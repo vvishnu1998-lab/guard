@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "PATH=/opt/homebrew/bin:$PATH /opt/homebrew/bin/node /Users/vishnuvardhanreddy/guard/apps/web/node_modules/.bin/next dev",
+    "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
