@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-base: #F5F3EE;
+  --color-structure: #1A1A2E;
+  --color-action: #F59E0B;
+  --color-surface: #242436;
+  --color-danger: #EF4444;
+  --color-success: #10B981;
+  --color-muted: #6B7280;
+  --color-border: #2E2E48;
+}
+
+body {
+  background-color: var(--color-structure);
+  color: var(--color-base);
+  font-family: 'Inter', system-ui, sans-serif;
+}

@@ -1,0 +1,16 @@
+node_modules/
+.env
+.env.local
+.env.production
+dist/
+.next/
+.expo/
+*.log
+.turbo/
+coverage/
+.DS_Store
+*.pem
+
+# Service account keys — never commit
+apps/api/secrets/*.json
+apps/mobile/google-service-account.json

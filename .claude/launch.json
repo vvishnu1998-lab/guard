@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "API Server (Node.js / Express)",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["/opt/homebrew/bin/npm", "run", "dev", "--prefix", "apps/api"],
+      "port": 3001
+    },
+    {
+      "name": "Web App (Next.js)",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["/opt/homebrew/bin/npm", "run", "dev", "--prefix", "apps/web"],
+      "port": 3000
+    },
+    {
+      "name": "Mobile App (Expo Web)",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["/opt/homebrew/bin/npm", "run", "web", "--prefix", "apps/mobile"],
+      "port": 8081
+    },
+    {
+      "name": "Database Migration",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["/opt/homebrew/bin/npm", "run", "db:migrate", "--prefix", "apps/api"],
+      "port": 0
+    }
+  ]
+}

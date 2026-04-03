@@ -1,0 +1,46 @@
+{
+  "name": "@guard/mobile",
+  "version": "1.0.0",
+  "main": "expo-router/entry",
+  "scripts": {
+    "dev": "/opt/homebrew/bin/node /Users/vishnuvardhanreddy/guard/node_modules/.bin/expo start",
+    "web": "EXPO_USE_METRO_WORKSPACE_ROOT=1 /opt/homebrew/bin/node /Users/vishnuvardhanreddy/guard/node_modules/.bin/expo start --web --port 8081",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "build:ios": "eas build --platform ios",
+    "build:android": "eas build --platform android"
+  },
+  "dependencies": {
+    "@expo-google-fonts/barlow-condensed": "^0.2.2",
+    "@expo/metro-runtime": "~3.2.3",
+    "@guard/shared": "*",
+    "@react-native-async-storage/async-storage": "^1.23.1",
+    "@react-native-community/netinfo": "^11.3.1",
+    "@react-navigation/bottom-tabs": "^6.5.20",
+    "@react-navigation/native": "^6.1.17",
+    "expo": "~51.0.0",
+    "expo-camera": "~15.0.0",
+    "expo-constants": "~16.0.0",
+    "expo-file-system": "~17.0.0",
+    "expo-font": "~12.0.0",
+    "expo-image-manipulator": "~12.0.0",
+    "expo-image-picker": "~15.0.0",
+    "expo-local-authentication": "~14.0.0",
+    "expo-location": "~17.0.0",
+    "expo-notifications": "~0.28.0",
+    "expo-router": "~3.5.0",
+    "expo-secure-store": "~13.0.0",
+    "expo-task-manager": "~11.8.0",
+    "react": "18.2.0",
+    "react-dom": "^18.2.0",
+    "react-native": "0.74.0",
+    "react-native-maps": "1.14.0",
+    "react-native-web": "^0.19.13",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "@types/react": "~18.2.79",
+    "typescript": "^5.4.0"
+  }
+}
