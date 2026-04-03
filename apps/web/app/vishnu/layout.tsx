@@ -27,7 +27,7 @@ export default function VishnuLayout({ children }: { children: React.ReactNode }
           <p className="text-gray-600 text-xs tracking-widest mt-1">SUPER ADMIN</p>
         </div>
         {NAV.map(({ href, label }) => {
-          const active = pathname === href || (href !== '/vishnu' && pathname.startsWith(href));
+          const active = pathname === href || (href !== '/vishnu' && (pathname ?? '').startsWith(href));
           return (
             <Link
               key={href}

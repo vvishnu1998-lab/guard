@@ -31,7 +31,7 @@ export default function AdminNav() {
         <p className="text-gray-500 text-xs tracking-widest mt-1">ADMIN</p>
       </div>
       {NAV_ITEMS.map(({ href, label }) => {
-        const active = pathname === href || (href !== '/admin' && pathname.startsWith(href));
+        const active = pathname === href || (href !== '/admin' && (pathname ?? '').startsWith(href));
         return (
           <Link
             key={href}

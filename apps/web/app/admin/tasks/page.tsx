@@ -224,7 +224,7 @@ export default function TaskTemplatesPage() {
 
       <TaskTemplateModal
         open={modalOpen}
-        initial={editing ?? undefined}
+        initial={editing ? { id: editing.id, title: editing.title, description: editing.description ?? '', scheduled_time: editing.scheduled_time, recurrence: editing.recurrence, requires_photo: editing.requires_photo, is_active: editing.is_active } : undefined}
         siteId={selectedSite}
         onSave={handleSave}
         onClose={() => setModalOpen(false)}

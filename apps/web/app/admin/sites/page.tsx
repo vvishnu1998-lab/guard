@@ -28,7 +28,7 @@ const EMPTY_GEO  = { center_lat: '', center_lng: '', radius_meters: '' };
 function circlePolygon(
   lat: number, lng: number, radiusM: number, points = 16
 ): { lat: number; lng: number }[] {
-  const coords = [];
+  const coords: { lat: number; lng: number }[] = [];
   const latR   = lat * (Math.PI / 180);
   const dLat   = radiusM / 111_320;
   const dLng   = radiusM / (111_320 * Math.cos(latR));
