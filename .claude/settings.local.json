@@ -57,7 +57,8 @@
       "Bash(PATH=\"/opt/homebrew/bin:$PATH\" npx next build)",
       "Bash(grep -v \"^$\")",
       "Bash(echo \"EXIT:$?\")",
-      "Bash(echo \"BUILD_EXIT:$?\")"
+      "Bash(echo \"BUILD_EXIT:$?\")",
+      "Bash(git reset:*)"
     ]
   }
 }
