@@ -41,7 +41,23 @@
       "Bash(PATH=\"/opt/homebrew/bin:$PATH\" pm2 logs guard-api --lines 20 --nostream)",
       "Bash(PATH=\"/opt/homebrew/bin:$PATH\" pm2 logs guard-api --lines 10 --nostream)",
       "Bash(PATH=\"/opt/homebrew/bin:$PATH\" pm2 logs guard-api --lines 5 --nostream)",
-      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" pm2 logs guard-api --lines 8 --nostream)"
+      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" pm2 logs guard-api --lines 8 --nostream)",
+      "Bash(git init:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git remote:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(/opt/homebrew/bin/node /opt/homebrew/bin/npm install --package-lock-only)",
+      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" npm install --package-lock-only --legacy-peer-deps)",
+      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" npx tsc --noEmit)",
+      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" npm install)",
+      "Bash(curl -s https://guard-production-6be4.up.railway.app/health)",
+      "Bash(git rm:*)",
+      "Bash(PATH=\"/opt/homebrew/bin:$PATH\" npx next build)",
+      "Bash(grep -v \"^$\")",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(echo \"BUILD_EXIT:$?\")"
     ]
   }
 }

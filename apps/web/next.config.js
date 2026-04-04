@@ -7,6 +7,12 @@ const nextConfig = {
   // /admin/* = Star admin dashboard
   // /client/* = Client read-only portal
   // /vishnu/* = Vishnu super admin panel
+
+  // Skip static generation of error pages (avoids React duplicate instance
+  // crash in monorepo local builds — no effect on Vercel)
+  experimental: {
+    missingSuspenseWithCSRBailout: false,
+  },
 };
 
 module.exports = nextConfig;
