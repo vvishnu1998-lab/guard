@@ -23,7 +23,7 @@
       },
     },
     "android": {
-      "package": "com.vishnu.guard-app",
+      "package": "com.vishnu.guardapp",
       "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
