@@ -13,7 +13,7 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.guard.mobile",
+      "bundleIdentifier": "com.vishnu.guard-app",
       "buildNumber": "1",
       "infoPlist": {
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Guard requires your location to verify you are on-site during shifts.",
@@ -24,7 +24,7 @@
       "backgroundModes": ["location"]
     },
     "android": {
-      "package": "com.guard.mobile",
+      "package": "com.vishnu.guard-app",
       "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
