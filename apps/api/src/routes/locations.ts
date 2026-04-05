@@ -5,6 +5,21 @@ import { isPointInPolygon } from '../services/geofence';
 
 const router = Router();
 
+// GET /api/locations/violations — guard's own violation history (mobile alerts tab)
+router.get('/violations', requireAuth('guard'), async (req, res) => {
+  const result = await pool.query(
+    `SELECT gv.id, gv.occurred_at, gv.resolved_at, gv.duration_minutes,
+            gv.violation_lat, gv.violation_lng, gv.supervisor_override,
+            si.name as site_name
+     FROM geofence_violations gv
+     JOIN sites si ON si.id = gv.site_id
+     WHERE gv.guard_id = $1
+     ORDER BY gv.occurred_at DESC LIMIT 50`,
+    [req.user!.sub]
+  );
+  res.json(result.rows);
+});
+
 // POST /api/locations/ping — guard submits a location ping (audit record)
 router.post('/ping', requireAuth('guard'), async (req, res) => {
   const { shift_session_id, latitude, longitude, ping_type, photo_url } = req.body;

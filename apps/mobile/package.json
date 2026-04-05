@@ -13,7 +13,6 @@
   "dependencies": {
     "@expo-google-fonts/barlow-condensed": "^0.2.2",
     "@expo/metro-runtime": "~3.2.3",
-    "@guard/shared": "*",
     "@react-native-async-storage/async-storage": "^1.23.1",
     "@react-native-community/netinfo": "^11.3.1",
     "@react-navigation/bottom-tabs": "^6.5.20",

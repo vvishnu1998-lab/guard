@@ -41,9 +41,8 @@ export default function TasksScreen() {
       return;
     }
     try {
-      const res = await apiClient(`/api/tasks/instances?shift_id=${activeShift.id}`);
-      if (!res.ok) throw new Error('Failed to load tasks');
-      setTasks(await res.json());
+      const data = await apiClient.get<TaskInstance[]>(`/tasks/instances?shift_id=${activeShift.id}`);
+      setTasks(data);
       setError(null);
     } catch (err: any) {
       setError(err?.message ?? 'Could not load tasks');

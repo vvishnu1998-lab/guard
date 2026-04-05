@@ -52,9 +52,7 @@ export default function ReportsScreen() {
   async function fetchReports(tab: ReportType = activeTab) {
     try {
       const params = tab !== 'all' ? `?type=${tab}` : '';
-      const res    = await apiClient(`/api/reports${params}`);
-      if (!res.ok) throw new Error('Failed to load reports');
-      const data = await res.json();
+      const data   = await apiClient.get<Report[]>(`/reports${params}`);
       setReports(data);
       setError(null);
     } catch (err: any) {

@@ -22,7 +22,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api-staging.guard.app"
+        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app"
       }
     },
     "production": {
@@ -34,7 +34,7 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.guard.app"
+        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app"
       }
     }
   },

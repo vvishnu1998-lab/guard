@@ -5,6 +5,20 @@ import bcrypt from 'bcrypt';
 
 const router = Router();
 
+// GET /api/guards/me — guard's own profile (used by mobile profile tab)
+router.get('/me', requireAuth('guard'), async (req, res) => {
+  const result = await pool.query(
+    `SELECT g.id, g.name, g.email, g.badge_number, g.created_at,
+            co.name as company_name
+     FROM guards g
+     JOIN companies co ON co.id = g.company_id
+     WHERE g.id = $1`,
+    [req.user!.sub]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Guard not found' });
+  res.json(result.rows[0]);
+});
+
 router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const isVishnu = req.user!.role === 'vishnu';
   const result = await pool.query(
