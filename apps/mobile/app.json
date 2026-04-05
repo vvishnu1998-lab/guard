@@ -21,7 +21,6 @@
         "NSCameraUsageDescription": "Guard uses the camera for clock-in verification and shift reports.",
         "NSFaceIDUsageDescription": "Use Face ID to quickly and securely sign in."
       },
-      "backgroundModes": ["location"]
     },
     "android": {
       "package": "com.vishnu.guard-app",
