@@ -18,7 +18,7 @@
       "distribution": "internal",
       "ios": {
         "simulator": true,
-        "image": "macos-sequoia-15.2-xcode-16.2"
+        "image": "macos-sequoia-15.3-xcode-16.2"
       },
       "android": {
         "buildType": "apk"
