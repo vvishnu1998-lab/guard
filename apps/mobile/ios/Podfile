@@ -32,12 +32,10 @@ platform :ios, podfile_properties['ios.deploymentTarget'] || '13.4'
 install! 'cocoapods',
   :deterministic_uuids => false
 
-use_modular_headers!
-
 prepare_react_native_project!
 
 target 'Guard' do
-  use_expo_modules!
+  use_expo_modules! :modular_headers => true
   config = use_native_modules!
 
   use_frameworks! :linkage => podfile_properties['ios.useFrameworks'].to_sym if podfile_properties['ios.useFrameworks']

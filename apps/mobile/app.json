@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Guard",
-    "slug": "guard-mobile",
+    "slug": "guard",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
