@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import 'express-async-errors';
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -24,6 +25,7 @@ import './jobs/dailyShiftEmail';
 import './jobs/monthlyRetentionNotice';
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 
 // Rate limiting
