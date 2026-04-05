@@ -25,7 +25,7 @@ export default function AdminLoginPage() {
       // Store tokens in httpOnly-like cookies via our own API route
       document.cookie = `guard_admin_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
       document.cookie = `guard_admin_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
-      router.push('/admin');
+      window.location.href = '/admin';
     } catch {
       setError('Network error. Please try again.');
     } finally {

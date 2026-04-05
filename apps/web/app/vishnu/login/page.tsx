@@ -24,7 +24,7 @@ export default function VishnuLoginPage() {
 
       document.cookie = `guard_vishnu_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
       document.cookie = `guard_vishnu_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
-      router.push('/vishnu');
+      window.location.href = '/vishnu';
     } catch {
       setError('Network error. Please try again.');
     } finally {
