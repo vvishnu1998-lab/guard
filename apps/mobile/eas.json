@@ -15,7 +15,6 @@
       }
     },
     "preview": {
-      "prebuildCommand": "npx expo prebuild --clean && node scripts/patch-podfile.js",
       "distribution": "internal",
       "ios": {
         "simulator": true
