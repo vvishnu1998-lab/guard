@@ -15,16 +15,24 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.vishnu.guard-app",
       "buildNumber": "1",
+      "config": {
+        "googleMapsApiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
+      },
       "infoPlist": {
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Guard requires your location to verify you are on-site during shifts.",
         "NSLocationAlwaysUsageDescription": "Guard monitors your location in the background to ensure geofence compliance during your shift.",
         "NSCameraUsageDescription": "Guard uses the camera for clock-in verification and shift reports.",
         "NSFaceIDUsageDescription": "Use Face ID to quickly and securely sign in."
-      },
+      }
     },
     "android": {
       "package": "com.vishnu.guardapp",
       "versionCode": 1,
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
+        }
+      },
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#1A1A2E"
