@@ -40,14 +40,14 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
        EXTRACT(EPOCH FROM (NOW() - ss.clocked_in_at))::int / 3600 AS hours_on_duty,
        lp.latitude  AS last_lat,
        lp.longitude AS last_lng,
-       lp.created_at AS last_ping_at
+       lp.pinged_at AS last_ping_at
      FROM shift_sessions ss
      JOIN guards g ON g.id = ss.guard_id
      LEFT JOIN LATERAL (
-       SELECT latitude, longitude, created_at
+       SELECT latitude, longitude, pinged_at
        FROM location_pings
        WHERE shift_session_id = ss.id
-       ORDER BY created_at DESC LIMIT 1
+       ORDER BY pinged_at DESC LIMIT 1
      ) lp ON true
      WHERE ss.site_id = $1 AND ss.clocked_out_at IS NULL
      ORDER BY ss.clocked_in_at ASC`,
