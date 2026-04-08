@@ -64,8 +64,7 @@ router.get('/reports', requireAuth('client'), async (req: Request, res: Response
   let query = `
     SELECT r.id, r.report_type, r.severity, r.description, r.reported_at,
            g.name AS guard_name,
-           array_agg(rp.storage_url ORDER BY rp.photo_index) FILTER (WHERE rp.id IS NOT NULL) AS photos,
-           r.email_sent
+           array_agg(rp.storage_url ORDER BY rp.photo_index) FILTER (WHERE rp.id IS NOT NULL) AS photos
     FROM reports r
     JOIN shift_sessions ss ON ss.id = r.shift_session_id
     JOIN guards g ON g.id = ss.guard_id
