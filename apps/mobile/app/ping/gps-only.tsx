@@ -40,6 +40,12 @@ export default function GpsOnlyPing() {
   useEffect(() => {
     (async () => {
       try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Location Required', 'Location permission is required to submit a ping.');
+          router.back();
+          return;
+        }
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         setLat(loc.coords.latitude);
         setLng(loc.coords.longitude);

@@ -36,6 +36,8 @@ export default function PhotoPing() {
     if (!cameraRef.current || capturing || !activeSession) return;
     setCapturing(true);
     try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') throw new Error('Location permission is required to submit a ping.');
       const loc   = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
       if (!photo) throw new Error('No photo captured');
