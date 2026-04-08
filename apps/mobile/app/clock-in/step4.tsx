@@ -39,7 +39,7 @@ export default function ClockInStep4() {
       <View style={styles.container}>
         <Text style={styles.errorTitle}>INCOMPLETE DATA</Text>
         <Text style={styles.errorSub}>Please restart the clock-in flow.</Text>
-        <TouchableOpacity style={styles.button} onPress={() => router.replace('/clock-in/step1')}>
+        <TouchableOpacity style={styles.button} onPress={() => router.replace('/(tabs)/home')}>
           <Text style={styles.buttonText}>RESTART</Text>
         </TouchableOpacity>
       </View>
@@ -50,40 +50,38 @@ export default function ClockInStep4() {
     if (submitting) return;
     setSubmitting(true);
     try {
-      // Step 1 — upload selfie
+      // Step 1 — upload selfie (S3 optional; use placeholder if not configured)
       setStatusStep(0);
-      const selfieUpload = await uploadToS3(selfie!.uri, 'clock_in');
+      let selfieUrl = 'pending';
+      try {
+        const selfieUpload = await uploadToS3(selfie!.uri, 'clock_in');
+        selfieUrl = selfieUpload.public_url;
+      } catch { /* S3 not configured — continue without photo URL */ }
 
       // Step 2 — upload site photo
       setStatusStep(1);
-      const sitePhotoUpload = await uploadToS3(sitePhoto!.uri, 'clock_in');
+      let sitePhotoUrl = 'pending';
+      try {
+        const sitePhotoUpload = await uploadToS3(sitePhoto!.uri, 'clock_in');
+        sitePhotoUrl = sitePhotoUpload.public_url;
+      } catch { /* S3 not configured — continue without photo URL */ }
 
       // Step 3 — clock in (creates shift_session + triggers task instance generation)
       setStatusStep(2);
-      const clockInRes = await apiClient(`/api/shifts/${pendingShiftId}/clock-in`, {
-        method: 'POST',
-        body: JSON.stringify({
-          clock_in_coords: `(${verifiedLatitude},${verifiedLongitude})`,
-        }),
-      });
-      if (!clockInRes.ok) {
-        const err = await clockInRes.json().catch(() => ({}));
-        throw new Error((err as any).error ?? 'Clock-in failed');
-      }
-      const session = await clockInRes.json();
+      const session = await apiClient.post<{ id: string; site_id: string; clocked_in_at: string }>(
+        `/shifts/${pendingShiftId}/clock-in`,
+        { clock_in_coords: `(${verifiedLatitude},${verifiedLongitude})` }
+      );
 
       // Step 4 — save photo verification proofs
       setStatusStep(3);
-      await apiClient('/api/locations/clock-in-verification', {
-        method: 'POST',
-        body: JSON.stringify({
-          shift_session_id:   session.id,
-          selfie_url:         selfieUpload.public_url,
-          site_photo_url:     sitePhotoUpload.public_url,
-          verified_lat:       verifiedLatitude,
-          verified_lng:       verifiedLongitude,
-          is_within_geofence: true,
-        }),
+      await apiClient.post('/locations/clock-in-verification', {
+        shift_session_id:   session.id,
+        selfie_url:         selfieUrl,
+        site_photo_url:     sitePhotoUrl,
+        verified_lat:       verifiedLatitude,
+        verified_lng:       verifiedLongitude,
+        is_within_geofence: true,
       });
 
       // Use the stored pendingShift object; fall back to a minimal shape

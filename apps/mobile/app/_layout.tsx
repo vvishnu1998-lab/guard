@@ -48,7 +48,7 @@ export default function RootLayout() {
     } else if (status === 'authenticated' && !isLocked) {
       if (mustChangePassword) {
         router.replace('/(auth)/change-password');
-      } else if (inAuth) {
+      } else if (inAuth || segments.length === 0) {
         router.replace('/(tabs)/home');
       }
     }
@@ -58,6 +58,7 @@ export default function RootLayout() {
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="index" />
       <Stack.Screen name="(auth)" />
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="clock-in" />

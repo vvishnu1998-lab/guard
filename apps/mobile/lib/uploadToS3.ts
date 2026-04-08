@@ -21,17 +21,10 @@ export async function uploadToS3(
   context: 'report' | 'ping' | 'clock_in' = 'report'
 ): Promise<UploadResult> {
   // 1. Get pre-signed URL from API
-  const presignRes = await apiClient('/api/uploads/presign', {
-    method: 'POST',
-    body: JSON.stringify({ content_type: 'image/jpeg', context }),
-  });
-
-  if (!presignRes.ok) {
-    const err = await presignRes.json().catch(() => ({}));
-    throw new Error((err as any).error ?? 'Failed to get upload URL');
-  }
-
-  const { presigned_url, public_url } = await presignRes.json();
+  const { presigned_url, public_url } = await apiClient.post<{ presigned_url: string; public_url: string }>(
+    '/uploads/presign',
+    { content_type: 'image/jpeg', context }
+  );
 
   // 2. Fetch local file as blob
   const fileRes  = await fetch(localUri);

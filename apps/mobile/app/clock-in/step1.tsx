@@ -7,6 +7,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'rea
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
+import { useClockInStore } from '../../store/clockInStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { isPointInPolygon, haversineDistance } from '../../utils/geofence';
 
@@ -16,6 +17,7 @@ export default function ClockInStep1() {
   const [state, setState] = useState<CheckState>('checking');
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const { pendingShift } = useShiftStore();
+  const { setGpsVerified } = useClockInStore();
 
   useEffect(() => {
     checkGeofence();
@@ -32,7 +34,11 @@ export default function ClockInStep1() {
       setCoords(point);
 
       const geofence = pendingShift?.geofence;
-      if (!geofence) { setState('inside'); return; } // no geofence = always allow
+      if (!geofence) {
+        setGpsVerified(point.lat, point.lng);
+        setState('inside');
+        return;
+      } // no geofence = always allow
 
       // Fast radius pre-check (Haversine) then precise polygon check (ray casting)
       const approxDistance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
@@ -41,6 +47,7 @@ export default function ClockInStep1() {
         return;
       }
       const inside = isPointInPolygon(point, geofence.polygon_coordinates);
+      if (inside) setGpsVerified(point.lat, point.lng);
       setState(inside ? 'inside' : 'outside');
     } catch {
       setState('error');

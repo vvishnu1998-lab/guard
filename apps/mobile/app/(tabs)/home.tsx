@@ -1,15 +1,89 @@
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
+import { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
+import { useClockInStore } from '../../store/clockInStore';
+import { apiClient } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
+interface ApiShift {
+  id: string;
+  site_id: string;
+  site_name: string;
+  scheduled_start: string;
+  scheduled_end: string;
+  status: string;
+}
+
+interface ActiveSessionResponse {
+  shift:   { id: string; site_id: string; site_name: string; scheduled_start: string; scheduled_end: string };
+  session: { id: string; shift_id: string; clocked_in_at: string };
+}
+
 export default function HomeScreen() {
-  const { activeSession, activeShift } = useShiftStore();
+  const { activeSession, activeShift, setPendingShift, setActiveSession } = useShiftStore();
+  const { setPendingShift: setClockInPendingShift, reset: resetClockIn } = useClockInStore();
   const isOnShift = !!activeSession;
+
+  const [upcomingShift, setUpcomingShift] = useState<ApiShift | null>(null);
+  const [loadingShift, setLoadingShift] = useState(false);
+
+  useEffect(() => {
+    if (!isOnShift) {
+      // First check if there's an active session in the DB (e.g. after app reload)
+      restoreOrFetchShift();
+    }
+  }, [isOnShift]);
+
+  async function restoreOrFetchShift() {
+    setLoadingShift(true);
+    try {
+      const active = await apiClient.get<ActiveSessionResponse | null>('/shifts/active-session');
+      if (active) {
+        setActiveSession(active.shift, active.session);
+        return;
+      }
+    } catch { /* not on shift */ }
+    fetchUpcomingShift();
+  }
+
+  async function fetchUpcomingShift() {
+    setLoadingShift(true);
+    try {
+      const shifts = await apiClient.get<ApiShift[]>('/shifts');
+      const next = shifts
+        .filter((s) => s.status === 'scheduled')
+        .sort((a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime())[0] ?? null;
+      setUpcomingShift(next);
+    } catch {
+      setUpcomingShift(null);
+    } finally {
+      setLoadingShift(false);
+    }
+  }
+
+  function handleClockIn() {
+    if (!upcomingShift) return;
+    resetClockIn();
+    // Set the shift in both stores before entering the flow
+    setPendingShift({
+      id: upcomingShift.id,
+      site_id: upcomingShift.site_id,
+      site_name: upcomingShift.site_name,
+      scheduled_start: upcomingShift.scheduled_start,
+      scheduled_end: upcomingShift.scheduled_end,
+    });
+    setClockInPendingShift(upcomingShift.id);
+    router.push('/clock-in/step1');
+  }
+
+  function fmtTime(iso: string) {
+    return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  }
 
   return (
     <View style={styles.container}>
-      {/* Live map placeholder — replaced by MapView with geofence polygon */}
+      {/* Live map placeholder */}
       <View style={styles.mapPlaceholder}>
         <Text style={styles.mapText}>LIVE MAP</Text>
         <Text style={styles.mapSub}>Guard position · Geofence boundary</Text>
@@ -21,18 +95,31 @@ export default function HomeScreen() {
           <View style={styles.shiftCard}>
             <Text style={styles.shiftSite}>{activeShift?.site_name?.toUpperCase()}</Text>
             <Text style={styles.shiftStatus}>SHIFT ACTIVE</Text>
-            {/* Ping countdown banner */}
             <PingCountdownBanner />
           </View>
         ) : (
           <View style={styles.shiftCard}>
-            <Text style={styles.noShift}>No active shift</Text>
-            <TouchableOpacity
-              style={styles.clockInButton}
-              onPress={() => router.push('/clock-in/step1')}
-            >
-              <Text style={styles.clockInText}>CLOCK IN</Text>
-            </TouchableOpacity>
+            {loadingShift ? (
+              <ActivityIndicator color={Colors.action} style={{ marginBottom: Spacing.md }} />
+            ) : upcomingShift ? (
+              <>
+                <Text style={styles.shiftLabel}>NEXT SHIFT</Text>
+                <Text style={styles.shiftSite}>{upcomingShift.site_name.toUpperCase()}</Text>
+                <Text style={styles.shiftTime}>
+                  {fmtTime(upcomingShift.scheduled_start)} – {fmtTime(upcomingShift.scheduled_end)}
+                </Text>
+                <TouchableOpacity style={styles.clockInButton} onPress={handleClockIn}>
+                  <Text style={styles.clockInText}>CLOCK IN</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={styles.noShift}>No scheduled shift</Text>
+                <TouchableOpacity onPress={fetchUpcomingShift} style={styles.retryButton}>
+                  <Text style={styles.retryText}>Refresh</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         )}
 
@@ -84,12 +171,16 @@ const styles = StyleSheet.create({
     padding: Spacing.lg, marginBottom: Spacing.lg,
     borderWidth: 1, borderColor: Colors.border,
   },
-  shiftSite: { fontFamily: Fonts.heading, color: Colors.base, fontSize: 22, letterSpacing: 3 },
+  shiftLabel: { color: Colors.muted, fontSize: 11, letterSpacing: 3, marginBottom: 4 },
+  shiftSite: { fontFamily: Fonts.heading, color: Colors.base, fontSize: 22, letterSpacing: 3, marginBottom: 4 },
+  shiftTime: { color: Colors.muted, fontSize: 14, marginBottom: Spacing.md },
   shiftStatus: { color: Colors.success, fontSize: 12, letterSpacing: 2, marginTop: 4 },
-  noShift: { color: Colors.muted, fontSize: 16, marginBottom: Spacing.md },
+  noShift: { color: Colors.muted, fontSize: 16, marginBottom: Spacing.sm },
+  retryButton: { alignSelf: 'flex-start' },
+  retryText: { color: Colors.action, fontSize: 14 },
   clockInButton: {
     backgroundColor: Colors.action, borderRadius: Radius.md,
-    padding: Spacing.md, alignItems: 'center',
+    padding: Spacing.md, alignItems: 'center', marginTop: Spacing.sm,
   },
   clockInText: { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 18, letterSpacing: 2 },
   pingBanner: {
