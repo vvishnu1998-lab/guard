@@ -126,9 +126,9 @@ export default function HomeScreen() {
         {/* Quick actions */}
         <Text style={styles.sectionTitle}>QUICK ACTIONS</Text>
         <View style={styles.actionGrid}>
-          <ActionButton label="ADD REPORT" color={Colors.action} onPress={() => router.push('/report/type-select')} disabled={!isOnShift} />
+          <ActionButton label="ADD REPORT" color={Colors.action} onPress={() => router.push('/reports/new')} disabled={!isOnShift} />
           <ActionButton label="TASKS" color={Colors.action} onPress={() => router.push('/(tabs)/tasks')} disabled={!isOnShift} />
-          <ActionButton label="INCIDENT" color={Colors.danger} onPress={() => router.push('/report/incident')} disabled={!isOnShift} />
+          <ActionButton label="INCIDENT" color={Colors.danger} onPress={() => router.push('/reports/new/incident')} disabled={!isOnShift} />
           <ActionButton label="TAKE BREAK" color={Colors.muted} onPress={() => router.push('/break')} disabled={!isOnShift} />
         </View>
       </ScrollView>
