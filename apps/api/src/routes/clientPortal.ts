@@ -21,8 +21,8 @@ const router = Router();
 router.get('/site', requireAuth('client'), async (req: Request, res: Response) => {
   const result = await pool.query(
     `SELECT id, name, address, contract_end,
-            client_star_access_until, data_delete_at,
-            EXTRACT(DAY FROM (data_delete_at - NOW()))::int AS days_until_deletion
+            (contract_end + INTERVAL '150 days') AS data_delete_at,
+            EXTRACT(DAY FROM ((contract_end + INTERVAL '150 days') - NOW()))::int AS days_until_deletion
      FROM sites WHERE id = $1`,
     [req.user!.site_id]
   );

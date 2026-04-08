@@ -20,8 +20,16 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
-import { v4 as uuidv4 } from 'uuid';
 import { apiClient } from './apiClient';
+
+/** RFC-4122 v4 UUID — Math.random-based, safe in Hermes (no crypto.getRandomValues needed) */
+function uuidv4(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 const QUEUE_KEY      = 'guard_offline_queue';
 const DEAD_LETTER_KEY = 'guard_offline_dead_letter';
