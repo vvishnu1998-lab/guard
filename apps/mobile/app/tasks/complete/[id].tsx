@@ -47,11 +47,9 @@ export default function TaskCompleteScreen() {
     (async () => {
       try {
         // Fetch the specific task from the instances list
-        const res = await apiClient(
-          `/api/tasks/instances?shift_id=${activeSession?.shift_id ?? ''}`
+        const list = await apiClient.get<TaskDetail[]>(
+          `/tasks/instances?shift_id=${activeSession?.shift_id ?? ''}`
         );
-        if (!res.ok) throw new Error('Could not load task');
-        const list: TaskDetail[] = await res.json();
         const found = list.find((t) => t.id === id);
         if (!found) throw new Error('Task not found');
         if (found.status === 'completed') {
@@ -112,20 +110,12 @@ export default function TaskCompleteScreen() {
       } catch { /* GPS optional */ }
 
       setStatusMsg('Submitting…');
-      const res = await apiClient(`/api/tasks/instances/${task.id}/complete`, {
-        method: 'POST',
-        body: JSON.stringify({
-          shift_session_id: activeSession.id,
-          completion_lat:   lat,
-          completion_lng:   lng,
-          photo_url:        uploadedUrl,
-        }),
+      await apiClient.post(`/tasks/instances/${task.id}/complete`, {
+        shift_session_id: activeSession.id,
+        completion_lat:   lat,
+        completion_lng:   lng,
+        photo_url:        uploadedUrl,
       });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error((err as any).error ?? 'Completion failed');
-      }
 
       setPhase('done');
       setTimeout(() => router.back(), 1200);
