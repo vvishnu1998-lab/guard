@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { sendIncidentAlert } from '../services/email';
-import { isPointInPolygon, haversineDistance } from '../services/geofence';
 
 const router = Router();
 
@@ -82,36 +81,6 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   );
   if (violationResult.rows[0]) {
     return res.status(403).json({ error: 'Cannot submit report while a geofence violation is unresolved' });
-  }
-
-  // Server-side GPS geofence check (if client supplied coords)
-  if (latitude != null && longitude != null) {
-    const geofenceResult = await pool.query(
-      'SELECT polygon_coordinates, grace_radius_meters FROM site_geofence WHERE site_id = $1',
-      [site_id]
-    );
-    if (geofenceResult.rows[0]) {
-      const { polygon_coordinates, grace_radius_meters } = geofenceResult.rows[0];
-      const inside = isPointInPolygon({ lat: latitude, lng: longitude }, polygon_coordinates);
-      if (!inside) {
-        // Allow if within grace radius of the polygon centroid
-        const centroidResult = await pool.query(
-          'SELECT center_lat, center_lng FROM site_geofence WHERE site_id = $1',
-          [site_id]
-        );
-        const { center_lat, center_lng } = centroidResult.rows[0];
-        const dist = haversineDistance(latitude, longitude, center_lat, center_lng);
-        // Compute approximate polygon radius
-        const radiusResult = await pool.query(
-          'SELECT radius_meters FROM site_geofence WHERE site_id = $1',
-          [site_id]
-        );
-        const polyRadius = radiusResult.rows[0]?.radius_meters ?? 0;
-        if (dist > polyRadius + (grace_radius_meters ?? 50)) {
-          return res.status(403).json({ error: 'Guard is outside geofence — report blocked' });
-        }
-      }
-    }
   }
 
   // Get site contract_end for delete_at calculation
