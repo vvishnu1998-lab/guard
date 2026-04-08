@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
+import { useOfflineStore } from '../../store/offlineStore';
 import { apiClient } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -23,6 +24,7 @@ interface ActiveSessionResponse {
 export default function HomeScreen() {
   const { activeSession, activeShift, setPendingShift, setActiveSession } = useShiftStore();
   const { setPendingShift: setClockInPendingShift, reset: resetClockIn } = useClockInStore();
+  const { startSync, stopSync } = useOfflineStore();
   const isOnShift = !!activeSession;
 
   const [upcomingShift, setUpcomingShift] = useState<ApiShift | null>(null);
@@ -32,6 +34,14 @@ export default function HomeScreen() {
     if (!isOnShift) {
       // First check if there's an active session in the DB (e.g. after app reload)
       restoreOrFetchShift();
+    }
+  }, [isOnShift]);
+
+  // Start/stop offline queue sync while on shift
+  useEffect(() => {
+    if (isOnShift) {
+      startSync();
+      return () => stopSync();
     }
   }, [isOnShift]);
 
