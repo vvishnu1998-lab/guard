@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
@@ -102,11 +102,11 @@ export default function HomeScreen() {
       {/* Shift card */}
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {isOnShift ? (
-          <View style={styles.shiftCard}>
+          <TouchableOpacity style={styles.shiftCard} onPress={() => router.push('/active-shift')}>
             <Text style={styles.shiftSite}>{activeShift?.site_name?.toUpperCase()}</Text>
-            <Text style={styles.shiftStatus}>SHIFT ACTIVE</Text>
-            <PingCountdownBanner />
-          </View>
+            <Text style={styles.shiftStatus}>SHIFT ACTIVE  ›</Text>
+            <PingCountdownBanner clockedInAt={activeSession?.clocked_in_at} />
+          </TouchableOpacity>
         ) : (
           <View style={styles.shiftCard}>
             {loadingShift ? (
@@ -146,10 +146,32 @@ export default function HomeScreen() {
   );
 }
 
-function PingCountdownBanner() {
+function PingCountdownBanner({ clockedInAt }: { clockedInAt?: string }) {
+  const PING_MS = 30 * 60 * 1000;
+  const [remaining, setRemaining] = useState(PING_MS);
+  const ref = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!clockedInAt) return;
+    function compute() {
+      const elapsed = Date.now() - new Date(clockedInAt!).getTime();
+      return PING_MS - (elapsed % PING_MS);
+    }
+    setRemaining(compute());
+    ref.current = setInterval(() => setRemaining(compute()), 1000);
+    return () => { if (ref.current) clearInterval(ref.current); };
+  }, [clockedInAt]);
+
+  const elapsedMs = clockedInAt ? Date.now() - new Date(clockedInAt).getTime() : 0;
+  const pingIndex = Math.floor(elapsedMs / PING_MS);
+  const pingType  = pingIndex % 2 === 0 ? 'GPS + PHOTO' : 'GPS ONLY';
+  const mins = Math.floor(remaining / 60000);
+  const secs = Math.floor((remaining % 60000) / 1000);
+  const label = `Next ping in ${mins}:${String(secs).padStart(2, '0')} · ${pingType}`;
+
   return (
     <View style={styles.pingBanner}>
-      <Text style={styles.pingText}>Next ping in 28 min · GPS + Photo</Text>
+      <Text style={styles.pingText}>{label}</Text>
     </View>
   );
 }
