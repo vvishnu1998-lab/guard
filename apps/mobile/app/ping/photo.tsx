@@ -11,6 +11,7 @@ import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useShiftStore }   from '../../store/shiftStore';
 import { useOfflineStore } from '../../store/offlineStore';
+import { pingState }       from '../../lib/pingState';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 export default function PhotoPing() {
@@ -56,6 +57,8 @@ export default function PhotoPing() {
         photo_url:        compressed.uri,
       });
 
+      // Suppress ping alert for the rest of this 30-min cycle
+      pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
       router.replace('/active-shift');
     } catch (err: any) {
       Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');

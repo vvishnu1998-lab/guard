@@ -171,7 +171,14 @@ export default function TaskTemplatesPage() {
                       <p className="text-gray-500 text-xs mt-0.5 truncate max-w-xs">{t.description}</p>
                     )}
                   </td>
-                  <td className="p-4 text-gray-400 font-mono">{t.scheduled_time}</td>
+                  <td className="p-4 text-gray-400 font-mono">
+                    {/* scheduled_time stored as UTC — convert to local for display */}
+                    {(() => {
+                      const [h, m] = t.scheduled_time.split(':').map(Number);
+                      const d = new Date(); d.setUTCHours(h, m, 0, 0);
+                      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    })()}
+                  </td>
                   <td className="p-4 text-gray-400">
                     {RECURRENCE_LABELS[t.recurrence] ?? t.recurrence}
                   </td>

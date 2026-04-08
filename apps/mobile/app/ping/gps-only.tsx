@@ -9,6 +9,7 @@ import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useShiftStore }   from '../../store/shiftStore';
 import { useOfflineStore } from '../../store/offlineStore';
+import { pingState }       from '../../lib/pingState';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const BLUE = '#3B82F6';
@@ -68,6 +69,8 @@ export default function GpsOnlyPing() {
         longitude:        lng,
         ping_type:        'gps_only',
       });
+      // Suppress ping alert for the rest of this 30-min cycle
+      pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
       setStatus('done');
       setTimeout(() => router.replace('/active-shift'), 1200);
     } catch (err: any) {

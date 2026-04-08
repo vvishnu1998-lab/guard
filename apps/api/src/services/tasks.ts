@@ -31,10 +31,11 @@ export async function generateTaskInstancesForShift(
 
     if (!matches) continue;
 
-    // due_at = clock-in date + template.scheduled_time
+    // due_at = clock-in date + template.scheduled_time (UTC).
+    // scheduled_time is stored as UTC HH:MM (converted from local on save in the admin portal).
     const [hours, minutes] = (tpl.scheduled_time as string).split(':').map(Number);
     const dueAt = new Date(clockInAt);
-    dueAt.setHours(hours, minutes, 0, 0);
+    dueAt.setUTCHours(hours, minutes, 0, 0);
 
     await pool.query(
       `INSERT INTO task_instances (template_id, shift_id, site_id, title, due_at)

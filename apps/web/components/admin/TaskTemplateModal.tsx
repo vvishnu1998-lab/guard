@@ -8,10 +8,26 @@ import { useEffect, useState } from 'react';
 export interface TemplateFormData {
   title:          string;
   description:    string;
-  scheduled_time: string;     // HH:MM
+  scheduled_time: string;     // HH:MM — stored as UTC, displayed as local in the form
   recurrence:     string;
   requires_photo: boolean;
   is_active:      boolean;
+}
+
+/** Convert "HH:MM" UTC string → "HH:MM" local string for the time input */
+function utcTimeToLocal(utcHHMM: string): string {
+  const [h, m] = utcHHMM.split(':').map(Number);
+  const d = new Date();
+  d.setUTCHours(h, m, 0, 0);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** Convert "HH:MM" local string → "HH:MM" UTC string for API storage */
+function localTimeToUtc(localHHMM: string): string {
+  const [h, m] = localHHMM.split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 }
 
 interface Props {
@@ -44,7 +60,13 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
 
   useEffect(() => {
     if (open) {
-      setForm(initial ? { ...EMPTY, ...initial } : EMPTY);
+      if (initial) {
+        // scheduled_time from DB is UTC — convert to local for the time input
+        const localTime = initial.scheduled_time ? utcTimeToLocal(initial.scheduled_time) : EMPTY.scheduled_time;
+        setForm({ ...EMPTY, ...initial, scheduled_time: localTime });
+      } else {
+        setForm(EMPTY);
+      }
       setError('');
     }
   }, [open, initial]);
@@ -61,7 +83,9 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
     setSaving(true);
     setError('');
     try {
-      await onSave(form, initial?.id);
+      // Convert local time → UTC before sending to API
+      const payload: TemplateFormData = { ...form, scheduled_time: localTimeToUtc(form.scheduled_time) };
+      await onSave(payload, initial?.id);
       onClose();
     } catch (err: any) {
       setError(err?.message ?? 'Save failed');

@@ -14,6 +14,7 @@ import {
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
+import { pingState }     from '../../lib/pingState';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 // How long between pings (ms)
@@ -87,7 +88,7 @@ export default function ActiveShiftScreen() {
 
       // When the cycle rolls over, prompt the guard to ping
       if (remaining >= PING_INTERVAL_MS - 2000) {
-        const snoozed = Date.now() < pingSnoozedUntilRef.current;
+        const snoozed = Date.now() < pingSnoozedUntilRef.current || Date.now() < pingState.suppressAlertUntil;
         if (!pingAlertShownRef.current && !snoozed) {
           pingAlertShownRef.current = true;
           Alert.alert(
