@@ -63,16 +63,48 @@ export default function ActiveShiftScreen() {
   }, [activeSession?.clocked_in_at]);
 
   // ── Ping countdown ─────────────────────────────────────────────────────
+  // Aligned to clock-in time so the cycle is correct even if the guard
+  // navigates away and returns, or opens the app mid-shift.
+  const pingAlertShownRef = useRef(false);
+
   useEffect(() => {
-    let lastPingTime = Date.now();
+    if (!activeSession?.clocked_in_at) return;
+
+    function computeRemaining() {
+      const clockInMs   = new Date(activeSession!.clocked_in_at).getTime();
+      const elapsedMs   = Date.now() - clockInMs;
+      const timeInCycle = elapsedMs % PING_INTERVAL_MS;
+      return PING_INTERVAL_MS - timeInCycle;
+    }
+
+    // Set immediately so there's no 1 s delay on mount
+    setNextPingMs(computeRemaining());
 
     pingRef.current = setInterval(() => {
-      const remaining = PING_INTERVAL_MS - (Date.now() - lastPingTime);
-      setNextPingMs(remaining > 0 ? remaining : 0);
+      const remaining = computeRemaining();
+      setNextPingMs(remaining);
+
+      // When the cycle rolls over, prompt the guard to ping
+      if (remaining >= PING_INTERVAL_MS - 2000) {
+        if (!pingAlertShownRef.current) {
+          pingAlertShownRef.current = true;
+          Alert.alert(
+            'PING DUE',
+            'Your 30-minute check-in is due. Submit your location now.',
+            [
+              { text: 'Later', style: 'cancel', onPress: () => { pingAlertShownRef.current = false; } },
+              { text: 'PING NOW', onPress: () => { pingAlertShownRef.current = false; router.push('/ping'); } },
+            ],
+            { cancelable: false }
+          );
+        }
+      } else {
+        pingAlertShownRef.current = false;
+      }
     }, 1000);
 
     return () => { if (pingRef.current) clearInterval(pingRef.current); };
-  }, []);
+  }, [activeSession?.clocked_in_at]);
 
   // ── Resume correction when app comes back to foreground ───────────────
   useEffect(() => {
