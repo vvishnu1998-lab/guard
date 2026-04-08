@@ -51,6 +51,27 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
   res.json(result.rows);
 });
 
+// GET /api/shifts/active-session — returns the guard's current active shift+session (for store restoration)
+router.get('/active-session', requireAuth('guard'), async (req, res) => {
+  const result = await pool.query(
+    `SELECT s.id as shift_id, s.site_id, s.scheduled_start, s.scheduled_end,
+            si.name as site_name,
+            ss.id as session_id, ss.clocked_in_at
+     FROM shifts s
+     JOIN sites si ON si.id = s.site_id
+     JOIN shift_sessions ss ON ss.shift_id = s.id AND ss.guard_id = $1 AND ss.clocked_out_at IS NULL
+     WHERE s.guard_id = $1 AND s.status = 'active'
+     ORDER BY ss.clocked_in_at DESC LIMIT 1`,
+    [req.user!.sub]
+  );
+  if (!result.rows[0]) return res.json(null);
+  const r = result.rows[0];
+  res.json({
+    shift:   { id: r.shift_id, site_id: r.site_id, site_name: r.site_name, scheduled_start: r.scheduled_start, scheduled_end: r.scheduled_end },
+    session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
+  });
+});
+
 // POST /api/shifts/:id/clock-in  — creates shift_session + triggers task instance generation
 router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
