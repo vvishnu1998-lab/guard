@@ -125,6 +125,7 @@ async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead
     return 'success';
   } catch (err: any) {
     const newAttempts = item.attempts + 1;
+    console.error(`[offline-queue] syncItem failed (attempt ${newAttempts}/${MAX_ATTEMPTS}):`, err?.message, 'payload:', JSON.stringify(item.payload).slice(0, 150));
     const queue = await readQueue();
     const idx = queue.findIndex((i) => i.localId === item.localId);
     if (idx !== -1) {
@@ -143,8 +144,8 @@ let isSyncing = false;
 export async function syncQueue(): Promise<void> {
   if (isSyncing) return;
 
-  const netState = await NetInfo.fetch();
-  if (!netState.isConnected) return;
+  // NetInfo.isConnected is unreliable on iOS simulator — always attempt sync.
+  // If the server is unreachable, the fetch will fail and the item stays in queue.
 
   isSyncing = true;
   try {

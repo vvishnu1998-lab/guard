@@ -45,7 +45,9 @@ export const useOfflineStore = create<OfflineState>((set) => ({
     try {
       await apiClient.post('/reports', payload);
       return 'synced';
-    } catch { /* fall through to queue */ }
+    } catch (err: any) {
+      console.error('[submitReport] Direct submit failed, queuing:', err?.message, JSON.stringify(payload).slice(0, 150));
+    }
 
     const localId = await enqueue('report_submit', payload as unknown as Record<string, unknown>);
     const count = await pendingCount();
