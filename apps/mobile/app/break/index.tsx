@@ -74,18 +74,10 @@ export default function BreakScreen() {
     }
     setStarting(true);
     try {
-      const res = await apiClient('/api/shifts/break-start', {
-        method: 'POST',
-        body: JSON.stringify({
-          session_id: activeSession.id,
-          break_type: option.type,
-        }),
+      const data = await apiClient.post<{ break_id: string }>('/shifts/break-start', {
+        session_id: activeSession.id,
+        break_type: option.type,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error((err as any).error ?? 'Failed to start break');
-      }
-      const data = await res.json();
       setBreakId(data.break_id ?? null);
       setBreakType(option.type);
       setBreakLabel(option.label);
@@ -104,10 +96,7 @@ export default function BreakScreen() {
     setEnding(true);
     try {
       if (breakId) {
-        await apiClient('/api/shifts/break-end', {
-          method: 'POST',
-          body: JSON.stringify({ break_id: breakId }),
-        });
+        await apiClient.post('/shifts/break-end', { break_id: breakId });
       }
       if (timerRef.current) clearInterval(timerRef.current);
       router.replace('/active-shift');

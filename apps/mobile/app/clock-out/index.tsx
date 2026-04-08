@@ -45,19 +45,9 @@ export default function ClockOutScreen() {
     if (submitting) return;
     setSubmitting(true);
     try {
-      const res = await apiClient('/api/shifts/clock-out', {
-        method: 'POST',
-        body: JSON.stringify({
-          session_id:     activeSession!.id,
-          handover_notes: notes.trim() || null,
-        }),
+      await apiClient.post(`/shifts/${activeShift!.id}/clock-out`, {
+        handover_notes: notes.trim() || null,
       });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error((err as any).error ?? 'Clock-out failed');
-      }
-
       clearSession();
       router.replace('/(tabs)/home');
     } catch (err: any) {

@@ -254,7 +254,7 @@ CREATE TABLE IF NOT EXISTS break_sessions (
   break_end         TIMESTAMPTZ,     -- NULL until break ends
   duration_minutes  INTEGER,         -- calculated on break end
   break_type        VARCHAR(20) NOT NULL
-                      CHECK (break_type IN ('scheduled','unscheduled')),
+                      CHECK (break_type IN ('meal','rest','other')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

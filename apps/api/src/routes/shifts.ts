@@ -72,6 +72,45 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
   });
 });
 
+// POST /api/shifts/break-start — guard starts a break
+router.post('/break-start', requireAuth('guard'), async (req, res) => {
+  const { session_id, break_type } = req.body;
+  if (!session_id || !break_type) {
+    return res.status(400).json({ error: 'session_id and break_type are required' });
+  }
+  // Verify session belongs to this guard and is open
+  const sessionResult = await pool.query(
+    'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2 AND clocked_out_at IS NULL',
+    [session_id, req.user!.sub]
+  );
+  if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
+  const { site_id } = sessionResult.rows[0];
+
+  const result = await pool.query(
+    `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type)
+     VALUES ($1, $2, $3, NOW(), $4) RETURNING id`,
+    [session_id, req.user!.sub, site_id, break_type]
+  );
+  res.status(201).json({ break_id: result.rows[0].id });
+});
+
+// POST /api/shifts/break-end — guard ends a break
+router.post('/break-end', requireAuth('guard'), async (req, res) => {
+  const { break_id } = req.body;
+  if (!break_id) return res.status(400).json({ error: 'break_id is required' });
+
+  const result = await pool.query(
+    `UPDATE break_sessions
+     SET break_end = NOW(),
+         duration_minutes = EXTRACT(EPOCH FROM (NOW() - break_start)) / 60
+     WHERE id = $1 AND guard_id = $2 AND break_end IS NULL
+     RETURNING *`,
+    [break_id, req.user!.sub]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Break not found or already ended' });
+  res.json(result.rows[0]);
+});
+
 // POST /api/shifts/:id/clock-in  — creates shift_session + triggers task instance generation
 router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
