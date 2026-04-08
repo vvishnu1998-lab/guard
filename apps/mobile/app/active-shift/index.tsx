@@ -66,6 +66,7 @@ export default function ActiveShiftScreen() {
   // Aligned to clock-in time so the cycle is correct even if the guard
   // navigates away and returns, or opens the app mid-shift.
   const pingAlertShownRef = useRef(false);
+  const pingSnoozedUntilRef = useRef(0); // epoch ms — suppress re-alert until this time
 
   useEffect(() => {
     if (!activeSession?.clocked_in_at) return;
@@ -86,13 +87,18 @@ export default function ActiveShiftScreen() {
 
       // When the cycle rolls over, prompt the guard to ping
       if (remaining >= PING_INTERVAL_MS - 2000) {
-        if (!pingAlertShownRef.current) {
+        const snoozed = Date.now() < pingSnoozedUntilRef.current;
+        if (!pingAlertShownRef.current && !snoozed) {
           pingAlertShownRef.current = true;
           Alert.alert(
             'PING DUE',
             'Your 30-minute check-in is due. Submit your location now.',
             [
-              { text: 'Later', style: 'cancel', onPress: () => { pingAlertShownRef.current = false; } },
+              { text: 'Later', style: 'cancel', onPress: () => {
+                // Snooze for 5 minutes before re-alerting
+                pingSnoozedUntilRef.current = Date.now() + 5 * 60 * 1000;
+                pingAlertShownRef.current = false;
+              }},
               { text: 'PING NOW', onPress: () => { pingAlertShownRef.current = false; router.push('/ping'); } },
             ],
             { cancelable: false }
@@ -100,6 +106,7 @@ export default function ActiveShiftScreen() {
         }
       } else {
         pingAlertShownRef.current = false;
+        pingSnoozedUntilRef.current = 0;
       }
     }, 1000);
 
