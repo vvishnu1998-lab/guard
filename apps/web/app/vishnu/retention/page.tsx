@@ -36,7 +36,7 @@ function DaysCell({ days, warn, danger }: { days: number; warn: number; danger: 
 function Flag({ sent, label }: { sent: boolean; label: string }) {
   return (
     <span className={`text-xs px-1.5 py-0.5 rounded border ${
-      sent ? 'border-green-800 text-green-500' : 'border-[#2E2E48] text-gray-700'
+      sent ? 'border-green-800 text-green-500' : 'border-[#1A3050] text-gray-700'
     }`}>
       {label}
     </span>
@@ -72,7 +72,7 @@ export default function RetentionPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-widest text-gray-300">RETENTION</h1>
-        <button onClick={load} className="text-xs text-gray-500 border border-[#2E2E48] rounded-lg px-3 py-2 hover:text-gray-300 hover:border-gray-500 transition-colors tracking-widest">
+        <button onClick={load} className="text-xs text-gray-500 border border-[#1A3050] rounded-lg px-3 py-2 hover:text-gray-300 hover:border-gray-500 transition-colors tracking-widest">
           REFRESH
         </button>
       </div>
@@ -84,7 +84,7 @@ export default function RetentionPage() {
           { label: 'URGENT (≤30D)', value: urgentCount,  color: urgentCount > 0 ? 'text-red-400' : 'text-gray-200' },
           { label: 'ACCESS EXPIRED', value: expiredCount, color: expiredCount > 0 ? 'text-orange-400' : 'text-gray-200' },
         ].map(({ label, value, color }) => (
-          <div key={label} className="bg-[#242436] border border-[#2E2E48] rounded-xl p-4 text-center">
+          <div key={label} className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-4 text-center">
             <p className="text-gray-600 text-xs tracking-widest mb-1">{label}</p>
             <p className={`text-3xl font-bold ${color}`}>{value}</p>
           </div>
@@ -100,7 +100,7 @@ export default function RetentionPage() {
             key={f}
             onClick={() => setFilter(f)}
             className={`text-xs tracking-widest px-3 py-1.5 rounded border transition-colors ${
-              filter === f ? 'bg-gray-600 border-gray-500 text-white' : 'border-[#2E2E48] text-gray-500 hover:text-gray-300'
+              filter === f ? 'bg-gray-600 border-gray-500 text-white' : 'border-[#1A3050] text-gray-500 hover:text-gray-300'
             }`}
           >
             {f.toUpperCase()}
@@ -108,10 +108,10 @@ export default function RetentionPage() {
         ))}
       </div>
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-600 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-600 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">COMPANY</th>
               <th className="text-center p-4">ACCESS ENDS</th>
@@ -128,10 +128,10 @@ export default function RetentionPage() {
             {visible.map((r) => (
               <tr
                 key={r.site_id}
-                className={`border-b border-[#2E2E48] transition-colors ${
+                className={`border-b border-[#1A3050] transition-colors ${
                   r.days_to_deletion <= 10 && !r.data_deleted ? 'bg-red-950/20 hover:bg-red-950/30' :
                   r.days_to_deletion <= 30 && !r.data_deleted ? 'bg-orange-950/10 hover:bg-orange-950/20' :
-                  'hover:bg-[#1A1A2E]'
+                  'hover:bg-[#0B1526]'
                 }`}
               >
                 <td className="p-4">
@@ -171,7 +171,7 @@ export default function RetentionPage() {
         </table>
       </div>
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-4 text-xs text-gray-600 space-y-1">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-4 text-xs text-gray-600 space-y-1">
         <p><span className="text-gray-400">D60</span> — Notice sent at 30 days before access expiry</p>
         <p><span className="text-gray-400">D89</span> — Final warning sent 1 day before access expiry</p>
         <p><span className="text-gray-400">D140</span> — Vishnu warning sent 10 days before hard deletion</p>

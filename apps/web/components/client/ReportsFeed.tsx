@@ -47,7 +47,7 @@ export default function ReportsFeed({ reports = [] }: { reports?: Report[] }) {
           { label: 'TASKS', value: 0 },
           { label: 'HOURS', value: '0.0' },
         ].map(({ label, value }) => (
-          <div key={label} className="bg-[#242436] border border-[#2E2E48] rounded-lg p-3 text-center">
+          <div key={label} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg p-3 text-center">
             <p className="text-gray-500 text-xs tracking-widest">{label}</p>
             <p className="text-2xl font-bold text-blue-400 mt-1">{value}</p>
           </div>
@@ -63,7 +63,7 @@ export default function ReportsFeed({ reports = [] }: { reports?: Report[] }) {
             className={`text-xs tracking-widest px-3 py-1.5 rounded-full border transition-colors ${
               filter === type
                 ? 'bg-blue-500 border-blue-500 text-white'
-                : 'border-[#2E2E48] text-gray-400 hover:border-blue-400'
+                : 'border-[#1A3050] text-gray-400 hover:border-blue-400'
             }`}
           >
             {type.toUpperCase()}
@@ -78,7 +78,7 @@ export default function ReportsFeed({ reports = [] }: { reports?: Report[] }) {
       {filtered.map((report) => (
         <div
           key={report.id}
-          className={`bg-[#242436] border-l-4 rounded-xl p-5 ${TYPE_STYLES[report.report_type]}`}
+          className={`bg-[#0F1E35] border-l-4 rounded-xl p-5 ${TYPE_STYLES[report.report_type]}`}
         >
           <div className="flex justify-between items-start mb-2">
             <div className="flex items-center gap-2">

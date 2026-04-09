@@ -23,7 +23,7 @@ export default async function KpiRow() {
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       {kpis.map(({ label, value, color }) => (
-        <div key={label} className="bg-[#242436] border border-[#2E2E48] rounded-xl p-5">
+        <div key={label} className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-5">
           <p className="text-gray-500 text-xs tracking-widest mb-2">{label}</p>
           <p className={`text-4xl font-bold ${color}`}>{value}</p>
         </div>

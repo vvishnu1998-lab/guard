@@ -22,7 +22,7 @@ export default function VishnuLayout({ children }: { children: React.ReactNode }
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <nav className="w-52 bg-[#0D0D1A] border-r border-white/[0.06] flex flex-col shrink-0">
+      <nav className="w-52 bg-[#070F1E] border-r border-white/[0.06] flex flex-col shrink-0">
         {/* Logo block */}
         <div className="px-5 pt-7 pb-6 border-b border-white/[0.06]">
           <div className="flex items-center gap-2.5">
@@ -72,7 +72,7 @@ export default function VishnuLayout({ children }: { children: React.ReactNode }
           </button>
         </div>
       </nav>
-      <main className="flex-1 overflow-y-auto bg-[#1A1A2E] p-6">{children}</main>
+      <main className="flex-1 overflow-y-auto bg-[#0B1526] p-6">{children}</main>
     </div>
   );
 }

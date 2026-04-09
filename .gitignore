@@ -14,3 +14,12 @@ coverage/
 # Service account keys — never commit
 apps/api/secrets/*.json
 apps/mobile/google-service-account.json
+
+# Claude Code local settings (may contain tokens)
+.claude/settings.local.json
+.claude/worktrees/
+
+# Local scripts and logs
+simulation-log.txt
+diagnose.command
+start-metro.command

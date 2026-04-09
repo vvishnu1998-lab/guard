@@ -11,12 +11,12 @@ interface GuardOnDuty {
 
 export default function GuardsOnDuty({ guards = [] }: { guards?: GuardOnDuty[] }) {
   return (
-    <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
-      <div className="p-4 border-b border-[#2E2E48] flex justify-between items-center">
+    <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
+      <div className="p-4 border-b border-[#1A3050] flex justify-between items-center">
         <h2 className="text-amber-400 font-bold tracking-widest text-sm">GUARDS ON DUTY</h2>
         <span className="text-green-400 text-xs">{guards.length} ACTIVE</span>
       </div>
-      <div className="divide-y divide-[#2E2E48]">
+      <div className="divide-y divide-[#1A3050]">
         {guards.length === 0 && (
           <p className="text-center text-gray-500 py-8 text-sm">No guards on duty</p>
         )}

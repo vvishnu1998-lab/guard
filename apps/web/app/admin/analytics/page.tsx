@@ -31,7 +31,7 @@ const SEV_COLOR: Record<string, string> = {
 
 function StatCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
   return (
-    <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-6">
+    <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
       <p className="text-gray-500 text-xs tracking-widest mb-2">{label}</p>
       <p className="text-3xl font-bold text-amber-400">{value}</p>
       {sub && <p className="text-gray-600 text-xs mt-1">{sub}</p>}
@@ -44,7 +44,7 @@ function BarRow({ label, value, max, color }: { label: string; value: number; ma
   return (
     <div className="flex items-center gap-3">
       <span className="text-gray-400 text-xs w-24 shrink-0 capitalize">{label}</span>
-      <div className="flex-1 bg-[#1A1A2E] rounded-full h-2">
+      <div className="flex-1 bg-[#0B1526] rounded-full h-2">
         <div className={`h-2 rounded-full ${color} transition-all`} style={{ width: `${pct}%` }} />
       </div>
       <span className="text-gray-400 text-xs w-8 text-right">{value}</span>
@@ -114,7 +114,7 @@ export default function AnalyticsPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Monthly hours */}
-        <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-6">
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
           <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">MONTHLY HOURS (ALL SITES)</p>
           {months.length === 0 ? (
             <p className="text-gray-600 text-xs text-center py-8">No data yet</p>
@@ -128,7 +128,7 @@ export default function AnalyticsPage() {
         </div>
 
         {/* Report type breakdown */}
-        <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-6">
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
           <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">REPORTS BY TYPE (30 DAYS)</p>
           {totalReports === 0 ? (
             <p className="text-gray-600 text-xs text-center py-8">No reports yet</p>
@@ -148,7 +148,7 @@ export default function AnalyticsPage() {
         </div>
 
         {/* Incident severity */}
-        <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-6">
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
           <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">INCIDENT SEVERITY (30 DAYS)</p>
           {(data?.incidents_by_severity.length ?? 0) === 0 ? (
             <p className="text-gray-600 text-xs text-center py-8">No incidents in last 30 days</p>
@@ -172,7 +172,7 @@ export default function AnalyticsPage() {
         </div>
 
         {/* Guard leaderboard */}
-        <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-6">
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
           <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">GUARD HOURS LEADERBOARD (30 DAYS)</p>
           {(data?.top_guards.length ?? 0) === 0 ? (
             <p className="text-gray-600 text-xs text-center py-8">No completed shifts yet</p>

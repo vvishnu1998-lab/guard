@@ -25,7 +25,7 @@ export default function DownloadPanel() {
   }
 
   return (
-    <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-5 space-y-4">
+    <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-5 space-y-4">
       <h2 className="text-blue-400 font-bold tracking-widest text-sm">DOWNLOAD REPORTS</h2>
 
       <button
@@ -42,19 +42,19 @@ export default function DownloadPanel() {
         THIS WEEK'S PDF
       </button>
 
-      <div className="border-t border-[#2E2E48] pt-4 space-y-3">
+      <div className="border-t border-[#1A3050] pt-4 space-y-3">
         <p className="text-gray-500 text-xs tracking-widest">CUSTOM DATE RANGE</p>
         <input
           type="date"
           value={dateFrom}
           onChange={(e) => setDateFrom(e.target.value)}
-          className="w-full bg-[#1A1A2E] border border-[#2E2E48] text-gray-300 text-sm rounded p-2"
+          className="w-full bg-[#0B1526] border border-[#1A3050] text-gray-300 text-sm rounded p-2"
         />
         <input
           type="date"
           value={dateTo}
           onChange={(e) => setDateTo(e.target.value)}
-          className="w-full bg-[#1A1A2E] border border-[#2E2E48] text-gray-300 text-sm rounded p-2"
+          className="w-full bg-[#0B1526] border border-[#1A3050] text-gray-300 text-sm rounded p-2"
         />
         <button
           onClick={() => downloadPdf('custom')}

@@ -25,8 +25,8 @@ const ALERT_LABELS: Record<Alert['type'], string> = {
 
 export default function RecentAlerts({ alerts = [] }: { alerts?: Alert[] }) {
   return (
-    <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
-      <div className="p-4 border-b border-[#2E2E48]">
+    <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
+      <div className="p-4 border-b border-[#1A3050]">
         <h2 className="text-amber-400 font-bold tracking-widest text-sm">RECENT ALERTS</h2>
       </div>
       <div className="p-4 space-y-3">

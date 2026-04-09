@@ -128,10 +128,10 @@ export default function LiveMapPage() {
         </div>
       )}
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">GUARD</th>
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">ON SHIFT</th>
@@ -151,8 +151,8 @@ export default function LiveMapPage() {
               return (
                 <tr
                   key={g.id}
-                  className={`border-b border-[#2E2E48] transition-colors ${
-                    g.has_violation ? 'bg-red-950/30 hover:bg-red-950/50' : 'hover:bg-[#1A1A2E]'
+                  className={`border-b border-[#1A3050] transition-colors ${
+                    g.has_violation ? 'bg-red-950/30 hover:bg-red-950/50' : 'hover:bg-[#0B1526]'
                   }`}
                 >
                   <td className="p-4">

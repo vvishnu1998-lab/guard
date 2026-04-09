@@ -26,7 +26,7 @@ export default function AdminNav() {
   }
 
   return (
-    <nav className="w-56 bg-[#0D0D1A] border-r border-white/[0.06] flex flex-col shrink-0">
+    <nav className="w-56 bg-[#070F1E] border-r border-white/[0.06] flex flex-col shrink-0">
       {/* Logo block */}
       <div className="px-5 pt-7 pb-6 border-b border-white/[0.06]">
         <div className="flex items-center gap-2.5">

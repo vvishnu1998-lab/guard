@@ -77,7 +77,7 @@ export default function SchedulePage() {
       {loading && <p className="text-gray-500 text-sm">Loading…</p>}
 
       {!loading && guards.length === 0 && (
-        <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-12 text-center">
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-12 text-center">
           <p className="text-gray-500 text-sm">No guards are currently on duty at this site.</p>
         </div>
       )}
@@ -90,7 +90,7 @@ export default function SchedulePage() {
           return (
             <div
               key={i}
-              className="bg-[#242436] border border-[#2E2E48] rounded-xl p-5 space-y-3"
+              className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-5 space-y-3"
             >
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-full bg-blue-900/50 border border-blue-700 flex items-center justify-center">
@@ -102,7 +102,7 @@ export default function SchedulePage() {
                 </div>
               </div>
 
-              <div className="border-t border-[#2E2E48] pt-3 space-y-2">
+              <div className="border-t border-[#1A3050] pt-3 space-y-2">
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">CLOCKED IN</span>
                   <span className="text-gray-300">

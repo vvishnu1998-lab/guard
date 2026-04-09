@@ -87,10 +87,10 @@ export default function ClientPortalsPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">CLIENT ACCOUNT</th>
               <th className="text-left p-4">EMAIL</th>
@@ -106,7 +106,7 @@ export default function ClientPortalsPage() {
             {sites.map((site) => {
               const client = clients[site.id];
               return (
-                <tr key={site.id} className="border-b border-[#2E2E48] hover:bg-[#1A1A2E] transition-colors">
+                <tr key={site.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
                   <td className="p-4 text-gray-200 font-medium">{site.name}</td>
                   <td className="p-4">
                     {client ? (
@@ -135,7 +135,7 @@ export default function ClientPortalsPage() {
         </table>
       </div>
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-5 text-sm text-gray-500 space-y-1">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-5 text-sm text-gray-500 space-y-1">
         <p className="text-amber-400 font-bold tracking-widest text-xs mb-2">CLIENT PORTAL ACCESS</p>
         <p>Each site can have one client portal account. The client gets read-only access to their site's reports, guard schedule, and PDF downloads.</p>
         <p>Clients log in at <span className="text-gray-300 font-mono">/client/login</span> and cannot see data from other sites.</p>
@@ -144,7 +144,7 @@ export default function ClientPortalsPage() {
       {/* Create Client Modal */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">ADD CLIENT ACCOUNT</h2>
               <button onClick={() => setShowModal(false)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -156,7 +156,7 @@ export default function ClientPortalsPage() {
                 <select
                   value={form.site_id}
                   onChange={(e) => setForm((f) => ({ ...f, site_id: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                 >
                   <option value="">Select site…</option>
                   {sitesWithoutClient.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -172,14 +172,14 @@ export default function ClientPortalsPage() {
                   <input
                     type={type} placeholder={ph} value={(form as any)[key]}
                     onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                    className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                   />
                 </div>
               ))}
             </div>
             <p className="text-gray-600 text-xs mt-3 mb-5">The client will log in at /client/login with read-only access to their site.</p>
             <div className="flex gap-3">
-              <button onClick={() => setShowModal(false)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setShowModal(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={createClient} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'CREATING…' : 'CREATE'}
               </button>

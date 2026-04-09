@@ -4,13 +4,14 @@
 
 :root {
   --color-base: #F5F3EE;
-  --color-structure: #1A1A2E;
+  --color-structure: #0B1526;
   --color-action: #F59E0B;
-  --color-surface: #242436;
+  --color-surface: #0F1E35;
   --color-danger: #EF4444;
   --color-success: #10B981;
   --color-muted: #6B7280;
-  --color-border: #2E2E48;
+  --color-border: #1A3050;
+  --color-cyan: #00C8FF;
 }
 
 body {

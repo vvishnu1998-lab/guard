@@ -27,7 +27,7 @@ interface Company {
 
 function KpiCard({ label, value, accent }: { label: string; value: number | string; accent?: string }) {
   return (
-    <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-5">
+    <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-5">
       <p className="text-gray-500 text-xs tracking-widest mb-2">{label}</p>
       <p className={`text-4xl font-bold ${accent ?? 'text-gray-200'}`}>{value}</p>
     </div>
@@ -86,8 +86,8 @@ export default function VishnuOverview() {
       </div>
 
       {/* Companies table */}
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
-        <div className="flex items-center justify-between p-4 border-b border-[#2E2E48]">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-[#1A3050]">
           <h2 className="text-gray-400 text-xs tracking-widest font-bold">ALL COMPANIES</h2>
           <Link href="/vishnu/companies" className="text-xs text-gray-500 hover:text-gray-300 tracking-widest transition-colors">
             MANAGE →
@@ -95,7 +95,7 @@ export default function VishnuOverview() {
         </div>
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-600 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-600 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">COMPANY</th>
               <th className="text-center p-4">SITES</th>
               <th className="text-center p-4">GUARDS</th>
@@ -111,7 +111,7 @@ export default function VishnuOverview() {
               <tr><td colSpan={7} className="text-center text-gray-500 py-10">No companies yet</td></tr>
             )}
             {companies.map((c) => (
-              <tr key={c.id} className={`border-b border-[#2E2E48] transition-colors ${c.is_active ? 'hover:bg-[#1A1A2E]' : 'opacity-50 hover:opacity-70'}`}>
+              <tr key={c.id} className={`border-b border-[#1A3050] transition-colors ${c.is_active ? 'hover:bg-[#0B1526]' : 'opacity-50 hover:opacity-70'}`}>
                 <td className="p-4">
                   <p className="text-gray-200 font-medium">{c.name}</p>
                   <p className="text-gray-600 text-xs font-mono">{c.id.slice(0, 8)}…</p>

@@ -96,7 +96,7 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="w-full max-w-lg bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+      <div className="w-full max-w-lg bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
 
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
@@ -123,7 +123,7 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
               value={form.title}
               onChange={(e) => set('title', e.target.value)}
               maxLength={120}
-              className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
               placeholder="e.g. Perimeter check — Gate 2"
             />
           </div>
@@ -136,7 +136,7 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
               onChange={(e) => set('description', e.target.value)}
               rows={3}
               maxLength={500}
-              className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm resize-none focus:outline-none focus:border-amber-400"
+              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm resize-none focus:outline-none focus:border-amber-400"
               placeholder="Optional — what should the guard do / check?"
             />
           </div>
@@ -151,7 +151,7 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
                 type="time"
                 value={form.scheduled_time}
                 onChange={(e) => set('scheduled_time', e.target.value)}
-                className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
               />
             </div>
 
@@ -160,7 +160,7 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
               <select
                 value={form.recurrence}
                 onChange={(e) => set('recurrence', e.target.value)}
-                className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
               >
                 {RECURRENCES.map((r) => (
                   <option key={r.value} value={r.value}>{r.label}</option>
@@ -199,7 +199,7 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
         <div className="flex gap-3 mt-6">
           <button
             onClick={onClose}
-            className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+            className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
           >
             CANCEL
           </button>

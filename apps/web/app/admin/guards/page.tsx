@@ -92,10 +92,10 @@ export default function GuardsPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">GUARD</th>
               <th className="text-left p-4">BADGE</th>
               <th className="text-left p-4">ASSIGNED SITES</th>
@@ -107,7 +107,7 @@ export default function GuardsPage() {
             {loading && <tr><td colSpan={5} className="text-center text-gray-500 py-10">Loading…</td></tr>}
             {!loading && visible.length === 0 && <tr><td colSpan={5} className="text-center text-gray-500 py-10">No guards yet</td></tr>}
             {visible.map((g) => (
-              <tr key={g.id} className={`border-b border-[#2E2E48] hover:bg-[#1A1A2E] transition-colors ${!g.is_active ? 'opacity-50' : ''}`}>
+              <tr key={g.id} className={`border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors ${!g.is_active ? 'opacity-50' : ''}`}>
                 <td className="p-4">
                   <p className="text-gray-200 font-medium">{g.name}</p>
                   <p className="text-gray-500 text-xs">{g.email}</p>
@@ -117,7 +117,7 @@ export default function GuardsPage() {
                   {g.assignments?.length ? (
                     <div className="flex flex-wrap gap-1">
                       {g.assignments.map((a) => (
-                        <span key={a.site_id} className="text-xs bg-[#1A1A2E] border border-[#2E2E48] px-2 py-0.5 rounded text-amber-400">
+                        <span key={a.site_id} className="text-xs bg-[#0B1526] border border-[#1A3050] px-2 py-0.5 rounded text-amber-400">
                           {a.site_name}
                         </span>
                       ))}
@@ -148,7 +148,7 @@ export default function GuardsPage() {
       {/* Add Guard Modal */}
       {showAdd && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">ADD GUARD</h2>
               <button onClick={() => setShowAdd(false)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -165,14 +165,14 @@ export default function GuardsPage() {
                   <label className="block text-gray-500 text-xs tracking-widest mb-1">{label} <span className="text-amber-400">*</span></label>
                   <input type={type} placeholder={ph} value={(form as any)[key]}
                     onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                    className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                   />
                 </div>
               ))}
             </div>
             <p className="text-gray-600 text-xs mt-3 mb-5">Guard will be prompted to change their password on first login.</p>
             <div className="flex gap-3">
-              <button onClick={() => setShowAdd(false)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setShowAdd(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={addGuard} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'ADDING…' : 'ADD GUARD'}
               </button>
@@ -184,7 +184,7 @@ export default function GuardsPage() {
       {/* Assign to Site Modal */}
       {showAssign && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-sm bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-sm bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">ASSIGN SITE</h2>
               <button onClick={() => setShowAssign(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -195,7 +195,7 @@ export default function GuardsPage() {
               <div>
                 <label className="block text-gray-500 text-xs tracking-widest mb-1">SITE <span className="text-amber-400">*</span></label>
                 <select value={assignForm.site_id} onChange={(e) => setAssignForm((f) => ({ ...f, site_id: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400">
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400">
                   <option value="">Select site…</option>
                   {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
@@ -203,16 +203,16 @@ export default function GuardsPage() {
               <div>
                 <label className="block text-gray-500 text-xs tracking-widest mb-1">FROM <span className="text-amber-400">*</span></label>
                 <input type="date" value={assignForm.assigned_from} onChange={(e) => setAssignForm((f) => ({ ...f, assigned_from: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
               </div>
               <div>
                 <label className="block text-gray-500 text-xs tracking-widest mb-1">UNTIL (OPTIONAL)</label>
                 <input type="date" value={assignForm.assigned_until} onChange={(e) => setAssignForm((f) => ({ ...f, assigned_until: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
               </div>
             </div>
             <div className="flex gap-3 mt-5">
-              <button onClick={() => setShowAssign(null)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setShowAssign(null)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={assignGuard} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'SAVING…' : 'ASSIGN'}
               </button>

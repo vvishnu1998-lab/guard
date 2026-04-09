@@ -93,7 +93,7 @@ export default function ShiftsPage() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400"
+            className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400"
           >
             <option value="">ALL STATUSES</option>
             <option value="scheduled">SCHEDULED</option>
@@ -112,10 +112,10 @@ export default function ShiftsPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">GUARD</th>
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">START</th>
@@ -128,7 +128,7 @@ export default function ShiftsPage() {
             {loading && <tr><td colSpan={6} className="text-center text-gray-500 py-10">Loading…</td></tr>}
             {!loading && visible.length === 0 && <tr><td colSpan={6} className="text-center text-gray-500 py-10">No shifts found</td></tr>}
             {visible.map((s) => (
-              <tr key={s.id} className="border-b border-[#2E2E48] hover:bg-[#1A1A2E] transition-colors">
+              <tr key={s.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
                 <td className="p-4 text-gray-200">{s.guard_name}</td>
                 <td className="p-4 text-gray-400 text-xs">{s.site_name}</td>
                 <td className="p-4 text-gray-400 text-xs font-mono">{fmtDT(s.scheduled_start)}</td>
@@ -148,7 +148,7 @@ export default function ShiftsPage() {
       {/* Schedule Shift Modal */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">SCHEDULE SHIFT</h2>
               <button onClick={() => setShowModal(false)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -160,7 +160,7 @@ export default function ShiftsPage() {
                 <select
                   value={form.guard_id}
                   onChange={(e) => setForm((f) => ({ ...f, guard_id: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                 >
                   <option value="">Select guard…</option>
                   {guards.filter((g: any) => g.is_active !== false).map((g) => (
@@ -173,7 +173,7 @@ export default function ShiftsPage() {
                 <select
                   value={form.site_id}
                   onChange={(e) => setForm((f) => ({ ...f, site_id: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                 >
                   <option value="">Select site…</option>
                   {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -186,7 +186,7 @@ export default function ShiftsPage() {
                     type="datetime-local"
                     value={form.scheduled_start}
                     onChange={(e) => setForm((f) => ({ ...f, scheduled_start: e.target.value }))}
-                    className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                   />
                 </div>
                 <div>
@@ -195,13 +195,13 @@ export default function ShiftsPage() {
                     type="datetime-local"
                     value={form.scheduled_end}
                     onChange={(e) => setForm((f) => ({ ...f, scheduled_end: e.target.value }))}
-                    className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                   />
                 </div>
               </div>
             </div>
             <div className="flex gap-3 mt-6">
-              <button onClick={() => setShowModal(false)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setShowModal(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={createShift} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'SAVING…' : 'SCHEDULE'}
               </button>

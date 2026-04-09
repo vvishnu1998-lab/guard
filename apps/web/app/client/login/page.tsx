@@ -31,9 +31,9 @@ export default function ClientLoginPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#080810] flex">
+    <main className="min-h-screen bg-[#060E1A] flex">
       {/* Left panel — brand */}
-      <div className="hidden lg:flex flex-col justify-between w-[45%] bg-[#0A0A18] border-r border-white/[0.05] p-14">
+      <div className="hidden lg:flex flex-col justify-between w-[45%] bg-[#070E1B] border-r border-white/[0.05] p-14">
         <div className="flex items-center gap-3">
           <Image
             src="/vwing_logo.png"

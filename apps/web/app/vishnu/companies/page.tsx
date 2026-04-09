@@ -145,13 +145,13 @@ export default function CompaniesPage() {
       <div className="space-y-3">
         {loading && <p className="text-center text-gray-500 py-10 text-sm">Loading…</p>}
         {!loading && companies.length === 0 && (
-          <div className="bg-[#242436] border border-[#2E2E48] rounded-xl p-12 text-center">
+          <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-12 text-center">
             <p className="text-gray-500 text-sm">No companies yet. Create the first one.</p>
           </div>
         )}
 
         {companies.map((c) => (
-          <div key={c.id} className={`bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden ${!c.is_active ? 'opacity-60' : ''}`}>
+          <div key={c.id} className={`bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden ${!c.is_active ? 'opacity-60' : ''}`}>
             {/* Company row */}
             <div className="p-4 flex items-center gap-4">
               <button
@@ -169,7 +169,7 @@ export default function CompaniesPage() {
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
                       placeholder={c.name}
-                      className="bg-[#1A1A2E] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none focus:border-gray-400 w-48"
+                      className="bg-[#0B1526] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none focus:border-gray-400 w-48"
                     />
                   ) : (
                     <p className="text-gray-200 font-medium">{c.name}</p>
@@ -193,7 +193,7 @@ export default function CompaniesPage() {
                     value={editForm.default_photo_limit}
                     onChange={(e) => setEditForm((f) => ({ ...f, default_photo_limit: e.target.value }))}
                     placeholder={String(c.default_photo_limit)}
-                    className="bg-[#1A1A2E] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none w-14 text-center"
+                    className="bg-[#0B1526] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none w-14 text-center"
                   />
                 ) : (
                   <div>
@@ -208,12 +208,12 @@ export default function CompaniesPage() {
                 {editId === c.id ? (
                   <>
                     <button onClick={() => saveEdit(c.id)} disabled={saving} className="text-xs text-green-400 border border-green-700 px-2 py-1 rounded hover:bg-green-900/30 transition-colors disabled:opacity-40">SAVE</button>
-                    <button onClick={() => { setEditId(null); setEditForm(EDIT_EMPTY); }} className="text-xs text-gray-500 border border-[#2E2E48] px-2 py-1 rounded hover:border-gray-500 transition-colors">CANCEL</button>
+                    <button onClick={() => { setEditId(null); setEditForm(EDIT_EMPTY); }} className="text-xs text-gray-500 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 transition-colors">CANCEL</button>
                   </>
                 ) : (
                   <>
                     <button onClick={() => { setEditId(c.id); setEditForm({ name: c.name, default_photo_limit: String(c.default_photo_limit) }); }}
-                      className="text-xs text-gray-400 border border-[#2E2E48] px-2 py-1 rounded hover:border-gray-500 hover:text-gray-200 transition-colors">
+                      className="text-xs text-gray-400 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 hover:text-gray-200 transition-colors">
                       EDIT
                     </button>
                     <button onClick={() => toggleActive(c)}
@@ -227,12 +227,12 @@ export default function CompaniesPage() {
 
             {/* Expanded: admin list */}
             {expanded === c.id && (
-              <div className="border-t border-[#2E2E48] px-4 pb-4 pt-3">
+              <div className="border-t border-[#1A3050] px-4 pb-4 pt-3">
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-gray-600 text-xs tracking-widest">ADMINS</p>
                   <button
                     onClick={() => { setAdminModal(c.id); setAdminForm(ADMIN_FORM_EMPTY); setAdminError(''); }}
-                    className="text-xs text-gray-400 border border-[#2E2E48] px-2 py-0.5 rounded hover:border-gray-500 hover:text-gray-200 transition-colors"
+                    className="text-xs text-gray-400 border border-[#1A3050] px-2 py-0.5 rounded hover:border-gray-500 hover:text-gray-200 transition-colors"
                   >
                     + ADD ADMIN
                   </button>
@@ -264,7 +264,7 @@ export default function CompaniesPage() {
       {/* Create Admin Modal */}
       {adminModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-gray-300 font-bold tracking-widest text-lg">NEW ADMIN</h2>
               <button onClick={() => setAdminModal(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -276,7 +276,7 @@ export default function CompaniesPage() {
                 <input autoFocus type="text" value={adminForm.name}
                   onChange={(e) => setAdminForm((f) => ({ ...f, name: e.target.value }))}
                   placeholder="e.g. John Smith"
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
                 />
               </div>
               <div>
@@ -284,7 +284,7 @@ export default function CompaniesPage() {
                 <input type="email" value={adminForm.email}
                   onChange={(e) => setAdminForm((f) => ({ ...f, email: e.target.value }))}
                   placeholder="admin@company.com"
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
                 />
               </div>
               <div>
@@ -292,12 +292,12 @@ export default function CompaniesPage() {
                 <input type="password" value={adminForm.password}
                   onChange={(e) => setAdminForm((f) => ({ ...f, password: e.target.value }))}
                   placeholder="Min 8 characters"
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
                 />
               </div>
             </div>
             <div className="flex gap-3 mt-6">
-              <button onClick={() => setAdminModal(null)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setAdminModal(null)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={() => createAdmin(adminModal)} disabled={adminSaving}
                 className="flex-1 bg-gray-600 text-white font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-gray-500 disabled:opacity-40 transition-colors">
                 {adminSaving ? 'CREATING…' : 'CREATE ADMIN'}
@@ -310,7 +310,7 @@ export default function CompaniesPage() {
       {/* Create Company Modal */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-gray-300 font-bold tracking-widest text-lg">NEW COMPANY</h2>
               <button onClick={() => setShowCreate(false)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -324,7 +324,7 @@ export default function CompaniesPage() {
                   type="text" value={createForm.name}
                   onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
                   placeholder="e.g. Apex Security Ltd"
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
                 />
               </div>
               <div>
@@ -334,14 +334,14 @@ export default function CompaniesPage() {
                     type="number" min={1} max={20}
                     value={createForm.default_photo_limit}
                     onChange={(e) => setCreateForm((f) => ({ ...f, default_photo_limit: e.target.value }))}
-                    className="w-24 bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
+                    className="w-24 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-gray-400"
                   />
                   <span className="text-gray-600 text-xs">Max 20. Can be overridden per site.</span>
                 </div>
               </div>
             </div>
             <div className="flex gap-3 mt-6">
-              <button onClick={() => setShowCreate(false)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setShowCreate(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={createCompany} disabled={saving} className="flex-1 bg-gray-600 text-white font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-gray-500 disabled:opacity-40 transition-colors">
                 {saving ? 'CREATING…' : 'CREATE'}
               </button>

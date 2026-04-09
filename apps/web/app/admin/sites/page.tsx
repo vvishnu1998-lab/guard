@@ -151,10 +151,10 @@ export default function SitesPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">CONTRACT</th>
               <th className="text-left p-4">GEOFENCE</th>
@@ -175,7 +175,7 @@ export default function SitesPage() {
               const accessIn    = daysUntil(site.client_star_access_until);
               const clientEnabled = !site.client_star_access_disabled;
               return (
-                <tr key={site.id} className="border-b border-[#2E2E48] hover:bg-[#1A1A2E] transition-colors">
+                <tr key={site.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
                   <td className="p-4">
                     <p className="text-gray-200 font-medium">{site.name}</p>
                     <p className="text-gray-500 text-xs">{site.address}</p>
@@ -233,7 +233,7 @@ export default function SitesPage() {
                       className={`text-xs tracking-widest px-3 py-1 rounded transition-colors ${
                         clientEnabled
                           ? 'bg-green-900/40 text-green-400 border border-green-700 hover:bg-red-900/40 hover:text-red-400 hover:border-red-700'
-                          : 'bg-[#1A1A2E] text-gray-500 border border-[#2E2E48] hover:border-green-700 hover:text-green-400'
+                          : 'bg-[#0B1526] text-gray-500 border border-[#1A3050] hover:border-green-700 hover:text-green-400'
                       } disabled:opacity-40`}
                     >
                       {toggling === site.id ? '…' : clientEnabled ? 'ENABLED' : 'DISABLED'}
@@ -249,7 +249,7 @@ export default function SitesPage() {
       {/* ── Create Site Modal ─────────────────────────────────────────── */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">NEW SITE</h2>
               <button onClick={() => setShowCreate(false)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -268,7 +268,7 @@ export default function SitesPage() {
                     type={type} placeholder={placeholder}
                     value={(form as any)[key]}
                     onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                    className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                   />
                 </div>
               ))}
@@ -279,7 +279,7 @@ export default function SitesPage() {
               <span className="text-amber-400/70">You can set the geofence boundary after creating the site.</span>
             </p>
             <div className="flex gap-3">
-              <button onClick={() => setShowCreate(false)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setShowCreate(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={createSite} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'CREATING…' : 'CREATE SITE'}
               </button>
@@ -291,7 +291,7 @@ export default function SitesPage() {
       {/* ── Set Geofence Modal ────────────────────────────────────────── */}
       {geoSite && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-lg bg-[#242436] border border-[#2E2E48] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-lg bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">SET GEOFENCE</h2>
               <button onClick={() => setGeoSite(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -301,7 +301,7 @@ export default function SitesPage() {
             </p>
 
             {/* How to find coordinates */}
-            <div className="bg-[#1A1A2E] border border-[#2E2E48] rounded-lg p-4 mb-5 text-xs text-gray-400 space-y-1">
+            <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 mb-5 text-xs text-gray-400 space-y-1">
               <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO GET COORDINATES</p>
               <p>1. Open <span className="text-white">Google Maps</span> and search for the site address.</p>
               <p>2. Right-click on the exact centre of the building/property.</p>
@@ -319,7 +319,7 @@ export default function SitesPage() {
                   type="number" step="any" placeholder="e.g. 37.7749"
                   value={geo.center_lat}
                   onChange={(e) => setGeo((g) => ({ ...g, center_lat: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                 />
               </div>
               <div>
@@ -328,7 +328,7 @@ export default function SitesPage() {
                   type="number" step="any" placeholder="e.g. -122.4194"
                   value={geo.center_lng}
                   onChange={(e) => setGeo((g) => ({ ...g, center_lng: e.target.value }))}
-                  className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                 />
               </div>
             </div>
@@ -338,7 +338,7 @@ export default function SitesPage() {
                 type="number" min="10" max="10000" placeholder="e.g. 100"
                 value={geo.radius_meters}
                 onChange={(e) => setGeo((g) => ({ ...g, radius_meters: e.target.value }))}
-                className="w-full bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
               />
               <p className="text-gray-600 text-xs mt-1">
                 Guards outside this radius will trigger a geofence violation alert.
@@ -348,7 +348,7 @@ export default function SitesPage() {
 
             {/* Live preview of what they entered */}
             {geo.center_lat && geo.center_lng && geo.radius_meters && (
-              <div className="bg-[#1A1A2E] border border-amber-400/30 rounded-lg p-3 mb-5 text-xs text-gray-400">
+              <div className="bg-[#0B1526] border border-amber-400/30 rounded-lg p-3 mb-5 text-xs text-gray-400">
                 <p className="text-amber-400 font-bold tracking-widest mb-1">PREVIEW</p>
                 <p>Centre: <span className="text-white font-mono">{geo.center_lat}, {geo.center_lng}</span></p>
                 <p>Boundary radius: <span className="text-white">{geo.radius_meters}m</span>
@@ -370,7 +370,7 @@ export default function SitesPage() {
             )}
 
             <div className="flex gap-3">
-              <button onClick={() => setGeoSite(null)} className="flex-1 border border-[#2E2E48] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => setGeoSite(null)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={saveGeofence} disabled={geoSaving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {geoSaving ? 'SAVING…' : 'SAVE GEOFENCE'}
               </button>

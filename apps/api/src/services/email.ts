@@ -42,19 +42,19 @@ function typeBadgeHtml(type: string, severity?: string | null): string {
 const BASE_STYLE = `
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;margin:0;padding:20px}
   .card{background:#fff;border-radius:8px;max-width:640px;margin:0 auto;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-  .hdr{background:#1A1A2E;color:#F59E0B;padding:24px 28px}
+  .hdr{background:#0B1526;color:#F59E0B;padding:24px 28px}
   .hdr h1{margin:0;font-size:22px;letter-spacing:3px}
   .brand{font-size:11px;color:#F59E0B;letter-spacing:4px;font-weight:700;margin-bottom:6px}
   .hdr p{margin:4px 0 0;color:#888;font-size:12px;letter-spacing:2px}
   .body{padding:24px 28px}
   .meta{color:#666;font-size:13px;margin-bottom:20px;border-bottom:1px solid #eee;padding-bottom:14px}
   .kpi{display:inline-block;background:#f5f5f5;border-radius:6px;padding:10px 20px;margin:4px 8px 4px 0;text-align:center}
-  .kpi .n{font-size:26px;font-weight:700;color:#1A1A2E}
+  .kpi .n{font-size:26px;font-weight:700;color:#0B1526}
   .kpi .l{font-size:10px;color:#999;letter-spacing:1px}
   .rrow{border-left:3px solid;padding:10px 14px;margin:8px 0;background:#fafafa;border-radius:0 6px 6px 0}
   .rrow p{margin:3px 0;font-size:13px}
   .footer{background:#f5f5f5;padding:14px 28px;font-size:11px;color:#aaa;text-align:center}
-  a.btn{display:inline-block;background:#F59E0B;color:#1A1A2E;font-weight:700;padding:10px 20px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:13px;margin-top:16px}
+  a.btn{display:inline-block;background:#F59E0B;color:#0B1526;font-weight:700;padding:10px 20px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:13px;margin-top:16px}
 `;
 
 // ── Email Type 1 — Incident Alert ─────────────────────────────────────────────
@@ -244,7 +244,7 @@ export async function sendRetentionNotice(
 
   const html = `<style>${BASE_STYLE}</style>
   <div class="card">
-    <div class="hdr" style="background:${isUrgent ? '#7F1D1D' : '#1A1A2E'}">
+    <div class="hdr" style="background:${isUrgent ? '#7F1D1D' : '#0B1526'}">
       <h1>DATA RETENTION NOTICE</h1><p>${site_name.toUpperCase()}</p>
     </div>
     <div class="body">

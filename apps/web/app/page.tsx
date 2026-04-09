@@ -3,7 +3,7 @@ import Link from 'next/link';
 
 export default function PortalSelect() {
   return (
-    <main className="min-h-screen bg-[#080810] flex flex-col items-center justify-center gap-10 p-8">
+    <main className="min-h-screen bg-[#060E1A] flex flex-col items-center justify-center gap-10 p-8">
       {/* Logo + wordmark */}
       <div className="flex flex-col items-center gap-4">
         <Image

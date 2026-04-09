@@ -89,14 +89,14 @@ export default function ReportsPage() {
       {/* Filters */}
       <div className="flex flex-wrap gap-3">
         <select value={filters.type} onChange={(e) => setFilter('type', e.target.value)}
-          className="bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400">
+          className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400">
           <option value="">ALL TYPES</option>
           <option value="activity">ACTIVITY</option>
           <option value="incident">INCIDENT</option>
           <option value="maintenance">MAINTENANCE</option>
         </select>
         <select value={filters.severity} onChange={(e) => setFilter('severity', e.target.value)}
-          className="bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400">
+          className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400">
           <option value="">ALL SEVERITIES</option>
           <option value="low">LOW</option>
           <option value="medium">MEDIUM</option>
@@ -104,16 +104,16 @@ export default function ReportsPage() {
           <option value="critical">CRITICAL</option>
         </select>
         <select value={filters.site_id} onChange={(e) => setFilter('site_id', e.target.value)}
-          className="bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400">
+          className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-amber-400">
           <option value="">ALL SITES</option>
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
         <input type="date" value={filters.date_from} onChange={(e) => setFilter('date_from', e.target.value)}
           placeholder="FROM"
-          className="bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-xs focus:outline-none focus:border-amber-400" />
+          className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-xs focus:outline-none focus:border-amber-400" />
         <input type="date" value={filters.date_to} onChange={(e) => setFilter('date_to', e.target.value)}
           placeholder="TO"
-          className="bg-[#1A1A2E] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-xs focus:outline-none focus:border-amber-400" />
+          className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-xs focus:outline-none focus:border-amber-400" />
         {Object.values(filters).some(Boolean) && (
           <button
             onClick={() => setFilters({ type: '', severity: '', site_id: '', date_from: '', date_to: '' })}
@@ -130,10 +130,10 @@ export default function ReportsPage() {
         {loading && <p className="text-center text-gray-500 py-10 text-sm">Loading…</p>}
         {!loading && filtered.length === 0 && <p className="text-center text-gray-500 py-10 text-sm">No reports found</p>}
         {filtered.map((r) => (
-          <div key={r.id} className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+          <div key={r.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
             {/* Header row */}
             <button
-              className="w-full text-left p-4 flex items-start gap-4 hover:bg-[#1A1A2E] transition-colors"
+              className="w-full text-left p-4 flex items-start gap-4 hover:bg-[#0B1526] transition-colors"
               onClick={() => setExpanded(expanded === r.id ? null : r.id)}
             >
               <div className="flex-1 min-w-0">
@@ -161,14 +161,14 @@ export default function ReportsPage() {
 
             {/* Expanded detail */}
             {expanded === r.id && (
-              <div className="border-t border-[#2E2E48] px-4 py-3 space-y-3">
+              <div className="border-t border-[#1A3050] px-4 py-3 space-y-3">
                 <p className="text-gray-300 text-sm whitespace-pre-wrap">{r.description}</p>
                 {r.photos && r.photos.length > 0 && (
                   <div className="flex gap-2 flex-wrap">
                     {r.photos.map((url, i) => (
                       <a key={i} href={url} target="_blank" rel="noreferrer">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={url} alt={`Photo ${i + 1}`} className="w-24 h-24 object-cover rounded-lg border border-[#2E2E48] hover:border-amber-400 transition-colors" />
+                        <img src={url} alt={`Photo ${i + 1}`} className="w-24 h-24 object-cover rounded-lg border border-[#1A3050] hover:border-amber-400 transition-colors" />
                       </a>
                     ))}
                   </div>

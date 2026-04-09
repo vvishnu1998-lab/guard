@@ -87,21 +87,21 @@ export default function AllSitesPage() {
         <input
           type="text" placeholder="Search sites or companies…" value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="flex-1 bg-[#242436] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-sm focus:outline-none focus:border-gray-500"
+          className="flex-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-sm focus:outline-none focus:border-gray-500"
         />
         <select
           value={companyFilter} onChange={(e) => setCompanyFilter(e.target.value)}
-          className="bg-[#242436] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-gray-500"
+          className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-xs tracking-widest focus:outline-none focus:border-gray-500"
         >
           <option value="">ALL COMPANIES</option>
           {companies.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
         </select>
       </div>
 
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-gray-600 text-xs tracking-widest border-b border-[#2E2E48]">
+            <tr className="text-gray-600 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">COMPANY</th>
               <th className="text-center p-4">CONTRACT</th>
@@ -117,7 +117,7 @@ export default function AllSitesPage() {
             {visible.map((s) => {
               const cs = contractStatus(s.contract_end);
               return (
-                <tr key={s.id} className={`border-b border-[#2E2E48] transition-colors ${s.is_active ? 'hover:bg-[#1A1A2E]' : 'opacity-50'}`}>
+                <tr key={s.id} className={`border-b border-[#1A3050] transition-colors ${s.is_active ? 'hover:bg-[#0B1526]' : 'opacity-50'}`}>
                   <td className="p-4">
                     <p className="text-gray-200 font-medium">{s.name}</p>
                     <p className="text-gray-600 text-xs truncate max-w-xs">{s.address}</p>
@@ -144,7 +144,7 @@ export default function AllSitesPage() {
                           value={overrideVal}
                           onChange={(e) => setOverrideVal(e.target.value)}
                           placeholder="—"
-                          className="w-12 bg-[#1A1A2E] border border-gray-600 rounded px-1 py-0.5 text-gray-200 text-xs text-center focus:outline-none"
+                          className="w-12 bg-[#0B1526] border border-gray-600 rounded px-1 py-0.5 text-gray-200 text-xs text-center focus:outline-none"
                         />
                         <button onClick={() => saveOverride(s.id)} disabled={saving} className="text-xs text-green-400 hover:text-green-300 disabled:opacity-40">✓</button>
                         <button onClick={() => { setEditSiteId(null); setOverrideVal(''); }} className="text-xs text-gray-500 hover:text-gray-300">✕</button>
@@ -152,7 +152,7 @@ export default function AllSitesPage() {
                     ) : (
                       <button
                         onClick={() => { setEditSiteId(s.id); setOverrideVal(s.photo_limit_override != null ? String(s.photo_limit_override) : ''); }}
-                        className="text-xs text-gray-500 hover:text-gray-300 border border-[#2E2E48] hover:border-gray-500 px-2 py-0.5 rounded transition-colors"
+                        className="text-xs text-gray-500 hover:text-gray-300 border border-[#1A3050] hover:border-gray-500 px-2 py-0.5 rounded transition-colors"
                       >
                         {s.photo_limit_override != null ? `${s.photo_limit_override} ✎` : 'SET'}
                       </button>

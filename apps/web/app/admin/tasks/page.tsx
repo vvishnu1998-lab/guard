@@ -123,15 +123,15 @@ export default function TaskTemplatesPage() {
         <select
           value={selectedSite}
           onChange={(e) => setSelectedSite(e.target.value)}
-          className="bg-[#242436] border border-[#2E2E48] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+          className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
         >
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
       </div>
 
       {/* Templates table */}
-      <div className="bg-[#242436] border border-[#2E2E48] rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-[#2E2E48] flex items-center justify-between">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
+        <div className="p-4 border-b border-[#1A3050] flex items-center justify-between">
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">
             TEMPLATES
             <span className="ml-2 text-gray-500 font-normal">({templates.length})</span>
@@ -153,7 +153,7 @@ export default function TaskTemplatesPage() {
         ) : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-gray-500 text-xs tracking-widest border-b border-[#2E2E48]">
+              <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
                 <th className="text-left p-4">TITLE</th>
                 <th className="text-left p-4">TIME</th>
                 <th className="text-left p-4">RECURRENCE</th>
@@ -164,7 +164,7 @@ export default function TaskTemplatesPage() {
             </thead>
             <tbody>
               {templates.map((t) => (
-                <tr key={t.id} className={`border-b border-[#2E2E48] transition-colors ${t.is_active ? 'hover:bg-[#1A1A2E]' : 'opacity-50'}`}>
+                <tr key={t.id} className={`border-b border-[#1A3050] transition-colors ${t.is_active ? 'hover:bg-[#0B1526]' : 'opacity-50'}`}>
                   <td className="p-4">
                     <p className="text-gray-200 font-medium">{t.title}</p>
                     {t.description && (
@@ -219,7 +219,7 @@ export default function TaskTemplatesPage() {
       </div>
 
       {/* Info callout */}
-      <div className="bg-[#1A1A2E] border border-[#2E2E48] rounded-xl p-4 text-sm text-gray-500">
+      <div className="bg-[#0B1526] border border-[#1A3050] rounded-xl p-4 text-sm text-gray-500">
         <p className="text-amber-400 font-bold tracking-widest text-xs mb-1">HOW IT WORKS</p>
         <ul className="space-y-1 list-disc list-inside">
           <li>Task instances are generated automatically when a guard clocks in.</li>
