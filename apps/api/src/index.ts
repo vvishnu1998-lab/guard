@@ -23,6 +23,7 @@ import clientPortalRoutes from './routes/clientPortal';
 import './jobs/nightlyPurge';
 import './jobs/dailyShiftEmail';
 import './jobs/monthlyRetentionNotice';
+import './jobs/missedShiftAlert';
 
 const app = express();
 app.set('trust proxy', 1);

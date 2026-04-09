@@ -1,12 +1,13 @@
 'use client';
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 
 const NAV = [
-  { href: '/vishnu',           label: 'OVERVIEW'   },
-  { href: '/vishnu/companies', label: 'COMPANIES'  },
-  { href: '/vishnu/sites',     label: 'ALL SITES'  },
-  { href: '/vishnu/retention', label: 'RETENTION'  },
+  { href: '/vishnu',           label: 'OVERVIEW'  },
+  { href: '/vishnu/companies', label: 'COMPANIES' },
+  { href: '/vishnu/sites',     label: 'ALL SITES' },
+  { href: '/vishnu/retention', label: 'RETENTION' },
 ];
 
 export default function VishnuLayout({ children }: { children: React.ReactNode }) {
@@ -21,32 +22,51 @@ export default function VishnuLayout({ children }: { children: React.ReactNode }
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <nav className="w-52 bg-[#242436] border-r border-[#2E2E48] flex flex-col p-4 gap-1 shrink-0">
-        <div className="mb-6">
-          <p className="text-gray-300 font-bold tracking-widest text-xl">GUARD</p>
-          <p className="text-gray-600 text-xs tracking-widest mt-1">SUPER ADMIN</p>
+      <nav className="w-52 bg-[#0D0D1A] border-r border-white/[0.06] flex flex-col shrink-0">
+        {/* Logo block */}
+        <div className="px-5 pt-7 pb-6 border-b border-white/[0.06]">
+          <div className="flex items-center gap-2.5">
+            <Image
+              src="/vwing_logo.png"
+              alt="V-Wing"
+              width={28}
+              height={28}
+              className="object-contain"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <div>
+              <p className="text-white font-black tracking-[0.2em] text-base leading-none">V-WING</p>
+              <p className="text-white/30 text-[9px] tracking-[0.25em] mt-1 font-medium">SUPER ADMIN</p>
+            </div>
+          </div>
         </div>
-        {NAV.map(({ href, label }) => {
-          const active = pathname === href || (href !== '/vishnu' && (pathname ?? '').startsWith(href));
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={`px-3 py-2 rounded text-xs tracking-widest transition-colors ${
-                active
-                  ? 'bg-gray-600 text-white font-bold'
-                  : 'text-gray-400 hover:text-gray-200 hover:bg-[#1A1A2E]'
-              }`}
-            >
-              {label}
-            </Link>
-          );
-        })}
-        <div className="mt-auto pt-4 border-t border-[#2E2E48]">
-          <p className="text-xs text-gray-700 mb-2">Vishnu · Full access</p>
+
+        {/* Nav links */}
+        <div className="flex-1 px-3 py-4 space-y-0.5">
+          {NAV.map(({ href, label }) => {
+            const active = pathname === href || (href !== '/vishnu' && (pathname ?? '').startsWith(href));
+            return (
+              <Link
+                key={href}
+                href={href}
+                className={`flex items-center px-3 py-2.5 rounded-md text-[11px] tracking-[0.15em] font-semibold transition-all duration-150 ${
+                  active
+                    ? 'bg-white/10 text-white'
+                    : 'text-white/40 hover:text-white hover:bg-white/[0.06]'
+                }`}
+              >
+                {label}
+              </Link>
+            );
+          })}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-5 border-t border-white/[0.06]">
+          <p className="text-[10px] text-white/20 tracking-wide mb-3">Vishnu · Full access</p>
           <button
             onClick={logout}
-            className="w-full px-3 py-2 rounded text-xs tracking-widest text-gray-500 hover:text-red-400 hover:bg-[#1A1A2E] transition-colors text-left"
+            className="w-full text-left text-[10px] tracking-[0.2em] text-white/25 hover:text-red-400 transition-colors font-semibold py-1"
           >
             SIGN OUT
           </button>

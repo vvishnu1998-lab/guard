@@ -44,6 +44,7 @@ const BASE_STYLE = `
   .card{background:#fff;border-radius:8px;max-width:640px;margin:0 auto;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
   .hdr{background:#1A1A2E;color:#F59E0B;padding:24px 28px}
   .hdr h1{margin:0;font-size:22px;letter-spacing:3px}
+  .brand{font-size:11px;color:#F59E0B;letter-spacing:4px;font-weight:700;margin-bottom:6px}
   .hdr p{margin:4px 0 0;color:#888;font-size:12px;letter-spacing:2px}
   .body{padding:24px 28px}
   .meta{color:#666;font-size:13px;margin-bottom:20px;border-bottom:1px solid #eee;padding-bottom:14px}
@@ -93,7 +94,7 @@ export async function sendIncidentAlert(
         <p style="font-size:14px;color:#333;line-height:1.6">${report.description}</p>
         <a class="btn" href="${PORTAL}">View in Client Portal</a>
       </div>
-      <div class="footer">Guard Security Management Platform — Confidential</div>
+      <div class="footer">V-Wing Security Management Platform — Confidential</div>
     </div>`,
   });
 }
@@ -190,7 +191,7 @@ export async function sendDailyShiftReport(shiftId: string) {
         : '<p style="color:#aaa;font-size:13px;margin-top:20px">No reports filed during this shift.</p>'}
       <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
     </div>
-    <div class="footer">Guard Security Management Platform — Confidential</div>
+    <div class="footer">V-Wing Security Management Platform — Confidential</div>
   </div>`;
 
   const recipients = [sh.client_email, sh.admin_email].filter(Boolean) as string[];
@@ -264,7 +265,7 @@ export async function sendRetentionNotice(
       </p>
       <a class="btn" href="${PORTAL}/download">Download Reports Now</a>
     </div>
-    <div class="footer">Guard Security Management Platform — Confidential</div>
+    <div class="footer">V-Wing Security Management Platform — Confidential</div>
   </div>`;
 
   const recipients = [client_email, admin_email].filter(Boolean) as string[];
@@ -276,6 +277,66 @@ export async function sendRetentionNotice(
     subject: `${subjectPfx} — ${site_name} (${daysRemaining} days)`,
     html,
   });
+}
+
+// ── Email Type 5 — Missed Shift Alert ────────────────────────────────────────
+
+export async function sendMissedShiftAlert(shiftId: string) {
+  const result = await pool.query(
+    `SELECT sh.scheduled_start,
+            si.name     AS site_name,
+            g.name      AS guard_name,
+            g.badge_number,
+            g.phone     AS guard_phone,
+            c.email     AS client_email,
+            ca.email    AS admin_email
+     FROM shifts sh
+     JOIN sites          si ON si.id = sh.site_id
+     JOIN guards         g  ON g.id  = sh.guard_id
+     LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
+     JOIN companies      co ON co.id = si.company_id
+     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
+     WHERE sh.id = $1`,
+    [shiftId],
+  );
+  if (!result.rows[0]) return;
+  const { scheduled_start, site_name, guard_name, badge_number, guard_phone, client_email, admin_email } = result.rows[0];
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    <div class="hdr" style="background:#7F1D1D">
+      <h1>MISSED SHIFT ALERT</h1><p>${site_name.toUpperCase()}</p>
+    </div>
+    <div class="body">
+      <div class="meta">
+        <strong>Scheduled Start:</strong> ${fmtDT(scheduled_start)}<br/>
+        <strong>Guard:</strong> ${guard_name} (${badge_number})${guard_phone ? `<br/><strong>Guard Phone:</strong> ${guard_phone}` : ''}
+      </div>
+      <p style="font-size:15px;color:#DC2626;font-weight:bold;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px">
+        ⚠️ No guard has clocked in for this shift. It is now 15 minutes past the scheduled start time.
+      </p>
+      <p style="color:#555;font-size:13px;margin-top:14px">
+        Please contact the assigned guard immediately or arrange cover for <strong>${site_name}</strong>.
+      </p>
+      <a class="btn" href="${PORTAL}">View Shift in Portal</a>
+    </div>
+    <div class="footer">V-Wing Security Management Platform — Automated Alert</div>
+  </div>`;
+
+  const recipients = [process.env.VISHNU_EMAIL, client_email, admin_email].filter(Boolean) as string[];
+  if (recipients.length === 0) return;
+
+  await sgMail.sendMultiple({
+    to: recipients,
+    from: FROM,
+    subject: `⚠️ Missed Shift Alert — ${site_name} — Guard not clocked in`,
+    html,
+  });
+
+  await pool.query(
+    'UPDATE shifts SET missed_alert_sent_at = NOW() WHERE id = $1',
+    [shiftId],
+  );
 }
 
 // ── Email Type 4 — Vishnu Day-140 Hard-Delete Warning ────────────────────────
@@ -318,7 +379,7 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
           This warning fires once, 10 days before the scheduled deletion date.
         </p>
       </div>
-      <div class="footer">Guard Security Management Platform — Internal Alert</div>
+      <div class="footer">V-Wing Security Management Platform — Internal Alert</div>
     </div>`,
   });
 }

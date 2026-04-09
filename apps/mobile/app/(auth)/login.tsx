@@ -66,7 +66,7 @@ export default function LoginScreen() {
       <View style={styles.inner}>
         {/* Logo */}
         <View style={styles.logoContainer}>
-          <Text style={styles.logo}>GUARD</Text>
+          <Text style={styles.logo}>V-WING</Text>
           <Text style={styles.tagline}>SECURITY MANAGEMENT</Text>
         </View>
 

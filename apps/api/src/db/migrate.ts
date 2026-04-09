@@ -7,7 +7,7 @@ async function migrate() {
   const client = await pool.connect();
   try {
     console.log('Running migrations...');
-    const files = ['schema.sql', 'schema_auth.sql', 'schema_v2.sql', 'schema_v3.sql'];
+    const files = ['schema.sql', 'schema_auth.sql', 'schema_v2.sql', 'schema_v3.sql', 'schema_v4.sql'];
     for (const file of files) {
       const sql = readFileSync(join(__dirname, file), 'utf8');
       console.log(`  → ${file}`);

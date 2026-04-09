@@ -1,9 +1,8 @@
 'use client';
+import Image from 'next/image';
 import { useState, FormEvent } from 'react';
-import { useRouter } from 'next/navigation';
 
 export default function ClientLoginPage() {
-  const router = useRouter();
   const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
   const [error, setError]       = useState('');
@@ -21,7 +20,6 @@ export default function ClientLoginPage() {
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Login failed'); return; }
-
       document.cookie = `guard_client_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
       document.cookie = `guard_client_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
       window.location.href = '/client';
@@ -33,46 +31,96 @@ export default function ClientLoginPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#1A1A2E] flex items-center justify-center p-8">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-10">
-          <h1 className="text-4xl font-bold tracking-widest text-blue-400">GUARD</h1>
-          <p className="text-gray-500 tracking-widest text-xs mt-2">CLIENT PORTAL</p>
+    <main className="min-h-screen bg-[#080810] flex">
+      {/* Left panel — brand */}
+      <div className="hidden lg:flex flex-col justify-between w-[45%] bg-[#0A0A18] border-r border-white/[0.05] p-14">
+        <div className="flex items-center gap-3">
+          <Image
+            src="/vwing_logo.png"
+            alt="V-Wing"
+            width={36}
+            height={36}
+            className="object-contain"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+          />
+          <span className="text-white font-black tracking-[0.2em] text-lg">V-WING</span>
         </div>
+        <div>
+          <p className="text-white/10 text-[11px] tracking-[0.3em] font-semibold mb-8">CLIENT PORTAL</p>
+          <h2 className="text-white font-black text-5xl leading-[1.1] tracking-tight mb-6">
+            Your site.<br />
+            Your guards.<br />
+            <span className="text-blue-400">Full visibility.</span>
+          </h2>
+          <p className="text-white/35 text-sm leading-relaxed max-w-xs">
+            View live reports, guard schedules, and download shift records — read-only access to everything that matters.
+          </p>
+        </div>
+        <p className="text-white/15 text-xs tracking-widest">© V-WING SECURITY MANAGEMENT</p>
+      </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+      {/* Right panel — form */}
+      <div className="flex-1 flex items-center justify-center p-8 lg:p-16">
+        <div className="w-full max-w-[380px]">
+          {/* Mobile logo */}
+          <div className="flex items-center gap-3 mb-12 lg:hidden">
+            <Image
+              src="/vwing_logo.png"
+              alt="V-Wing"
+              width={32}
+              height={32}
+              className="object-contain"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <span className="text-white font-black tracking-[0.2em] text-lg">V-WING</span>
+          </div>
+
+          <h1 className="text-white font-black text-3xl tracking-tight mb-1">Client Sign In</h1>
+          <p className="text-white/35 text-sm mb-10 tracking-wide">View your site activity and reports.</p>
+
           {error && (
-            <div className="bg-red-950 border border-red-500 rounded-lg p-3 text-red-400 text-sm">
+            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3.5 mb-6 text-red-400 text-sm">
               {error}
             </div>
           )}
-          <div>
-            <label className="block text-gray-500 text-xs tracking-widest mb-1">EMAIL</label>
-            <input
-              type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-              className="w-full bg-[#242436] border border-[#2E2E48] rounded-lg px-4 py-3 text-gray-200 text-sm focus:border-blue-400 focus:outline-none"
-              placeholder="client@yoursite.com"
-            />
-          </div>
-          <div>
-            <label className="block text-gray-500 text-xs tracking-widest mb-1">PASSWORD</label>
-            <input
-              type="password" required value={password} onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-[#242436] border border-[#2E2E48] rounded-lg px-4 py-3 text-gray-200 text-sm focus:border-blue-400 focus:outline-none"
-              placeholder="••••••••"
-            />
-          </div>
-          <button
-            type="submit" disabled={loading}
-            className="w-full bg-blue-500 text-white font-bold tracking-widest text-sm py-3 rounded-lg hover:bg-blue-400 transition-colors disabled:opacity-50"
-          >
-            {loading ? 'SIGNING IN...' : 'SIGN IN'}
-          </button>
-        </form>
 
-        <p className="text-gray-600 text-xs text-center mt-8 leading-relaxed">
-          Read-only access. Contact your security provider if you have trouble signing in.
-        </p>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-white/40 text-[10px] tracking-[0.2em] font-semibold mb-2">EMAIL</label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3.5 text-white text-sm placeholder-white/20 focus:border-blue-500/60 focus:bg-white/[0.06] focus:outline-none transition-all"
+                placeholder="you@yourcompany.com"
+              />
+            </div>
+            <div>
+              <label className="block text-white/40 text-[10px] tracking-[0.2em] font-semibold mb-2">PASSWORD</label>
+              <input
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3.5 text-white text-sm placeholder-white/20 focus:border-blue-500/60 focus:bg-white/[0.06] focus:outline-none transition-all"
+                placeholder="••••••••"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-500 hover:bg-blue-400 active:bg-blue-600 text-white font-black tracking-[0.15em] text-sm py-4 rounded-lg transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 mt-2"
+            >
+              {loading ? 'SIGNING IN…' : 'SIGN IN'}
+            </button>
+          </form>
+
+          <p className="text-white/15 text-[11px] text-center mt-10 tracking-wide">
+            Read-only access · Contact your security provider for help
+          </p>
+        </div>
       </div>
     </main>
   );
