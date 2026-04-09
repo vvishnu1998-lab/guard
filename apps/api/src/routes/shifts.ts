@@ -78,20 +78,25 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
   if (!session_id || !break_type) {
     return res.status(400).json({ error: 'session_id and break_type are required' });
   }
-  // Verify session belongs to this guard and is open
-  const sessionResult = await pool.query(
-    'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2 AND clocked_out_at IS NULL',
-    [session_id, req.user!.sub]
-  );
-  if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
-  const { site_id } = sessionResult.rows[0];
+  try {
+    // Verify session belongs to this guard and is open
+    const sessionResult = await pool.query(
+      'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2 AND clocked_out_at IS NULL',
+      [session_id, req.user!.sub]
+    );
+    if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
+    const { site_id } = sessionResult.rows[0];
 
-  const result = await pool.query(
-    `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type)
-     VALUES ($1, $2, $3, NOW(), $4) RETURNING id`,
-    [session_id, req.user!.sub, site_id, break_type]
-  );
-  res.status(201).json({ break_id: result.rows[0].id });
+    const result = await pool.query(
+      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type)
+       VALUES ($1, $2, $3, NOW(), $4) RETURNING id`,
+      [session_id, req.user!.sub, site_id, break_type]
+    );
+    res.status(201).json({ break_id: result.rows[0].id });
+  } catch (err: any) {
+    console.error('break-start error:', err);
+    res.status(500).json({ error: err.message ?? 'Failed to start break' });
+  }
 });
 
 // POST /api/shifts/break-end — guard ends a break
@@ -99,16 +104,21 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
   const { break_id } = req.body;
   if (!break_id) return res.status(400).json({ error: 'break_id is required' });
 
-  const result = await pool.query(
-    `UPDATE break_sessions
-     SET break_end = NOW(),
-         duration_minutes = EXTRACT(EPOCH FROM (NOW() - break_start)) / 60
-     WHERE id = $1 AND guard_id = $2 AND break_end IS NULL
-     RETURNING *`,
-    [break_id, req.user!.sub]
-  );
-  if (!result.rows[0]) return res.status(404).json({ error: 'Break not found or already ended' });
-  res.json(result.rows[0]);
+  try {
+    const result = await pool.query(
+      `UPDATE break_sessions
+       SET break_end = NOW(),
+           duration_minutes = EXTRACT(EPOCH FROM (NOW() - break_start)) / 60
+       WHERE id = $1 AND guard_id = $2 AND break_end IS NULL
+       RETURNING *`,
+      [break_id, req.user!.sub]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Break not found or already ended' });
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    console.error('break-end error:', err);
+    res.status(500).json({ error: err.message ?? 'Failed to end break' });
+  }
 });
 
 // POST /api/shifts/:id/clock-in  — creates shift_session + triggers task instance generation
