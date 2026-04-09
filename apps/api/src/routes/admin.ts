@@ -271,23 +271,49 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
   res.json(result.rows);
 });
 
-// GET /api/admin/recent-alerts — last 10 geofence violations for dashboard
+// GET /api/admin/recent-alerts — geofence violations + missed shifts, merged and sorted
 router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
   const result = await pool.query(
-    `SELECT
-       gv.id, 'geofence_violation' AS type,
-       'Guard left designated area' AS description,
-       s.name AS site_name,
-       g.name AS guard_name,
-       gv.occurred_at,
-       (gv.resolved_at IS NOT NULL) AS is_resolved
-     FROM geofence_violations gv
-     JOIN shift_sessions ss ON ss.id = gv.shift_session_id
-     JOIN guards g ON g.id = ss.guard_id
-     JOIN sites s ON s.id = gv.site_id
-     WHERE s.company_id = $1
-     ORDER BY gv.occurred_at DESC LIMIT 10`,
+    `SELECT * FROM (
+
+       -- Geofence violations
+       SELECT
+         gv.id::text,
+         'geofence_violation'          AS type,
+         'Guard left designated area'  AS description,
+         s.name                        AS site_name,
+         g.name                        AS guard_name,
+         gv.occurred_at,
+         (gv.resolved_at IS NOT NULL)  AS is_resolved
+       FROM geofence_violations gv
+       JOIN shift_sessions ss ON ss.id = gv.shift_session_id
+       JOIN guards         g  ON g.id  = ss.guard_id
+       JOIN sites          s  ON s.id  = gv.site_id
+       WHERE s.company_id = $1
+
+       UNION ALL
+
+       -- Missed shifts — scheduled but no clock-in 15 min after start
+       SELECT
+         sh.id::text,
+         'missed_shift'                                          AS type,
+         'No guard clocked in 15+ minutes after scheduled start' AS description,
+         s.name                                                  AS site_name,
+         g.name                                                  AS guard_name,
+         sh.scheduled_start                                      AS occurred_at,
+         false                                                   AS is_resolved
+       FROM shifts sh
+       JOIN sites  s ON s.id = sh.site_id
+       JOIN guards g ON g.id = sh.guard_id
+       WHERE s.company_id = $1
+         AND sh.status = 'scheduled'
+         AND sh.scheduled_start + INTERVAL '15 minutes' <= NOW()
+         AND sh.missed_alert_sent_at IS NOT NULL
+
+     ) combined
+     ORDER BY occurred_at DESC
+     LIMIT 15`,
     [cid]
   );
   res.json(result.rows);
