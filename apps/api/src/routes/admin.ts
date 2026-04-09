@@ -234,10 +234,10 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
      JOIN guards g  ON g.id  = ss.guard_id
      JOIN sites  s  ON s.id  = ss.site_id
      LEFT JOIN LATERAL (
-       SELECT latitude, longitude, lp_inner.created_at, ping_type
+       SELECT latitude, longitude, lp_inner.pinged_at, ping_type
        FROM location_pings lp_inner
        WHERE lp_inner.shift_session_id = ss.id
-       ORDER BY lp_inner.created_at DESC LIMIT 1
+       ORDER BY lp_inner.pinged_at DESC LIMIT 1
      ) lp ON true
      WHERE s.company_id = $1 AND ss.clocked_out_at IS NULL
      ORDER BY s.name, g.name`,
