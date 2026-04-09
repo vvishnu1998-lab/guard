@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { isPointInPolygon } from '../services/geofence';
+import { sendGeofenceViolationAlert } from '../services/firebase';
 
 const router = Router();
 
@@ -63,14 +64,38 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Session not found' });
 
+  const siteId   = sessionResult.rows[0].site_id;
+  const guardId  = req.user!.sub;
+
   const result = await pool.query(
     `INSERT INTO geofence_violations
        (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [shift_session_id, req.user!.sub, sessionResult.rows[0].site_id, latitude, longitude, photo_url || null]
+    [shift_session_id, guardId, siteId, latitude, longitude, photo_url || null]
   );
 
-  // FCM notification to Star admin handled by a separate push service
+  // Fire FCM push to all company admin devices — non-blocking
+  pool.query(
+    `SELECT g.name AS guard_name, s.name AS site_name,
+            array_agg(ca.fcm_token) FILTER (WHERE ca.fcm_token IS NOT NULL) AS admin_tokens
+     FROM shift_sessions ss
+     JOIN guards g  ON g.id  = ss.guard_id
+     JOIN sites  s  ON s.id  = ss.site_id
+     JOIN companies co ON co.id = s.company_id
+     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_active = true
+     WHERE ss.id = $1
+     GROUP BY g.name, s.name`,
+    [shift_session_id]
+  ).then(({ rows }) => {
+    if (!rows[0] || !rows[0].admin_tokens?.length) return;
+    sendGeofenceViolationAlert({
+      adminFcmTokens: rows[0].admin_tokens,
+      guardName:      rows[0].guard_name,
+      siteName:       rows[0].site_name,
+      sessionId:      shift_session_id,
+    }).catch((err) => console.error('[fcm] violation push failed:', err));
+  }).catch((err) => console.error('[fcm] admin token lookup failed:', err));
+
   res.status(201).json(result.rows[0]);
 });
 

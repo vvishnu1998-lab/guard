@@ -224,7 +224,7 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        ss.clocked_in_at,
        lp.latitude  AS last_lat,
        lp.longitude AS last_lng,
-       lp.created_at AS last_ping_at,
+       lp.pinged_at  AS last_ping_at,
        lp.ping_type  AS last_ping_type,
        EXISTS (
          SELECT 1 FROM geofence_violations gv
