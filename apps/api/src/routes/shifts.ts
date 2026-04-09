@@ -160,28 +160,33 @@ router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
 router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
   const { handover_notes } = req.body;
-  const sessionResult = await pool.query(
-    `UPDATE shift_sessions SET clocked_out_at = NOW()
-     WHERE shift_id = $1 AND guard_id = $2 AND clocked_out_at IS NULL
-     RETURNING *`,
-    [id, req.user!.sub]
-  );
-  if (!sessionResult.rows[0]) return res.status(404).json({ error: 'Active session not found' });
-  // Calculate total_hours minus breaks
-  const session = sessionResult.rows[0];
-  const breaksResult = await pool.query(
-    'SELECT COALESCE(SUM(duration_minutes), 0) as total_break_mins FROM break_sessions WHERE shift_session_id = $1',
-    [session.id]
-  );
-  const grossHours = (session.clocked_out_at - session.clocked_in_at) / 3600000;
-  const breakHours = breaksResult.rows[0].total_break_mins / 60;
-  const netHours = Math.max(0, grossHours - breakHours);
-  await pool.query(
-    'UPDATE shift_sessions SET total_hours = $1 WHERE id = $2',
-    [netHours, session.id]
-  );
-  await pool.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);
-  res.json({ ...session, total_hours: netHours, handover_notes });
+  try {
+    const sessionResult = await pool.query(
+      `UPDATE shift_sessions SET clocked_out_at = NOW()
+       WHERE shift_id = $1 AND guard_id = $2 AND clocked_out_at IS NULL
+       RETURNING *`,
+      [id, req.user!.sub]
+    );
+    if (!sessionResult.rows[0]) return res.status(404).json({ error: 'Active session not found' });
+    // Calculate total_hours minus breaks
+    const session = sessionResult.rows[0];
+    const breaksResult = await pool.query(
+      'SELECT COALESCE(SUM(duration_minutes), 0) as total_break_mins FROM break_sessions WHERE shift_session_id = $1',
+      [session.id]
+    );
+    const grossHours = (new Date(session.clocked_out_at).getTime() - new Date(session.clocked_in_at).getTime()) / 3600000;
+    const breakHours = breaksResult.rows[0].total_break_mins / 60;
+    const netHours = Math.max(0, grossHours - breakHours);
+    await pool.query(
+      'UPDATE shift_sessions SET total_hours = $1, handover_notes = $2 WHERE id = $3',
+      [netHours, handover_notes ?? null, session.id]
+    );
+    await pool.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);
+    res.json({ ...session, total_hours: netHours, handover_notes: handover_notes ?? null });
+  } catch (err: any) {
+    console.error('clock-out error:', err);
+    res.status(500).json({ error: err.message ?? 'Failed to clock out' });
+  }
 });
 
 export default router;
