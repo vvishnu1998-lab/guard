@@ -45,11 +45,14 @@ module.exports = function withPodfilePatch(config) {
       );
 
       // Fix 2: inject explicit pod declaration with :modular_headers => true
-      // Insert right after "target 'Guard' do\n"
-      contents = contents.replace(
-        /(target 'Guard' do\n)/,
-        `$1${MODULAR_HEADERS_POD}`
-      );
+      // Insert right after the target block opening line (any target name).
+      // Guard against duplicate injection — skip if already present.
+      if (!contents.includes("pod 'React-jsinspector'")) {
+        contents = contents.replace(
+          /(target '[^']+' do\n)/,
+          `$1${MODULAR_HEADERS_POD}`
+        );
+      }
 
       // Fix 3: inject DEFINES_MODULE inside existing post_install block
       // Identifies the end of the post_install block by the post_integrate block that follows
