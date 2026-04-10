@@ -174,7 +174,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     WHERE r.site_id = $1`;
   const params: unknown[] = [payload.site_id];
   if (from) { reportQuery += ` AND r.reported_at >= $${params.length + 1}`; params.push(from); }
-  if (to)   { reportQuery += ` AND r.reported_at <= $${params.length + 1}`; params.push(to + 'T23:59:59'); }
+  if (to)   { reportQuery += ` AND r.reported_at <= $${params.length + 1}`; params.push((to as string).includes('T') ? to : to + 'T23:59:59'); }
   reportQuery += ' ORDER BY r.reported_at ASC LIMIT 500';
   const reports = (await pool.query(reportQuery, params)).rows;
 
@@ -188,7 +188,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     WHERE ss.site_id = $1`;
   const shiftParams: unknown[] = [payload.site_id];
   if (from) { shiftQuery += ` AND ss.clocked_in_at >= $${shiftParams.length + 1}`; shiftParams.push(from); }
-  if (to)   { shiftQuery += ` AND ss.clocked_in_at <= $${shiftParams.length + 1}`; shiftParams.push(to + 'T23:59:59'); }
+  if (to)   { shiftQuery += ` AND ss.clocked_in_at <= $${shiftParams.length + 1}`; shiftParams.push((to as string).includes('T') ? to : to + 'T23:59:59'); }
   const shifts = (await pool.query(shiftQuery, shiftParams)).rows;
 
   // ── 4. Monthly incident counts (last 3 months) ────────────────────────────────
