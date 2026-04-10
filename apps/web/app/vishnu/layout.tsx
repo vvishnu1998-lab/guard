@@ -14,10 +14,16 @@ export default function VishnuLayout({ children }: { children: React.ReactNode }
   const pathname = usePathname();
   const router   = useRouter();
 
+  const isAuthPage = pathname === '/vishnu/login' || pathname === '/vishnu/reset-password';
+
   function logout() {
     document.cookie = 'guard_vishnu_access=; path=/; max-age=0';
     document.cookie = 'guard_vishnu_refresh=; path=/; max-age=0';
     router.push('/vishnu/login');
+  }
+
+  if (isAuthPage) {
+    return <>{children}</>;
   }
 
   return (

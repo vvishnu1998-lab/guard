@@ -339,6 +339,59 @@ export async function sendMissedShiftAlert(shiftId: string) {
   );
 }
 
+// ── Email Type 6 — Password Reset ────────────────────────────────────────────
+
+export async function sendPasswordResetEmail(
+  email: string,
+  resetUrl: string,
+  portal: 'admin' | 'client' | 'vishnu',
+) {
+  const portalLabels: Record<string, string> = {
+    admin: 'Admin Dashboard',
+    client: 'Client Portal',
+    vishnu: 'Super Admin',
+  };
+  const accentColors: Record<string, string> = {
+    admin: '#F59E0B',
+    client: '#6699FF',
+    vishnu: '#FFFFFF',
+  };
+  const label  = portalLabels[portal] ?? 'Portal';
+  const accent = accentColors[portal] ?? '#F59E0B';
+
+  await sgMail.send({
+    to: email,
+    from: FROM,
+    subject: `Reset your V-Wing ${label} password`,
+    html: `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">V-WING</div>
+        <h1>PASSWORD RESET</h1>
+        <p>${label.toUpperCase()}</p>
+      </div>
+      <div class="body">
+        <p style="font-size:15px;color:#333;margin-bottom:20px">
+          We received a request to reset the password for your V-Wing <strong>${label}</strong> account.
+        </p>
+        <p style="color:#555;font-size:13px;margin-bottom:20px">
+          Click the button below to set a new password. This link expires in <strong>1 hour</strong>.
+        </p>
+        <a href="${resetUrl}" style="display:inline-block;background:${accent};color:${portal === 'vishnu' ? '#0B1526' : '#0B1526'};font-weight:700;padding:12px 28px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:14px;margin-bottom:24px">
+          RESET PASSWORD
+        </a>
+        <p style="color:#999;font-size:12px;margin-top:16px">
+          If you didn't request this, you can safely ignore this email. Your password will not change.
+        </p>
+        <p style="color:#bbb;font-size:11px;margin-top:8px;word-break:break-all">
+          Or copy this link: ${resetUrl}
+        </p>
+      </div>
+      <div class="footer">V-Wing Security Management Platform — Do not reply to this email</div>
+    </div>`,
+  });
+}
+
 // ── Email Type 4 — Vishnu Day-140 Hard-Delete Warning ────────────────────────
 
 export async function sendVishnu140DayWarning(siteId: string, daysRemaining: number) {

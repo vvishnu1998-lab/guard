@@ -46,7 +46,7 @@ export default function PortalSelect() {
         </Link>
       </div>
 
-      <p className="text-white/10 text-[10px] tracking-widest mt-4">© V-WING SECURITY MANAGEMENT</p>
+      <p className="text-[#4A5568] text-[10px] tracking-widest mt-4">© V-WING SECURITY MANAGEMENT</p>
     </main>
   );
 }
