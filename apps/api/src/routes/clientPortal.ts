@@ -74,7 +74,7 @@ router.get('/reports', requireAuth('client'), async (req: Request, res: Response
 
   if (type)      { query += ` AND r.report_type = $${params.length + 1}`; params.push(type); }
   if (date_from) { query += ` AND r.reported_at >= $${params.length + 1}`; params.push(date_from); }
-  if (date_to)   { query += ` AND r.reported_at <= $${params.length + 1}`; params.push(date_to + 'T23:59:59'); }
+  if (date_to)   { query += ` AND r.reported_at <= $${params.length + 1}`; params.push((date_to as string).includes('T') ? date_to : date_to + 'T23:59:59'); }
 
   query += ' GROUP BY r.id, g.name ORDER BY r.reported_at DESC LIMIT 200';
 
