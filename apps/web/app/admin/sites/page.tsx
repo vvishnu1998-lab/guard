@@ -21,7 +21,7 @@ interface Site {
   radius_meters:               number | null;
 }
 
-const EMPTY_FORM = { name: '', address: '', contract_start: '', contract_end: '' };
+const EMPTY_FORM = { name: '', address: '', contract_start: '', contract_end: '' as string };
 const EMPTY_GEO  = { center_lat: '', center_lng: '', radius_meters: '' };
 
 /** Generate an N-point circle polygon from a center + radius (in metres). */
@@ -73,8 +73,11 @@ export default function SitesPage() {
 
   /* ── Create site ─────────────────────────────────────────────────── */
   async function createSite() {
-    if (!form.name || !form.address || !form.contract_start || !form.contract_end) {
-      setFormError('All fields are required'); return;
+    if (!form.name || !form.address || !form.contract_start) {
+      setFormError('Site name, address, and contract start are required'); return;
+    }
+    if (form.contract_end && new Date(form.contract_end) < new Date(form.contract_start)) {
+      setFormError('Contract end must be after contract start'); return;
     }
     setSaving(true); setFormError('');
     try {
@@ -181,7 +184,7 @@ export default function SitesPage() {
                     <p className="text-gray-500 text-xs">{site.address}</p>
                   </td>
                   <td className="p-4 text-gray-400 text-xs">
-                    {fmtDate(site.contract_start)} → {fmtDate(site.contract_end)}
+                    {fmtDate(site.contract_start)} → {site.contract_end ? fmtDate(site.contract_end) : <span className="text-gray-600 italic">no end date</span>}
                   </td>
                   <td className="p-4">
                     {site.has_geofence ? (
@@ -211,20 +214,28 @@ export default function SitesPage() {
                     )}
                   </td>
                   <td className="p-4">
-                    <span className={`text-xs ${accessIn !== null && accessIn <= 14 ? 'text-red-400' : 'text-gray-400'}`}>
-                      {fmtDate(site.client_star_access_until)}
-                      {accessIn !== null && accessIn <= 30 && (
-                        <span className="ml-1 text-red-400">({accessIn}d)</span>
-                      )}
-                    </span>
+                    {site.client_star_access_until ? (
+                      <span className={`text-xs ${accessIn !== null && accessIn <= 14 ? 'text-red-400' : 'text-gray-400'}`}>
+                        {fmtDate(site.client_star_access_until)}
+                        {accessIn !== null && accessIn <= 30 && (
+                          <span className="ml-1 text-red-400">({accessIn}d)</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-gray-600 text-xs">—</span>
+                    )}
                   </td>
                   <td className="p-4">
-                    <span className={`text-xs ${deleteIn !== null && deleteIn <= 30 ? 'text-red-400' : 'text-gray-500'}`}>
-                      {fmtDate(site.data_delete_at)}
-                      {deleteIn !== null && deleteIn <= 30 && (
-                        <span className="ml-1">({deleteIn}d)</span>
-                      )}
-                    </span>
+                    {site.data_delete_at ? (
+                      <span className={`text-xs ${deleteIn !== null && deleteIn <= 30 ? 'text-red-400' : 'text-gray-500'}`}>
+                        {fmtDate(site.data_delete_at)}
+                        {deleteIn !== null && deleteIn <= 30 && (
+                          <span className="ml-1">({deleteIn}d)</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-gray-600 text-xs">—</span>
+                    )}
                   </td>
                   <td className="p-4 text-right">
                     <button
@@ -257,10 +268,9 @@ export default function SitesPage() {
             {formError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{formError}</div>}
             <div className="space-y-4">
               {[
-                { key: 'name',           label: 'SITE NAME',       type: 'text', placeholder: 'e.g. Westfield Shopping Centre' },
-                { key: 'address',        label: 'ADDRESS',         type: 'text', placeholder: 'Full address' },
-                { key: 'contract_start', label: 'CONTRACT START',  type: 'date', placeholder: '' },
-                { key: 'contract_end',   label: 'CONTRACT END',    type: 'date', placeholder: '' },
+                { key: 'name',           label: 'SITE NAME',       type: 'text', placeholder: 'e.g. Westfield Shopping Centre', required: true },
+                { key: 'address',        label: 'ADDRESS',         type: 'text', placeholder: 'Full address',                   required: true },
+                { key: 'contract_start', label: 'CONTRACT START',  type: 'date', placeholder: '',                               required: true },
               ].map(({ key, label, type, placeholder }) => (
                 <div key={key}>
                   <label className="block text-gray-500 text-xs tracking-widest mb-1">{label} <span className="text-amber-400">*</span></label>
@@ -272,9 +282,20 @@ export default function SitesPage() {
                   />
                 </div>
               ))}
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                  CONTRACT END <span className="text-gray-600 text-xs normal-case">(optional)</span>
+                </label>
+                <input
+                  type="date"
+                  value={form.contract_end}
+                  onChange={(e) => setForm((f) => ({ ...f, contract_end: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+              </div>
             </div>
             <p className="text-gray-500 text-xs mt-3 mb-5">
-              Client access runs to contract end + 90 days. Data is hard-deleted at contract end + 150 days.
+              When a contract end date is set, client access runs to contract end + 90 days and data is hard-deleted at contract end + 150 days.
               <br />
               <span className="text-amber-400/70">You can set the geofence boundary after creating the site.</span>
             </p>

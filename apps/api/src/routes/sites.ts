@@ -24,22 +24,24 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   res.json(result.rows);
 });
 
-// POST /api/sites — admin creates a site and its retention record
+// POST /api/sites — admin creates a site and its retention record (contract_end is optional)
 router.post('/', requireAuth('company_admin'), async (req, res) => {
   const { name, address, contract_start, contract_end } = req.body;
+  if (!name || !address || !contract_start) {
+    return res.status(400).json({ error: 'name, address, contract_start are required' });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const siteResult = await client.query(
       `INSERT INTO sites (company_id, name, address, contract_start, contract_end)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [req.user!.company_id, name, address, contract_start, contract_end]
+      [req.user!.company_id, name, address, contract_start, contract_end || null]
     );
     const site = siteResult.rows[0];
-    const accessUntil = new Date(contract_end);
-    accessUntil.setDate(accessUntil.getDate() + 90);
-    const deleteAt = new Date(contract_end);
-    deleteAt.setDate(deleteAt.getDate() + 150);
+    // Only compute retention dates if contract_end was provided
+    const accessUntil = contract_end ? (() => { const d = new Date(contract_end); d.setDate(d.getDate() + 90); return d; })() : null;
+    const deleteAt    = contract_end ? (() => { const d = new Date(contract_end); d.setDate(d.getDate() + 150); return d; })() : null;
     await client.query(
       `INSERT INTO data_retention_log (site_id, client_star_access_until, data_delete_at)
        VALUES ($1, $2, $3)`,

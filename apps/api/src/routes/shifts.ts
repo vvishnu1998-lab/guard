@@ -5,26 +5,99 @@ import { generateTaskInstancesForShift } from '../services/tasks';
 
 const router = Router();
 
-// POST /api/shifts — admin schedules a new shift
+// POST /api/shifts — admin schedules a new shift (guard_id is optional)
 router.post('/', requireAuth('company_admin'), async (req, res) => {
-  const { guard_id, site_id, scheduled_start, scheduled_end } = req.body;
-  if (!guard_id || !site_id || !scheduled_start || !scheduled_end) {
-    return res.status(400).json({ error: 'guard_id, site_id, scheduled_start, scheduled_end are required' });
+  const { guard_id, site_id, scheduled_start, scheduled_end, repeat_days } = req.body;
+  if (!site_id || !scheduled_start || !scheduled_end) {
+    return res.status(400).json({ error: 'site_id, scheduled_start, scheduled_end are required' });
   }
-  // Verify guard and site belong to this company
-  const [guardCheck, siteCheck] = await Promise.all([
-    pool.query('SELECT id FROM guards WHERE id = $1 AND company_id = $2 AND is_active = true', [guard_id, req.user!.company_id]),
-    pool.query('SELECT id FROM sites WHERE id = $1 AND company_id = $2', [site_id, req.user!.company_id]),
-  ]);
-  if (!guardCheck.rows[0]) return res.status(400).json({ error: 'Guard not found or inactive' });
-  if (!siteCheck.rows[0])  return res.status(400).json({ error: 'Site not found' });
 
+  // Verify site belongs to this company
+  const siteCheck = await pool.query(
+    'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
+    [site_id, req.user!.company_id]
+  );
+  if (!siteCheck.rows[0]) return res.status(400).json({ error: 'Site not found' });
+
+  // If guard_id provided, verify it
+  if (guard_id) {
+    const guardCheck = await pool.query(
+      'SELECT id FROM guards WHERE id = $1 AND company_id = $2 AND is_active = true',
+      [guard_id, req.user!.company_id]
+    );
+    if (!guardCheck.rows[0]) return res.status(400).json({ error: 'Guard not found or inactive' });
+  }
+
+  const status = guard_id ? 'scheduled' : 'unassigned';
+
+  // If repeat_days provided, create one shift per selected day within 4 weeks
+  if (Array.isArray(repeat_days) && repeat_days.length > 0) {
+    const baseStart = new Date(scheduled_start);
+    const baseEnd   = new Date(scheduled_end);
+    const durationMs = baseEnd.getTime() - baseStart.getTime();
+
+    // Collect all dates within 4 weeks from base start
+    const created: object[] = [];
+    const horizon = new Date(baseStart);
+    horizon.setDate(horizon.getDate() + 28); // 4 weeks
+
+    const cur = new Date(baseStart);
+    // Start from the base date and iterate each day for 28 days
+    while (cur <= horizon) {
+      const dow = cur.getDay(); // 0=Sun..6=Sat
+      if (repeat_days.includes(dow)) {
+        const shiftStart = new Date(cur);
+        // preserve time-of-day from baseStart
+        shiftStart.setHours(baseStart.getHours(), baseStart.getMinutes(), baseStart.getSeconds(), 0);
+        const shiftEnd = new Date(shiftStart.getTime() + durationMs);
+        const r = await pool.query(
+          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
+           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+          [guard_id || null, site_id, shiftStart.toISOString(), shiftEnd.toISOString(), status]
+        );
+        created.push(r.rows[0]);
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+    return res.status(201).json(created);
+  }
+
+  // Single shift
   const result = await pool.query(
-    `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [guard_id, site_id, scheduled_start, scheduled_end]
+    `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [guard_id || null, site_id, scheduled_start, scheduled_end, status]
   );
   res.status(201).json(result.rows[0]);
+});
+
+// PATCH /api/admin/shifts/:id/assign-guard
+router.patch('/:id/assign-guard', requireAuth('company_admin'), async (req, res) => {
+  const { guard_id } = req.body;
+  if (!guard_id) return res.status(400).json({ error: 'guard_id is required' });
+
+  // Verify guard and shift belong to this company
+  const [guardCheck, shiftCheck] = await Promise.all([
+    pool.query(
+      'SELECT id FROM guards WHERE id = $1 AND company_id = $2 AND is_active = true',
+      [guard_id, req.user!.company_id]
+    ),
+    pool.query(
+      `SELECT s.id FROM shifts s
+       JOIN sites si ON si.id = s.site_id
+       WHERE s.id = $1 AND si.company_id = $2`,
+      [req.params.id, req.user!.company_id]
+    ),
+  ]);
+  if (!guardCheck.rows[0]) return res.status(400).json({ error: 'Guard not found or inactive' });
+  if (!shiftCheck.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+
+  const result = await pool.query(
+    `UPDATE shifts SET guard_id = $1, status = 'scheduled'
+     WHERE id = $2 RETURNING *`,
+    [guard_id, req.params.id]
+  );
+  res.json(result.rows[0]);
 });
 
 // GET /api/shifts  — guard sees their shifts; admin sees all for company
@@ -43,7 +116,7 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
       `SELECT s.*, si.name as site_name, g.name as guard_name
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
-       JOIN guards g ON s.guard_id = g.id
+       LEFT JOIN guards g ON s.guard_id = g.id
        WHERE si.company_id = $1 ORDER BY s.scheduled_start DESC LIMIT 100`,
       [user!.company_id]
     );
