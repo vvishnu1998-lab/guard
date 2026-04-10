@@ -343,7 +343,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   y = 90;
 
   doc.fontSize(14).fillColor(BLUE).font('Helvetica-Bold').text('Activity Timeline', ML, y);
-  y += 8;
+  y = doc.y + 2;
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(BLUE).lineWidth(2).stroke();
   y += 16;
 
@@ -405,7 +405,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   y = 90;
 
   doc.fontSize(14).fillColor(RED).font('Helvetica-Bold').text('Incident Reports', ML, y);
-  y += 8;
+  y = doc.y + 2;
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(RED).lineWidth(2).stroke();
   y += 16;
 
@@ -517,7 +517,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   y = 90;
 
   doc.fontSize(14).fillColor(AMBER).font('Helvetica-Bold').text('Maintenance Reports', ML, y);
-  y += 8;
+  y = doc.y + 2;
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(AMBER).lineWidth(2).stroke();
   y += 16;
 
@@ -584,7 +584,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   y = 90;
 
   doc.fontSize(14).fillColor(NAVY).font('Helvetica-Bold').text('Guard Performance', ML, y);
-  y += 8;
+  y = doc.y + 2;
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(NAVY).lineWidth(2).stroke();
   y += 20;
 
