@@ -8,6 +8,8 @@ import { NextRequest, NextResponse } from 'next/server';
  *   /client/*  → guard_client_access  → /client/login
  *   /vishnu/*  → guard_vishnu_access  → /vishnu/login
  *
+ * Public paths (login + reset-password) are always let through without a cookie.
+ *
  * Decodes the JWT access token without importing jsonwebtoken
  * (Edge runtime does not support Node.js crypto — we do a lightweight decode only).
  * Full signature verification happens on the API for every data request.
@@ -15,19 +17,22 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const ROUTES = [
   {
-    prefix:     '/admin',
-    loginPath:  '/admin/login',
-    cookieName: 'guard_admin_access',
+    prefix:             '/admin',
+    loginPath:          '/admin/login',
+    resetPasswordPath:  '/admin/reset-password',
+    cookieName:         'guard_admin_access',
   },
   {
-    prefix:     '/client',
-    loginPath:  '/client/login',
-    cookieName: 'guard_client_access',
+    prefix:             '/client',
+    loginPath:          '/client/login',
+    resetPasswordPath:  '/client/reset-password',
+    cookieName:         'guard_client_access',
   },
   {
-    prefix:     '/vishnu',
-    loginPath:  '/vishnu/login',
-    cookieName: 'guard_vishnu_access',
+    prefix:             '/vishnu',
+    loginPath:          '/vishnu/login',
+    resetPasswordPath:  '/vishnu/reset-password',
+    cookieName:         'guard_vishnu_access',
   },
 ];
 
@@ -47,8 +52,13 @@ export function middleware(req: NextRequest) {
   for (const route of ROUTES) {
     if (!pathname.startsWith(route.prefix)) continue;
 
-    // Let login page through
-    if (pathname === route.loginPath || pathname.startsWith(route.loginPath + '/')) {
+    // Let login and reset-password pages through without a valid session
+    if (
+      pathname === route.loginPath ||
+      pathname.startsWith(route.loginPath + '/') ||
+      pathname === route.resetPasswordPath ||
+      pathname.startsWith(route.resetPasswordPath + '/')
+    ) {
       return NextResponse.next();
     }
 
