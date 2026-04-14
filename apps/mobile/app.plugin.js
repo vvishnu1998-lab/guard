@@ -42,7 +42,8 @@ function withAndroidSdkVersion(config) {
         props.push({ type: 'property', key, value });
       }
     };
-    set('android.compileSdkVersion', '35');
+    // compileSdkVersion stays at 34 — expo-modules-core (SDK 51) does not compile
+    // cleanly against SDK 35. Play Store only requires targetSdkVersion >= 35.
     set('android.targetSdkVersion', '35');
     return config;
   });
