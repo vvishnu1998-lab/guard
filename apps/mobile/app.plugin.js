@@ -10,7 +10,7 @@
  * 3. Injects DEFINES_MODULE=YES inside the existing post_install block as a
  *    belt-and-suspenders fix for Xcode to auto-generate a module map.
  */
-const { withDangerousMod } = require('@expo/config-plugins');
+const { withDangerousMod, withGradleProperties } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
@@ -31,7 +31,25 @@ const DEFINES_MODULE_FIX = `
     end
 `;
 
+function withAndroidSdkVersion(config) {
+  return withGradleProperties(config, (config) => {
+    const props = config.modResults;
+    const set = (key, value) => {
+      const existing = props.find(p => p.type === 'property' && p.key === key);
+      if (existing) {
+        existing.value = value;
+      } else {
+        props.push({ type: 'property', key, value });
+      }
+    };
+    set('android.compileSdkVersion', '35');
+    set('android.targetSdkVersion', '35');
+    return config;
+  });
+}
+
 module.exports = function withPodfilePatch(config) {
+  config = withAndroidSdkVersion(config);
   return withDangerousMod(config, [
     'ios',
     (config) => {
