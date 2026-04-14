@@ -28,6 +28,8 @@
     "android": {
       "package": "com.vishnu.guardapp",
       "versionCode": 1,
+      "compileSdkVersion": 35,
+      "targetSdkVersion": 35,
       "config": {
         "googleMaps": {
           "apiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
