@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — V-Wing Security Management</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.7; }
+    header { background: #0b1526; color: #fff; padding: 32px 24px; }
+    header h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: 0.05em; }
+    header p { color: #94a3b8; font-size: 0.85rem; margin-top: 4px; }
+    main { max-width: 760px; margin: 40px auto; padding: 0 24px 80px; }
+    h2 { font-size: 1.1rem; font-weight: 700; color: #0b1526; margin: 36px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #e2e8f0; }
+    p { margin-bottom: 12px; font-size: 0.95rem; color: #334155; }
+    ul { margin: 8px 0 12px 20px; }
+    li { font-size: 0.95rem; color: #334155; margin-bottom: 6px; }
+    .meta { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 20px; margin-bottom: 32px; font-size: 0.85rem; color: #64748b; }
+    .meta strong { color: #1e293b; }
+    a { color: #2563eb; }
+    footer { text-align: center; padding: 32px; font-size: 0.8rem; color: #94a3b8; border-top: 1px solid #e2e8f0; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>V-WING — Privacy Policy</h1>
+  <p>Security Management Platform</p>
+</header>
+
+<main>
+  <div class="meta">
+    <strong>Effective date:</strong> April 14, 2026 &nbsp;·&nbsp;
+    <strong>Last updated:</strong> April 14, 2026 &nbsp;·&nbsp;
+    <strong>Contact:</strong> <a href="mailto:vvishnu1998@gmail.com">vvishnu1998@gmail.com</a>
+  </div>
+
+  <p>V-Wing Security Management ("V-Wing", "we", "our") operates the V-Wing mobile application and web portals. This Privacy Policy explains what information we collect, how we use it, and your rights regarding that information.</p>
+
+  <h2>1. Information We Collect</h2>
+  <ul>
+    <li><strong>Account information:</strong> Name, email address, and company affiliation provided at registration.</li>
+    <li><strong>Location data:</strong> GPS coordinates collected during active guard shifts for geofence compliance verification. Location is only collected when the app is in use during a shift.</li>
+    <li><strong>Camera / photos:</strong> Photos taken at clock-in (selfie for identity verification) and during shift reports (site photos for incident documentation). Photos are stored securely and scoped to your employer.</li>
+    <li><strong>Shift and report data:</strong> Clock-in/clock-out times, shift duration, activity reports, incident reports, and maintenance reports submitted during shifts.</li>
+    <li><strong>Device identifiers:</strong> Push notification tokens (FCM) for real-time alert delivery.</li>
+  </ul>
+
+  <h2>2. How We Use Your Information</h2>
+  <ul>
+    <li>Verify guard presence on-site during shifts via GPS geofencing.</li>
+    <li>Confirm guard identity at clock-in via photo verification.</li>
+    <li>Generate shift reports and audit records for security operations.</li>
+    <li>Send real-time alerts to security managers for incidents and geofence violations.</li>
+    <li>Provide clients (site owners) with read-only access to reports for their site.</li>
+  </ul>
+
+  <h2>3. Camera Permission</h2>
+  <p>V-Wing requests camera access for two purposes:</p>
+  <ul>
+    <li><strong>Clock-in selfie:</strong> A photo is captured at the start of each shift to verify the correct guard is on duty. This photo is stored securely and visible only to your company administrator.</li>
+    <li><strong>Report photos:</strong> Guards may attach photos to incident and maintenance reports. These photos are stored in secure cloud storage (AWS S3) and accessible only to authorized personnel.</li>
+  </ul>
+  <p>Camera access is only requested when actively clocking in or submitting a report. V-Wing does not access the camera in the background.</p>
+
+  <h2>4. Location Permission</h2>
+  <p>V-Wing requests location access to:</p>
+  <ul>
+    <li>Verify you are within the designated site boundary when clocking in.</li>
+    <li>Send periodic GPS pings during active shifts for live guard tracking visible to your security manager.</li>
+    <li>Trigger geofence violation alerts if a guard leaves the designated area during a shift.</li>
+  </ul>
+  <p>Location data is collected only while a shift is active. Location is not collected in the background when no shift is in progress.</p>
+
+  <h2>5. Data Retention</h2>
+  <ul>
+    <li>Shift records, GPS pings, and reports are retained for <strong>90 days</strong> after a site contract ends.</li>
+    <li>After 90 days from contract end, client portal access is revoked. Data is fully deleted within 150 days.</li>
+    <li>Active accounts retain all data for the duration of their service agreement.</li>
+    <li>You may request deletion of your personal data at any time by contacting us.</li>
+  </ul>
+
+  <h2>6. Data Sharing</h2>
+  <p>We do not sell your personal data. Data is shared only with:</p>
+  <ul>
+    <li><strong>Your employer / security company:</strong> Shift data, location, and reports are visible to your company administrator.</li>
+    <li><strong>Site clients:</strong> Site owners have read-only access to reports filed at their site.</li>
+    <li><strong>Service providers:</strong> AWS S3 (photo storage), Railway (database hosting), SendGrid (email delivery), Firebase (push notifications), Twilio (SMS OTP). All are bound by data processing agreements.</li>
+  </ul>
+
+  <h2>7. Security</h2>
+  <p>All data is transmitted over HTTPS. Passwords are stored as bcrypt hashes. JWT tokens expire after 8 hours. Photos are stored in private S3 buckets with signed URLs. Database access is restricted to the application server.</p>
+
+  <h2>8. Your Rights</h2>
+  <p>Depending on your jurisdiction, you may have rights to access, correct, or delete your personal data. To exercise these rights, contact us at <a href="mailto:vvishnu1998@gmail.com">vvishnu1998@gmail.com</a>.</p>
+
+  <h2>9. Children's Privacy</h2>
+  <p>V-Wing is designed for use by employed security professionals. We do not knowingly collect data from individuals under 18 years of age.</p>
+
+  <h2>10. Changes to This Policy</h2>
+  <p>We may update this policy as the app evolves. The effective date at the top of this page will reflect the most recent revision. Continued use of the app after changes constitutes acceptance.</p>
+
+  <h2>11. Contact</h2>
+  <p>For privacy questions or data requests, contact:<br />
+  <strong>V-Wing Security Management</strong><br />
+  <a href="mailto:vvishnu1998@gmail.com">vvishnu1998@gmail.com</a></p>
+</main>
+
+<footer>
+  © 2026 V-Wing Security Management. All rights reserved.
+</footer>
+
+</body>
+</html>
