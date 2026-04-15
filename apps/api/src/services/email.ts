@@ -287,7 +287,7 @@ export async function sendMissedShiftAlert(shiftId: string) {
             si.name     AS site_name,
             g.name      AS guard_name,
             g.badge_number,
-            g.phone     AS guard_phone,
+            g.phone_number AS guard_phone,
             c.email     AS client_email,
             ca.email    AS admin_email
      FROM shifts sh
