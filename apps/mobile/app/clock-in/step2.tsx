@@ -1,6 +1,6 @@
 /**
  * Clock-In Step 2 — Guard Selfie (Section 5.2)
- * Front camera with face-guide oval overlay.
+ * Front camera — simple capture, no overlay.
  * GPS and timestamp are embedded in photo metadata before upload.
  * Blocked if GPS is outside geofence (enforced by step 1 state).
  */
@@ -67,18 +67,14 @@ export default function ClockInStep2() {
     <View style={styles.container}>
       <Text style={styles.step}>CLOCK IN · STEP 2 OF 4</Text>
 
+      <Text style={styles.instruction}>Take a clear photo of yourself</Text>
+
       <View style={styles.cameraContainer}>
         <CameraView
           ref={cameraRef}
           style={styles.camera}
           facing={'front' as CameraType}
         >
-          {/* Face guide oval */}
-          <View style={styles.overlay}>
-            <View style={styles.ovalGuide} />
-            <Text style={styles.guideText}>Position your face inside the oval</Text>
-          </View>
-
           {/* Timestamp strip */}
           <View style={styles.timestampStrip}>
             <Text style={styles.timestamp}>{new Date().toLocaleString()}</Text>
@@ -104,19 +100,7 @@ const styles = StyleSheet.create({
   step:            { color: Colors.muted, fontSize: 11, letterSpacing: 3, marginTop: Spacing.xl, marginBottom: Spacing.sm },
   cameraContainer: { width: '100%', flex: 1 },
   camera:          { flex: 1 },
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  ovalGuide: {
-    width: 220, height: 280,
-    borderRadius: 110,
-    borderWidth: 2,
-    borderColor: Colors.action,
-    borderStyle: 'dashed',
-  },
-  guideText:  { color: Colors.action, fontSize: 13, marginTop: Spacing.md, letterSpacing: 1 },
+  instruction: { color: Colors.base, fontSize: 16, letterSpacing: 1, marginBottom: Spacing.sm },
   timestampStrip: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: 'rgba(0,0,0,0.6)', padding: Spacing.sm,
