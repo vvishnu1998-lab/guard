@@ -134,6 +134,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
      JOIN sites si ON si.id = s.site_id
      JOIN shift_sessions ss ON ss.shift_id = s.id AND ss.guard_id = $1 AND ss.clocked_out_at IS NULL
      WHERE s.guard_id = $1 AND s.status = 'active'
+       AND s.scheduled_end > NOW() - INTERVAL '2 hours'
      ORDER BY ss.clocked_in_at DESC LIMIT 1`,
     [req.user!.sub]
   );

@@ -12,8 +12,7 @@ cron.schedule('*/5 * * * *', async () => {
   try {
     const result = await pool.query(
       `UPDATE shifts
-       SET status = 'completed',
-           notes  = COALESCE(notes || E'\n', '') || 'Auto-completed — guard did not clock out.'
+       SET status = 'completed'
        WHERE scheduled_end <= NOW()
          AND status IN ('active', 'scheduled')
        RETURNING id`
