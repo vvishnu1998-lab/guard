@@ -24,6 +24,7 @@ import './jobs/nightlyPurge';
 import './jobs/dailyShiftEmail';
 import './jobs/monthlyRetentionNotice';
 import './jobs/missedShiftAlert';
+import './jobs/autoCompleteShifts';
 
 const app = express();
 app.set('trust proxy', 1);

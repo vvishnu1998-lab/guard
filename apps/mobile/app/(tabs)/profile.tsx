@@ -5,7 +5,7 @@
 import { useCallback, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, ActivityIndicator, Alert,
+  ScrollView, ActivityIndicator, Alert, FlatList,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { useAuthStore } from '../../store/authStore';
@@ -22,19 +22,47 @@ interface GuardProfile {
   created_at:   string;
 }
 
+interface ShiftRecord {
+  id:              string;
+  site_name:       string;
+  scheduled_start: string;
+  scheduled_end:   string;
+  status:          string;
+}
+
 export default function ProfileScreen() {
   const [profile,  setProfile]  = useState<GuardProfile | null>(null);
   const [loading,  setLoading]  = useState(true);
+  const [shifts,   setShifts]   = useState<ShiftRecord[]>([]);
   const logout = useAuthStore((s) => s.logout);
 
   useFocusEffect(
     useCallback(() => {
-      apiClient.get<GuardProfile>('/guards/me')
-        .then((data) => setProfile(data))
-        .catch(() => { /* show what we have from token */ })
-        .finally(() => setLoading(false));
+      Promise.all([
+        apiClient.get<GuardProfile>('/guards/me'),
+        apiClient.get<ShiftRecord[]>('/shifts'),
+      ]).then(([p, s]) => {
+        setProfile(p);
+        setShifts(s.filter((sh) => sh.status === 'completed' || sh.status === 'active'));
+      }).catch(() => {}).finally(() => setLoading(false));
     }, [])
   );
+
+  function hoursWorked(shift: ShiftRecord) {
+    return (new Date(shift.scheduled_end).getTime() - new Date(shift.scheduled_start).getTime()) / 3_600_000;
+  }
+
+  const now       = new Date();
+  const todayStart   = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const weekStart    = new Date(todayStart); weekStart.setDate(todayStart.getDate() - todayStart.getDay());
+  const monthStart   = new Date(now.getFullYear(), now.getMonth(), 1);
+  const month3Start  = new Date(now.getFullYear(), now.getMonth() - 3, 1);
+
+  const completedShifts = shifts.filter((s) => new Date(s.scheduled_start) >= month3Start);
+  const todayHours  = completedShifts.filter((s) => new Date(s.scheduled_start) >= todayStart).reduce((a, s) => a + hoursWorked(s), 0);
+  const weekHours   = completedShifts.filter((s) => new Date(s.scheduled_start) >= weekStart).reduce((a, s) => a + hoursWorked(s), 0);
+  const monthHours  = completedShifts.filter((s) => new Date(s.scheduled_start) >= monthStart).reduce((a, s) => a + hoursWorked(s), 0);
+  const recentShifts = completedShifts.slice(0, 20);
 
   function handleLogout() {
     Alert.alert(
@@ -97,6 +125,36 @@ export default function ProfileScreen() {
               />
             </View>
 
+            {/* Hours summary */}
+            <View style={styles.section}>
+              <View style={styles.hoursGrid}>
+                <HoursStat label="TODAY" value={todayHours} />
+                <View style={styles.hoursDivider} />
+                <HoursStat label="THIS WEEK" value={weekHours} />
+                <View style={styles.hoursDivider} />
+                <HoursStat label="THIS MONTH" value={monthHours} />
+              </View>
+            </View>
+
+            {/* Shift history */}
+            {recentShifts.length > 0 && (
+              <View style={styles.section}>
+                <View style={styles.historyHeader}>
+                  <Text style={styles.historyTitle}>SHIFT HISTORY</Text>
+                  <Text style={styles.historySub}>Last 3 months</Text>
+                </View>
+                {recentShifts.map((s) => (
+                  <View key={s.id} style={styles.historyRow}>
+                    <Text style={styles.historyDate}>
+                      {new Date(s.scheduled_start).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}
+                    </Text>
+                    <Text style={styles.historySite} numberOfLines={1}>{s.site_name}</Text>
+                    <Text style={styles.historyHours}>{hoursWorked(s).toFixed(1)}h</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
             {/* Actions */}
             <View style={styles.section}>
               <TouchableOpacity style={styles.actionRow} onPress={handleChangePassword}>
@@ -115,6 +173,15 @@ export default function ProfileScreen() {
           </>
         )}
       </ScrollView>
+    </View>
+  );
+}
+
+function HoursStat({ label, value }: { label: string; value: number }) {
+  return (
+    <View style={styles.hoursStat}>
+      <Text style={styles.hoursValue}>{value.toFixed(1)}<Text style={styles.hoursUnit}>h</Text></Text>
+      <Text style={styles.hoursLabel}>{label}</Text>
     </View>
   );
 }
@@ -187,4 +254,27 @@ const styles = StyleSheet.create({
   logoutText: { fontFamily: Fonts.heading, color: '#FCA5A5', fontSize: 16, letterSpacing: 3 },
 
   versionText: { color: Colors.muted, fontSize: 11, textAlign: 'center', marginTop: Spacing.sm },
+
+  hoursGrid:    { flexDirection: 'row', padding: Spacing.md },
+  hoursStat:    { flex: 1, alignItems: 'center', paddingVertical: Spacing.sm },
+  hoursValue:   { fontFamily: Fonts.heading, color: Colors.action, fontSize: 28, letterSpacing: 1 },
+  hoursUnit:    { fontSize: 16, color: Colors.muted },
+  hoursLabel:   { color: Colors.muted, fontSize: 10, letterSpacing: 2, marginTop: 2 },
+  hoursDivider: { width: 1, backgroundColor: Colors.border, marginVertical: Spacing.sm },
+
+  historyHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: Colors.border,
+  },
+  historyTitle:  { color: Colors.muted, fontSize: 11, letterSpacing: 2 },
+  historySub:    { color: Colors.muted, fontSize: 11 },
+  historyRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: Colors.border,
+  },
+  historyDate:  { color: Colors.muted, fontSize: 12, width: 52 },
+  historySite:  { flex: 1, color: Colors.base, fontSize: 13, marginHorizontal: Spacing.sm },
+  historyHours: { color: Colors.action, fontSize: 13, fontFamily: Fonts.heading, letterSpacing: 1 },
 });

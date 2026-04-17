@@ -57,9 +57,17 @@ export default function ScheduleScreen() {
     setRefreshing(false);
   }
 
-  const now      = new Date();
-  const upcoming = shifts.filter((s) => s.status === 'scheduled' || s.status === 'active');
-  const recent   = shifts.filter((s) => s.status === 'completed' || s.status === 'missed');
+  const now = new Date();
+  // A shift is only "upcoming/active" if its end time is in the future AND status warrants it
+  const upcoming = shifts.filter((s) =>
+    (s.status === 'scheduled' || s.status === 'active') &&
+    new Date(s.scheduled_end) > now
+  );
+  const recent = shifts.filter((s) =>
+    s.status === 'completed' || s.status === 'missed' ||
+    // Treat past active/scheduled shifts as completed on the frontend
+    ((s.status === 'scheduled' || s.status === 'active') && new Date(s.scheduled_end) <= now)
+  );
 
   function fmtDate(iso: string) {
     return new Date(iso).toLocaleDateString('en-GB', {

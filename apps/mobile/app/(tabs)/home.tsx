@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator } from 'react-native';
+import MapView, { Marker, Circle } from 'react-native-maps';
+import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
@@ -29,6 +31,17 @@ export default function HomeScreen() {
 
   const [upcomingShift, setUpcomingShift] = useState<ApiShift | null>(null);
   const [loadingShift, setLoadingShift] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+
+  useEffect(() => {
+    Location.getLastKnownPositionAsync()
+      .then((pos) => { if (pos) setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }); })
+      .catch(() => {});
+    Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.Balanced, timeInterval: 30000, distanceInterval: 10 },
+      (pos) => setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude })
+    );
+  }, []);
 
   useEffect(() => {
     if (!isOnShift) {
@@ -93,11 +106,33 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Live map placeholder */}
-      <View style={styles.mapPlaceholder}>
-        <Text style={styles.mapText}>LIVE MAP</Text>
-        <Text style={styles.mapSub}>Guard position · Geofence boundary</Text>
-      </View>
+      {/* Live map */}
+      {userLocation ? (
+        <MapView
+          style={styles.map}
+          region={{
+            latitude: userLocation.latitude,
+            longitude: userLocation.longitude,
+            latitudeDelta: 0.005,
+            longitudeDelta: 0.005,
+          }}
+          showsUserLocation
+          showsMyLocationButton={false}
+        >
+          <Marker coordinate={userLocation} title="You are here" pinColor="#F59E0B" />
+          <Circle
+            center={userLocation}
+            radius={100}
+            strokeColor="rgba(245,158,11,0.6)"
+            fillColor="rgba(245,158,11,0.1)"
+          />
+        </MapView>
+      ) : (
+        <View style={styles.mapPlaceholder}>
+          <Text style={styles.mapText}>LIVE MAP</Text>
+          <Text style={styles.mapSub}>Acquiring location…</Text>
+        </View>
+      )}
 
       {/* Shift card */}
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
@@ -190,6 +225,7 @@ function ActionButton({ label, color, onPress, disabled }: { label: string; colo
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.structure },
+  map: { height: 240, width: '100%' },
   mapPlaceholder: {
     height: 240, backgroundColor: Colors.surface,
     justifyContent: 'center', alignItems: 'center',
