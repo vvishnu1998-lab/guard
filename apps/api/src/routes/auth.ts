@@ -137,6 +137,25 @@ router.post('/guard/badge', async (req: Request, res: Response) => {
   res.json({ ...tokens, must_change_password: guard.must_change_password });
 });
 
+// ── Guard: verify password (used by lock screen unlock) ──────────────────────
+
+router.post('/guard/verify-password', requireAuth('guard'), async (req: Request, res: Response) => {
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: 'password required' });
+
+  const result = await pool.query(
+    'SELECT password_hash FROM guards WHERE id = $1',
+    [(req as any).user.id]
+  );
+  const guard = result.rows[0];
+  if (!guard) return res.status(404).json({ error: 'Guard not found' });
+
+  const valid = await bcrypt.compare(password, guard.password_hash);
+  if (!valid) return res.status(401).json({ error: 'Incorrect password' });
+
+  return res.json({ ok: true });
+});
+
 // ── Guard: change password (required on first login) ─────────────────────────
 
 router.post('/guard/change-password', requireAuth('guard'), async (req: Request, res: Response) => {

@@ -4,7 +4,7 @@
  * Shows a preview after capture; guard can retake or proceed.
  * GPS and timestamp are embedded in photo metadata before upload.
  */
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, Image } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
@@ -18,6 +18,11 @@ export default function ClockInStep2() {
   const [permission, requestPermission]  = useCameraPermissions();
   const [cameraReady, setCameraReady]    = useState(false);
   const [capturing, setCapturing]        = useState(false);
+  // Android: onCameraReady sometimes never fires — force-enable after 3s
+  useEffect(() => {
+    const t = setTimeout(() => setCameraReady(true), 3000);
+    return () => clearTimeout(t);
+  }, []);
   const [preview, setPreview]            = useState<{
     uri: string; latitude: number; longitude: number; takenAt: string;
   } | null>(null);
@@ -41,8 +46,7 @@ export default function ClockInStep2() {
     if (!cameraRef.current || !cameraReady || capturing) return;
     setCapturing(true);
     try {
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-
+      // Take photo first — don't block on GPS
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
       if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
 
@@ -51,13 +55,18 @@ export default function ClockInStep2() {
         [{ resize: { width: 1080 } }],
         { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
       );
-
       if (!compressed?.uri) throw new Error('Photo compression failed.');
+
+      // Use cached GPS first (instant), fall back to live with 3s timeout
+      const loc = await Location.getLastKnownPositionAsync() ?? await Promise.race([
+        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+        new Promise<null>(res => setTimeout(() => res(null), 3000)),
+      ]);
 
       setPreview({
         uri:       compressed.uri,
-        latitude:  loc.coords.latitude,
-        longitude: loc.coords.longitude,
+        latitude:  (loc as any)?.coords?.latitude  ?? 0,
+        longitude: (loc as any)?.coords?.longitude ?? 0,
         takenAt:   new Date().toISOString(),
       });
     } catch (err: any) {
