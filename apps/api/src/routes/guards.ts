@@ -38,13 +38,33 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
 
 router.post('/', requireAuth('company_admin'), async (req, res) => {
   const { name, email, badge_number, temp_password } = req.body;
-  const password_hash = await bcrypt.hash(temp_password, 12);
-  const result = await pool.query(
-    `INSERT INTO guards (company_id, name, email, password_hash, badge_number)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, badge_number, is_active, created_at`,
-    [req.user!.company_id, name, email, password_hash, badge_number]
-  );
-  res.status(201).json(result.rows[0]);
+
+  // Validate required fields
+  if (!name?.trim())         return res.status(400).json({ error: 'Guard name is required' });
+  if (!email?.trim())        return res.status(400).json({ error: 'Email is required' });
+  if (!badge_number?.trim()) return res.status(400).json({ error: 'Badge number is required' });
+  if (!temp_password)        return res.status(400).json({ error: 'Temporary password is required' });
+  if (temp_password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+  try {
+    const password_hash = await bcrypt.hash(temp_password, 12);
+    const result = await pool.query(
+      `INSERT INTO guards (company_id, name, email, password_hash, badge_number)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, badge_number, is_active, created_at`,
+      [req.user!.company_id, name.trim(), email.trim().toLowerCase(), password_hash, badge_number.trim()]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err: any) {
+    // PostgreSQL unique_violation = error code 23505
+    if (err.code === '23505' && err.constraint?.includes('email')) {
+      return res.status(409).json({ error: 'A guard with this email already exists' });
+    }
+    if (err.code === '23505' && err.constraint?.includes('badge')) {
+      return res.status(409).json({ error: 'A guard with this badge number already exists' });
+    }
+    console.error('[POST /api/guards] Error:', err);
+    res.status(500).json({ error: err.message ?? 'Failed to create guard' });
+  }
 });
 
 router.patch('/:id/deactivate', requireAuth('company_admin'), async (req, res) => {
