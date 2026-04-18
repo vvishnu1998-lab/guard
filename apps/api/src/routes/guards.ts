@@ -75,6 +75,15 @@ router.patch('/:id/deactivate', requireAuth('company_admin'), async (req, res) =
   res.json({ success: true });
 });
 
+router.patch('/:id/reactivate', requireAuth('company_admin'), async (req, res) => {
+  const result = await pool.query(
+    'UPDATE guards SET is_active = true WHERE id = $1 AND company_id = $2 RETURNING id, name, email, is_active',
+    [req.params.id, req.user!.company_id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Guard not found' });
+  res.json(result.rows[0]);
+});
+
 router.post('/:id/assign', requireAuth('company_admin'), async (req, res) => {
   const { site_id, assigned_from, assigned_until } = req.body;
   const siteCheck = await pool.query(
