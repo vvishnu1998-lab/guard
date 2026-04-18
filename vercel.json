@@ -1,6 +1,6 @@
 {
   "buildCommand": "turbo run build --filter=@v-wing/web",
-  "outputDirectory": "apps/web/.next",
+  "outputDirectory": ".next",
   "framework": "nextjs",
   "installCommand": "npm install"
 }
