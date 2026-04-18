@@ -18,6 +18,7 @@ import adminRoutes from './routes/admin';
 import exportRoutes from './routes/exports';
 import uploadRoutes from './routes/uploads';
 import clientPortalRoutes from './routes/clientPortal';
+import aiRoutes from './routes/ai';
 
 // Cron jobs
 import './jobs/nightlyPurge';
@@ -75,6 +76,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/exports', exportRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/client', clientPortalRoutes);
+app.use('/api/ai', aiRoutes);
 
 app.listen(PORT, () => {
   console.log(`API server running on port ${PORT}`);

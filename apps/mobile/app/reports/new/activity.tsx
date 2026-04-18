@@ -13,15 +13,52 @@ import { useShiftStore }         from '../../../store/shiftStore';
 import { useOfflineStore }       from '../../../store/offlineStore';
 import { usePhotoAttachments }   from '../../../hooks/usePhotoAttachments';
 import { PhotoStrip }            from '../../../components/reports/PhotoStrip';
+import { apiClient }             from '../../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 
 export default function ActivityReportForm() {
-  const [description, setDescription] = useState('');
-  const [submitting, setSubmitting]   = useState(false);
+  const [description, setDescription]           = useState('');
+  const [submitting,  setSubmitting]             = useState(false);
+  const [enhancing,   setEnhancing]              = useState(false);
+  const [enhanced,    setEnhanced]               = useState<string | null>(null);
+  const [originalDesc, setOriginalDesc]          = useState<string | null>(null);
 
   const { activeSession } = useShiftStore();
   const { submitReport }  = useOfflineStore();
   const photos            = usePhotoAttachments(3);
+
+  async function handleEnhance() {
+    if (description.trim().length < 10) return;
+    setEnhancing(true);
+    try {
+      setOriginalDesc(description);
+      const { enhanced: result } = await apiClient.post<{ enhanced: string }>(
+        '/ai/enhance-description',
+        { text: description, report_type: 'activity' }
+      );
+      setEnhanced(result);
+    } catch (err: any) {
+      Alert.alert('Enhancement Failed', err?.message ?? 'Could not enhance description. Try again.');
+    } finally {
+      setEnhancing(false);
+    }
+  }
+
+  function acceptEnhanced() {
+    if (enhanced) {
+      setDescription(enhanced);
+      setEnhanced(null);
+      setOriginalDesc(null);
+    }
+  }
+
+  function revertEnhanced() {
+    if (originalDesc !== null) {
+      setDescription(originalDesc);
+    }
+    setEnhanced(null);
+    setOriginalDesc(null);
+  }
 
   async function submit() {
     if (!description.trim()) {
@@ -64,6 +101,8 @@ export default function ActivityReportForm() {
     }
   }
 
+  const showEnhanceBtn = description.trim().length >= 10 && !enhancing && !enhanced;
+
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView style={styles.bg} contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
@@ -78,7 +117,7 @@ export default function ActivityReportForm() {
           <TextInput
             style={styles.textArea}
             value={description}
-            onChangeText={setDescription}
+            onChangeText={(t) => { setDescription(t); if (enhanced) { setEnhanced(null); setOriginalDesc(null); } }}
             placeholder="Describe your patrol observations, completed rounds, access checks…"
             placeholderTextColor={Colors.muted}
             multiline
@@ -87,6 +126,37 @@ export default function ActivityReportForm() {
             textAlignVertical="top"
           />
           <Text style={styles.charCount}>{description.length}/2000</Text>
+
+          {/* Enhance with AI button */}
+          {showEnhanceBtn && (
+            <TouchableOpacity style={styles.enhanceBtn} onPress={handleEnhance}>
+              <Text style={styles.enhanceBtnText}>✦ Enhance with AI</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Loading state */}
+          {enhancing && (
+            <View style={styles.enhancingRow}>
+              <ActivityIndicator size="small" color={Colors.action} />
+              <Text style={styles.enhancingText}>Enhancing description…</Text>
+            </View>
+          )}
+
+          {/* Enhanced preview */}
+          {enhanced && (
+            <View style={styles.enhancedBox}>
+              <Text style={styles.enhancedLabel}>✦ AI ENHANCED</Text>
+              <Text style={styles.enhancedText}>{enhanced}</Text>
+              <View style={styles.enhancedActions}>
+                <TouchableOpacity style={styles.acceptBtn} onPress={acceptEnhanced}>
+                  <Text style={styles.acceptText}>ACCEPT</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.revertBtn} onPress={revertEnhanced}>
+                  <Text style={styles.revertText}>REVERT</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
         </View>
 
         {/* Photos */}
@@ -139,6 +209,40 @@ const styles = StyleSheet.create({
     padding: Spacing.md, minHeight: 140,
   },
   charCount: { color: Colors.muted, fontSize: 11, textAlign: 'right', marginTop: 4 },
+
+  enhanceBtn: {
+    alignSelf: 'flex-start',
+    marginTop: Spacing.sm,
+    paddingVertical: 6, paddingHorizontal: Spacing.md,
+    borderRadius: Radius.sm,
+    borderWidth: 1, borderColor: Colors.action,
+    backgroundColor: 'rgba(245,158,11,0.08)',
+  },
+  enhanceBtnText: { color: Colors.action, fontSize: 13, letterSpacing: 1 },
+
+  enhancingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginTop: Spacing.sm },
+  enhancingText: { color: Colors.muted, fontSize: 13 },
+
+  enhancedBox: {
+    marginTop: Spacing.md,
+    backgroundColor: 'rgba(245,158,11,0.08)',
+    borderRadius: Radius.md,
+    borderWidth: 1, borderColor: Colors.action,
+    padding: Spacing.md,
+  },
+  enhancedLabel: { color: Colors.action, fontSize: 10, letterSpacing: 2, marginBottom: Spacing.sm },
+  enhancedText:  { color: Colors.base, fontSize: 14, lineHeight: 22 },
+  enhancedActions: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.md },
+  acceptBtn: {
+    flex: 1, backgroundColor: Colors.action,
+    borderRadius: Radius.sm, paddingVertical: Spacing.sm, alignItems: 'center',
+  },
+  acceptText: { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 13, letterSpacing: 2 },
+  revertBtn: {
+    flex: 1, borderWidth: 1, borderColor: Colors.muted,
+    borderRadius: Radius.sm, paddingVertical: Spacing.sm, alignItems: 'center',
+  },
+  revertText: { color: Colors.muted, fontSize: 13, letterSpacing: 1 },
 
   submitBtn: {
     width: '92%',
