@@ -1,30 +1,76 @@
+import { View } from 'react-native';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors } from '../../constants/theme';
+import DrawerOverlay from '../../components/DrawerOverlay';
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>['name'];
 
-function icon(name: IoniconsName, focused: boolean) {
-  return <Ionicons name={focused ? name : `${name}-outline` as IoniconsName} size={22} color={focused ? Colors.action : Colors.muted} />;
+const ACTIVE_COLOR = '#00C8FF';
+const INACTIVE_COLOR = '#445566';
+
+function TabIcon(name: IoniconsName, focused: boolean) {
+  return (
+    <Ionicons
+      name={focused ? name : (`${name}-outline` as IoniconsName)}
+      size={26}
+      color={focused ? ACTIVE_COLOR : INACTIVE_COLOR}
+    />
+  );
 }
 
 export default function TabLayout() {
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarStyle: { backgroundColor: Colors.structure, borderTopColor: Colors.border },
-        tabBarActiveTintColor: Colors.action,
-        tabBarInactiveTintColor: Colors.muted,
-        tabBarLabelStyle: { fontSize: 10, letterSpacing: 1 },
-      }}
-    >
-      <Tabs.Screen name="home"     options={{ title: 'HOME',     tabBarIcon: ({ focused }) => icon('home', focused) }} />
-      <Tabs.Screen name="reports"  options={{ title: 'REPORTS',  tabBarIcon: ({ focused }) => icon('document-text', focused) }} />
-      <Tabs.Screen name="tasks"    options={{ title: 'TASKS',    tabBarIcon: ({ focused }) => icon('checkbox', focused) }} />
-      <Tabs.Screen name="schedule" options={{ title: 'SCHEDULE', tabBarIcon: ({ focused }) => icon('calendar', focused) }} />
-      <Tabs.Screen name="alerts"   options={{ title: 'ALERTS',   tabBarIcon: ({ focused }) => icon('notifications', focused) }} />
-      <Tabs.Screen name="profile"  options={{ title: 'PROFILE',  tabBarIcon: ({ focused }) => icon('person', focused) }} />
-    </Tabs>
+    <View style={{ flex: 1 }}>
+      <Tabs
+        screenOptions={{
+          headerShown: false,
+          tabBarStyle: {
+            backgroundColor: '#070D1A',
+            borderTopColor: '#1E3A5F',
+            borderTopWidth: 1,
+            height: 68,
+            paddingBottom: 8,
+            paddingTop: 6,
+          },
+          tabBarActiveTintColor: ACTIVE_COLOR,
+          tabBarInactiveTintColor: INACTIVE_COLOR,
+          tabBarLabelStyle: {
+            fontSize: 11,
+            letterSpacing: 1.5,
+          },
+        }}
+      >
+        {/* Visible tabs */}
+        <Tabs.Screen
+          name="home"
+          options={{
+            title: 'HOME',
+            tabBarIcon: ({ focused }) => TabIcon('home', focused),
+          }}
+        />
+        <Tabs.Screen
+          name="schedule"
+          options={{
+            title: 'SCHEDULE',
+            tabBarIcon: ({ focused }) => TabIcon('calendar', focused),
+          }}
+        />
+        <Tabs.Screen
+          name="notifications"
+          options={{
+            title: 'ALERTS',
+            tabBarIcon: ({ focused }) => TabIcon('notifications', focused),
+          }}
+        />
+
+        {/* Hidden — accessible via router.push but not shown in tab bar */}
+        <Tabs.Screen name="reports"  options={{ href: null }} />
+        <Tabs.Screen name="tasks"    options={{ href: null }} />
+        <Tabs.Screen name="alerts"   options={{ href: null }} />
+        <Tabs.Screen name="profile"  options={{ href: null }} />
+      </Tabs>
+
+      <DrawerOverlay />
+    </View>
   );
 }

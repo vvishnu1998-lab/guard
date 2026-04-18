@@ -1,19 +1,26 @@
 /**
- * Precision Field design language (Section 8)
- * Barlow Condensed headings, warm off-white base, deep charcoal structure, amber action
+ * V-Wing design language — deep navy + cyan accent
  */
 export const Colors = {
-  base: '#F5F3EE',        // warm off-white background
-  structure: '#1A1A2E',   // deep charcoal
-  action: '#F59E0B',      // amber — single action color
-  surface: '#242436',     // slightly lighter charcoal for cards
-  danger: '#EF4444',      // red — incidents, violations, clock-out
-  info: '#3B82F6',        // blue — GPS only pings
-  success: '#10B981',     // green — confirmations
-  muted: '#6B7280',       // subdued text
-  border: '#2E2E48',      // subtle borders
+  bg: '#070D1A',            // deep navy background
+  surface: '#0F1929',       // card surface
+  surface2: '#172035',      // elevated cards
+  border: '#1E3A5F',        // subtle borders
+  action: '#00C8FF',        // V-Wing cyan — primary accent
+  success: '#00E5A0',       // green confirmations
+  danger: '#EF4444',        // red — incidents, violations, clock-out
+  warning: '#F59E0B',       // amber — GPS markers, warnings
+  info: '#3B82F6',          // blue
+  textPrimary: '#FFFFFF',   // primary text
+  muted: '#8899AA',         // subdued text
   white: '#FFFFFF',
   black: '#000000',
+
+  // Legacy aliases kept for backward-compatibility with existing screens
+  base: '#FFFFFF',
+  structure: '#070D1A',
+  surface_card: '#0F1929',
+  border_card: '#1E3A5F',
 } as const;
 
 export const Fonts = {
