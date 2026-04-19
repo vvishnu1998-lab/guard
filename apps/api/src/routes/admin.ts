@@ -189,8 +189,11 @@ router.get('/kpis', requireAuth('company_admin'), async (req, res) => {
     pool.query(
       `SELECT COUNT(DISTINCT ss.guard_id)
        FROM shift_sessions ss
-       JOIN sites s ON s.id = ss.site_id
-       WHERE s.company_id = $1 AND ss.clocked_out_at IS NULL`,
+       JOIN sites s  ON s.id  = ss.site_id
+       JOIN shifts sh ON sh.id = ss.shift_id
+       WHERE s.company_id = $1
+         AND ss.clocked_out_at IS NULL
+         AND sh.status NOT IN ('completed', 'cancelled', 'missed')`,
       [cid]
     ),
     pool.query(
@@ -233,13 +236,16 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
      FROM shift_sessions ss
      JOIN guards g  ON g.id  = ss.guard_id
      JOIN sites  s  ON s.id  = ss.site_id
+     JOIN shifts sh ON sh.id = ss.shift_id
      LEFT JOIN LATERAL (
        SELECT latitude, longitude, lp_inner.pinged_at, ping_type
        FROM location_pings lp_inner
        WHERE lp_inner.shift_session_id = ss.id
        ORDER BY lp_inner.pinged_at DESC LIMIT 1
      ) lp ON true
-     WHERE s.company_id = $1 AND ss.clocked_out_at IS NULL
+     WHERE s.company_id = $1
+       AND ss.clocked_out_at IS NULL
+       AND sh.status NOT IN ('completed', 'cancelled', 'missed')
      ORDER BY s.name, g.name`,
     [req.user!.company_id]
   );
