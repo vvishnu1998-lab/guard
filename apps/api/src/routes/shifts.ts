@@ -195,7 +195,14 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
   }
 });
 
-// POST /api/shifts/:id/clock-in  — creates shift_session + triggers task instance generation
+// POST /api/shifts/:id/clock-in — creates shift_session + triggers task instance generation
+//
+// Concurrency model (CB2/CB3, audit/WEEK1.md C2):
+//   - SELECT … FOR UPDATE locks the `shifts` row so two near-simultaneous
+//     clock-in attempts from two devices serialise here.
+//   - The partial unique index `idx_shift_sessions_one_open_per_guard`
+//     (schema_v9.sql) is the last-line backstop: if the FOR UPDATE check
+//     races past somehow, the INSERT raises 23505 and we return 409.
 router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
   const { clock_in_coords } = req.body;
@@ -203,7 +210,7 @@ router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
   try {
     await client.query('BEGIN');
     const shiftResult = await client.query(
-      'SELECT * FROM shifts WHERE id = $1 AND guard_id = $2 AND status = $3',
+      'SELECT * FROM shifts WHERE id = $1 AND guard_id = $2 AND status = $3 FOR UPDATE',
       [id, req.user!.sub, 'scheduled']
     );
     if (!shiftResult.rows[0]) {
@@ -222,8 +229,14 @@ router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
     // Generate task instances outside transaction (non-critical)
     generateTaskInstancesForShift(id, shift.site_id, session.clocked_in_at).catch(console.error);
     res.status(201).json(session);
-  } catch (err) {
+  } catch (err: any) {
     await client.query('ROLLBACK');
+    // 23505 = unique_violation on idx_shift_sessions_one_open_per_guard
+    if (err?.code === '23505' && err?.constraint === 'idx_shift_sessions_one_open_per_guard') {
+      return res.status(409).json({
+        error: 'Already clocked in on another device. Clock out first.',
+      });
+    }
     throw err;
   } finally {
     client.release();
@@ -231,35 +244,68 @@ router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
 });
 
 // POST /api/shifts/:id/clock-out
+//
+// Wrapped in an explicit transaction (CB2/CB3): previously four independent
+// queries fired outside any transaction, so a crash between them could leave
+// total_hours NULL or shifts.status stuck on 'active'.  Now closes the open
+// session, sets total_hours = gross − breaks, and completes the shift in one
+// atomic unit.
 router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
   const { handover_notes } = req.body;
+  const client = await pool.connect();
   try {
-    const sessionResult = await pool.query(
+    await client.query('BEGIN');
+
+    // Close the session and grab the existing clocked_in_at for math
+    const sessionResult = await client.query(
       `UPDATE shift_sessions SET clocked_out_at = NOW()
        WHERE shift_id = $1 AND guard_id = $2 AND clocked_out_at IS NULL
-       RETURNING *`,
+       RETURNING id, clocked_in_at, clocked_out_at`,
       [id, req.user!.sub]
     );
-    if (!sessionResult.rows[0]) return res.status(404).json({ error: 'Active session not found' });
-    // Calculate total_hours minus breaks
+    if (!sessionResult.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Active session not found' });
+    }
     const session = sessionResult.rows[0];
-    const breaksResult = await pool.query(
-      'SELECT COALESCE(SUM(duration_minutes), 0) as total_break_mins FROM break_sessions WHERE shift_session_id = $1',
+
+    // Close any break that was still open when the guard clocked out
+    await client.query(
+      `UPDATE break_sessions
+       SET break_end = NOW(),
+           duration_minutes = GREATEST(
+             0,
+             ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT
+           )
+       WHERE shift_session_id = $1 AND break_end IS NULL`,
       [session.id]
     );
-    const grossHours = (new Date(session.clocked_out_at).getTime() - new Date(session.clocked_in_at).getTime()) / 3600000;
-    const breakHours = breaksResult.rows[0].total_break_mins / 60;
-    const netHours = Math.max(0, grossHours - breakHours);
-    await pool.query(
+
+    // Compute total_hours = gross − breaks (matches autoCompleteShifts math)
+    const breaksResult = await client.query(
+      'SELECT COALESCE(SUM(duration_minutes), 0) AS total_break_mins FROM break_sessions WHERE shift_session_id = $1',
+      [session.id]
+    );
+    const grossHours = (new Date(session.clocked_out_at).getTime()
+                       - new Date(session.clocked_in_at).getTime()) / 3_600_000;
+    const breakHours = Number(breaksResult.rows[0].total_break_mins) / 60;
+    const netHours   = Math.max(0, grossHours - breakHours);
+
+    await client.query(
       'UPDATE shift_sessions SET total_hours = $1, handover_notes = $2 WHERE id = $3',
       [netHours, handover_notes ?? null, session.id]
     );
-    await pool.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);
+    await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);
+
+    await client.query('COMMIT');
     res.json({ ...session, total_hours: netHours, handover_notes: handover_notes ?? null });
   } catch (err: any) {
+    await client.query('ROLLBACK');
     console.error('clock-out error:', err);
     res.status(500).json({ error: err.message ?? 'Failed to clock out' });
+  } finally {
+    client.release();
   }
 });
 
