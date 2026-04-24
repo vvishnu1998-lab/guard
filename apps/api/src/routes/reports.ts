@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { sendIncidentAlert } from '../services/email';
+import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
+import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 
 const router = Router();
 
@@ -64,6 +66,20 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     return res.status(400).json({ error: 'severity is required for incident reports' });
   }
 
+  // V5 / audit/WEEK1.md §C6 — incident reports must carry at least one
+  // chain-of-custody photo.  The mobile form already enforces this client-
+  // side (apps/mobile/app/reports/new/incident.tsx), but we reject here
+  // too so direct API hits can't bypass the rule (see B1: 4 legacy seed
+  // rows landed in prod this way during the 2026-04-07..09 test window).
+  if (
+    report_type === 'incident' &&
+    (!Array.isArray(photo_urls) || photo_urls.length === 0)
+  ) {
+    return res.status(400).json({
+      error: 'Incident reports require at least one photo (camera-only, chain-of-custody).',
+    });
+  }
+
   // Verify session belongs to guard and is still open
   const sessionResult = await pool.query(
     'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2 AND clocked_out_at IS NULL',
@@ -71,6 +87,58 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
   const { site_id } = sessionResult.rows[0];
+
+  // D2 / audit/WEEK1.md §D2 — magic-byte validation for every photo URL.
+  // D1 closed the size and MIME-pin gaps via the presigned POST policy,
+  // but the bytes themselves are still client-controlled.  Here we GET
+  // the first 16 bytes of each S3 object and confirm they match the
+  // declared MIME (FF D8 FF for JPEG, 89 50 4E 47 for PNG, RIFF…WEBP).
+  // Mismatch → quarantine row + 400; the report and its photos are
+  // never INSERTed, so the corrupt object never enters the data plane.
+  if (Array.isArray(photo_urls) && photo_urls.length > 0) {
+    for (const p of photo_urls as Array<{ url: string; content_type?: string }>) {
+      const key = s3KeyFromPublicUrl(p.url);
+      if (!key) {
+        return res.status(400).json({
+          error: 'photo_urls must point at the configured S3 bucket (validated by signed URL)',
+        });
+      }
+      // The presigned POST policy pins Content-Type per upload; the mobile
+      // client always sends image/jpeg today.  We accept an optional
+      // per-photo content_type override for forward-compat (PNG/WEBP) but
+      // default to image/jpeg.
+      const declared = (p.content_type ?? 'image/jpeg') as string;
+      if (!isAllowedContentType(declared)) {
+        return res.status(400).json({
+          error: `unsupported content_type ${declared} (allowed: image/jpeg, image/png, image/webp)`,
+        });
+      }
+      let head: Buffer;
+      try {
+        head = await getS3ObjectHead(key, 16);
+      } catch (err: any) {
+        // S3 returned NoSuchKey or AccessDenied — treat as upload failure
+        return res.status(400).json({
+          error: `Photo not found in storage (key=${key}); please re-upload before submitting.`,
+        });
+      }
+      if (!magicMatches(declared, head)) {
+        const detected = describeMagic(head);
+        // Forensics row — keep going only after the INSERT in case of DB
+        // failure we still don't accept the report.
+        await pool.query(
+          `INSERT INTO quarantined_uploads
+             (s3_key, declared_content_type, detected_magic,
+              guard_id, company_id, shift_session_id)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [key, declared, detected, req.user!.sub, req.user!.company_id, shift_session_id]
+        );
+        return res.status(400).json({
+          error: `Uploaded file is not a valid ${declared} (detected: ${detected}). The upload has been quarantined; please re-take the photo.`,
+        });
+      }
+    }
+  }
 
   // Geofence validation — block submission if guard has an unresolved violation
   const violationResult = await pool.query(
