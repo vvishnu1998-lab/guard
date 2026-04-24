@@ -1,0 +1,23 @@
+# Known historical leaks tracked in audit/REPORT.md (Top 10 fix #4).
+#
+# These five fingerprints all reference the SAME Google Maps API key that was
+# committed in two pre-audit commits (d193e046 and 61bca7f1) and is still
+# present at HEAD in `.env.example` and `apps/mobile/app.json`.
+#
+# The key must be:
+#   1. Rotated at console.cloud.google.com (kill the leaked key, mint a new one
+#      restricted to the V-Wing iOS bundle id, Android cert SHA-1, and the
+#      *.vercel.app + production custom domain referrers).
+#   2. Removed from HEAD by replacing the literal with `${GOOGLE_MAPS_API_KEY}`
+#      placeholders in both files; mobile reads via app.config.ts injection.
+#   3. Scrubbed from git history with `git filter-repo --replace-text rules.txt`
+#      (rules: `AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA==>***GMAPS_KEY***`).
+#   4. Force-pushed; collaborators re-clone; remove this file.
+#
+# Until step 4 is complete this allowlist must remain so CI doesn't block PRs
+# that have nothing to do with the Maps key.
+d193e046318950cad8313fbc17bf7b5e1e9852a2:.env.example:gcp-api-key:49
+d193e046318950cad8313fbc17bf7b5e1e9852a2:.env.example:gcp-api-key:50
+d193e046318950cad8313fbc17bf7b5e1e9852a2:.env.example:gcp-api-key:51
+61bca7f1185c49697f39ebff7a649daeb9f27e2c:apps/mobile/app.json:gcp-api-key:19
+61bca7f1185c49697f39ebff7a649daeb9f27e2c:apps/mobile/app.json:gcp-api-key:33

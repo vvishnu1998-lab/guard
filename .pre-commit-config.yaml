@@ -1,0 +1,15 @@
+# Pre-commit hooks — install once with:
+#   brew install pre-commit gitleaks
+#   pre-commit install
+#
+# Hooks run on every `git commit`. Bypass only with explicit user consent
+# (`git commit --no-verify`); the gitleaks GitHub Action below catches anything
+# pushed without local hooks.
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secret scan)
+        description: Detect hard-coded secrets in staged changes
