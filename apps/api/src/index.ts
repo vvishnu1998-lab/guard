@@ -46,8 +46,29 @@ const authLimiter = rateLimit({
   message: { error: 'Too many login attempts, please try again later.' },
 });
 
+// Fail-closed CORS (CB4, audit/WEEK1.md C3).
+// - ALLOWED_ORIGINS is required; the server refuses to start without it so
+//   we never fall back to the old "origin: true" wildcard-with-credentials
+//   behaviour (which browsers will reject anyway but still a foot-gun).
+// - Non-browser requests (React Native, curl, health probes) arrive with
+//   no Origin header; those are allowed through — CORS isn't relevant to
+//   them and we still have auth enforcement below.
+if (!process.env.ALLOWED_ORIGINS) {
+  throw new Error(
+    'ALLOWED_ORIGINS is required. Set a comma-separated list of exact origins (no wildcards).'
+  );
+}
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : true,
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);               // native app / curl / health
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
   credentials: true,
 }));
 app.use(globalLimiter);
