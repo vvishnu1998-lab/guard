@@ -17,9 +17,12 @@ const REFRESH_TOKEN_TTL = '30d';
 // ── Token helpers ────────────────────────────────────────────────────────────
 
 function signTokens(payload: Omit<AuthPayload, 'iat' | 'exp' | 'jti'>) {
-  const jti = uuidv4(); // unique ID embedded in refresh token for revocation
-  const access = jwt.sign(payload, process.env.JWT_SECRET!, { expiresIn: ACCESS_TOKEN_TTL });
-  const refresh = jwt.sign({ ...payload, jti }, process.env.JWT_REFRESH_SECRET!, { expiresIn: REFRESH_TOKEN_TTL });
+  // Each access *and* refresh gets its own jti so either can be added to the
+  // revoked_tokens blocklist at logout / admin-revoke time (CB6 — WEEK1 §C5).
+  const accessJti  = uuidv4();
+  const refreshJti = uuidv4();
+  const access  = jwt.sign({ ...payload, jti: accessJti },  process.env.JWT_SECRET!,         { expiresIn: ACCESS_TOKEN_TTL  });
+  const refresh = jwt.sign({ ...payload, jti: refreshJti }, process.env.JWT_REFRESH_SECRET!, { expiresIn: REFRESH_TOKEN_TTL });
   return { access, refresh };
 }
 
@@ -160,8 +163,11 @@ router.post('/guard/verify-password', requireAuth('guard'), async (req: Request,
 
 router.post('/guard/change-password', requireAuth('guard'), async (req: Request, res: Response) => {
   const { current_password, new_password } = req.body;
-  if (!new_password || new_password.length < 8) {
-    return res.status(400).json({ error: 'New password must be at least 8 characters' });
+  // C7 — guards rotating off their temp credential must end up with a
+  // ≥12-char permanent password; otherwise the temp-floor bump is a
+  // paper rule (guard could rotate 12 → 8).
+  if (!new_password || new_password.length < 12) {
+    return res.status(400).json({ error: 'New password must be at least 12 characters' });
   }
 
   const guardResult = await pool.query(
@@ -300,6 +306,18 @@ router.post('/refresh', async (req: Request, res: Response) => {
 // ── Logout ───────────────────────────────────────────────────────────────────
 
 router.post('/logout', requireAuth('guard', 'company_admin', 'client', 'vishnu'), async (req: Request, res: Response) => {
+  // Revoke the access token that carried this request (CB6 — WEEK1 §C5).
+  // req.user was populated by requireAuth so it already holds a verified
+  // payload; inserting its jti into the blocklist makes every subsequent
+  // request with that token 401 until natural expiry prunes the row.
+  if (req.user?.jti) {
+    await pool.query(
+      'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [req.user.jti, new Date(req.user.exp * 1000)]
+    ).catch(() => { /* blocklist insert failure is non-fatal at logout */ });
+  }
+
+  // Also revoke the refresh token (unchanged behaviour).
   const { refresh_token } = req.body;
   if (refresh_token) {
     try {
@@ -326,14 +344,22 @@ router.post('/admin/revoke-guard/:guard_id', requireAuth('company_admin'), async
   );
   if (!guardResult.rows[0]) return res.status(404).json({ error: 'Guard not found' });
 
-  // Clear FCM token so device gets no more pushes, log the revocation
-  await pool.query('UPDATE guards SET fcm_token = NULL WHERE id = $1', [req.params.guard_id]);
+  // CB6 (audit/WEEK1.md §C5) — stamp tokens_not_before to NOW().  Any JWT
+  // with `iat * 1000 < tokens_not_before` is rejected by requireAuth on
+  // the guard's very next request, regardless of remaining TTL.  This
+  // replaces the previous "best we can do is wait for natural expiry"
+  // behaviour (noted in the old comment that referenced a hypothetical
+  // JTI-add — we never had the jti).
+  await pool.query(
+    'UPDATE guards SET tokens_not_before = NOW(), fcm_token = NULL WHERE id = $1',
+    [req.params.guard_id]
+  );
   await logEvent(req.params.guard_id, 'guard', 'session_revoked', req);
 
-  // The guard's next API call will fail because their tokens will be rotated/rejected.
-  // For immediate hard revocation we add their current JTI to revoked_tokens.
-  // The client is responsible for clearing SecureStore on 401 response.
-  res.json({ success: true, message: 'Guard session revoked. They will be logged out on next API call.' });
+  res.json({
+    success: true,
+    message: 'Guard sessions revoked. All active tokens for this guard are invalid as of now.',
+  });
 });
 
 // ── Star admin (primary): unlock a locked guard account ─────────────────────
@@ -511,7 +537,8 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 router.post('/reset-password', async (req: Request, res: Response) => {
   const { token, password } = req.body;
   if (!token || !password) return res.status(400).json({ error: 'token and password required' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  // C7 — admin/client/vishnu reset paths share the same 12-char floor.
+  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
 
   const { rows } = await pool.query(
     `SELECT * FROM password_reset_tokens

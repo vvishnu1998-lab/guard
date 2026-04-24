@@ -103,6 +103,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   /** Unlock the auto-locked app using PIN (biometric fallback) */
   unlock: async (pin) => {
+    // In dev/simulator, skip biometrics to avoid passcode fallback loop
+    if (__DEV__) {
+      set({ isLocked: false });
+      return;
+    }
     const result = await LocalAuthentication.authenticateAsync({
       promptMessage: 'Unlock Guard',
       fallbackLabel: 'Use PIN',

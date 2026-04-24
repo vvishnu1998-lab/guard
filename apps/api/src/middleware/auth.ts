@@ -42,15 +42,44 @@ export function requireAuth(...roles: UserRole[]) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
-    // Guard-specific: check account is still active and not locked
+    // CB6 — access-token revocation blocklist (audit/WEEK1.md §C5).
+    // Both /logout and /auth/refresh insert the presented jti into
+    // revoked_tokens; the row has TTL = token.exp so the table stays
+    // small.  On failure to reach the DB we deliberately fail-closed.
+    if (payload.jti) {
+      try {
+        const revoked = await pool.query(
+          'SELECT 1 FROM revoked_tokens WHERE jti = $1 LIMIT 1',
+          [payload.jti]
+        );
+        if (revoked.rows.length > 0) {
+          return res.status(401).json({ error: 'Token has been revoked' });
+        }
+      } catch {
+        return res.status(503).json({ error: 'Auth verification unavailable' });
+      }
+    }
+
+    // Guard-specific: check account is still active, and that this token
+    // wasn't nuked by an admin via /api/auth/admin/revoke-guard/:id.
     if (payload.role === 'guard') {
       const guardResult = await pool.query(
-        'SELECT is_active FROM guards WHERE id = $1',
+        'SELECT is_active, tokens_not_before FROM guards WHERE id = $1',
         [payload.sub]
-      ).catch(() => ({ rows: [] as { is_active: boolean }[] }));
+      ).catch(() => ({ rows: [] as { is_active: boolean; tokens_not_before: Date | null }[] }));
 
-      if (!guardResult.rows[0]?.is_active) {
+      const guardRow = guardResult.rows[0];
+      if (!guardRow?.is_active) {
         return res.status(403).json({ error: 'Account deactivated' });
+      }
+
+      // Per-guard session nuke: any access token minted before the
+      // revocation stamp is rejected.  `iat` is seconds since epoch.
+      if (guardRow.tokens_not_before) {
+        const notBeforeMs = new Date(guardRow.tokens_not_before).getTime();
+        if (payload.iat * 1000 < notBeforeMs) {
+          return res.status(401).json({ error: 'Session revoked by administrator' });
+        }
       }
     }
 
