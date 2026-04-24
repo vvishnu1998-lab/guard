@@ -10,6 +10,20 @@ const router = Router();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 /**
+ * Anthropic model ID — sourced from env so we can roll forward without
+ * a code deploy when Anthropic retires a model.
+ *
+ * The previous pin `claude-sonnet-4-20250514` was retired by Anthropic
+ * on 2026-04-20 and the prod /enhance-description endpoint started
+ * returning HTTP 404 with body `model: claude-sonnet-4-20250514`.
+ * Default updated to `claude-sonnet-4-5-20250929` (Sonnet 4.5 GA).
+ *
+ * To roll forward at any time without a deploy, set ANTHROPIC_MODEL on
+ * Railway to the new model ID — server picks it up on next request.
+ */
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5-20250929';
+
+/**
  * POST /api/ai/enhance-description
  * Body: { text: string, report_type: 'activity' | 'incident' | 'maintenance' }
  * Returns: { enhanced: string }
@@ -46,7 +60,7 @@ Rewrite this as a professional security report entry:`;
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: ANTHROPIC_MODEL,
       max_tokens: 1024,
       messages: [{ role: 'user', content: userPrompt }],
       system: systemPrompt,
