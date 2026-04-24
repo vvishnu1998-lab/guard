@@ -27,7 +27,7 @@
     },
     "android": {
       "package": "com.vishnu.guardapp",
-      "versionCode": 6,
+      "versionCode": 7,
       "compileSdkVersion": 35,
       "targetSdkVersion": 35,
       "config": {
