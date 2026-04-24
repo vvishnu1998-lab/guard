@@ -2,9 +2,16 @@
  * Client Portal API routes — read-only, strictly scoped to client's site_id.
  * CRITICAL: every query must filter by site_id from the JWT (Section 11.5).
  *
- * GET  /api/client/site            — site info + retention dates
- * GET  /api/client/guards-on-duty  — guards currently clocked in at this site
- * GET  /api/client/reports/pdf     — PDF report download (auth via ?token= query param)
+ * GET  /api/client/site                 — site info + retention dates
+ * GET  /api/client/guards-on-duty       — guards currently clocked in at this site
+ * GET  /api/client/reports              — reports list
+ * POST /api/client/reports/pdf-link     — mint a short-lived (60s) handoff URL
+ *                                         carrying `?dl=<purpose-scoped JWT>`.
+ *                                         Requires Bearer auth. (CB5 fix — audit/WEEK1.md C4)
+ * GET  /api/client/reports/pdf          — PDF report download. Accepts:
+ *                                           * `Authorization: Bearer <client JWT>`, OR
+ *                                           * `?dl=<handoff token from pdf-link>`.
+ *                                         Legacy `?token=` param returns 410 Gone.
  */
 
 import { Router, Request, Response } from 'express';
@@ -82,8 +89,49 @@ router.get('/reports', requireAuth('client'), async (req: Request, res: Response
   res.json(result.rows);
 });
 
+// ── PDF download handoff (CB5 — audit/WEEK1.md C4) ────────────────────────────
+// Browser downloads can't carry Authorization headers (window.open/anchor
+// navigation can only set query params).  Putting the long-lived access JWT
+// in the query string leaks it to server logs, proxy caches, browser history
+// and the Referer header.
+//
+// This endpoint, protected by the normal Bearer flow, mints a purpose-scoped
+// token that:
+//   * is valid for 60 seconds,
+//   * carries `purpose: 'pdf_download'` so it can't be used for anything else,
+//   * pins the `from`/`to` window into the token claims so the URL can't be
+//     tampered with by the browser.
+//
+// The client then `window.open`s the returned URL.  Even if the URL leaks it
+// is useless 60 seconds later and only ever reads PDFs — not the full API.
+
+const PDF_DL_TTL_SECONDS = 60;
+
+router.post('/reports/pdf-link', requireAuth('client'), async (req: Request, res: Response) => {
+  const { from, to } = req.body ?? {};
+  if (typeof from !== 'string' || typeof to !== 'string') {
+    return res.status(400).json({ error: 'from and to are required (ISO date strings)' });
+  }
+
+  const dl = jwt.sign(
+    {
+      sub: req.user!.sub,
+      role: 'client',
+      site_id: req.user!.site_id,
+      purpose: 'pdf_download',
+      from,
+      to,
+    },
+    process.env.JWT_SECRET!,
+    { expiresIn: PDF_DL_TTL_SECONDS }
+  );
+  res.json({
+    url: `/api/client/reports/pdf?dl=${encodeURIComponent(dl)}`,
+    expires_in: PDF_DL_TTL_SECONDS,
+  });
+});
+
 // ── PDF export ────────────────────────────────────────────────────────────────
-// Auth via ?token= query param (required for browser download links).
 
 // ── PDF constants ─────────────────────────────────────────────────────────────
 const NAVY   = '#0B1526';
@@ -141,22 +189,63 @@ function proportionBar(
   }
 }
 
-router.get('/reports/pdf', async (req: Request, res: Response) => {
-  // Verify token from query param
-  const rawToken = req.query.token as string;
-  if (!rawToken) return res.status(401).json({ error: 'Missing token' });
+interface PdfDownloadPayload extends AuthPayload {
+  purpose?: string;
+  from?: string;
+  to?: string;
+}
 
-  let payload: AuthPayload;
-  try {
-    payload = jwt.verify(rawToken, process.env.JWT_SECRET!) as AuthPayload;
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+router.get('/reports/pdf', async (req: Request, res: Response) => {
+  // CB5 (audit/WEEK1.md C4): the old ?token=<access-JWT> query param leaked
+  // long-lived credentials to server logs, Referer, and browser history.
+  // Reject it loudly so any unpatched client forces a frontend refresh.
+  if (typeof req.query.token === 'string') {
+    return res.status(410).json({
+      error:
+        'The ?token= query auth is retired. Call POST /api/client/reports/pdf-link first ' +
+        'to obtain a short-lived ?dl= URL, or send Authorization: Bearer.',
+    });
   }
-  if (payload.role !== 'client' || !payload.site_id) {
+
+  let payload: PdfDownloadPayload | null = null;
+
+  // Preferred path: handoff token from POST /reports/pdf-link
+  if (typeof req.query.dl === 'string') {
+    try {
+      payload = jwt.verify(req.query.dl, process.env.JWT_SECRET!) as PdfDownloadPayload;
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired download link' });
+    }
+    if (payload.purpose !== 'pdf_download') {
+      return res.status(403).json({ error: 'Download link is not scoped for PDF export' });
+    }
+  } else {
+    // Fallback: direct Authorization: Bearer (useful for server-to-server
+    // consumers and for future in-page <iframe> or fetch-to-blob use-cases).
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing authorization' });
+    }
+    try {
+      payload = jwt.verify(header.slice(7), process.env.JWT_SECRET!) as PdfDownloadPayload;
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+  }
+
+  if (!payload || payload.role !== 'client' || !payload.site_id) {
     return res.status(403).json({ error: 'Client access required' });
   }
 
-  const { from, to } = req.query as Record<string, string>;
+  // When using a handoff token the from/to come from the token claims, so
+  // the download window can't be widened by tampering with the URL. For the
+  // Bearer fallback the caller may pass them on the query string.
+  const from = payload.purpose === 'pdf_download'
+    ? (payload.from ?? '')
+    : ((req.query.from as string | undefined) ?? '');
+  const to = payload.purpose === 'pdf_download'
+    ? (payload.to ?? '')
+    : ((req.query.to as string | undefined) ?? '');
 
   // ── 1. Site info ─────────────────────────────────────────────────────────────
   const siteResult = await pool.query('SELECT name, address FROM sites WHERE id = $1', [payload.site_id]);

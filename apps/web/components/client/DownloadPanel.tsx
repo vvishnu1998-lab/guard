@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { format, startOfDay, endOfDay, startOfWeek, endOfWeek } from 'date-fns';
-import { pdfDownloadUrl, clientGet } from '../../lib/clientApi';
+import { requestPdfDownloadUrl, clientGet } from '../../lib/clientApi';
 
 interface ReportRow {
   report_type: 'activity' | 'incident' | 'maintenance' | string;
@@ -68,9 +68,24 @@ export default function DownloadPanel() {
 
   useEffect(() => { fetchPreview(); }, [fetchPreview]);
 
-  function downloadPdf() {
-    const { from, to } = buildFromTo(activeRange, dateFrom, dateTo);
-    window.open(pdfDownloadUrl(from, to), '_blank');
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  async function downloadPdf() {
+    setDownloadError(null);
+    setDownloading(true);
+    try {
+      const { from, to } = buildFromTo(activeRange, dateFrom, dateTo);
+      const url = await requestPdfDownloadUrl(from, to);
+      // The URL carries a 60-second, purpose-scoped token — opening it now
+      // triggers the download without the long-lived client JWT ever
+      // appearing in the URL.
+      window.open(url, '_blank');
+    } catch (e) {
+      setDownloadError(e instanceof Error ? e.message : 'Download failed');
+    } finally {
+      setDownloading(false);
+    }
   }
 
   const { label: periodLabel } = buildFromTo(activeRange, dateFrom, dateTo);
@@ -181,11 +196,20 @@ export default function DownloadPanel() {
       {/* Download button */}
       <button
         onClick={downloadPdf}
-        disabled={!preview.loading && !preview.error && preview.total === 0}
+        disabled={
+          downloading || (!preview.loading && !preview.error && preview.total === 0)
+        }
         className="w-full bg-blue-500 text-white py-2.5 rounded text-xs tracking-widest hover:bg-blue-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
       >
-        {preview.total === 0 && !preview.loading ? 'NO REPORTS IN PERIOD' : 'DOWNLOAD PDF REPORT'}
+        {downloading
+          ? 'PREPARING DOWNLOAD…'
+          : preview.total === 0 && !preview.loading
+            ? 'NO REPORTS IN PERIOD'
+            : 'DOWNLOAD PDF REPORT'}
       </button>
+      {downloadError && (
+        <p className="text-red-400 text-xs">{downloadError}</p>
+      )}
     </div>
   );
 }

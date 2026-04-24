@@ -30,11 +30,21 @@ export async function clientGet<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** Returns the PDF download URL with the auth token embedded as a query param. */
-export function pdfDownloadUrl(from: string, to: string): string {
-  const token = typeof document !== 'undefined'
-    ? (document.cookie.match(/guard_client_access=([^;]+)/)?.[1] ?? '')
-    : '';
-  const params = new URLSearchParams({ from, to, token });
-  return `${API}/api/client/reports/pdf?${params}`;
+/**
+ * Fetches a short-lived (60 s) PDF download URL from the API.
+ * The long-lived client JWT never touches the URL — we POST it as a Bearer
+ * token, the server mints a purpose-scoped handoff token, and we
+ * `window.open` the returned URL. See audit/WEEK1.md §C4 (CB5 fix).
+ */
+export async function requestPdfDownloadUrl(from: string, to: string): Promise<string> {
+  const res = await clientFetch('/api/client/reports/pdf-link', {
+    method: 'POST',
+    body: JSON.stringify({ from, to }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { error?: string }).error ?? `Failed to build download link: ${res.status}`);
+  }
+  const { url } = (await res.json()) as { url: string; expires_in: number };
+  return `${API}${url}`;
 }
