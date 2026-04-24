@@ -87,7 +87,8 @@ router.get('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => {
 router.post('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || !email || !password) return res.status(400).json({ error: 'name, email and password are required' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  // C7 — Vishnu provisions admin accounts; align with the 12-char floor.
+  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
 
   const bcrypt = require('bcrypt');
   const password_hash = await bcrypt.hash(password, 10);
@@ -187,13 +188,13 @@ router.get('/kpis', requireAuth('company_admin'), async (req, res) => {
       [cid]
     ),
     pool.query(
+      // e2fec53 status filter removed in Week-1 C2: the atomic clock-out +
+      // partial unique index (idx_shift_sessions_one_open_per_guard) now
+      // enforce that clocked_out_at IS NULL iff the shift is still running.
       `SELECT COUNT(DISTINCT ss.guard_id)
        FROM shift_sessions ss
-       JOIN sites s  ON s.id  = ss.site_id
-       JOIN shifts sh ON sh.id = ss.shift_id
-       WHERE s.company_id = $1
-         AND ss.clocked_out_at IS NULL
-         AND sh.status NOT IN ('completed', 'cancelled', 'missed')`,
+       JOIN sites s ON s.id = ss.site_id
+       WHERE s.company_id = $1 AND ss.clocked_out_at IS NULL`,
       [cid]
     ),
     pool.query(
@@ -234,18 +235,16 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
          WHERE gv.shift_session_id = ss.id AND gv.resolved_at IS NULL
        ) AS has_violation
      FROM shift_sessions ss
-     JOIN guards g  ON g.id  = ss.guard_id
-     JOIN sites  s  ON s.id  = ss.site_id
-     JOIN shifts sh ON sh.id = ss.shift_id
+     JOIN guards g ON g.id = ss.guard_id
+     JOIN sites  s ON s.id = ss.site_id
      LEFT JOIN LATERAL (
        SELECT latitude, longitude, lp_inner.pinged_at, ping_type
        FROM location_pings lp_inner
        WHERE lp_inner.shift_session_id = ss.id
        ORDER BY lp_inner.pinged_at DESC LIMIT 1
      ) lp ON true
-     WHERE s.company_id = $1
-       AND ss.clocked_out_at IS NULL
-       AND sh.status NOT IN ('completed', 'cancelled', 'missed')
+     -- e2fec53 status filter removed in Week-1 C2 (see /kpis comment above)
+     WHERE s.company_id = $1 AND ss.clocked_out_at IS NULL
      ORDER BY s.name, g.name`,
     [req.user!.company_id]
   );

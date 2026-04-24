@@ -18,8 +18,8 @@ export default function ChangePasswordScreen() {
   const { changePassword, logout } = useAuthStore();
 
   async function handleChange() {
-    if (next.length < 8) {
-      Alert.alert('Too short', 'New password must be at least 8 characters.'); return;
+    if (next.length < 12) {
+      Alert.alert('Too short', 'New password must be at least 12 characters.'); return;
     }
     if (next !== confirm) {
       Alert.alert('Mismatch', 'New passwords do not match.'); return;
