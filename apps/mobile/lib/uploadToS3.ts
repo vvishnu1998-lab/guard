@@ -46,6 +46,25 @@ export async function uploadToS3(
     { content_type: 'image/jpeg', context }
   );
 
+  // Defensive — detect deployment skew where the API is still on the
+  // pre-D1 PUT-presigned shape ({ url } only).  Without this guard,
+  // the next line crashes with "Cannot convert undefined value to
+  // object" when Object.entries(undefined) is invoked, which is what
+  // the operator saw in production on 2026-04-24 (mobile shipped with
+  // the new shape, prod API still on audit-base e2fec53 with the old
+  // shape).  Fail fast with an actionable message instead.
+  if (!presign || typeof presign !== 'object'
+      || !presign.fields || typeof presign.fields !== 'object'
+      || !presign.post_url
+      || !presign.public_url
+      || typeof presign.max_bytes !== 'number') {
+    throw new Error(
+      'Upload service returned an unexpected response shape. ' +
+      'The API may need to be redeployed with the latest upload changes. ' +
+      'Please contact your administrator.'
+    );
+  }
+
   // 2. Fetch local file as blob
   const fileRes = await fetch(localUri);
   const blob    = await fileRes.blob();
