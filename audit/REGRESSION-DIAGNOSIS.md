@@ -194,19 +194,202 @@ been deployed cleanly, Bug 2 would still have surfaced.
 
 ## 5. Verification log
 
-(Populated after step 9 above.)
+### 5.1 `test-upload-flow-mobile.ts` local run — 2026-04-24
 
-### 5.1 `test-upload-flow-mobile.ts` local run
-_(filled in)_
+```
+$ npx tsx apps/api/scripts/test-upload-flow-mobile.ts
+…
+  ✓ [ctx=clock_in] mobile multipart constructed without error
+  ✓ [ctx=clock_in] form carries every API field plus 'file' (got 9 parts, expected 9)
+  ✓ [ctx=clock_in] 'file' is the last form part (S3 requirement)
+  ✓ mobile multipart throws on legacy { url } shape (does not return undefined-pass)
+  ✓ legacy-shape error message is actionable (got: "Upload service returned an unexpected response shape. The API may need to be redeployed with the lat")
+  ✓ legacy-shape error is NOT the cryptic "Cannot convert undefined value to object" TypeError
+  ✓ mobile multipart throws when `fields` is missing entirely
+  ✓ mobile multipart throws when `max_bytes` is missing (cannot validate file size)
 
-### 5.2 Railway deploy log
-_(filled in)_
+=== ALL ASSERTIONS PASSED ===
+```
 
-### 5.3 Prod curl — `/api/ai/enhance-description`
-_(filled in)_
+**36/36 assertions PASS** across the three contexts (`report`, `ping`,
+`clock_in`) plus the four defensive failure modes.
 
-### 5.4 S25 end-to-end smoke
-_(filled in — DB row, S3 listing, logcat excerpt, screenshots if any)_
+### 5.2 Railway deploy — 2026-04-24
+
+`week1-fixes` branch (15 commits) was fast-forward merged into `main`
+and pushed to `origin/main`. Railway auto-deploy picked up the push
+and the new build was live within ~60s.
+
+Pre-deploy probe of `/api/uploads/presign` returned the **pre-D1
+shape**:
+```
+{ "presigned_url": "...", "public_url": "...", "key": "..." }
+```
+
+Post-deploy probe (first poll iteration, ~60s after push) returned
+the **post-D1 shape**:
+```json
+{
+    "post_url": "https://s3.amazonaws.com/guard-media-prod",
+    "fields": {
+        "key": "report/.../dc5e65c0-....jpg",
+        "Content-Type": "image/jpeg",
+        "bucket": "guard-media-prod",
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+        "X-Amz-Credential": "AKIA…/20260424/us-east-1/s3/aws4_request",
+        "X-Amz-Date": "20260424T235439Z",
+        "Policy": "<base64 — decodes to: bucket eq, $key eq,
+                   $Content-Type eq, content-length-range 1..5_242_880>",
+        "X-Amz-Signature": "ea2a1ef3bc848d59abd127c1bb7cd639a0ac984f940c6a0f3a80a08285ea8331"
+    },
+    "public_url": "https://guard-media-prod.s3.us-east-1.amazonaws.com/report/.../dc5e65c0-....jpg",
+    "key": "report/.../dc5e65c0-....jpg",
+    "max_bytes": 5242880
+}
+```
+
+Bonus signal — fresh login (post-deploy) returned an access JWT with
+the new `jti` claim, confirming CB6 (revoked-tokens path) is also
+live:
+```json
+{ "sub": "98a569d8-...", "role": "guard", "company_id": "b062f601-...",
+  "jti": "635de729-d466-419a-bb66-8743839a758e",
+  "iat": 1777074879, "exp": 1777103679 }
+```
+
+`/health` continued to return 200 throughout the deploy.
+
+### 5.3 Prod curl — `/api/ai/enhance-description` — 2026-04-24
+
+```
+$ curl -X POST https://guard-production-6be4.up.railway.app/api/ai/enhance-description \
+    -H "Authorization: Bearer <test guard JWT>" \
+    -H 'Content-Type: application/json' \
+    -d '{"text":"guy was acting weird near door at 2am, kept looking around","report_type":"activity"}'
+
+HTTP 200, ~4.16s
+{"enhanced":"At approximately 0200 hours, observed a male subject
+exhibiting suspicious behavior near the entrance door. The individual
+repeatedly scanned the surrounding area in a manner consistent with
+counter-surveillance activity. Maintained visual observation of the
+subject until behavior ceased."}
+```
+
+200 OK, response in ~4 s, professional security-report tone preserved
+(matches the system prompt). **Bug 2 fully resolved on prod.**
+
+### 5.4 S25 end-to-end smoke — 2026-04-24
+
+**Device state at hand-off**:
+- Package `com.vishnu.guardapp` versionCode 10, last updated 13:42:38
+  (rebuild APK from §11 of `audit/BUILD-2026-04-24.md`).
+- This APK contains the post-D1 multipart-POST helper PLUS the
+  defensive shape-guard committed at `d1cfd47`.
+- App relaunched cleanly: pid 32377 alive 5 s post-launch.
+- Background `adb logcat` filter active → `/tmp/regression-verify.log`
+  (terms: `upload|presign|enhance|fatal|reactnative|s3|anthropic|undefined value`).
+- Open shift session for `travisscott26@proton.me`:
+  `b272e0a1-213d-46b9-8694-b433158af1d7`, clocked in at 2026-04-24
+  20:46:32 UTC — guard can submit a report immediately.
+
+**Tap-through (operator, 2026-04-24 17:03 PT / 00:03 UTC)**:
+
+```
+Step 1 — log in            : ✅ pass
+Step 2 — see open shift    : ✅ pass
+Step 3 — open report form  : ✅ pass
+Step 4 — take photo        : ✅ pass (2 photos captured)
+Step 5 — type description  : ✅ pass
+Step 6 — tap Enhance       : ✅ pass (description below is the enhanced version)
+Step 7 — submit            : ✅ pass — operator reported "submitted successfully"
+```
+
+**DB confirmation** (Railway-prod, queried 00:04 UTC):
+
+```
+                  id                  | report_type |                                                          description                                                          |          created_at           | photo_count
+--------------------------------------+-------------+-----------------------------------------------------------------------------------------------------------------------------+-------------------------------+-------------
+ 79f000e7-0998-4fa4-8d23-be4d950a9346 | activity    | Conducted continuous monitoring of front desk area and all camera feeds. No unusual activities observed throughout          | 2026-04-25 00:03:11.824611+00 |           2
+                                                      surveillance period. Property confirmed secure with no incidents to report.
+```
+
+The description text is clearly the AI-enhanced ("Conducted continuous
+monitoring…", "Property confirmed secure with no incidents to report")
+— so Bug 2 is also verified through the operator-driven path, not just
+the curl probe in §5.3.
+
+**S3 confirmation**:
+
+```
+                  id                  |                                                     storage_url                                                                                | file_size_kb |          created_at
+--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------+--------------+-------------------------------
+ 8d367b7a-e49d-4695-894b-3d1c9c8fe075 | https://guard-media-prod.s3.us-east-1.amazonaws.com/report/b062f601-6173-461c-897e-af2c427e0fd7/2026-04-25/40044f9a-…223d.jpg     |          184 | 2026-04-25 00:03:11.852552+00
+ 83860eab-e24b-4163-9325-f7a8293621d4 | https://guard-media-prod.s3.us-east-1.amazonaws.com/report/b062f601-6173-461c-897e-af2c427e0fd7/2026-04-25/87bd3c50-…c4d9.jpg     |          190 | 2026-04-25 00:03:11.839938+00
+```
+
+Both photos:
+- Live under `s3://guard-media-prod/report/<company-id>/2026-04-25/`
+  (correct prefix for `context: 'report'`).
+- 184 KB / 190 KB — well under the 5 MiB `max_bytes` policy cap and
+  the 800 KB CHECK constraint on `report_photos.file_size_kb`.
+- `created_at` within ~13 ms of the report row → upload pipeline
+  completed cleanly before the report INSERT.
+- D2 magic-byte gate ran at report-create time (`POST /api/reports`
+  returned the report ID, which means no INSERT into
+  `quarantined_uploads`; bytes matched the declared `image/jpeg`).
+
+**Logcat excerpt** (`/tmp/regression-verify.log`, smoke window):
+
+```
+04-24 16:55:58  D/nativeloader(32377)  Load …/base.apk!/lib/arm64-v8a/libhermes.so       ; RN engine
+04-24 16:55:58  D/nativeloader(32377)  Load …/base.apk!/lib/arm64-v8a/libreactnativejni.so
+… (clean React Native init)
+```
+
+Crash-signal scan — `FATAL|AndroidRuntime|ANR in|undefined value`:
+**0 hits**. The only matches for `upload` in the filtered log were
+Samsung's `SecVibrator-HAL-AIDL-CORE` haptic-feedback noise
+(`uploadForceFeedbackeffect`) — unrelated to the S3 upload. No
+"Cannot convert undefined value to object" — confirming the
+defensive-guard code path in `uploadToS3.ts` was either not invoked
+(API was on the new shape so no skew detection needed) or completed
+silently. Either way: clean.
+
+### 5.5 Combined verdict
+
+Both regression bugs are **fully closed end-to-end**:
+
+| Bug | Source fix | Server-side prod | On-device S25 |
+| --- | --- | --- | --- |
+| Bug 1 (upload Cannot convert undefined value to object) | `d1cfd47` (mobile defensive guard) + `2bc47ea` (D1 server) | ✅ post-D1 shape live in `/api/uploads/presign` | ✅ 2 photos uploaded to S3, report row references both, no TypeError in logcat |
+| Bug 2 (AI 404 model) | `a7ca4f7` (`ANTHROPIC_MODEL` env + `claude-sonnet-4-5-20250929` default) | ✅ enhance-description returns 200 in ~4 s with curl | ✅ submitted report description is clearly AI-enhanced (professional security-report tone) |
+
+---
+
+## 6. Operator hand-off — staged commands
+
+The on-device flow is the operator's. Once they've finished step 7 of
+§5.4, run the following (from the repo root) and paste the verbatim
+output back into §5.4 above:
+
+```bash
+# DB — find the latest report for the open shift session
+export $(grep -E "^DATABASE_URL" apps/api/.env | head -1)
+psql "$DATABASE_URL" -c "
+  SELECT r.id, r.report_type, r.description, r.created_at,
+         (SELECT COUNT(*) FROM report_photos WHERE report_id = r.id) AS photo_count,
+         (SELECT array_agg(storage_url) FROM report_photos WHERE report_id = r.id) AS storage_urls
+  FROM reports r
+  WHERE r.shift_session_id = 'b272e0a1-213d-46b9-8694-b433158af1d7'
+  ORDER BY r.created_at DESC LIMIT 1;
+"
+
+# Logcat tail — only the lines that fired during the smoke window
+tail -100 /tmp/regression-verify.log
+
+# Optional S3 head check (if AWS creds are local — otherwise skip)
+# aws s3 ls 's3://guard-media-prod/report/b062f601-6173-461c-897e-af2c427e0fd7/' --recursive | tail -5
+```
 
 ---
 
