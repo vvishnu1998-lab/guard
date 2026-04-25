@@ -38,8 +38,11 @@ function formatDuration(ms: number) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-function fmtTime(iso: string) {
-  return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+function fmtTime(iso: string | null | undefined) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
 function getCurrentTimeStr() {
@@ -269,7 +272,10 @@ export default function HomeScreen() {
                 <Text style={styles.shiftLabel}>NEXT SHIFT</Text>
                 <Text style={styles.shiftSite}>{upcomingShift.site_name.toUpperCase()}</Text>
                 <Text style={styles.shiftTime}>
-                  {fmtTime(upcomingShift.scheduled_start)} – {fmtTime(upcomingShift.scheduled_end)}
+                  {fmtTime(upcomingShift.scheduled_start)}
+                  {upcomingShift.scheduled_end && fmtTime(upcomingShift.scheduled_end)
+                    ? ` – ${fmtTime(upcomingShift.scheduled_end)}`
+                    : ''}
                 </Text>
                 <TouchableOpacity style={styles.clockInBtn} onPress={handleClockIn}>
                   <Text style={styles.clockInText}>CLOCK IN</Text>
