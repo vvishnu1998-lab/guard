@@ -204,7 +204,7 @@ export default function VishnuLoginPage() {
           </div>
         )}
 
-        <p className="text-white/10 text-[10px] text-center mt-10 tracking-widest">
+        <p className="text-white/60 text-[10px] text-center mt-10 tracking-widest">
           V-WING · RESTRICTED ACCESS
         </p>
       </div>

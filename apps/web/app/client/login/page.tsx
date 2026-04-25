@@ -101,7 +101,7 @@ export default function ClientLoginPage() {
             View live reports, guard schedules, and download shift records — read-only access to everything that matters.
           </p>
         </div>
-        <p className="text-white/15 text-xs tracking-widest">© V-WING SECURITY MANAGEMENT</p>
+        <p className="text-white/60 text-xs tracking-widest">© V-WING SECURITY MANAGEMENT</p>
       </div>
 
       {/* Right panel — form */}
@@ -234,7 +234,7 @@ export default function ClientLoginPage() {
             </div>
           )}
 
-          <p className="text-white/15 text-[11px] text-center mt-10 tracking-wide">
+          <p className="text-white/60 text-[11px] text-center mt-10 tracking-wide">
             Read-only access · Contact your security provider for help
           </p>
         </div>

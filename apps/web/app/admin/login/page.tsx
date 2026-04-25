@@ -101,7 +101,7 @@ export default function AdminLoginPage() {
             Real-time guard monitoring, geofence compliance, and automated reporting — built for serious security operations.
           </p>
         </div>
-        <p className="text-white/15 text-xs tracking-widest">© V-WING SECURITY MANAGEMENT</p>
+        <p className="text-white/60 text-xs tracking-widest">© V-WING SECURITY MANAGEMENT</p>
       </div>
 
       {/* Right panel — form */}
@@ -234,7 +234,7 @@ export default function AdminLoginPage() {
             </div>
           )}
 
-          <p className="text-white/15 text-[11px] text-center mt-10 tracking-wide">
+          <p className="text-white/60 text-[11px] text-center mt-10 tracking-wide">
             V-Wing Security Management Platform
           </p>
         </div>
