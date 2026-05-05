@@ -72,11 +72,17 @@ export function usePhotoAttachments(maxPhotos = 3) {
       } catch { /* GPS optional */ }
 
       // Compress to max 1080px / 80% quality
-      const compressed = await ImageManipulator.manipulateAsync(
-        asset.uri,
-        [{ resize: { width: 1080 } }],
-        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-      );
+      let compressed: { uri: string } = { uri: asset.uri };
+      try {
+        const result = await ImageManipulator.manipulateAsync(
+          asset.uri,
+          [{ resize: { width: 1080 } }],
+          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
+        );
+        if (result?.uri) compressed = result;
+      } catch {
+        // Use original if compression fails (Expo Go native module mismatch)
+      }
 
       const placeholder: Attachment = {
         localUri:    compressed.uri,
