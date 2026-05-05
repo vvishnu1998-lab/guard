@@ -20,6 +20,7 @@ import uploadRoutes from './routes/uploads';
 import clientPortalRoutes from './routes/clientPortal';
 import aiRoutes from './routes/ai';
 import billingRoutes from './routes/billing';
+import chatRoutes from './routes/chat';
 
 // Cron jobs
 import './jobs/nightlyPurge';
@@ -28,6 +29,7 @@ import './jobs/monthlyRetentionNotice';
 import './jobs/missedShiftAlert';
 import './jobs/autoCompleteShifts';
 import './jobs/monthlyHoursReport';
+import './jobs/chatRetention';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -101,6 +103,7 @@ app.use('/api/uploads', uploadRoutes);
 app.use('/api/client', clientPortalRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/billing', billingRoutes);
+app.use('/api/chat', chatRoutes);
 
 app.listen(PORT, () => {
   console.log(`API server running on port ${PORT}`);

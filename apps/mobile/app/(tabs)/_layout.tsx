@@ -63,6 +63,14 @@ export default function TabLayout() {
           }}
         />
 
+        <Tabs.Screen
+          name="chat"
+          options={{
+            title: 'CHAT',
+            tabBarIcon: ({ focused }) => TabIcon('chatbubbles', focused),
+          }}
+        />
+
         {/* Hidden — accessible via router.push but not shown in tab bar */}
         <Tabs.Screen name="reports"  options={{ href: null }} />
         <Tabs.Screen name="tasks"    options={{ href: null }} />
