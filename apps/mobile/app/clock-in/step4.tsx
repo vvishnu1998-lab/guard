@@ -7,7 +7,7 @@
  *   3. POST /api/locations/clock-in-verification  → stores S3 photo proofs
  */
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, Modal, Linking } from 'react-native';
 import { router } from 'expo-router';
 import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
@@ -20,6 +20,8 @@ const STEPS = ['Uploading selfie…', 'Uploading site photo…', 'Starting shift
 export default function ClockInStep4() {
   const [submitting,  setSubmitting]  = useState(false);
   const [statusStep,  setStatusStep]  = useState(0);
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [instructionsPdfUrl, setInstructionsPdfUrl] = useState<string | null>(null);
 
   const {
     verifiedLatitude,
@@ -93,9 +95,15 @@ export default function ClockInStep4() {
         scheduled_end:   session.clocked_in_at,
       };
       setActiveSession(shiftForStore, session);
-
       resetClockIn();
-      router.replace('/(tabs)/home');
+
+      const pdfUrl = pendingShift?.instructions_pdf_url ?? null;
+      if (pdfUrl) {
+        setInstructionsPdfUrl(pdfUrl);
+        setShowInstructions(true);
+      } else {
+        router.replace('/(tabs)/home');
+      }
     } catch (err: any) {
       Alert.alert('Clock-In Failed', err?.message ?? 'Could not start shift. Please try again.');
     } finally {
@@ -105,7 +113,39 @@ export default function ClockInStep4() {
 
   function fmtCoord(n: number) { return n.toFixed(6); }
 
+  function dismissInstructions() {
+    setShowInstructions(false);
+    router.replace('/(tabs)/home');
+  }
+
   return (
+    <>
+    <Modal
+      visible={showInstructions}
+      transparent
+      animationType="fade"
+      onRequestClose={dismissInstructions}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalIcon}>📄</Text>
+          <Text style={styles.modalTitle}>SITE INSTRUCTIONS{'\n'}AVAILABLE</Text>
+          <Text style={styles.modalSub}>This site has instructions for your shift. Would you like to view them now?</Text>
+          <TouchableOpacity
+            style={styles.modalPrimaryBtn}
+            onPress={() => {
+              if (instructionsPdfUrl) Linking.openURL(instructionsPdfUrl);
+              dismissInstructions();
+            }}
+          >
+            <Text style={styles.modalPrimaryText}>VIEW INSTRUCTIONS</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.modalSkipBtn} onPress={dismissInstructions}>
+            <Text style={styles.modalSkipText}>SKIP</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
     <ScrollView contentContainerStyle={styles.scroll} style={styles.bg}>
       <Text style={styles.step}>CLOCK IN · STEP 4 OF 4</Text>
       <Text style={styles.title}>CONFIRM & START</Text>
@@ -192,6 +232,7 @@ export default function ClockInStep4() {
         <Text style={styles.cancelText}>CANCEL</Text>
       </TouchableOpacity>
     </ScrollView>
+    </>
   );
 }
 
@@ -256,4 +297,56 @@ const styles = StyleSheet.create({
   errorSub:   { color: Colors.muted, fontSize: 14, marginBottom: Spacing.xl },
   button:     { backgroundColor: Colors.action, borderRadius: Radius.md, padding: Spacing.md },
   buttonText: { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 16, letterSpacing: 2 },
+
+  // Instructions modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: Spacing.xl,
+  },
+  modalCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.xl,
+    alignItems: 'center',
+    width: '100%',
+  },
+  modalIcon: { fontSize: 40, marginBottom: Spacing.md },
+  modalTitle: {
+    fontFamily: Fonts.heading,
+    color: Colors.base,
+    fontSize: 20,
+    letterSpacing: 3,
+    textAlign: 'center',
+    marginBottom: Spacing.md,
+    lineHeight: 28,
+  },
+  modalSub: {
+    color: Colors.muted,
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: Spacing.xl,
+  },
+  modalPrimaryBtn: {
+    backgroundColor: Colors.action,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.xl,
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
+  },
+  modalPrimaryText: {
+    fontFamily: Fonts.heading,
+    color: Colors.structure,
+    fontSize: 15,
+    letterSpacing: 2,
+  },
+  modalSkipBtn: { padding: Spacing.sm },
+  modalSkipText: { color: Colors.muted, fontSize: 14, letterSpacing: 1 },
 });

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
-  ActivityIndicator, Dimensions,
+  ActivityIndicator, Dimensions, Linking,
 } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -24,6 +24,7 @@ interface ApiShift {
   scheduled_start: string;
   scheduled_end: string;
   status: string;
+  instructions_pdf_url?: string | null;
 }
 
 interface ActiveSessionResponse {
@@ -135,6 +136,7 @@ export default function HomeScreen() {
       site_name: upcomingShift.site_name,
       scheduled_start: upcomingShift.scheduled_start,
       scheduled_end: upcomingShift.scheduled_end,
+      instructions_pdf_url: upcomingShift.instructions_pdf_url ?? null,
     });
     setClockInPendingShift(upcomingShift.id);
     router.push('/clock-in/step1');
@@ -235,6 +237,15 @@ export default function HomeScreen() {
                 <Text style={styles.actionIcon}>📍</Text>
                 <Text style={styles.actionLabel}>PING</Text>
               </TouchableOpacity>
+              {!!activeShift?.instructions_pdf_url && (
+                <TouchableOpacity
+                  style={styles.actionBtn}
+                  onPress={() => Linking.openURL(activeShift.instructions_pdf_url!)}
+                >
+                  <Text style={styles.actionIcon}>📄</Text>
+                  <Text style={styles.actionLabel}>INSTRUCTIONS</Text>
+                </TouchableOpacity>
+              )}
             </View>
 
             {/* Active shift card */}

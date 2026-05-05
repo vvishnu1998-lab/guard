@@ -13,6 +13,7 @@ interface Shift {
   site_name: string;
   scheduled_start: string;
   scheduled_end: string;
+  instructions_pdf_url?: string | null;
   geofence?: Geofence;
 }
 

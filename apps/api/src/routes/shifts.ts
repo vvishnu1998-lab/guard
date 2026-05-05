@@ -106,14 +106,14 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
   let result;
   if (user!.role === 'guard') {
     result = await pool.query(
-      `SELECT s.*, si.name as site_name
+      `SELECT s.*, si.name as site_name, si.instructions_pdf_url
        FROM shifts s JOIN sites si ON s.site_id = si.id
        WHERE s.guard_id = $1 ORDER BY s.scheduled_start DESC LIMIT 50`,
       [user!.sub]
     );
   } else {
     result = await pool.query(
-      `SELECT s.*, si.name as site_name, g.name as guard_name
+      `SELECT s.*, si.name as site_name, si.instructions_pdf_url, g.name as guard_name
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
        LEFT JOIN guards g ON s.guard_id = g.id
@@ -128,7 +128,7 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
 router.get('/active-session', requireAuth('guard'), async (req, res) => {
   const result = await pool.query(
     `SELECT s.id as shift_id, s.site_id, s.scheduled_start, s.scheduled_end,
-            si.name as site_name,
+            si.name as site_name, si.instructions_pdf_url,
             ss.id as session_id, ss.clocked_in_at
      FROM shifts s
      JOIN sites si ON si.id = s.site_id
@@ -141,7 +141,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
   if (!result.rows[0]) return res.json(null);
   const r = result.rows[0];
   res.json({
-    shift:   { id: r.shift_id, site_id: r.site_id, site_name: r.site_name, scheduled_start: r.scheduled_start, scheduled_end: r.scheduled_end },
+    shift:   { id: r.shift_id, site_id: r.site_id, site_name: r.site_name, scheduled_start: r.scheduled_start, scheduled_end: r.scheduled_end, instructions_pdf_url: r.instructions_pdf_url ?? null },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
   });
 });
