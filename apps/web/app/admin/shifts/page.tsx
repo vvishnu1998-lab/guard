@@ -65,33 +65,25 @@ function buildISO(date: Date, timeStr: string): string {
   return d.toISOString();
 }
 
-/** Derive availability badge from shifts */
-function getAvailability(guardId: string, shifts: Shift[], weekStart: Date, weekEnd: Date) {
+/** Derive availability badge — today-only logic, independent of the week range picker */
+function getAvailability(guardId: string, shifts: Shift[]) {
   const now = new Date();
-  const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
-  const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+  // Date portion of today in local time
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
 
   const guardShifts = shifts.filter((s) => s.guard_id === guardId);
 
-  const activeNow = guardShifts.find(
-    (s) => s.status === 'active' ||
-      (s.status === 'scheduled' && new Date(s.scheduled_start) <= now && new Date(s.scheduled_end) >= now)
-  );
-  if (activeNow) return 'ON SHIFT';
+  // ON SHIFT — active status (clocked in, not clocked out)
+  if (guardShifts.some((s) => s.status === 'active')) return 'ON SHIFT';
 
-  const scheduledToday = guardShifts.find(
-    (s) => s.status === 'scheduled' &&
-      new Date(s.scheduled_start) >= todayStart &&
-      new Date(s.scheduled_start) <= todayEnd &&
-      new Date(s.scheduled_start) > now
-  );
-  if (scheduledToday) return 'SCHEDULED';
-
-  const thisWeek = guardShifts.filter(
-    (s) => new Date(s.scheduled_start) >= weekStart && new Date(s.scheduled_start) <= weekEnd &&
-      s.status !== 'cancelled'
-  );
-  if (thisWeek.length === 0) return 'OFF';
+  // SCHEDULED — has a scheduled shift whose start date (local) is today and not yet active
+  const hasScheduledToday = guardShifts.some((s) => {
+    if (s.status !== 'scheduled') return false;
+    const start = new Date(s.scheduled_start);
+    const startStr = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2,'0')}-${String(start.getDate()).padStart(2,'0')}`;
+    return startStr === todayStr;
+  });
+  if (hasScheduledToday) return 'SCHEDULED';
 
   return 'AVAILABLE';
 }
@@ -100,7 +92,6 @@ const AVAILABILITY_STYLES: Record<string, string> = {
   'ON SHIFT':  'bg-green-500/20 text-green-400 border border-green-500/40',
   'SCHEDULED': 'bg-blue-500/20  text-blue-400  border border-blue-500/40',
   'AVAILABLE': 'bg-[#00C8FF]/10 text-[#00C8FF] border border-[#00C8FF]/30',
-  'OFF':       'bg-gray-700/30  text-gray-500  border border-gray-600/30',
 };
 
 function getWeekBounds(referenceDate: Date) {
@@ -370,7 +361,7 @@ export default function ShiftsPage() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {activeGuards.map((guard) => {
-            const availability = getAvailability(guard.id, shifts, weekStart, weekEnd);
+            const availability = getAvailability(guard.id, shifts);
             const weekShifts = shifts.filter(
               (s) => s.guard_id === guard.id &&
                 new Date(s.scheduled_start) >= weekStart &&
