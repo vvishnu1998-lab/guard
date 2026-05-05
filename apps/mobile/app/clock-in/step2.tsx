@@ -50,12 +50,17 @@ export default function ClockInStep2() {
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
       if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
 
-      const compressed = await ImageManipulator.manipulateAsync(
-        photo.uri,
-        [{ resize: { width: 1080 } }],
-        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
-      );
-      if (!compressed?.uri) throw new Error('Photo compression failed.');
+      let compressed: { uri: string } = { uri: photo.uri };
+      try {
+        const result = await ImageManipulator.manipulateAsync(
+          photo.uri,
+          [{ resize: { width: 1080 } }],
+          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
+        );
+        if (result?.uri) compressed = result;
+      } catch {
+        // Use original photo if compression fails (e.g. Expo Go native module mismatch)
+      }
 
       // Use cached GPS first (instant), fall back to live with 3s timeout
       const loc = await Location.getLastKnownPositionAsync() ?? await Promise.race([

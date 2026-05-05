@@ -98,6 +98,21 @@ export async function getS3ObjectHead(key: string, n = 16): Promise<Buffer> {
  * Used to validate that the photo_urls in a report payload point at our
  * bucket before we GetObject them.
  */
+/** Upload a buffer directly to S3 — used for server-side validated uploads (e.g. PDFs). */
+export async function uploadBufferToS3(
+  key: string,
+  buffer: Buffer,
+  contentType: string,
+): Promise<string> {
+  await s3.putObject({
+    Bucket: BUCKET,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType,
+  }).promise();
+  return `https://${BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+}
+
 export function s3KeyFromPublicUrl(url: string): string | null {
   try {
     const u = new URL(url);

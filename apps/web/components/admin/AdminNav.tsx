@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { href: '/admin/reports',   label: 'REPORTS'        },
   { href: '/admin/analytics', label: 'ANALYTICS'      },
   { href: '/admin/clients',   label: 'CLIENT PORTALS' },
+  { href: '/admin/billing',   label: 'BILLING'        },
 ];
 
 export default function AdminNav() {

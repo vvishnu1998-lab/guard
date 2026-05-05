@@ -1,10 +1,16 @@
 'use client';
 /**
  * Admin — Sites Management (/admin/sites)
- * List sites, create new site, set geofence, toggle client portal access.
+ * List sites, create new site, set geofence, toggle client portal access, PDF instructions.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { adminGet, adminPost, adminPatch } from '../../../lib/adminApi';
+
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+function getAdminToken() {
+  if (typeof document === 'undefined') return '';
+  return document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? '';
+}
 
 interface Site {
   id:                          string;
@@ -19,6 +25,7 @@ interface Site {
   center_lat:                  number | null;
   center_lng:                  number | null;
   radius_meters:               number | null;
+  instructions_pdf_url:        string | null;
 }
 
 const EMPTY_FORM = { name: '', address: '', contract_start: '', contract_end: '' as string };
@@ -52,6 +59,7 @@ export default function SitesPage() {
   const [form,         setForm]         = useState(EMPTY_FORM);
   const [saving,       setSaving]       = useState(false);
   const [formError,    setFormError]    = useState('');
+  const [pdfFile,      setPdfFile]      = useState<File | null>(null);
 
   // geofence modal
   const [geoSite,      setGeoSite]      = useState<Site | null>(null);
@@ -60,6 +68,13 @@ export default function SitesPage() {
   const [geoError,     setGeoError]     = useState('');
 
   const [toggling,     setToggling]     = useState<string | null>(null);
+
+  // PDF modal (edit / replace)
+  const [pdfSite,      setPdfSite]      = useState<Site | null>(null);
+  const [replacePdf,   setReplacePdf]   = useState<File | null>(null);
+  const [pdfSaving,    setPdfSaving]    = useState(false);
+  const [pdfError,     setPdfError]     = useState('');
+  const pdfInputRef                     = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -71,6 +86,22 @@ export default function SitesPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  /* ── Upload PDF to a site ───────────────────────────────────────── */
+  async function uploadPdfToSite(siteId: string, file: File): Promise<void> {
+    const fd = new FormData();
+    fd.append('file', file);
+    // Do NOT set Content-Type — browser auto-sets multipart/form-data with boundary
+    const res = await fetch(`${API}/api/sites/${siteId}/instructions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getAdminToken()}` },
+      body: fd,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error((err as any).error ?? 'PDF upload failed');
+    }
+  }
+
   /* ── Create site ─────────────────────────────────────────────────── */
   async function createSite() {
     if (!form.name || !form.address || !form.contract_start) {
@@ -81,11 +112,27 @@ export default function SitesPage() {
     }
     setSaving(true); setFormError('');
     try {
-      await adminPost('/api/sites', form);
-      setShowCreate(false); setForm(EMPTY_FORM);
+      const site = await adminPost<{ id: string }>('/api/sites', form);
+      if (pdfFile) {
+        try { await uploadPdfToSite(site.id, pdfFile); }
+        catch (e: any) { setFormError(`Site created but PDF upload failed: ${e.message}`); }
+      }
+      setShowCreate(false); setForm(EMPTY_FORM); setPdfFile(null);
       await load();
     } catch (e: any) { setFormError(e.message); }
     finally { setSaving(false); }
+  }
+
+  /* ── Replace PDF on existing site ───────────────────────────────── */
+  async function savePdf() {
+    if (!replacePdf) { setPdfError('Select a PDF file first'); return; }
+    setPdfSaving(true); setPdfError('');
+    try {
+      await uploadPdfToSite(pdfSite!.id, replacePdf);
+      setPdfSite(null); setReplacePdf(null);
+      await load();
+    } catch (e: any) { setPdfError(e.message); }
+    finally { setPdfSaving(false); }
   }
 
   /* ── Set geofence ────────────────────────────────────────────────── */
@@ -161,6 +208,7 @@ export default function SitesPage() {
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">CONTRACT</th>
               <th className="text-left p-4">GEOFENCE</th>
+              <th className="text-left p-4">INSTRUCTIONS</th>
               <th className="text-left p-4">CLIENT ACCESS UNTIL</th>
               <th className="text-left p-4">DATA DELETION</th>
               <th className="text-right p-4">CLIENT PORTAL</th>
@@ -210,6 +258,22 @@ export default function SitesPage() {
                         className="text-xs text-red-400 border border-red-700 px-2 py-1 rounded hover:border-amber-400 hover:text-amber-400 transition-colors"
                       >
                         NOT SET — Configure
+                      </button>
+                    )}
+                  </td>
+                  <td className="p-4">
+                    {site.instructions_pdf_url ? (
+                      <div className="space-y-1">
+                        <a href={site.instructions_pdf_url} target="_blank" rel="noopener noreferrer"
+                           className="text-xs text-cyan-400 underline">View PDF</a>
+                        <br />
+                        <button onClick={() => { setPdfSite(site); setReplacePdf(null); setPdfError(''); }}
+                                className="text-xs text-amber-400 hover:text-amber-300 underline">Replace</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => { setPdfSite(site); setReplacePdf(null); setPdfError(''); }}
+                              className="text-xs text-gray-500 border border-[#1A3050] px-2 py-1 rounded hover:border-amber-400 hover:text-amber-400 transition-colors">
+                        + Upload
                       </button>
                     )}
                   </td>
@@ -294,6 +358,17 @@ export default function SitesPage() {
                 />
               </div>
             </div>
+            <div className="mt-4">
+              <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                SITE INSTRUCTIONS <span className="text-gray-600 text-xs normal-case">(PDF, optional)</span>
+              </label>
+              <input
+                type="file" accept="application/pdf,.pdf"
+                onChange={(e) => setPdfFile(e.target.files?.[0] ?? null)}
+                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400 file:mr-3 file:bg-amber-400 file:text-gray-900 file:border-0 file:rounded file:px-3 file:py-1 file:text-xs file:font-bold file:cursor-pointer"
+              />
+              {pdfFile && <p className="text-gray-400 text-xs mt-1">Selected: {pdfFile.name}</p>}
+            </div>
             <p className="text-gray-500 text-xs mt-3 mb-5">
               When a contract end date is set, client access runs to contract end + 90 days and data is hard-deleted at contract end + 150 days.
               <br />
@@ -303,6 +378,49 @@ export default function SitesPage() {
               <button onClick={() => setShowCreate(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={createSite} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'CREATING…' : 'CREATE SITE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── PDF Instructions Modal ───────────────────────────────────── */}
+      {pdfSite && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">SITE INSTRUCTIONS</h2>
+              <button onClick={() => setPdfSite(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            <p className="text-gray-500 text-xs mb-4">Site: <span className="text-gray-300">{pdfSite.name}</span></p>
+
+            {pdfSite.instructions_pdf_url && (
+              <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-3 mb-4">
+                <p className="text-gray-400 text-xs mb-1">Current instructions PDF:</p>
+                <a href={pdfSite.instructions_pdf_url} target="_blank" rel="noopener noreferrer"
+                   className="text-cyan-400 text-sm underline break-all">
+                  View instructions.pdf ↗
+                </a>
+              </div>
+            )}
+
+            {pdfError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{pdfError}</div>}
+
+            <div className="mb-5">
+              <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                {pdfSite.instructions_pdf_url ? 'REPLACE PDF' : 'UPLOAD PDF'} <span className="text-amber-400">*</span>
+              </label>
+              <input ref={pdfInputRef} type="file" accept="application/pdf,.pdf"
+                onChange={(e) => setReplacePdf(e.target.files?.[0] ?? null)}
+                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400 file:mr-3 file:bg-amber-400 file:text-gray-900 file:border-0 file:rounded file:px-3 file:py-1 file:text-xs file:font-bold file:cursor-pointer"
+              />
+              {replacePdf && <p className="text-gray-400 text-xs mt-1">Selected: {replacePdf.name}</p>}
+            </div>
+
+            <div className="flex gap-3">
+              <button onClick={() => setPdfSite(null)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={savePdf} disabled={pdfSaving || !replacePdf} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
+                {pdfSaving ? 'UPLOADING…' : 'UPLOAD PDF'}
               </button>
             </div>
           </div>

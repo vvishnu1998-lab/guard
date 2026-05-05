@@ -43,11 +43,17 @@ export default function PhotoPing() {
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
       if (!photo) throw new Error('No photo captured');
 
-      const compressed = await ImageManipulator.manipulateAsync(
-        photo.uri,
-        [{ resize: { width: 1080 } }],
-        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-      );
+      let compressed: { uri: string } = { uri: photo.uri };
+      try {
+        const result = await ImageManipulator.manipulateAsync(
+          photo.uri,
+          [{ resize: { width: 1080 } }],
+          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
+        );
+        if (result?.uri) compressed = result;
+      } catch {
+        // Use original photo if compression fails (e.g. Expo Go native module mismatch)
+      }
 
       await submitPing({
         shift_session_id: activeSession.id,
