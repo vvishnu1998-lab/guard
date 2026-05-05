@@ -46,13 +46,16 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
   const guardResult = await pool.query(
-    `SELECT g.id, g.company_id, g.site_id, g.password_hash, g.is_active, g.must_change_password,
+    `SELECT g.id, g.company_id, g.password_hash, g.is_active, g.must_change_password,
             c.is_active AS company_active,
-            s.is_active AS site_active
+            bool_or(s.is_active) AS any_site_active
      FROM guards g
      JOIN companies c ON c.id = g.company_id
-     LEFT JOIN sites s ON s.id = g.site_id
-     WHERE g.email = $1`,
+     LEFT JOIN guard_site_assignments gsa ON gsa.guard_id = g.id
+       AND (gsa.assigned_until IS NULL OR gsa.assigned_until >= CURRENT_DATE)
+     LEFT JOIN sites s ON s.id = gsa.site_id
+     WHERE g.email = $1
+     GROUP BY g.id, g.company_id, g.password_hash, g.is_active, g.must_change_password, c.is_active`,
     [email.toLowerCase().trim()]
   );
   const guard = guardResult.rows[0];
@@ -87,7 +90,9 @@ router.post('/guard/login', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your administrator.' });
   }
 
-  if (guard.site_active === false) {
+  // Only block if guard has active assignments and ALL of them are inactive (any_site_active = false)
+  // null means no assignments — let through
+  if (guard.any_site_active === false) {
     return res.status(403).json({ error: 'Your assigned site has been deactivated. Please contact your administrator.' });
   }
 
@@ -132,13 +137,16 @@ router.post('/guard/badge', async (req: Request, res: Response) => {
   if (!badge_number || !pin) return res.status(400).json({ error: 'badge_number and pin required' });
 
   const guardResult = await pool.query(
-    `SELECT g.id, g.company_id, g.site_id, g.password_hash, g.is_active, g.must_change_password,
+    `SELECT g.id, g.company_id, g.password_hash, g.is_active, g.must_change_password,
             c.is_active AS company_active,
-            s.is_active AS site_active
+            bool_or(s.is_active) AS any_site_active
      FROM guards g
      JOIN companies c ON c.id = g.company_id
-     LEFT JOIN sites s ON s.id = g.site_id
-     WHERE g.badge_number = $1`,
+     LEFT JOIN guard_site_assignments gsa ON gsa.guard_id = g.id
+       AND (gsa.assigned_until IS NULL OR gsa.assigned_until >= CURRENT_DATE)
+     LEFT JOIN sites s ON s.id = gsa.site_id
+     WHERE g.badge_number = $1
+     GROUP BY g.id, g.company_id, g.password_hash, g.is_active, g.must_change_password, c.is_active`,
     [badge_number.trim()]
   );
   const guard = guardResult.rows[0];
@@ -153,7 +161,9 @@ router.post('/guard/badge', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your administrator.' });
   }
 
-  if (guard.site_active === false) {
+  // Only block if guard has active assignments and ALL of them are inactive (any_site_active = false)
+  // null means no assignments — let through
+  if (guard.any_site_active === false) {
     return res.status(403).json({ error: 'Your assigned site has been deactivated. Please contact your administrator.' });
   }
 
