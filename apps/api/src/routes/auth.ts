@@ -46,8 +46,13 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
   const guardResult = await pool.query(
-    `SELECT id, company_id, password_hash, is_active, must_change_password
-     FROM guards WHERE email = $1`,
+    `SELECT g.id, g.company_id, g.site_id, g.password_hash, g.is_active, g.must_change_password,
+            c.is_active AS company_active,
+            s.is_active AS site_active
+     FROM guards g
+     JOIN companies c ON c.id = g.company_id
+     LEFT JOIN sites s ON s.id = g.site_id
+     WHERE g.email = $1`,
     [email.toLowerCase().trim()]
   );
   const guard = guardResult.rows[0];
@@ -76,6 +81,14 @@ router.post('/guard/login', async (req: Request, res: Response) => {
 
   if (!guard.is_active) {
     return res.status(403).json({ error: 'Account deactivated. Contact your supervisor.' });
+  }
+
+  if (!guard.company_active) {
+    return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your administrator.' });
+  }
+
+  if (guard.site_active === false) {
+    return res.status(403).json({ error: 'Your assigned site has been deactivated. Please contact your administrator.' });
   }
 
   // Check lockout
@@ -119,7 +132,13 @@ router.post('/guard/badge', async (req: Request, res: Response) => {
   if (!badge_number || !pin) return res.status(400).json({ error: 'badge_number and pin required' });
 
   const guardResult = await pool.query(
-    'SELECT id, company_id, password_hash, is_active, must_change_password FROM guards WHERE badge_number = $1',
+    `SELECT g.id, g.company_id, g.site_id, g.password_hash, g.is_active, g.must_change_password,
+            c.is_active AS company_active,
+            s.is_active AS site_active
+     FROM guards g
+     JOIN companies c ON c.id = g.company_id
+     LEFT JOIN sites s ON s.id = g.site_id
+     WHERE g.badge_number = $1`,
     [badge_number.trim()]
   );
   const guard = guardResult.rows[0];
@@ -128,6 +147,14 @@ router.post('/guard/badge', async (req: Request, res: Response) => {
 
   if (!guard || !valid || !guard.is_active) {
     return res.status(401).json({ error: 'Invalid badge number or PIN' });
+  }
+
+  if (!guard.company_active) {
+    return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your administrator.' });
+  }
+
+  if (guard.site_active === false) {
+    return res.status(403).json({ error: 'Your assigned site has been deactivated. Please contact your administrator.' });
   }
 
   if (fcm_token) {
@@ -193,7 +220,11 @@ router.post('/admin/login', async (req: Request, res: Response) => {
   if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
   const result = await pool.query(
-    'SELECT id, company_id, password_hash, is_active, is_primary FROM company_admins WHERE email = $1',
+    `SELECT ca.id, ca.company_id, ca.password_hash, ca.is_active, ca.is_primary,
+            c.is_active AS company_active
+     FROM company_admins ca
+     JOIN companies c ON c.id = ca.company_id
+     WHERE ca.email = $1`,
     [email.toLowerCase().trim()]
   );
   const admin = result.rows[0];
@@ -203,6 +234,10 @@ router.post('/admin/login', async (req: Request, res: Response) => {
   if (!admin || !valid || !admin.is_active) {
     if (admin) await logEvent(admin.id, 'company_admin', 'login_failed', req);
     return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  if (!admin.company_active) {
+    return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your platform administrator.' });
   }
 
   const tokens = signTokens({
@@ -222,7 +257,13 @@ router.post('/client/login', async (req: Request, res: Response) => {
   if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
   const result = await pool.query(
-    'SELECT c.id, c.site_id, c.password_hash, c.is_active FROM clients c WHERE c.email = $1',
+    `SELECT cl.id, cl.site_id, cl.password_hash, cl.is_active,
+            co.is_active AS company_active,
+            s.is_active AS site_active
+     FROM clients cl
+     JOIN sites s ON s.id = cl.site_id
+     JOIN companies co ON co.id = s.company_id
+     WHERE cl.email = $1`,
     [email.toLowerCase().trim()]
   );
   const client = result.rows[0];
@@ -231,6 +272,14 @@ router.post('/client/login', async (req: Request, res: Response) => {
 
   if (!client || !valid || !client.is_active) {
     return res.status(401).json({ error: 'Invalid credentials or portal access disabled' });
+  }
+
+  if (!client.company_active) {
+    return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your administrator.' });
+  }
+
+  if (client.site_active === false) {
+    return res.status(403).json({ error: 'Your site access has been deactivated. Please contact your administrator.' });
   }
 
   // Check data retention — block login if site data window has expired
@@ -399,7 +448,10 @@ router.post('/guard/request-unlock', async (req: Request, res: Response) => {
   if (!email) return res.status(400).json({ error: 'email required' });
 
   const guardResult = await pool.query(
-    'SELECT id, phone_number FROM guards WHERE email = $1 AND is_active = true',
+    `SELECT g.id, g.phone_number, c.is_active AS company_active
+     FROM guards g
+     JOIN companies c ON c.id = g.company_id
+     WHERE g.email = $1 AND g.is_active = true AND c.is_active = true`,
     [email.toLowerCase().trim()]
   );
   const guard = guardResult.rows[0];
@@ -448,7 +500,9 @@ router.post('/guard/verify-unlock', async (req: Request, res: Response) => {
   if (!email || !otp) return res.status(400).json({ error: 'email and otp required' });
 
   const guardResult = await pool.query(
-    'SELECT g.id, g.company_id FROM guards g WHERE g.email = $1 AND g.is_active = true',
+    `SELECT g.id, g.company_id FROM guards g
+     JOIN companies c ON c.id = g.company_id
+     WHERE g.email = $1 AND g.is_active = true AND c.is_active = true`,
     [email.toLowerCase().trim()]
   );
   const guard = guardResult.rows[0];
@@ -501,10 +555,21 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
   // Validate email exists for the given portal
   let emailExists = false;
   if (portal === 'admin') {
-    const r = await pool.query('SELECT id FROM company_admins WHERE email = $1 AND is_active = true', [normalizedEmail]);
+    const r = await pool.query(
+      `SELECT ca.id FROM company_admins ca
+       JOIN companies c ON c.id = ca.company_id
+       WHERE ca.email = $1 AND ca.is_active = true AND c.is_active = true`,
+      [normalizedEmail]
+    );
     emailExists = r.rows.length > 0;
   } else if (portal === 'client') {
-    const r = await pool.query('SELECT id FROM clients WHERE email = $1 AND is_active = true', [normalizedEmail]);
+    const r = await pool.query(
+      `SELECT cl.id FROM clients cl
+       JOIN sites s ON s.id = cl.site_id
+       JOIN companies co ON co.id = s.company_id
+       WHERE cl.email = $1 AND cl.is_active = true AND co.is_active = true`,
+      [normalizedEmail]
+    );
     emailExists = r.rows.length > 0;
   } else if (portal === 'vishnu') {
     emailExists = normalizedEmail === process.env.VISHNU_EMAIL?.toLowerCase();
