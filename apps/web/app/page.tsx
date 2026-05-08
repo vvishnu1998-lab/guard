@@ -49,8 +49,8 @@ const features = [
         <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
       </svg>
     ),
-    title: 'Real-Time Guard Monitoring',
-    body: 'Live location tracking with GPS pings every 30 minutes. Know exactly where every guard is, at every moment.',
+    title: 'Live Patrol Visibility',
+    body: 'Track every officer\'s patrol in real time. GPS check-ins every 30 minutes confirm guards are on post and moving — no radio calls required.',
   },
   {
     icon: (
@@ -58,8 +58,8 @@ const features = [
         <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
       </svg>
     ),
-    title: 'Geofence Compliance',
-    body: 'Set boundaries per site. Get instant alerts when guards leave the designated zone — before incidents escalate.',
+    title: 'Post Order Enforcement',
+    body: 'Define patrol boundaries for every post. Officers who leave their designated zone trigger an instant alert — before a client ever notices.',
   },
   {
     icon: (
@@ -67,8 +67,8 @@ const features = [
         <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
       </svg>
     ),
-    title: 'Automated Reporting',
-    body: 'Daily shift reports delivered every morning. Incident alerts sent the moment they happen — no manual write-ups.',
+    title: 'Digital Duty Logs',
+    body: 'Every shift generates a complete duty log — clock-in time, patrol checkpoints, incidents, and handoff notes. Delivered to your inbox every morning.',
   },
   {
     icon: (
@@ -76,17 +76,9 @@ const features = [
         <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
       </svg>
     ),
-    title: 'Missed Shift Alerts',
-    body: 'If a guard doesn\'t clock in within 15 minutes of shift start, you\'re notified immediately — automatically.',
+    title: 'No-Show Incident Response',
+    body: 'If an officer fails to report to post within 15 minutes of shift start, command is notified automatically. No gap in coverage goes undetected.',
   },
-];
-
-// ── Pricing tiers ──────────────────────────────────────────────────────────────
-const tiers = [
-  { name: 'Starter', sites: '1–4 sites', price: '$149', featured: false },
-  { name: 'Growth', sites: '5–14 sites', price: '$119', featured: true },
-  { name: 'Enterprise', sites: '15–24 sites', price: '$99', featured: false },
-  { name: 'Scale', sites: '25+ sites', price: '$69', featured: false },
 ];
 
 // ── Main page ─────────────────────────────────────────────────────────────────
@@ -187,73 +179,6 @@ export default function LandingPage() {
               </FadeSection>
             ))}
           </div>
-        </div>
-      </section>
-
-      {/* ── PRICING ─────────────────────────────────────────────────────────── */}
-      <section id="pricing" className="relative z-10 py-28 px-6 border-t border-white/[0.05]">
-        <div className="max-w-5xl mx-auto">
-          <FadeSection>
-            <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold text-center mb-4">PRICING</p>
-            <h2 className="text-center text-4xl md:text-5xl font-black text-white mb-3"
-              style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.04em' }}>
-              Transparent Pricing. No Surprises.
-            </h2>
-            <p className="text-center text-white/40 mb-16 text-base" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
-              Pay per site, per month. Scale up or down anytime.
-            </p>
-          </FadeSection>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-            {tiers.map((tier, i) => (
-              <FadeSection key={i}>
-                <div className={`relative rounded-xl border p-6 flex flex-col gap-4 h-full transition-all duration-300 ${
-                  tier.featured
-                    ? 'border-[#C9A84C]/60 bg-[#C9A84C]/[0.06]'
-                    : 'border-white/[0.07] bg-white/[0.03] hover:border-white/[0.15]'
-                }`}>
-                  {tier.featured && (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                      <span className="bg-[#C9A84C] text-[#0B1526] text-[10px] font-black px-3 py-1 rounded-full tracking-widest">
-                        MOST POPULAR
-                      </span>
-                    </div>
-                  )}
-                  <div>
-                    <p className={`text-xs font-bold tracking-[0.2em] mb-1 ${tier.featured ? 'text-[#C9A84C]' : 'text-white/40'}`}>
-                      {tier.name.toUpperCase()}
-                    </p>
-                    <p className="text-white/50 text-sm" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>{tier.sites}</p>
-                  </div>
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-4xl font-black text-white" style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.02em' }}>
-                      {tier.price}
-                    </span>
-                    <span className="text-white/30 text-xs">/site/mo</span>
-                  </div>
-                  <ul className="flex flex-col gap-2 mt-2 flex-1">
-                    {['Unlimited guards', 'Automated reporting', 'Geofence monitoring', 'Email alerts'].map((feat) => (
-                      <li key={feat} className="flex items-center gap-2 text-white/50 text-xs" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
-                        <span className="text-[#C9A84C]">✓</span> {feat}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </FadeSection>
-            ))}
-          </div>
-
-          <FadeSection className="text-center mt-12">
-            <p className="text-white/30 text-sm mb-8" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
-              All plans include unlimited guards, automated reporting, geofence monitoring, and email alerts.
-            </p>
-            <a
-              href="mailto:vvishnu1998@gmail.com"
-              className="inline-block bg-[#C9A84C] hover:bg-[#D4B560] text-[#0B1526] font-black px-10 py-4 rounded-lg tracking-[0.15em] text-sm transition-all shadow-lg shadow-[#C9A84C]/20 hover:shadow-[#C9A84C]/30"
-            >
-              GET STARTED
-            </a>
-          </FadeSection>
         </div>
       </section>
 
@@ -410,9 +335,6 @@ function NavBar() {
         <div className="flex items-center gap-6">
           <a href="#features" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             FEATURES
-          </a>
-          <a href="#pricing" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
-            PRICING
           </a>
           <a href="#contact" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             CONTACT

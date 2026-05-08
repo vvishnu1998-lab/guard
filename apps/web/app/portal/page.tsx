@@ -2,6 +2,8 @@
 import Image from 'next/image';
 import Link from 'next/link';
 
+export const dynamic = 'force-static';
+
 export default function PortalSelect() {
   return (
     <main className="min-h-screen bg-[#060E1A] flex flex-col items-center justify-center gap-10 p-8">
