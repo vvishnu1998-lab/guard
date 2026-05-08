@@ -94,7 +94,7 @@ export async function sendIncidentAlert(
         <p style="font-size:14px;color:#333;line-height:1.6">${report.description}</p>
         <a class="btn" href="${PORTAL}">View in Client Portal</a>
       </div>
-      <div class="footer">V-Wing Security Management Platform — Confidential</div>
+      <div class="footer">NetraOps — Confidential</div>
     </div>`,
   });
 }
@@ -191,7 +191,7 @@ export async function sendDailyShiftReport(shiftId: string) {
         : '<p style="color:#aaa;font-size:13px;margin-top:20px">No reports filed during this shift.</p>'}
       <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
     </div>
-    <div class="footer">V-Wing Security Management Platform — Confidential</div>
+    <div class="footer">NetraOps — Confidential</div>
   </div>`;
 
   const recipients = [sh.client_email, sh.admin_email].filter(Boolean) as string[];
@@ -265,7 +265,7 @@ export async function sendRetentionNotice(
       </p>
       <a class="btn" href="${PORTAL}/download">Download Reports Now</a>
     </div>
-    <div class="footer">V-Wing Security Management Platform — Confidential</div>
+    <div class="footer">NetraOps — Confidential</div>
   </div>`;
 
   const recipients = [client_email, admin_email].filter(Boolean) as string[];
@@ -320,7 +320,7 @@ export async function sendMissedShiftAlert(shiftId: string) {
       </p>
       <a class="btn" href="${PORTAL}">View Shift in Portal</a>
     </div>
-    <div class="footer">V-Wing Security Management Platform — Automated Alert</div>
+    <div class="footer">NetraOps — Automated Alert</div>
   </div>`;
 
   const recipients = [process.env.VISHNU_EMAIL, client_email, admin_email].filter(Boolean) as string[];
@@ -362,7 +362,7 @@ export async function sendPasswordResetEmail(
   await sgMail.send({
     to: email,
     from: FROM,
-    subject: `Reset your V-Wing ${label} password`,
+    subject: `Reset your Netra ${label} password`,
     html: `<style>${BASE_STYLE}</style>
     <div class="card">
       <div class="hdr">
@@ -372,7 +372,7 @@ export async function sendPasswordResetEmail(
       </div>
       <div class="body">
         <p style="font-size:15px;color:#333;margin-bottom:20px">
-          We received a request to reset the password for your V-Wing <strong>${label}</strong> account.
+          We received a request to reset the password for your Netra <strong>${label}</strong> account.
         </p>
         <p style="color:#555;font-size:13px;margin-bottom:20px">
           Click the button below to set a new password. This link expires in <strong>1 hour</strong>.
@@ -387,7 +387,7 @@ export async function sendPasswordResetEmail(
           Or copy this link: ${resetUrl}
         </p>
       </div>
-      <div class="footer">V-Wing Security Management Platform — Do not reply to this email</div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
     </div>`,
   });
 }
@@ -432,7 +432,7 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
           This warning fires once, 10 days before the scheduled deletion date.
         </p>
       </div>
-      <div class="footer">V-Wing Security Management Platform — Internal Alert</div>
+      <div class="footer">NetraOps — Internal Alert</div>
     </div>`,
   });
 }

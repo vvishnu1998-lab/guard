@@ -29,7 +29,7 @@ export default function ClientNav() {
         <div className="flex items-center gap-2.5">
           <Image
             src="/vwing_logo.png"
-            alt="V-Wing"
+            alt="Netra"
             width={28}
             height={28}
             className="object-contain"
@@ -85,7 +85,7 @@ export default function ClientNav() {
       <div className="md:hidden fixed top-0 left-0 right-0 z-40 h-14 bg-[#070F1E] border-b border-white/[0.06] flex items-center px-4 gap-3">
         <button onClick={() => setOpen(true)} className="text-white/60 hover:text-white text-2xl w-10 h-10 flex items-center justify-center">☰</button>
         <div className="flex items-center gap-2">
-          <Image src="/vwing_logo.png" alt="V-Wing" width={22} height={22} className="object-contain"
+          <Image src="/vwing_logo.png" alt="Netra" width={22} height={22} className="object-contain"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
           <span className="text-white font-black tracking-[0.2em] text-sm">V-WING</span>
           <span className="text-blue-400 text-[9px] tracking-[0.2em] font-medium">CLIENT</span>

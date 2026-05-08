@@ -1,0 +1,125 @@
+# V-Wing iOS Smoke Test (Maestro)
+#
+# Validates the post-Week1 build on iPhone 17 / iOS 26.4 sim end-to-end:
+#   (login if needed) → tabs sweep → ADD REPORT → ACTIVITY → AI Enhance → SUBMIT
+#
+# Bundle ID is com.vishnu.vwing (NOT com.vishnu.guardapp — that is the
+# Android package).  Test creds are travisscott26@proton.me / Travis@26.
+# A live shift session must exist for travisscott26 in prod DB; without it
+# the home tab shows the upcoming-shift card (no ADD REPORT button).
+#
+# Runs against prod Railway API.  Photos are skipped (iOS-sim camera
+# is mocked and activity reports do not require photos).
+#
+# NOTE — accessibility: the RN code has zero `testID` / `accessibilityLabel`
+# props (verified via grep across apps/mobile/**/*.tsx).  This flow targets
+# elements purely by visible text, which is brittle (e.g. duplicate labels
+# in nested TextInput placeholders).  Adding testIDs is a separate task.
+#
+# NOTE — clearState: omitted intentionally.  With Metro bundler attached,
+# `clearState: true` does not always reset the JS-side auth store, leading
+# to flaky behaviour where login fails because we are already logged in.
+# Instead the flow handles both states with `runFlow when:` conditionals.
+
+appId: com.vishnu.vwing
+---
+
+# 1. Cold-launch (preserve state) and grant permissions
+- launchApp:
+    permissions:
+      location: inuse
+      notifications: allow
+      camera: allow
+
+# 2. If we landed on login, sign in.  Otherwise skip.
+- runFlow:
+    when:
+      visible: "SIGN IN"
+    commands:
+      - takeScreenshot: 01-login
+
+      - tapOn: "Email address"
+      - inputText: "travisscott26@proton.me"
+
+      - tapOn: "Password"
+      - inputText: "Travis@26"
+
+      - takeScreenshot: 02-login-filled
+
+      - tapOn: "SIGN IN"
+
+# 3. Home tab — wait for the on-shift variant to render.
+- extendedWaitUntil:
+    visible: "ADD REPORT"
+    timeout: 30000
+- assertVisible: "HOME"
+- assertVisible: "SCHEDULE"
+- assertVisible: "ALERTS"
+- takeScreenshot: 03-home
+
+# 4. Tab sweep — SCHEDULE
+- tapOn: "SCHEDULE"
+- takeScreenshot: 04-schedule
+
+# 5. Tab sweep — ALERTS
+- tapOn: "ALERTS"
+- takeScreenshot: 05-alerts
+
+# 6. Back to HOME, then enter the report flow.
+- tapOn: "HOME"
+- extendedWaitUntil:
+    visible: "ADD REPORT"
+    timeout: 10000
+- takeScreenshot: 06-home-on-shift
+
+- tapOn: "ADD REPORT"
+
+# 7. Type selector — pick ACTIVITY.
+- assertVisible: "SELECT TYPE"
+- assertVisible: "ACTIVITY REPORT"
+- assertVisible: "INCIDENT REPORT"
+- assertVisible: "MAINTENANCE REPORT"
+- takeScreenshot: 07-report-types
+
+- tapOn: "ACTIVITY REPORT"
+
+# 8. Activity form — type description, run AI Enhance, accept, submit.
+- extendedWaitUntil:
+    visible: "DESCRIPTION"
+    timeout: 10000
+- takeScreenshot: 08-activity-form
+
+- tapOn:
+    text: "Describe your patrol observations.*"
+- inputText: "Routine patrol completed all quiet, checked all entry points, no incidents observed during the shift period"
+
+- takeScreenshot: 09-activity-typed
+
+# AI Enhance becomes visible when description >= 10 chars.
+- extendedWaitUntil:
+    visible: "Enhance with AI"
+    timeout: 5000
+- tapOn: "Enhance with AI"
+
+# Wait for the enhanced result panel.
+- extendedWaitUntil:
+    visible: "AI ENHANCED"
+    timeout: 30000
+- assertVisible: "ACCEPT"
+- assertVisible: "REVERT"
+- takeScreenshot: 10-ai-enhanced
+
+- tapOn: "ACCEPT"
+
+# 9. Submit (no photos — sim camera is mocked, activity allows zero photos).
+- assertVisible: "SUBMIT REPORT"
+- takeScreenshot: 11-ready-to-submit
+
+- tapOn: "SUBMIT REPORT"
+
+# 10. Successful submit lands on /(tabs)/reports.  Take a final screenshot
+#     and assert no Alert popup appeared (Alert.alert title would be
+#     "Submit Failed" or "Required").
+- assertNotVisible: "Submit Failed"
+- assertNotVisible: "Required"
+- takeScreenshot: 12-submitted

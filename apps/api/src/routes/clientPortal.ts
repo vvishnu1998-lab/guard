@@ -164,7 +164,7 @@ function drawFooter(doc: InstanceType<typeof PDFDocument>, siteName: string, per
   doc.rect(0, PAGE_H - 30, PAGE_W, 30).fill('#F1F5F9');
   doc.moveTo(ML, PAGE_H - 30).lineTo(MR, PAGE_H - 30).strokeColor(GRAY2).lineWidth(0.5).stroke();
   doc.fontSize(7).fillColor(MUTED).font('Helvetica')
-     .text(`${siteName}  |  ${period}  |  Confidential — V-Wing Security Management Platform`,
+     .text(`${siteName}  |  ${period}  |  Confidential — NetraOps`,
            ML, PAGE_H - 20, { width: CW, align: 'center' });
 }
 

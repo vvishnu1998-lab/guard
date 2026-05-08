@@ -1,5 +1,5 @@
 export const metadata = {
-  title: 'Privacy Policy — V-Wing Security Management',
+  title: 'Privacy Policy — Netra Security Management',
 };
 
 export default function PrivacyPolicy() {
@@ -19,7 +19,7 @@ export default function PrivacyPolicy() {
         </div>
 
         <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>
-          V-Wing Security Management ("V-Wing", "we", "our") operates the V-Wing mobile application and web portals. This Privacy Policy explains what information we collect, how we use it, and your rights regarding that information.
+          Netra ("Netra", "we", "our") operates the Netra mobile application and web portals. This Privacy Policy explains what information we collect, how we use it, and your rights regarding that information.
         </p>
 
         <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0b1526', margin: '36px 0 10px', paddingBottom: 6, borderBottom: '2px solid #e2e8f0' }}>1. Information We Collect</h2>
@@ -41,15 +41,15 @@ export default function PrivacyPolicy() {
         </ul>
 
         <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0b1526', margin: '36px 0 10px', paddingBottom: 6, borderBottom: '2px solid #e2e8f0' }}>3. Camera Permission</h2>
-        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>V-Wing requests camera access for two purposes:</p>
+        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>Netra requests camera access for two purposes:</p>
         <ul style={{ margin: '8px 0 12px 20px' }}>
           <li style={{ fontSize: '0.95rem', color: '#334155', marginBottom: 6 }}><strong>Clock-in selfie:</strong> A photo is captured at the start of each shift to verify the correct guard is on duty. This photo is stored securely and visible only to your company administrator.</li>
           <li style={{ fontSize: '0.95rem', color: '#334155', marginBottom: 6 }}><strong>Report photos:</strong> Guards may attach photos to incident and maintenance reports. These photos are stored in secure cloud storage (AWS S3) and accessible only to authorized personnel.</li>
         </ul>
-        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>Camera access is only requested when actively clocking in or submitting a report. V-Wing does not access the camera in the background.</p>
+        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>Camera access is only requested when actively clocking in or submitting a report. Netra does not access the camera in the background.</p>
 
         <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0b1526', margin: '36px 0 10px', paddingBottom: 6, borderBottom: '2px solid #e2e8f0' }}>4. Location Permission</h2>
-        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>V-Wing requests location access to:</p>
+        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>Netra requests location access to:</p>
         <ul style={{ margin: '8px 0 12px 20px' }}>
           <li style={{ fontSize: '0.95rem', color: '#334155', marginBottom: 6 }}>Verify you are within the designated site boundary when clocking in.</li>
           <li style={{ fontSize: '0.95rem', color: '#334155', marginBottom: 6 }}>Send periodic GPS pings during active shifts for live guard tracking visible to your security manager.</li>
@@ -80,7 +80,7 @@ export default function PrivacyPolicy() {
         <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>Depending on your jurisdiction, you may have rights to access, correct, or delete your personal data. To exercise these rights, contact us at <a href="mailto:vvishnu1998@gmail.com" style={{ color: '#2563eb' }}>vvishnu1998@gmail.com</a>.</p>
 
         <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0b1526', margin: '36px 0 10px', paddingBottom: 6, borderBottom: '2px solid #e2e8f0' }}>9. Children&apos;s Privacy</h2>
-        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>V-Wing is designed for use by employed security professionals. We do not knowingly collect data from individuals under 18 years of age.</p>
+        <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>Netra is designed for use by employed security professionals. We do not knowingly collect data from individuals under 18 years of age.</p>
 
         <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0b1526', margin: '36px 0 10px', paddingBottom: 6, borderBottom: '2px solid #e2e8f0' }}>10. Changes to This Policy</h2>
         <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>We may update this policy as the app evolves. The effective date at the top of this page will reflect the most recent revision. Continued use of the app after changes constitutes acceptance.</p>
@@ -88,13 +88,13 @@ export default function PrivacyPolicy() {
         <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0b1526', margin: '36px 0 10px', paddingBottom: 6, borderBottom: '2px solid #e2e8f0' }}>11. Contact</h2>
         <p style={{ marginBottom: 12, fontSize: '0.95rem', color: '#334155' }}>
           For privacy questions or data requests, contact:<br />
-          <strong>V-Wing Security Management</strong><br />
+          <strong>Netra</strong><br />
           <a href="mailto:vvishnu1998@gmail.com" style={{ color: '#2563eb' }}>vvishnu1998@gmail.com</a>
         </p>
       </main>
 
       <footer style={{ textAlign: 'center', padding: 32, fontSize: '0.8rem', color: '#94a3b8', borderTop: '1px solid #e2e8f0' }}>
-        © 2026 V-Wing Security Management. All rights reserved.
+        © 2026 Netra. All rights reserved.
       </footer>
     </div>
   );

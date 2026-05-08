@@ -117,7 +117,7 @@ export default function DrawerOverlay() {
             <Text style={styles.avatarText}>{initials}</Text>
           </View>
           <Text style={styles.guardName}>GUARD</Text>
-          <Text style={styles.companyName}>V-Wing Security</Text>
+          <Text style={styles.companyName}>Netra</Text>
         </View>
 
         {/* Divider */}

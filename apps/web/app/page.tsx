@@ -9,7 +9,7 @@ export default function PortalSelect() {
       <div className="flex flex-col items-center gap-4">
         <Image
           src="/vwing_logo.png"
-          alt="V-Wing"
+          alt="Netra"
           width={56}
           height={56}
           className="object-contain"

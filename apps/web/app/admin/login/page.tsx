@@ -82,7 +82,7 @@ export default function AdminLoginPage() {
         <div className="flex items-center gap-3">
           <Image
             src="/vwing_logo.png"
-            alt="V-Wing"
+            alt="Netra"
             width={36}
             height={36}
             className="object-contain"
@@ -111,7 +111,7 @@ export default function AdminLoginPage() {
           <div className="flex items-center gap-3 mb-12 lg:hidden">
             <Image
               src="/vwing_logo.png"
-              alt="V-Wing"
+              alt="Netra"
               width={32}
               height={32}
               className="object-contain"
@@ -235,7 +235,7 @@ export default function AdminLoginPage() {
           )}
 
           <p className="text-white/60 text-[11px] text-center mt-10 tracking-wide">
-            V-Wing Security Management Platform
+            NetraOps
           </p>
         </div>
       </div>

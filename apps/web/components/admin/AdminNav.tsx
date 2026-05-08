@@ -39,7 +39,7 @@ export default function AdminNav() {
         <div className="flex items-center gap-2.5">
           <Image
             src="/vwing_logo.png"
-            alt="V-Wing"
+            alt="Netra"
             width={28}
             height={28}
             className="object-contain"
@@ -99,7 +99,7 @@ export default function AdminNav() {
         <div className="flex items-center gap-2">
           <Image
             src="/vwing_logo.png"
-            alt="V-Wing"
+            alt="Netra"
             width={22}
             height={22}
             className="object-contain"

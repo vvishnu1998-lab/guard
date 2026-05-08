@@ -10,8 +10,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: 'V-Wing — Security Management',
-  description: 'V-Wing security guard management platform',
+  title: 'Netra — Security Management',
+  description: 'Netra security guard management platform',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

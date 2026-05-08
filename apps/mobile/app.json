@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "V-Wing",
-    "slug": "guard",
+    "name": "Netra",
+    "slug": "netra",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -13,20 +13,21 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.vishnu.vwing",
+      "bundleIdentifier": "com.netraops.guard",
       "buildNumber": "1",
       "config": {
         "googleMapsApiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
       },
       "infoPlist": {
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "V-Wing requires your location to verify you are on-site during shifts.",
-        "NSLocationAlwaysUsageDescription": "V-Wing monitors your location in the background to ensure geofence compliance during your shift.",
-        "NSCameraUsageDescription": "V-Wing uses the camera for clock-in verification and shift reports.",
-        "NSFaceIDUsageDescription": "Use Face ID to quickly and securely sign in."
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Netra requires your location to verify you are on-site during shifts.",
+        "NSLocationAlwaysUsageDescription": "Netra monitors your location in the background to ensure geofence compliance during your shift.",
+        "NSCameraUsageDescription": "Netra uses the camera for clock-in verification and shift reports.",
+        "NSFaceIDUsageDescription": "Use Face ID to quickly and securely sign in.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
-      "package": "com.vishnu.guardapp",
+      "package": "com.netraops.guard",
       "versionCode": 7,
       "compileSdkVersion": 35,
       "targetSdkVersion": 35,
@@ -59,13 +60,13 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "V-Wing monitors your location during shifts for geofence compliance."
+          "locationAlwaysAndWhenInUsePermission": "Netra monitors your location during shifts for geofence compliance."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "V-Wing uses the camera for clock-in verification and reports."
+          "cameraPermission": "Netra uses the camera for clock-in verification and reports."
         }
       ]
     ],
@@ -78,7 +79,7 @@
       "bundler": "metro",
       "output": "single"
     },
-    "scheme": "v-wing",
+    "scheme": "netra",
     "extra": {
       "eas": {
         "projectId": "5fd28125-2461-4165-b9df-7f34ced8b194"

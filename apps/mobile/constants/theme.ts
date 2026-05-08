@@ -1,12 +1,12 @@
 /**
- * V-Wing design language — deep navy + cyan accent
+ * Netra design language — deep navy + cyan accent
  */
 export const Colors = {
   bg: '#070D1A',            // deep navy background
   surface: '#0F1929',       // card surface
   surface2: '#172035',      // elevated cards
   border: '#1E3A5F',        // subtle borders
-  action: '#00C8FF',        // V-Wing cyan — primary accent
+  action: '#00C8FF',        // Netra cyan — primary accent
   success: '#00E5A0',       // green confirmations
   danger: '#EF4444',        // red — incidents, violations, clock-out
   warning: '#F59E0B',       // amber — GPS markers, warnings

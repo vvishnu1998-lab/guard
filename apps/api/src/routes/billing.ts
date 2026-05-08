@@ -110,7 +110,7 @@ router.get('/hours-export', requireAuth('company_admin', 'vishnu'), async (req, 
 
   const sd = start_date ?? 'all';
   const ed = end_date   ?? 'all';
-  const fileName = `vwing-hours-${sd}-to-${ed}.xlsx`;
+  const fileName = `netra-hours-${sd}-to-${ed}.xlsx`;
 
   const wb = buildWorkbook(rows, fileName);
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -153,7 +153,7 @@ router.post('/hours-export/schedule', requireAuth('company_admin', 'vishnu'), as
 
   const rows = await fetchHoursData(companyId, { start_date: monthStart, end_date: monthEnd });
 
-  const fileName = `vwing-hours-${monthStart}-to-${monthEnd}.xlsx`;
+  const fileName = `netra-hours-${monthStart}-to-${monthEnd}.xlsx`;
   const wb = buildWorkbook(rows, fileName);
   const buf = Buffer.from(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }));
 

@@ -82,7 +82,7 @@ export default function VishnuLoginPage() {
         <div className="flex flex-col items-center mb-14">
           <Image
             src="/vwing_logo.png"
-            alt="V-Wing"
+            alt="Netra"
             width={48}
             height={48}
             className="object-contain mb-4"
@@ -120,7 +120,7 @@ export default function VishnuLoginPage() {
                     value={resetEmail}
                     onChange={(e) => setResetEmail(e.target.value)}
                     className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-4 py-3.5 text-white text-sm placeholder-white/15 focus:border-white/30 focus:ring-1 focus:ring-white/20 focus:bg-white/[0.06] focus:outline-none transition-all"
-                    placeholder="admin@vwing.io"
+                    placeholder="admin@netraops.com"
                   />
                 </div>
                 <button
@@ -160,7 +160,7 @@ export default function VishnuLoginPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-4 py-3.5 text-white text-sm placeholder-white/15 focus:border-white/30 focus:ring-1 focus:ring-white/20 focus:bg-white/[0.06] focus:outline-none transition-all"
-                  placeholder="admin@vwing.io"
+                  placeholder="admin@netraops.com"
                 />
               </div>
               <div>

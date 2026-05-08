@@ -66,7 +66,7 @@ function ResetPasswordForm() {
         <div className="flex items-center gap-3 mb-12">
           <Image
             src="/vwing_logo.png"
-            alt="V-Wing"
+            alt="Netra"
             width={32}
             height={32}
             className="object-contain"
