@@ -16,7 +16,7 @@ export default function PortalSelect() {
           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
         />
         <div className="text-center">
-          <h1 className="text-white font-black tracking-[0.25em] text-3xl">V-WING</h1>
+          <h1 className="text-white font-black tracking-[0.25em] text-3xl">NETRA</h1>
           <p className="text-white/25 text-[10px] tracking-[0.35em] mt-2 font-semibold">SECURITY MANAGEMENT</p>
         </div>
       </div>
@@ -46,7 +46,7 @@ export default function PortalSelect() {
         </Link>
       </div>
 
-      <p className="text-[#4A5568] text-[10px] tracking-widest mt-4">© V-WING SECURITY MANAGEMENT</p>
+      <p className="text-[#4A5568] text-[10px] tracking-widest mt-4">© NETRAOPS</p>
     </main>
   );
 }

@@ -88,7 +88,7 @@ export default function ClientLoginPage() {
             className="object-contain"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
-          <span className="text-white font-black tracking-[0.2em] text-lg">V-WING</span>
+          <span className="text-white font-black tracking-[0.2em] text-lg">NETRA</span>
         </div>
         <div>
           <p className="text-white/10 text-[11px] tracking-[0.3em] font-semibold mb-8">CLIENT PORTAL</p>
@@ -101,7 +101,7 @@ export default function ClientLoginPage() {
             View live reports, guard schedules, and download shift records — read-only access to everything that matters.
           </p>
         </div>
-        <p className="text-white/60 text-xs tracking-widest">© V-WING SECURITY MANAGEMENT</p>
+        <p className="text-white/60 text-xs tracking-widest">© NETRAOPS</p>
       </div>
 
       {/* Right panel — form */}
@@ -117,7 +117,7 @@ export default function ClientLoginPage() {
               className="object-contain"
               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
             />
-            <span className="text-white font-black tracking-[0.2em] text-lg">V-WING</span>
+            <span className="text-white font-black tracking-[0.2em] text-lg">NETRA</span>
           </div>
 
           {showForgot ? (

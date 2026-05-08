@@ -72,7 +72,7 @@ function ResetPasswordForm() {
             className="object-contain"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
-          <span className="text-white font-black tracking-[0.2em] text-lg">V-WING</span>
+          <span className="text-white font-black tracking-[0.2em] text-lg">NETRA</span>
         </div>
 
         <h1 className="text-white font-black text-3xl tracking-tight mb-1">Set New Password</h1>

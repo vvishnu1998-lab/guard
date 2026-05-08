@@ -88,7 +88,7 @@ export default function VishnuLoginPage() {
             className="object-contain mb-4"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
-          <p className="text-white font-black tracking-[0.3em] text-2xl">V-WING</p>
+          <p className="text-white font-black tracking-[0.3em] text-2xl">NETRA</p>
           <div className="w-8 h-px bg-white/20 my-3" />
           <p className="text-white/25 text-[10px] tracking-[0.3em] font-semibold">SUPER ADMIN</p>
         </div>
@@ -205,7 +205,7 @@ export default function VishnuLoginPage() {
         )}
 
         <p className="text-white/60 text-[10px] text-center mt-10 tracking-widest">
-          V-WING · RESTRICTED ACCESS
+          NETRA · RESTRICTED ACCESS
         </p>
       </div>
     </main>

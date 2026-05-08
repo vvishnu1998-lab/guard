@@ -6,7 +6,7 @@ export default function PrivacyPolicy() {
   return (
     <div style={{ fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", background: '#f8fafc', color: '#1e293b', lineHeight: 1.7, minHeight: '100vh' }}>
       <header style={{ background: '#0b1526', color: '#fff', padding: '32px 24px' }}>
-        <h1 style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '0.05em', margin: 0 }}>V-WING — Privacy Policy</h1>
+        <h1 style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '0.05em', margin: 0 }}>NetraOps — Privacy Policy</h1>
         <p style={{ color: '#94a3b8', fontSize: '0.85rem', marginTop: 4, marginBottom: 0 }}>Security Management Platform</p>
       </header>
 
