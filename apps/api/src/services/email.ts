@@ -13,7 +13,7 @@ import { pool } from '../db/pool';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
 
-const FROM   = process.env.SENDGRID_FROM_EMAIL!;
+const FROM   = process.env.SENDGRID_FROM_EMAIL ?? 'alerts@netraops.com';
 const PORTAL = process.env.CLIENT_PORTAL_URL ?? '';
 
 // ── Shared helpers ─────────────────────────────────────────────────────────────
