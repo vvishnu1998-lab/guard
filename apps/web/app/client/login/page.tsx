@@ -234,9 +234,16 @@ export default function ClientLoginPage() {
             </div>
           )}
 
-          <p className="text-white/60 text-[11px] text-center mt-10 tracking-wide">
-            Read-only access · Contact your security provider for help
-          </p>
+          <div className="text-center mt-10">
+            <p className="text-white/60 text-[11px] tracking-wide mb-2">
+              Read-only access · Contact your security provider for help
+            </p>
+            <div className="flex justify-center gap-4">
+              <a href="/privacy" className="text-white/40 hover:text-white/70 text-[11px] tracking-wide transition-colors">Privacy</a>
+              <span className="text-white/20 text-[11px]">•</span>
+              <a href="/terms" className="text-white/40 hover:text-white/70 text-[11px] tracking-wide transition-colors">Terms</a>
+            </div>
+          </div>
         </div>
       </div>
     </main>

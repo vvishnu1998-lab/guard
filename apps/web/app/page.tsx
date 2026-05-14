@@ -160,7 +160,7 @@ export default function LandingPage() {
               {
                 n: '02',
                 title: 'Guards Clock In',
-                body: 'Guards use the Netra mobile app to clock in with photo verification and live location.',
+                body: 'Guards use the NetraOps mobile app to clock in with photo verification and live location.',
               },
               {
                 n: '03',
@@ -283,7 +283,7 @@ export default function LandingPage() {
           <div className="flex items-center gap-3">
             <Image
               src="/vwing_logo.png"
-              alt="Netra"
+              alt="NetraOps"
               width={28}
               height={28}
               className="object-contain opacity-80"
@@ -292,8 +292,11 @@ export default function LandingPage() {
             <span className="text-white/30 text-xs tracking-[0.2em]">© 2026 NETRAOPS. ALL RIGHTS RESERVED.</span>
           </div>
           <div className="flex items-center gap-6">
-            <Link href="/privacy-policy" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+            <Link href="/privacy" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               PRIVACY POLICY
+            </Link>
+            <Link href="/terms" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+              TERMS OF SERVICE
             </Link>
             <Link href="/portal" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               LOGIN
@@ -317,7 +320,7 @@ function NavBar() {
         <div className="flex items-center gap-3">
           <Image
             src="/vwing_logo.png"
-            alt="Netra"
+            alt="NetraOps"
             width={30}
             height={30}
             className="object-contain"
@@ -327,7 +330,7 @@ function NavBar() {
             className="text-white font-black tracking-[0.25em] text-lg"
             style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.18em' }}
           >
-            NETRA
+            NETRAOPS
           </span>
         </div>
 

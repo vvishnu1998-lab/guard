@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Netra",
-    "slug": "guard",
+    "name": "NetraOps",
+    "slug": "netra",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -16,24 +16,28 @@
       "bundleIdentifier": "com.netraops.guard",
       "buildNumber": "1",
       "config": {
-        "googleMapsApiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
+        "googleMapsApiKey": "AIzaSyDnKeFghQFa0q5rAJeDXdW09iwzI9KVcSU",
+        "usesNonExemptEncryption": false
       },
       "infoPlist": {
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Netra requires your location to verify you are on-site during shifts.",
-        "NSLocationAlwaysUsageDescription": "Netra monitors your location in the background to ensure geofence compliance during your shift.",
-        "NSCameraUsageDescription": "Netra uses the camera for clock-in verification and shift reports.",
-        "NSFaceIDUsageDescription": "Use Face ID to quickly and securely sign in.",
-        "ITSAppUsesNonExemptEncryption": false
+        "NSCameraUsageDescription": "NetraOps uses the camera to capture incident report photos and location verification pings during your shift.",
+        "NSLocationWhenInUseUsageDescription": "NetraOps uses your location to verify clock-ins, geofence patrols, and send location pings to your supervisor during active shifts.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "NetraOps uses your location in the background during active shifts to send periodic location pings to your supervisor for safety monitoring.",
+        "NSPhotoLibraryUsageDescription": "NetraOps may save report photos to your library.",
+        "NSPhotoLibraryAddUsageDescription": "NetraOps saves photos you capture during incident reports.",
+        "NSFaceIDUsageDescription": "NetraOps uses Face ID for secure biometric login.",
+        "NSMicrophoneUsageDescription": "NetraOps does not record audio. This permission is required by the camera module.",
+        "UIBackgroundModes": ["location", "fetch", "remote-notification"]
       }
     },
     "android": {
       "package": "com.netraops.guard",
-      "versionCode": 7,
+      "versionCode": 1,
       "compileSdkVersion": 35,
       "targetSdkVersion": 35,
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
+          "apiKey": "AIzaSyDg14tf3PyiJT83PzRwUXqwIDZ79oCFRB0"
         }
       },
       "adaptiveIcon": {
@@ -60,13 +64,13 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Netra monitors your location during shifts for geofence compliance."
+          "locationAlwaysAndWhenInUsePermission": "NetraOps monitors your location during shifts for geofence compliance."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "Netra uses the camera for clock-in verification and reports."
+          "cameraPermission": "NetraOps uses the camera for clock-in verification and reports."
         }
       ]
     ],

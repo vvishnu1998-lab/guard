@@ -24,3 +24,6 @@ simulation-log.txt
 diagnose.command
 start-metro.command
 .vercel
+.antigravity/
+*.jks
+*.tsbuildinfo
