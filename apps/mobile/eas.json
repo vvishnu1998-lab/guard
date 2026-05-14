@@ -29,8 +29,7 @@
     "production": {
   "autoIncrement": true,
   "ios": {
-    "simulator": false,
-    "image": "latest"
+    "simulator": false
   },
       "android": {
         "buildType": "app-bundle"

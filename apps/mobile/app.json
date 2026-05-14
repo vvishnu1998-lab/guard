@@ -33,8 +33,6 @@
     "android": {
       "package": "com.netraops.guard",
       "versionCode": 1,
-      "compileSdkVersion": 35,
-      "targetSdkVersion": 35,
       "config": {
         "googleMaps": {
           "apiKey": "AIzaSyDg14tf3PyiJT83PzRwUXqwIDZ79oCFRB0"
@@ -59,7 +57,6 @@
     },
     "plugins": [
       "./app.plugin.js",
-      "./plugins/withFixZXing",
       "expo-router",
       "expo-font",
       [
