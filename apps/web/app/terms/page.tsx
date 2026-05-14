@@ -30,10 +30,10 @@ export default function TermsOfService() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">1. Introduction</h2>
             <p className="mb-4">
-              Welcome to Netra (mobile app) and NetraOps (web platform), collectively referred to as "NetraOps Services".
+              Welcome to NetraOps.
             </p>
             <p>
-              By accessing or using the NetraOps Services, you agree to be bound by these Terms of Service. If you disagree with any part of the terms, you may not access the service.
+              By accessing or using NetraOps, you agree to be bound by these Terms of Service. If you disagree with any part of the terms, you may not access the service.
             </p>
           </section>
 
@@ -47,7 +47,7 @@ export default function TermsOfService() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">3. User Accounts</h2>
             <p className="mb-4">
-              To use the NetraOps Services, an account is required. You agree to:
+              To use NetraOps, an account is required. You agree to:
             </p>
             <ul className="list-disc pl-6 space-y-3">
               <li>Maintain the confidentiality of your account credentials.</li>
@@ -59,7 +59,7 @@ export default function TermsOfService() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">4. Acceptable Use</h2>
             <p className="mb-4">
-              You agree not to use the NetraOps Services to:
+              You agree not to use NetraOps to:
             </p>
             <ul className="list-disc pl-6 space-y-3">
               <li>Violate any local, state, national, or international law.</li>
@@ -72,14 +72,14 @@ export default function TermsOfService() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">5. Subscription Billing</h2>
             <p>
-              Billing for NetraOps Services is conducted on a per-site monthly basis. Subscription tiers, payment terms, and related financial agreements are handled separately through signed commercial contracts or integrated payment systems (when implemented). Failure to pay may result in suspension of services.
+              Billing for NetraOps is conducted on a per-site monthly basis. Subscription tiers, payment terms, and related financial agreements are handled separately through signed commercial contracts or integrated payment systems (when implemented). Failure to pay may result in suspension of services.
             </p>
           </section>
 
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">6. Liability Limits</h2>
             <p>
-              In no event shall NetraOps, its directors, employees, partners, agents, or affiliates, be liable for any indirect, incidental, special, consequential or punitive damages, including without limitation, loss of profits, data, use, goodwill, or other intangible losses, resulting from your access to or use of or inability to access or use the NetraOps Services.
+              In no event shall NetraOps, its directors, employees, partners, agents, or affiliates, be liable for any indirect, incidental, special, consequential or punitive damages, including without limitation, loss of profits, data, use, goodwill, or other intangible losses, resulting from your access to or use of or inability to access or use NetraOps.
             </p>
           </section>
 

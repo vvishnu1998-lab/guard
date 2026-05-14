@@ -30,10 +30,10 @@ export default function PrivacyPolicy() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">1. Introduction</h2>
             <p className="mb-4">
-              Welcome to Netra (mobile app) and NetraOps (web platform), collectively referred to as "NetraOps Services".
+              Welcome to NetraOps.
             </p>
             <p>
-              We take your privacy seriously. This Privacy Policy explains who we are, what information we collect, why we collect it, how it is used, and your rights regarding your data. By using the NetraOps Services, you agree to the practices described in this policy.
+              We take your privacy seriously. This Privacy Policy explains who we are, what information we collect, why we collect it, how it is used, and your rights regarding your data. By using NetraOps, you agree to the practices described in this policy.
             </p>
           </section>
 
@@ -46,7 +46,7 @@ export default function PrivacyPolicy() {
 
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">3. What Data We Collect and Why</h2>
-            <p className="mb-4">We collect specific types of information to provide and improve the NetraOps Services:</p>
+            <p className="mb-4">We collect specific types of information to provide and improve NetraOps:</p>
             <ul className="list-disc pl-6 space-y-3">
               <li><strong>Account Information:</strong> Name, email, hashed password, and employer/company affiliation. This is required to create your account, manage access securely, and associate you with the correct security company.</li>
               <li><strong>Location Data:</strong> We collect your device's location (including in the background) only during active shifts. This verifies clock-ins, monitors geofence compliance, and sends periodic location pings to your supervisor for safety monitoring.</li>
@@ -58,7 +58,7 @@ export default function PrivacyPolicy() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">4. Biometric Data Notice</h2>
             <p>
-              If you enable Face ID or Touch ID for secure login on the Netra mobile app, your biometric template remains stored securely on your device. We do not transmit, collect, or store your biometric data on our servers.
+              If you enable Face ID or Touch ID for secure login on the NetraOps mobile app, your biometric template remains stored securely on your device. We do not transmit, collect, or store your biometric data on our servers.
             </p>
           </section>
 
@@ -73,7 +73,7 @@ export default function PrivacyPolicy() {
 
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">6. Third-Party Services</h2>
-            <p className="mb-4">We rely on trusted third-party providers to operate NetraOps Services:</p>
+            <p className="mb-4">We rely on trusted third-party providers to operate NetraOps:</p>
             <ul className="list-disc pl-6 space-y-3">
               <li><strong>AWS:</strong> Secure storage of photos and documents.</li>
               <li><strong>Google Maps:</strong> Location services and geofencing.</li>
@@ -93,14 +93,14 @@ export default function PrivacyPolicy() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">8. Children's Privacy</h2>
             <p>
-              The NetraOps Services are intended strictly for adults employed in the security sector. The app is not designed for or directed at children under the age of 18, and we do not knowingly collect personal data from minors.
+              NetraOps is intended strictly for adults employed in the security sector. The app is not designed for or directed at children under the age of 18, and we do not knowingly collect personal data from minors.
             </p>
           </section>
 
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">9. Updates to this Policy</h2>
             <p>
-              We may update this Privacy Policy from time to time. Any changes will be posted on this page with an updated "Effective Date". Continued use of the NetraOps Services after changes constitute your acceptance of the revised policy.
+              We may update this Privacy Policy from time to time. Any changes will be posted on this page with an updated "Effective Date". Continued use of NetraOps after changes constitute your acceptance of the revised policy.
             </p>
           </section>
         </div>
