@@ -19,6 +19,9 @@
         "googleMapsApiKey": "AIzaSyDnKeFghQFa0q5rAJeDXdW09iwzI9KVcSU",
         "usesNonExemptEncryption": false
       },
+      "entitlements": {
+        "aps-environment": "production"
+      },
       "infoPlist": {
         "NSCameraUsageDescription": "NetraOps uses the camera to capture incident report photos and location verification pings during your shift.",
         "NSLocationWhenInUseUsageDescription": "NetraOps uses your location to verify clock-ins, geofence patrols, and send location pings to your supervisor during active shifts.",
