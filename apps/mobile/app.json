@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Netra",
-    "slug": "guard",
+    "slug": "netra",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -16,19 +16,23 @@
       "bundleIdentifier": "com.netraops.guard",
       "buildNumber": "1",
       "config": {
-        "googleMapsApiKey": "AIzaSyDnKeFghQFa0q5rAJeDXdW09iwzI9KVcSU"
+        "googleMapsApiKey": "AIzaSyDnKeFghQFa0q5rAJeDXdW09iwzI9KVcSU",
+        "usesNonExemptEncryption": false
       },
       "infoPlist": {
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Netra requires your location to verify you are on-site during shifts.",
-        "NSLocationAlwaysUsageDescription": "Netra monitors your location in the background to ensure geofence compliance during your shift.",
-        "NSCameraUsageDescription": "Netra uses the camera for clock-in verification and shift reports.",
-        "NSFaceIDUsageDescription": "Use Face ID to quickly and securely sign in.",
-        "ITSAppUsesNonExemptEncryption": false
+        "NSCameraUsageDescription": "Netra uses the camera to capture incident report photos and location verification pings during your shift.",
+        "NSLocationWhenInUseUsageDescription": "Netra uses your location to verify clock-ins, geofence patrols, and send location pings to your supervisor during active shifts.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Netra uses your location in the background during active shifts to send periodic location pings to your supervisor for safety monitoring.",
+        "NSPhotoLibraryUsageDescription": "Netra may save report photos to your library.",
+        "NSPhotoLibraryAddUsageDescription": "Netra saves photos you capture during incident reports.",
+        "NSFaceIDUsageDescription": "Netr uses Face ID for secure biometric login.",
+        "NSMicrophoneUsageDescription": "Netra does not record audio. This permission is required by the camera module.",
+        "UIBackgroundModes": ["location", "fetch", "remote-notification"]
       }
     },
     "android": {
       "package": "com.netraops.guard",
-      "versionCode": 7,
+      "versionCode": 1,
       "compileSdkVersion": 35,
       "targetSdkVersion": 35,
       "config": {
