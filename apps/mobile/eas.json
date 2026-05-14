@@ -27,10 +27,11 @@
       }
     },
     "production": {
-      "autoIncrement": true,
-      "ios": {
-        "simulator": false
-      },
+  "autoIncrement": true,
+  "ios": {
+    "simulator": false,
+    "image": "latest"
+  },
       "android": {
         "buildType": "app-bundle"
       },
