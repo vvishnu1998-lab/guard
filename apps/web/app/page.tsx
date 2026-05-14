@@ -292,8 +292,11 @@ export default function LandingPage() {
             <span className="text-white/30 text-xs tracking-[0.2em]">© 2026 NETRAOPS. ALL RIGHTS RESERVED.</span>
           </div>
           <div className="flex items-center gap-6">
-            <Link href="/privacy-policy" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+            <Link href="/privacy" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               PRIVACY POLICY
+            </Link>
+            <Link href="/terms" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+              TERMS OF SERVICE
             </Link>
             <Link href="/portal" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               LOGIN

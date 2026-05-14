@@ -204,9 +204,16 @@ export default function VishnuLoginPage() {
           </div>
         )}
 
-        <p className="text-white/60 text-[10px] text-center mt-10 tracking-widest">
-          NETRA · RESTRICTED ACCESS
-        </p>
+        <div className="text-center mt-10">
+          <p className="text-white/60 text-[10px] tracking-widest mb-2">
+            NETRA · RESTRICTED ACCESS
+          </p>
+          <div className="flex justify-center gap-4">
+            <a href="/privacy" className="text-white/40 hover:text-white/70 text-[10px] tracking-widest transition-colors">PRIVACY</a>
+            <span className="text-white/20 text-[10px]">•</span>
+            <a href="/terms" className="text-white/40 hover:text-white/70 text-[10px] tracking-widest transition-colors">TERMS</a>
+          </div>
+        </div>
       </div>
     </main>
   );
