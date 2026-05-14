@@ -160,7 +160,7 @@ export default function LandingPage() {
               {
                 n: '02',
                 title: 'Guards Clock In',
-                body: 'Guards use the Netra mobile app to clock in with photo verification and live location.',
+                body: 'Guards use the NetraOps mobile app to clock in with photo verification and live location.',
               },
               {
                 n: '03',
@@ -283,7 +283,7 @@ export default function LandingPage() {
           <div className="flex items-center gap-3">
             <Image
               src="/vwing_logo.png"
-              alt="Netra"
+              alt="NetraOps"
               width={28}
               height={28}
               className="object-contain opacity-80"
@@ -320,7 +320,7 @@ function NavBar() {
         <div className="flex items-center gap-3">
           <Image
             src="/vwing_logo.png"
-            alt="Netra"
+            alt="NetraOps"
             width={30}
             height={30}
             className="object-contain"
@@ -330,7 +330,7 @@ function NavBar() {
             className="text-white font-black tracking-[0.25em] text-lg"
             style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.18em' }}
           >
-            NETRA
+            NETRAOPS
           </span>
         </div>
 
