@@ -59,6 +59,7 @@
     },
     "plugins": [
       "./app.plugin.js",
+      "./plugins/withFixZXing",
       "expo-router",
       "expo-font",
       [
