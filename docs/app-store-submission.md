@@ -1,7 +1,7 @@
 # App Store Submission Metadata
 
 ## Basic Information
-**App Name:** Netra
+**App Name:** NetraOps
 **Subtitle:** Guard Tour & Patrol Reports
 **Primary Category:** Business
 **Secondary Category:** Productivity
@@ -11,7 +11,7 @@
 Live guard monitoring, instant incident reports, and real-time location verification for modern security operations.
 
 **Description:**
-Netra is the mobile app for NetraOps, the operations platform for security companies and their clients. Guards use Netra to clock in, verify their presence, complete shift patrols, and submit detailed incident reports.
+NetraOps is the all-in-one platform for security companies and their clients. Guards use the mobile app to clock in, verify their presence, complete shift patrols, and submit detailed incident reports.
 
 Features:
 - **Verified Clock-Ins:** Geofenced and photo-verified clock-ins ensure guards are on-site and ready for duty.
@@ -20,7 +20,7 @@ Features:
 - **Task Management:** Stay on top of required patrols and operational tasks.
 - **Biometric Login:** Secure, fast sign-in using Face ID or Touch ID.
 
-Netra works in tandem with the NetraOps web platform to provide complete visibility into security operations. 
+NetraOps works in tandem with the NetraOps web platform to provide complete visibility into security operations. 
 
 **Keywords:**
 security,guard,patrol,tour,sitework,gps,reports,scheduling
