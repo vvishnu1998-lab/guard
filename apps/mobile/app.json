@@ -16,7 +16,7 @@
       "bundleIdentifier": "com.netraops.guard",
       "buildNumber": "1",
       "config": {
-        "googleMapsApiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
+        "googleMapsApiKey": "AIzaSyDnKeFghQFa0q5rAJeDXdW09iwzI9KVcSU"
       },
       "infoPlist": {
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Netra requires your location to verify you are on-site during shifts.",
@@ -33,7 +33,7 @@
       "targetSdkVersion": 35,
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyBCBgU60e8PbeZEPeKA7RVddgTlLwy7jiA"
+          "apiKey": "AIzaSyDg14tf3PyiJT83PzRwUXqwIDZ79oCFRB0"
         }
       },
       "adaptiveIcon": {

@@ -25,3 +25,4 @@ diagnose.command
 start-metro.command
 .vercel
 .antigravity/
+*.jks
