@@ -26,3 +26,4 @@ start-metro.command
 .vercel
 .antigravity/
 *.jks
+*.tsbuildinfo
