@@ -3,10 +3,10 @@
  *
  * Finds shifts that:
  *  - are still in 'scheduled' status (no clock-in)
- *  - started more than 15 minutes ago
+ *  - started more than 10 minutes ago
  *  - haven't had a missed-alert email sent yet
  *
- * Sends an alert to: Vishnu (super admin) + company admin + client.
+ * Sends an alert to: the company admin only.
  */
 
 import cron from 'node-cron';
@@ -17,7 +17,7 @@ cron.schedule('*/5 * * * *', async () => {
   const result = await pool.query(
     `SELECT id FROM shifts
      WHERE status = 'scheduled'
-       AND scheduled_start + INTERVAL '15 minutes' <= NOW()
+       AND scheduled_start + INTERVAL '10 minutes' <= NOW()
        AND missed_alert_sent_at IS NULL`,
   );
 

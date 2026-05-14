@@ -48,7 +48,7 @@ export default function AdminLoginPage() {
       if (!res.ok) { setError(data.error ?? 'Login failed'); return; }
       document.cookie = `guard_admin_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
       document.cookie = `guard_admin_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
-      window.location.href = '/admin';
+      window.location.href = data.must_change_password ? '/admin/change-password' : '/admin';
     } catch {
       setError('Network error. Please try again.');
     } finally {
@@ -125,7 +125,7 @@ export default function AdminLoginPage() {
             <div>
               <h1 className="text-white font-black text-3xl tracking-tight mb-1">Reset Password</h1>
               <p className="text-white/35 text-sm mb-10 tracking-wide">
-                Enter your email and we&apos;ll send you a reset link.
+                Enter your email and we&apos;ll send you a temporary password. You&apos;ll be required to change it on next login.
               </p>
 
               {resetError && (
@@ -136,7 +136,7 @@ export default function AdminLoginPage() {
 
               {resetSent ? (
                 <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 mb-6 text-amber-400 text-sm">
-                  Check your email for a reset link.
+                  If that email is registered, a temporary password has been sent. Sign in with it and you&apos;ll be prompted to set a new password.
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -156,7 +156,7 @@ export default function AdminLoginPage() {
                     disabled={resetLoading || !resetEmail}
                     className="w-full bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-black font-black tracking-[0.15em] text-sm py-4 rounded-lg transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-amber-500/20 hover:shadow-amber-500/30"
                   >
-                    {resetLoading ? 'SENDING…' : 'SEND RESET LINK'}
+                    {resetLoading ? 'SENDING…' : 'SEND TEMPORARY PASSWORD'}
                   </button>
                 </div>
               )}

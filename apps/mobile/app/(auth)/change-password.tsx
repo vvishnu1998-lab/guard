@@ -1,12 +1,14 @@
 /**
- * Force password change — shown on first login (Section 7)
- * Guard cannot proceed to home until they set a new password.
+ * Force password change — shown after first login OR after forgot-password
+ * temp-password issuance. Guard cannot proceed to home until they set a new
+ * valid password (6–8 characters).
  */
 import { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, Alert, KeyboardAvoidingView, Platform, ScrollView,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -14,12 +16,15 @@ export default function ChangePasswordScreen() {
   const [current, setCurrent]     = useState('');
   const [next, setNext]           = useState('');
   const [confirm, setConfirm]     = useState('');
+  const [showCurrent, setShowCurrent] = useState(false);
+  const [showNext, setShowNext]   = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [loading, setLoading]     = useState(false);
   const { changePassword, logout } = useAuthStore();
 
   async function handleChange() {
-    if (next.length < 12) {
-      Alert.alert('Too short', 'New password must be at least 12 characters.'); return;
+    if (next.length < 6 || next.length > 8) {
+      Alert.alert('Invalid', 'New password must be 6–8 characters.'); return;
     }
     if (next !== confirm) {
       Alert.alert('Mismatch', 'New passwords do not match.'); return;
@@ -35,6 +40,18 @@ export default function ChangePasswordScreen() {
     }
   }
 
+  function renderEye(visible: boolean, toggle: () => void) {
+    return (
+      <TouchableOpacity style={styles.eyeButton} onPress={toggle}>
+        <Ionicons
+          name={visible ? 'eye-off-outline' : 'eye-outline'}
+          size={20}
+          color={Colors.muted}
+        />
+      </TouchableOpacity>
+    );
+  }
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -42,44 +59,55 @@ export default function ChangePasswordScreen() {
     >
       <ScrollView contentContainerStyle={styles.inner} keyboardShouldPersistTaps="handled">
         <View style={styles.badge}>
-          <Text style={styles.badgeText}>FIRST LOGIN</Text>
+          <Text style={styles.badgeText}>SET PASSWORD</Text>
         </View>
         <Text style={styles.title}>SET YOUR PASSWORD</Text>
         <Text style={styles.subtitle}>
-          Your account was created with a temporary password.{'\n'}
-          Set a personal password to continue.
+          Enter your current (or temporary) password,{'\n'}
+          then choose a new 6–8 character password.
         </Text>
 
         <View style={styles.form}>
-          <Text style={styles.label}>TEMPORARY PASSWORD</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter temporary password"
-            placeholderTextColor={Colors.muted}
-            value={current}
-            onChangeText={setCurrent}
-            secureTextEntry
-            textContentType="password"
-          />
+          <Text style={styles.label}>CURRENT / TEMPORARY PASSWORD</Text>
+          <View style={styles.passwordRow}>
+            <TextInput
+              style={[styles.input, styles.passwordInput]}
+              placeholder="Enter current password"
+              placeholderTextColor={Colors.muted}
+              value={current}
+              onChangeText={setCurrent}
+              secureTextEntry={!showCurrent}
+              textContentType="password"
+            />
+            {renderEye(showCurrent, () => setShowCurrent((p) => !p))}
+          </View>
+
           <Text style={styles.label}>NEW PASSWORD</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="At least 8 characters"
-            placeholderTextColor={Colors.muted}
-            value={next}
-            onChangeText={setNext}
-            secureTextEntry
-            textContentType="newPassword"
-          />
+          <View style={styles.passwordRow}>
+            <TextInput
+              style={[styles.input, styles.passwordInput]}
+              placeholder="6–8 characters"
+              placeholderTextColor={Colors.muted}
+              value={next}
+              onChangeText={setNext}
+              secureTextEntry={!showNext}
+              textContentType="newPassword"
+            />
+            {renderEye(showNext, () => setShowNext((p) => !p))}
+          </View>
+
           <Text style={styles.label}>CONFIRM NEW PASSWORD</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Repeat new password"
-            placeholderTextColor={Colors.muted}
-            value={confirm}
-            onChangeText={setConfirm}
-            secureTextEntry
-          />
+          <View style={styles.passwordRow}>
+            <TextInput
+              style={[styles.input, styles.passwordInput]}
+              placeholder="Repeat new password"
+              placeholderTextColor={Colors.muted}
+              value={confirm}
+              onChangeText={setConfirm}
+              secureTextEntry={!showConfirm}
+            />
+            {renderEye(showConfirm, () => setShowConfirm((p) => !p))}
+          </View>
 
           <TouchableOpacity
             style={[styles.button, loading && styles.disabled]}
@@ -115,6 +143,12 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.surface, color: Colors.base,
     borderRadius: Radius.md, padding: Spacing.md, fontSize: 16,
     borderWidth: 1, borderColor: Colors.border,
+  },
+  passwordRow: { position: 'relative', justifyContent: 'center' },
+  passwordInput: { paddingRight: 48 },
+  eyeButton: {
+    position: 'absolute', right: Spacing.md, top: 0, bottom: 0,
+    justifyContent: 'center', paddingHorizontal: Spacing.xs,
   },
   button: {
     backgroundColor: Colors.action, borderRadius: Radius.md,

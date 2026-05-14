@@ -3,21 +3,10 @@
  * - Automatically attaches Bearer token to every request
  * - Silently refreshes access token on 401 (single retry)
  * - Triggers logout on refresh failure
- * - Tracks last activity timestamp for 5-min auto-lock (Section 7)
  */
 import * as SecureStore from 'expo-secure-store';
 
 const BASE = process.env.EXPO_PUBLIC_API_URL;
-let lastActivityAt = Date.now();
-const INACTIVITY_LOCK_MS = 5 * 60 * 1000; // 5 minutes
-
-export function touchActivity() {
-  lastActivityAt = Date.now();
-}
-
-export function isInactivityLockDue(): boolean {
-  return Date.now() - lastActivityAt > INACTIVITY_LOCK_MS;
-}
 
 async function getAccessToken(): Promise<string | null> {
   return SecureStore.getItemAsync('guard_access_token');
@@ -46,7 +35,6 @@ async function request<T>(
   body?: unknown,
   retry = true
 ): Promise<T> {
-  touchActivity();
   const token = await getAccessToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -57,13 +45,11 @@ async function request<T>(
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  // Token expired — refresh once and retry
   if (res.status === 401 && retry) {
     try {
       await refreshAccessToken();
-      return request<T>(method, path, body, false); // no more retries
+      return request<T>(method, path, body, false);
     } catch {
-      // Refresh failed — force logout via store
       const { useAuthStore } = await import('../store/authStore');
       useAuthStore.getState().logout();
       throw new Error('Session expired. Please log in again.');

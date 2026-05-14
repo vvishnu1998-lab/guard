@@ -313,7 +313,7 @@ export async function sendMissedShiftAlert(shiftId: string) {
         <strong>Guard:</strong> ${guard_name} (${badge_number})${guard_phone ? `<br/><strong>Guard Phone:</strong> ${guard_phone}` : ''}
       </div>
       <p style="font-size:15px;color:#DC2626;font-weight:bold;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px">
-        ⚠️ No guard has clocked in for this shift. It is now 15 minutes past the scheduled start time.
+        ⚠️ No guard has clocked in for this shift. It is now 10 minutes past the scheduled start time.
       </p>
       <p style="color:#555;font-size:13px;margin-top:14px">
         Please contact the assigned guard immediately or arrange cover for <strong>${site_name}</strong>.
@@ -323,11 +323,10 @@ export async function sendMissedShiftAlert(shiftId: string) {
     <div class="footer">NetraOps — Automated Alert</div>
   </div>`;
 
-  const recipients = [process.env.VISHNU_EMAIL, client_email, admin_email].filter(Boolean) as string[];
-  if (recipients.length === 0) return;
+  if (!admin_email) return;
 
-  await sgMail.sendMultiple({
-    to: recipients,
+  await sgMail.send({
+    to: admin_email,
     from: FROM,
     subject: `⚠️ Missed Shift Alert — ${site_name} — Guard not clocked in`,
     html,
@@ -339,7 +338,59 @@ export async function sendMissedShiftAlert(shiftId: string) {
   );
 }
 
-// ── Email Type 6 — Password Reset ────────────────────────────────────────────
+// ── Email Type 6b — Temporary Password (forgot-password flow) ────────────────
+
+/**
+ * Sends a one-shot temporary password to the user. The caller is responsible
+ * for setting must_change_password=true and writing the hash to the user row
+ * before invoking this — we just deliver the plaintext.
+ */
+export async function sendTempPasswordEmail(
+  email: string,
+  tempPassword: string,
+  portal: 'admin' | 'client' | 'guard',
+) {
+  const portalLabels: Record<string, string> = {
+    admin: 'Admin Dashboard',
+    client: 'Client Portal',
+    guard: 'Guard App',
+  };
+  const label = portalLabels[portal] ?? 'Portal';
+
+  await sgMail.send({
+    to: email,
+    from: FROM,
+    subject: 'NetraOps password reset',
+    html: `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">V-WING</div>
+        <h1>PASSWORD RESET</h1>
+        <p>${label.toUpperCase()}</p>
+      </div>
+      <div class="body">
+        <p style="font-size:15px;color:#333;margin-bottom:20px">
+          We received a request to reset your NetraOps <strong>${label}</strong> password.
+        </p>
+        <p style="color:#555;font-size:13px;margin-bottom:8px">
+          Your temporary password is:
+        </p>
+        <div style="background:#0B1526;color:#F59E0B;font-family:'SF Mono','Menlo',monospace;font-size:22px;letter-spacing:4px;padding:14px 20px;border-radius:8px;text-align:center;margin-bottom:20px">
+          ${tempPassword}
+        </div>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin-bottom:20px">
+          You will be required to change this on next login.
+        </p>
+        <p style="color:#999;font-size:12px;margin-top:16px">
+          If you didn't request this, contact your administrator immediately.
+        </p>
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`,
+  });
+}
+
+// ── Email Type 6 — Password Reset (legacy reset-link flow, kept for back-compat) ─
 
 export async function sendPasswordResetEmail(
   email: string,

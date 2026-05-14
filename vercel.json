@@ -1,6 +1,6 @@
 {
-  "buildCommand": "turbo run build --filter=@v-wing/web",
-  "outputDirectory": ".next",
+  "buildCommand": "cd apps/web && npm run build",
+  "outputDirectory": "apps/web/.next",
   "framework": "nextjs",
-  "installCommand": "npm install"
+  "installCommand": "npm install --legacy-peer-deps"
 }

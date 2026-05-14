@@ -87,8 +87,10 @@ router.get('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => {
 router.post('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || !email || !password) return res.status(400).json({ error: 'name, email and password are required' });
-  // C7 — Vishnu provisions admin accounts; align with the 12-char floor.
-  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' });
+  // Password policy: 6–8 characters/digits.
+  if (password.length < 6 || password.length > 8) {
+    return res.status(400).json({ error: 'Password must be 6–8 characters' });
+  }
 
   const bcrypt = require('bcrypt');
   const password_hash = await bcrypt.hash(password, 10);

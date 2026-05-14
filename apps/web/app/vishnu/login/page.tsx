@@ -98,7 +98,7 @@ export default function VishnuLoginPage() {
           <div>
             <h2 className="text-white font-black text-2xl tracking-tight mb-1">Reset Password</h2>
             <p className="text-white/35 text-sm mb-8 tracking-wide">
-              Enter your email and we&apos;ll send you a reset link.
+              Enter your email and we&apos;ll send you a temporary password.
             </p>
 
             {resetError && (
@@ -109,7 +109,7 @@ export default function VishnuLoginPage() {
 
             {resetSent ? (
               <div className="bg-white/[0.06] border border-white/[0.15] rounded-lg p-4 mb-6 text-white/70 text-sm">
-                Check your email for a reset link.
+                If that email is registered, a temporary password has been sent.
               </div>
             ) : (
               <div className="space-y-4">
@@ -129,7 +129,7 @@ export default function VishnuLoginPage() {
                   disabled={resetLoading || !resetEmail}
                   className="w-full bg-white hover:bg-white/90 active:bg-white/80 text-black font-black tracking-[0.2em] text-sm py-4 rounded-lg transition-all duration-150 disabled:opacity-30 disabled:cursor-not-allowed"
                 >
-                  {resetLoading ? 'SENDING…' : 'SEND RESET LINK'}
+                  {resetLoading ? 'SENDING…' : 'SEND TEMPORARY PASSWORD'}
                 </button>
               </div>
             )}

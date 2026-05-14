@@ -48,7 +48,7 @@ export default function ClientLoginPage() {
       if (!res.ok) { setError(data.error ?? 'Login failed'); return; }
       document.cookie = `guard_client_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
       document.cookie = `guard_client_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
-      window.location.href = '/client';
+      window.location.href = data.must_change_password ? '/client/change-password' : '/client';
     } catch {
       setError('Network error. Please try again.');
     } finally {
@@ -125,7 +125,7 @@ export default function ClientLoginPage() {
             <div>
               <h1 className="text-white font-black text-3xl tracking-tight mb-1">Reset Password</h1>
               <p className="text-white/35 text-sm mb-10 tracking-wide">
-                Enter your email and we&apos;ll send you a reset link.
+                Enter your email and we&apos;ll send you a temporary password. You&apos;ll be required to change it on next login.
               </p>
 
               {resetError && (
@@ -136,7 +136,7 @@ export default function ClientLoginPage() {
 
               {resetSent ? (
                 <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-6 text-blue-400 text-sm">
-                  Check your email for a reset link.
+                  If that email is registered, a temporary password has been sent. Sign in with it and you&apos;ll be prompted to set a new password.
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -156,7 +156,7 @@ export default function ClientLoginPage() {
                     disabled={resetLoading || !resetEmail}
                     className="w-full bg-blue-500 hover:bg-blue-400 active:bg-blue-600 text-white font-black tracking-[0.15em] text-sm py-4 rounded-lg transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30"
                   >
-                    {resetLoading ? 'SENDING…' : 'SEND RESET LINK'}
+                    {resetLoading ? 'SENDING…' : 'SEND TEMPORARY PASSWORD'}
                   </button>
                 </div>
               )}

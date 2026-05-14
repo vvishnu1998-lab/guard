@@ -44,13 +44,10 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   if (!email?.trim())        return res.status(400).json({ error: 'Email is required' });
   if (!badge_number?.trim()) return res.status(400).json({ error: 'Badge number is required' });
   if (!temp_password)        return res.status(400).json({ error: 'Temporary password is required' });
-  // C7 / audit/WEEK1.md §C7 — temp passwords must be ≥12 chars.  The old
-  // 6-char floor was indefensible (≈30 bits of entropy at uniform random,
-  // far less for human-chosen).  Forced rotation on first login is wired
-  // separately via guards.must_change_password DEFAULT true, so this floor
-  // governs the credential the admin hands the guard for first sign-in.
-  if (temp_password.length < 12) {
-    return res.status(400).json({ error: 'Temporary password must be at least 12 characters' });
+  // Password policy: 6–8 characters/digits. Forced rotation on first login is
+  // wired separately via guards.must_change_password DEFAULT true.
+  if (temp_password.length < 6 || temp_password.length > 8) {
+    return res.status(400).json({ error: 'Temporary password must be 6–8 characters' });
   }
 
   try {
