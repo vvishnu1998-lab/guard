@@ -18,7 +18,7 @@ module.exports = function withFixZXing(config) {
 
       const hook = `
   ${marker}
-  Dir.glob(File.join(installer.sandbox.pods_root, 'ZXingObjC/**/*.m')).each do |f|
+  Dir.glob(File.join(installer.sandbox.root, 'ZXingObjC/**/*.m')).each do |f|
     text = File.read(f)
     File.open(f, 'w') { |file| file.puts(text.gsub('TARGET_IPHONE_SIMULATOR', 'TARGET_OS_SIMULATOR')) }
   end
