@@ -15,10 +15,13 @@ import { useEffect } from 'react';
 import { Stack, router, useSegments } from 'expo-router';
 import { useFonts, BarlowCondensed_500Medium, BarlowCondensed_700Bold } from '@expo-google-fonts/barlow-condensed';
 import * as Notifications from 'expo-notifications';
+import * as SecureStore from 'expo-secure-store';
 import { useAuthStore } from '../store/authStore';
 import { useUnreadStore } from '../store/unreadStore';
+import { useShiftStore } from '../store/shiftStore';
 import { apiClient } from '../lib/apiClient';
 import { navigateForNotification } from '../lib/navigateForNotification';
+import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locationBackground';
 
 const EAS_PROJECT_ID = '5fd28125-2461-4165-b9df-7f34ced8b194';
 
@@ -109,6 +112,39 @@ export default function RootLayout() {
     });
     return () => sub.remove();
   }, [bumpChat, bumpNotifications, refreshUnread]);
+
+  // Background geofence monitoring — start when a shift goes active with a
+  // known geofence, stop on clock-out. The background task reads the
+  // persisted geofence + session id from SecureStore.
+  const activeSession = useShiftStore((s) => s.activeSession);
+  const activeShift   = useShiftStore((s) => s.activeShift);
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!activeSession || !activeShift?.geofence) {
+      // No active shift, or shift has no geofence configured → stop monitoring
+      stopBackgroundLocation().catch((err) => console.warn('[bg-loc] stop failed:', err));
+      SecureStore.deleteItemAsync('active_session_id').catch(() => {});
+      SecureStore.deleteItemAsync('active_geofence').catch(() => {});
+      SecureStore.deleteItemAsync('geofence_state').catch(() => {});
+      return;
+    }
+
+    (async () => {
+      try {
+        await Promise.all([
+          SecureStore.setItemAsync('active_session_id', activeSession.id),
+          SecureStore.setItemAsync('active_geofence',   JSON.stringify(activeShift.geofence)),
+        ]);
+        if (cancelled) return;
+        await startBackgroundLocation();
+      } catch (err) {
+        console.warn('[bg-loc] start failed:', err);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [activeSession?.id, activeShift?.geofence]);
 
   if (!fontsLoaded || status === 'unknown') return null;
 
