@@ -166,6 +166,19 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
   res.json({ success: true });
 });
 
+// ── Guard: register/refresh Expo push token from an already-authenticated session ──
+// Called by the mobile app on startup whenever the guard is signed in (incl. auto-login
+// via persisted refresh token). Login handler at /guard/login also accepts a token in
+// the same flow; this endpoint covers the case where login isn't re-run.
+router.post('/guard/fcm-token', requireAuth('guard'), async (req: Request, res: Response) => {
+  const { fcm_token } = req.body;
+  if (typeof fcm_token !== 'string' || !fcm_token.trim()) {
+    return res.status(400).json({ error: 'fcm_token is required' });
+  }
+  await pool.query('UPDATE guards SET fcm_token = $1 WHERE id = $2', [fcm_token, req.user!.sub]);
+  res.json({ ok: true });
+});
+
 // ── Star admin login ─────────────────────────────────────────────────────────
 
 router.post('/admin/login', async (req: Request, res: Response) => {
