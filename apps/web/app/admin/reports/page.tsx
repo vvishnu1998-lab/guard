@@ -2,10 +2,8 @@
 /**
  * Admin — Activity Log (/admin/reports)
  *
- * Unified table of pings (with synthesized "Missed Ping" rows) and
- * activity / incident / maintenance reports. Filters: date range,
- * guard-name search. Paginated 10/page. Layout matches the Aventus
- * Dispatch reference.
+ * Site dropdown → Shift dropdown → date range. Photos click through to
+ * /admin/reports/<reportId>/photos in a new tab.
  */
 import ActivityLogTable from '../../../components/ActivityLogTable';
 import { adminGet } from '../../../lib/adminApi';
@@ -16,6 +14,8 @@ export default function AdminActivityLogPage() {
       fetcher={adminGet}
       accentClass="text-amber-400"
       heading="ACTIVITY LOGS"
+      mode="admin"
+      detailPathPrefix="/admin/reports"
     />
   );
 }

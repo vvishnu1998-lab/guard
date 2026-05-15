@@ -3,14 +3,12 @@
  * Client Read-Only Portal — Site Activity Log (Section 10)
  * CRITICAL: server scopes data to the client's site_id (Section 11.5).
  *
- * Layout: activity log table on the left (2/3 width), download +
- * retention notice panels on the right (1/3 width). Same table component
- * as /admin/reports — see components/ActivityLogTable.tsx.
+ * Full-width activity log table (no right-column DownloadPanel — Downloads
+ * has its own sidebar tab). Date range only; no guard search.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { clientGet } from '../../lib/clientApi';
 import ActivityLogTable from '../../components/ActivityLogTable';
-import DownloadPanel from '../../components/client/DownloadPanel';
 import RetentionNotice from '../../components/client/RetentionNotice';
 
 interface SiteInfo {
@@ -63,18 +61,13 @@ export default function ClientPortal() {
       {loading ? (
         <p className="text-gray-500 text-sm">Loading…</p>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
-            <ActivityLogTable
-              fetcher={clientGet}
-              accentClass="text-blue-400"
-              heading="SITE ACTIVITY LOG"
-            />
-          </div>
-          <div>
-            <DownloadPanel />
-          </div>
-        </div>
+        <ActivityLogTable
+          fetcher={clientGet}
+          accentClass="text-blue-400"
+          heading="SITE ACTIVITY LOG"
+          mode="client"
+          detailPathPrefix="/client/reports"
+        />
       )}
     </div>
   );

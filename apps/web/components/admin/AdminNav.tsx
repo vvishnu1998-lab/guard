@@ -3,6 +3,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
+import { adminGet } from '../../lib/adminApi';
 
 const NAV_ITEMS = [
   { href: '/admin',           label: 'DASHBOARD'      },
@@ -18,13 +19,35 @@ const NAV_ITEMS = [
   { href: '/admin/chat',      label: 'CHAT'           },
 ];
 
+const CHAT_POLL_MS = 15_000;
+
 export default function AdminNav() {
   const pathname = usePathname();
   const router   = useRouter();
   const [open, setOpen] = useState(false);
+  const [chatUnread, setChatUnread] = useState(0);
 
   // Close drawer on route change
   useEffect(() => { setOpen(false); }, [pathname]);
+
+  // Poll chat rooms for unread count — admin can't get push (no fcm_token
+  // on company_admins), so this in-app badge is the notification surface.
+  // Reset to 0 while the admin is *on* the chat page (server-side mark-read
+  // happens when a specific room is opened; this is a UX smoothing).
+  useEffect(() => {
+    let cancelled = false;
+    const fetchUnread = async () => {
+      try {
+        const rooms = await adminGet<{ unread_count: number | string }[]>('/api/chat/rooms');
+        if (cancelled) return;
+        const total = rooms.reduce((sum, r) => sum + Number(r.unread_count ?? 0), 0);
+        setChatUnread(total);
+      } catch { /* keep last value */ }
+    };
+    fetchUnread();
+    const id = setInterval(fetchUnread, CHAT_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [pathname]);
 
   function logout() {
     document.cookie = 'guard_admin_access=; path=/; max-age=0';
@@ -58,17 +81,27 @@ export default function AdminNav() {
       <div className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
         {NAV_ITEMS.map(({ href, label }) => {
           const active = pathname === href || (href !== '/admin' && (pathname ?? '').startsWith(href));
+          const showBadge = href === '/admin/chat' && chatUnread > 0;
           return (
             <Link
               key={href}
               href={href}
-              className={`flex items-center px-3 py-3 md:py-2.5 rounded-md text-sm md:text-[11px] tracking-[0.15em] font-semibold transition-all duration-150 ${
+              className={`flex items-center justify-between px-3 py-3 md:py-2.5 rounded-md text-sm md:text-[11px] tracking-[0.15em] font-semibold transition-all duration-150 ${
                 active
                   ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20'
                   : 'text-white/40 hover:text-white hover:bg-white/[0.06]'
               }`}
             >
-              {label}
+              <span>{label}</span>
+              {showBadge && (
+                <span
+                  className={`min-w-[18px] h-[18px] px-1.5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                    active ? 'bg-black/80 text-amber-300' : 'bg-red-500 text-white'
+                  }`}
+                >
+                  {chatUnread > 99 ? '99+' : chatUnread}
+                </span>
+              )}
             </Link>
           );
         })}

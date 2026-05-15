@@ -428,4 +428,26 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
   });
 });
 
+// GET /api/admin/sites/:site_id/sessions — recent shift sessions at a site,
+// for populating the "shift" dropdown on the activity log page.
+// Returns the most recent 50, newest first.
+router.get('/sites/:site_id/sessions', requireAuth('company_admin'), async (req, res) => {
+  const verify = await pool.query(
+    'SELECT 1 FROM sites WHERE id = $1 AND company_id = $2',
+    [req.params.site_id, req.user!.company_id],
+  );
+  if (!verify.rows[0]) return res.status(404).json({ error: 'Site not found' });
+
+  const result = await pool.query(
+    `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at, g.name AS guard_name
+     FROM shift_sessions ss
+     JOIN guards g ON g.id = ss.guard_id
+     WHERE ss.site_id = $1
+     ORDER BY ss.clocked_in_at DESC
+     LIMIT 50`,
+    [req.params.site_id],
+  );
+  res.json(result.rows);
+});
+
 export default router;

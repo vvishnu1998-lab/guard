@@ -52,6 +52,58 @@ router.get('/', requireAuth('guard', 'company_admin', 'client'), async (req, res
   res.json(result.rows);
 });
 
+// GET /api/reports/:id — single report with photos (scoped by role)
+// Used by the photo-detail page (open photos in a new tab from the activity log).
+router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, res) => {
+  const { user } = req;
+  const { id } = req.params;
+
+  const result = await pool.query(
+    `SELECT r.id, r.shift_session_id, r.site_id, r.report_type, r.description,
+            r.severity, r.reported_at,
+            si.name AS site_name, si.company_id,
+            g.name  AS guard_name,
+            array_agg(rp.storage_url ORDER BY rp.photo_index)
+              FILTER (WHERE rp.id IS NOT NULL) AS photos
+     FROM reports r
+     JOIN sites si          ON si.id = r.site_id
+     JOIN shift_sessions ss ON ss.id = r.shift_session_id
+     JOIN guards g          ON g.id  = ss.guard_id
+     LEFT JOIN report_photos rp ON rp.report_id = r.id
+     WHERE r.id = $1
+     GROUP BY r.id, si.name, si.company_id, g.name`,
+    [id],
+  );
+  const row = result.rows[0];
+  if (!row) return res.status(404).json({ error: 'Report not found' });
+
+  // Authorization: client → site_id match; guard → submitted by this guard; admin → company_id match.
+  if (user!.role === 'client' && row.site_id !== user!.site_id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (user!.role === 'guard') {
+    const own = await pool.query(
+      'SELECT 1 FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+      [row.shift_session_id, user!.sub],
+    );
+    if (!own.rows[0]) return res.status(403).json({ error: 'Access denied' });
+  }
+  if (user!.role === 'company_admin' && row.company_id !== user!.company_id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  res.json({
+    id:          row.id,
+    report_type: row.report_type,
+    severity:    row.severity,
+    description: row.description,
+    reported_at: row.reported_at,
+    site_name:   row.site_name,
+    guard_name:  row.guard_name,
+    photos:      row.photos ?? [],
+  });
+});
+
 // POST /api/reports — guard submits a report
 router.post('/', requireAuth('guard'), async (req, res) => {
   const { shift_session_id, report_type, description, severity, photo_urls, latitude, longitude } = req.body;

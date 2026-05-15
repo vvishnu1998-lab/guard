@@ -78,7 +78,10 @@ export interface ActivityRow {
   status:         string;
   status_kind:    StatusKind;
   log_time:       string | null;
+  /** First photo URL for back-compat. Same as log_media_urls[0]. */
   log_media_url:  string | null;
+  /** Every photo for this event. Pings have 0 or 1; reports often have 4-5. */
+  log_media_urls: string[];
   event_time:     string;        // used for sort + ordering only
   detail_id:      string | null; // ping id or report id; null for synthesized missed rows
 }
@@ -108,7 +111,7 @@ function buildPingStatus(deltaMin: number): { text: string; kind: 'on_time' | 'l
 }
 
 router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res: Response) => {
-  const { from, to, guard_id, page = '1', page_size = '10' } = req.query;
+  const { from, to, guard_id, site_id, session_id, page = '1', page_size = '10' } = req.query;
   const pageNum  = Math.max(1, parseInt(page as string, 10) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(page_size as string, 10) || 10));
   const offset   = (pageNum - 1) * pageSize;
@@ -130,6 +133,10 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
     scopeParams = [user!.company_id];
   }
 
+  // Admin-only narrowing: site_id + session_id
+  // (clients are already site-scoped; client-supplied site_id is ignored)
+  const isAdmin = user!.role === 'company_admin';
+
   // ── Pull every shift_session that overlaps [fromIso, toIso] ──────────────
   let sessionQuery = `
     SELECT
@@ -148,9 +155,17 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       AND COALESCE(ss.clocked_out_at, NOW()) > $${scopeParams.length + 2}`;
   const sessionParams: unknown[] = [...scopeParams, toIso, fromIso];
 
-  if (guard_id && user!.role === 'company_admin') {
+  if (guard_id && isAdmin) {
     sessionQuery += ` AND ss.guard_id = $${sessionParams.length + 1}`;
     sessionParams.push(guard_id);
+  }
+  if (site_id && isAdmin) {
+    sessionQuery += ` AND ss.site_id = $${sessionParams.length + 1}`;
+    sessionParams.push(site_id);
+  }
+  if (session_id && isAdmin) {
+    sessionQuery += ` AND ss.id = $${sessionParams.length + 1}`;
+    sessionParams.push(session_id);
   }
   const sessionsResult = await pool.query<SessionRow>(sessionQuery, sessionParams);
   const sessions = sessionsResult.rows;
@@ -192,9 +207,17 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       AND r.reported_at <= $${scopeParams.length + 2}`;
   const reportParams: unknown[] = [...scopeParams, fromIso, toIso];
 
-  if (guard_id && user!.role === 'company_admin') {
+  if (guard_id && isAdmin) {
     reportQuery += ` AND ss.guard_id = $${reportParams.length + 1}`;
     reportParams.push(guard_id);
+  }
+  if (site_id && isAdmin) {
+    reportQuery += ` AND r.site_id = $${reportParams.length + 1}`;
+    reportParams.push(site_id);
+  }
+  if (session_id && isAdmin) {
+    reportQuery += ` AND ss.id = $${reportParams.length + 1}`;
+    reportParams.push(session_id);
   }
   reportQuery += ' GROUP BY r.id, ss.guard_id, g.name, si.name';
   const reportsResult = await pool.query<ReportRow>(reportQuery, reportParams);
@@ -236,33 +259,35 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
           const deltaMin = (Date.parse(ping.pinged_at) - windowStart) / 60_000;
           const status   = buildPingStatus(deltaMin);
           rows.push({
-            id:            ping.id,
-            kind:          'ping',
-            guard_id:      s.guard_id,
-            guard_name:    s.guard_name,
-            site_id:       s.site_id,
-            site_name:     s.site_name,
-            status:        status.text,
-            status_kind:   status.kind,
-            log_time:      ping.pinged_at,
-            log_media_url: ping.photo_url,
-            event_time:    ping.pinged_at,
-            detail_id:     ping.id,
+            id:             ping.id,
+            kind:           'ping',
+            guard_id:       s.guard_id,
+            guard_name:     s.guard_name,
+            site_id:        s.site_id,
+            site_name:      s.site_name,
+            status:         status.text,
+            status_kind:    status.kind,
+            log_time:       ping.pinged_at,
+            log_media_url:  ping.photo_url,
+            log_media_urls: ping.photo_url ? [ping.photo_url] : [],
+            event_time:     ping.pinged_at,
+            detail_id:      ping.id,
           });
         } else {
           rows.push({
-            id:            `missed-${s.session_id}-${windowStart}`,
-            kind:          'ping',
-            guard_id:      s.guard_id,
-            guard_name:    s.guard_name,
-            site_id:       s.site_id,
-            site_name:     s.site_name,
-            status:        'Missed Ping',
-            status_kind:   'missed',
-            log_time:      null,
-            log_media_url: null,
-            event_time:    new Date(windowStart).toISOString(),
-            detail_id:     null,
+            id:             `missed-${s.session_id}-${windowStart}`,
+            kind:           'ping',
+            guard_id:       s.guard_id,
+            guard_name:     s.guard_name,
+            site_id:        s.site_id,
+            site_name:      s.site_name,
+            status:         'Missed Ping',
+            status_kind:    'missed',
+            log_time:       null,
+            log_media_url:  null,
+            log_media_urls: [],
+            event_time:     new Date(windowStart).toISOString(),
+            detail_id:      null,
           });
         }
       }
@@ -274,19 +299,21 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
   // Add report rows
   for (const r of reportsResult.rows) {
     const typeName = r.report_type.charAt(0).toUpperCase() + r.report_type.slice(1);
+    const photos = r.photos ?? [];
     rows.push({
-      id:            r.id,
-      kind:          'report',
-      guard_id:      r.guard_id,
-      guard_name:    r.guard_name,
-      site_id:       r.site_id,
-      site_name:     r.site_name,
-      status:        `${typeName} Report`,
-      status_kind:   `${r.report_type}_report` as StatusKind,
-      log_time:      r.reported_at,
-      log_media_url: r.photos?.[0] ?? null,
-      event_time:    r.reported_at,
-      detail_id:     r.id,
+      id:             r.id,
+      kind:           'report',
+      guard_id:       r.guard_id,
+      guard_name:     r.guard_name,
+      site_id:        r.site_id,
+      site_name:      r.site_name,
+      status:         `${typeName} Report`,
+      status_kind:    `${r.report_type}_report` as StatusKind,
+      log_time:       r.reported_at,
+      log_media_url:  photos[0] ?? null,
+      log_media_urls: photos,
+      event_time:     r.reported_at,
+      detail_id:      r.id,
     });
   }
 
