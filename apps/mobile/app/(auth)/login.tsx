@@ -29,8 +29,13 @@ export default function LoginScreen() {
       try {
         const { status } = await Notifications.requestPermissionsAsync();
         if (status === 'granted') {
-          const t = await Notifications.getDevicePushTokenAsync();
-          fcmToken = t.data;
+          // Use Expo's push token (not the raw APNs device token).
+          // Expo's push service bridges to APNs/FCM so the backend
+          // can send via https://exp.host/--/api/v2/push/send.
+          const t = await Notifications.getExpoPushTokenAsync({
+            projectId: '5fd28125-2461-4165-b9df-7f34ced8b194',
+          });
+          fcmToken = t.data; // looks like "ExponentPushToken[xxxx]"
         }
       } catch (e) {
         console.warn('Failed to get push token', e);
