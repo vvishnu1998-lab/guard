@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
+import { validatePassword } from './auth';
 
 const router = Router();
 
@@ -329,6 +330,10 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
 // Star primary admin: add company admin
 router.post('/company-admins', requireAuth('company_admin'), async (req, res) => {
   const { name, email, password } = req.body;
+  // B2: password policy enforcement
+  const policyErr = validatePassword(password);
+  if (policyErr) return res.status(400).json({ error: policyErr });
+
   // Only primary admin can add others
   const callerResult = await pool.query(
     'SELECT is_primary FROM company_admins WHERE id = $1',

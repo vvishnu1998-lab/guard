@@ -3,9 +3,10 @@
  * Shows all chat rooms for the logged-in guard with last message preview and unread badge.
  * Tapping a room navigates to /chat/[roomId].
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { apiClient } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -47,7 +48,13 @@ export default function ChatListScreen() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // C4: refetch on every screen focus so last-message preview is always current
+  useFocusEffect(
+    useCallback(() => {
+      setLoading(true);
+      load();
+    }, [load])
+  );
 
   function renderRoom({ item }: { item: ChatRoom }) {
     return (

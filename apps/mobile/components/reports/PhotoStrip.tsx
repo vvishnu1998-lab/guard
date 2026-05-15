@@ -1,8 +1,10 @@
 /**
- * PhotoStrip — horizontal scrollable row of photo thumbnails with add/remove.
+ * PhotoStrip — wrap-grid of photo thumbnails with add/remove.
  * Used by all three report forms.
+ * E2: layout changed from horizontal ScrollView to flexWrap row so the +ADD
+ * button is always visible after 4 photos rather than hidden off-screen.
  */
-import { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Image, ActivityIndicator } from 'react-native';
 import type { Attachment } from '../../hooks/usePhotoAttachments';
 import { Colors, Spacing, Radius } from '../../constants/theme';
 
@@ -24,7 +26,8 @@ export function PhotoStrip({ attachments, onAdd, onRemove, maxPhotos = 3, disabl
         <Text style={styles.count}>{attachments.length}/{maxPhotos}</Text>
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.strip}>
+      {/* E2: wrap grid — no more horizontal scroll, +ADD always visible */}
+      <View style={styles.grid}>
         {attachments.map((att) => (
           <View key={att.localUri} style={styles.thumb}>
             <Image source={{ uri: att.localUri }} style={styles.img} resizeMode="cover" />
@@ -55,12 +58,13 @@ export function PhotoStrip({ attachments, onAdd, onRemove, maxPhotos = 3, disabl
             <Text style={styles.addLabel}>ADD</Text>
           </TouchableOpacity>
         )}
-      </ScrollView>
+      </View>
     </View>
   );
 }
 
 const THUMB = 90;
+const GAP   = 8;
 
 const styles = StyleSheet.create({
   container: { marginBottom: Spacing.lg },
@@ -68,7 +72,12 @@ const styles = StyleSheet.create({
   label:     { color: Colors.muted, fontSize: 11, letterSpacing: 2 },
   count:     { color: Colors.muted, fontSize: 11 },
 
-  strip: { gap: Spacing.sm, paddingBottom: 4 },
+  // E2: wrap grid instead of horizontal strip
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: GAP,
+  },
 
   thumb: {
     width: THUMB, height: THUMB,

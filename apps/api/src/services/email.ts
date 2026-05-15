@@ -69,34 +69,45 @@ export async function sendIncidentAlert(
      WHERE s.id = $1 AND c.is_active = true`,
     [siteId],
   );
-  if (!result.rows[0]) return;
+  // G2: log result for Railway diagnostics
+  if (!result.rows[0]) {
+    console.warn(`[email] sendIncidentAlert: no active client found for site_id=${siteId} — email not sent`);
+    return;
+  }
   const { site_name, client_email } = result.rows[0];
+  console.log(`[email] sendIncidentAlert: sending to ${client_email} for site=${site_name} (report=${report.id})`);
 
   const sevColors: Record<string, string> = {
     critical: '#DC2626', high: '#EA580C', medium: '#CA8A04', low: '#6B7280',
   };
   const sevColor = sevColors[report.severity] ?? '#6B7280';
 
-  await sgMail.send({
-    to: client_email,
-    from: FROM,
-    subject: `🚨 Incident Alert — ${site_name} [${report.severity.toUpperCase()}]`,
-    html: `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr" style="background:#7F1D1D">
-        <h1>INCIDENT ALERT</h1><p>${site_name.toUpperCase()}</p>
-      </div>
-      <div class="body">
-        <div class="meta">
-          <strong>Date/Time:</strong> ${fmtDT(report.reported_at)}<br/>
-          <strong>Severity:</strong> <span style="color:${sevColor};font-weight:bold">${report.severity.toUpperCase()}</span>
+  try {
+    await sgMail.send({
+      to: client_email,
+      from: FROM,
+      subject: `🚨 Incident Alert — ${site_name} [${report.severity.toUpperCase()}]`,
+      html: `<style>${BASE_STYLE}</style>
+      <div class="card">
+        <div class="hdr" style="background:#7F1D1D">
+          <h1>INCIDENT ALERT</h1><p>${site_name.toUpperCase()}</p>
         </div>
-        <p style="font-size:14px;color:#333;line-height:1.6">${report.description}</p>
-        <a class="btn" href="${PORTAL}">View in Client Portal</a>
-      </div>
-      <div class="footer">NetraOps — Confidential</div>
-    </div>`,
-  });
+        <div class="body">
+          <div class="meta">
+            <strong>Date/Time:</strong> ${fmtDT(report.reported_at)}<br/>
+            <strong>Severity:</strong> <span style="color:${sevColor};font-weight:bold">${report.severity.toUpperCase()}</span>
+          </div>
+          <p style="font-size:14px;color:#333;line-height:1.6">${report.description}</p>
+          <a class="btn" href="${PORTAL}">View in Client Portal</a>
+        </div>
+        <div class="footer">NetraOps — Confidential</div>
+      </div>`,
+    });
+    console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${client_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendIncidentAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    throw err;
+  }
 }
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────

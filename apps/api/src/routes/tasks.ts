@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
+import { sendPushNotification } from '../services/firebase';
 
 const router = Router();
 
@@ -100,6 +101,27 @@ router.post('/templates', requireAuth('company_admin'), async (req, res) => {
     [site_id, req.user!.sub, title, description, scheduled_time, recurrence, requires_photo ?? false]
   );
   res.status(201).json(result.rows[0]);
+
+  // F5: push to guards currently on shift at this site — non-blocking
+  pool.query<{ fcm_token: string }>(
+    `SELECT g.fcm_token
+     FROM shift_sessions ss
+     JOIN guards g ON g.id = ss.guard_id
+     WHERE ss.site_id = $1 AND ss.clocked_out_at IS NULL AND g.fcm_token IS NOT NULL`,
+    [site_id]
+  ).then(({ rows }) => {
+    if (!rows.length) return;
+    return Promise.allSettled(
+      rows.map((r) =>
+        sendPushNotification({
+          token: r.fcm_token,
+          title: 'New task',
+          body:  title ?? 'A new task has been assigned to your site.',
+          data:  { type: 'task_assigned', site_id },
+        })
+      )
+    );
+  }).catch((err) => console.error('[fcm] task assign push failed:', err));
 });
 
 // PATCH /api/tasks/templates/:id — update a template (company-scoped)

@@ -30,6 +30,7 @@ import './jobs/missedShiftAlert';
 import './jobs/autoCompleteShifts';
 import './jobs/monthlyHoursReport';
 import './jobs/chatRetention';
+import './jobs/pingReminder';
 
 const app = express();
 app.set('trust proxy', 1);

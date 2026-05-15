@@ -16,7 +16,7 @@ const REFRESH_TOKEN_TTL = '30d';
 // Password policy: 6–8 characters/digits, alphanumeric.
 const PASSWORD_MIN = 6;
 const PASSWORD_MAX = 8;
-function validatePassword(p: unknown): string | null {
+export function validatePassword(p: unknown): string | null {
   if (typeof p !== 'string') return 'Password is required';
   if (p.length < PASSWORD_MIN || p.length > PASSWORD_MAX) {
     return `Password must be ${PASSWORD_MIN}–${PASSWORD_MAX} characters`;

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
+import { validatePassword } from './auth';
 
 const router = Router();
 
@@ -23,6 +24,10 @@ router.get('/:site_id', requireAuth('company_admin'), async (req, res) => {
 // POST /api/clients — create client portal account for a site
 router.post('/', requireAuth('company_admin'), async (req, res) => {
   const { site_id, name, email, password } = req.body;
+  // B1: server-side password policy enforcement
+  const policyErr = validatePassword(password);
+  if (policyErr) return res.status(400).json({ error: policyErr });
+
   const siteCheck = await pool.query(
     'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
     [site_id, req.user!.company_id]
