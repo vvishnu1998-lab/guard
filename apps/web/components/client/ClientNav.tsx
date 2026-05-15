@@ -36,7 +36,7 @@ export default function ClientNav() {
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
           <div>
-            <p className="text-white font-black tracking-[0.2em] text-base leading-none">V-WING</p>
+            <p className="text-white font-black tracking-[0.2em] text-base leading-none">NetraOps</p>
             <p className="text-blue-400 text-[9px] tracking-[0.25em] mt-1 font-medium">CLIENT PORTAL</p>
           </div>
         </div>
@@ -87,7 +87,7 @@ export default function ClientNav() {
         <div className="flex items-center gap-2">
           <Image src="/vwing_logo.png" alt="Netra" width={22} height={22} className="object-contain"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-          <span className="text-white font-black tracking-[0.2em] text-sm">V-WING</span>
+          <span className="text-white font-black tracking-[0.2em] text-sm">NetraOps</span>
           <span className="text-blue-400 text-[9px] tracking-[0.2em] font-medium">CLIENT</span>
         </div>
       </div>

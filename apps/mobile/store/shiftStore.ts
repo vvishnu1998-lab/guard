@@ -14,6 +14,7 @@ interface Shift {
   scheduled_start: string;
   scheduled_end: string;
   instructions_pdf_url?: string | null;
+  effective_photo_limit?: number;
   geofence?: Geofence;
 }
 

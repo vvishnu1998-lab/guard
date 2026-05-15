@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
+import * as Notifications from 'expo-notifications';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -24,7 +25,17 @@ export default function LoginScreen() {
     if (!email.trim() || !password) return;
     setLoading(true);
     try {
-      await loginWithEmail(email.trim(), password);
+      let fcmToken: string | undefined;
+      try {
+        const { status } = await Notifications.requestPermissionsAsync();
+        if (status === 'granted') {
+          const t = await Notifications.getDevicePushTokenAsync();
+          fcmToken = t.data;
+        }
+      } catch (e) {
+        console.warn('Failed to get push token', e);
+      }
+      await loginWithEmail(email.trim(), password, fcmToken);
       // Navigation handled by root _layout.tsx
     } catch (err: any) {
       const msg = err?.message ?? 'Login failed';
@@ -49,7 +60,7 @@ export default function LoginScreen() {
     >
       <View style={styles.inner}>
         <View style={styles.logoContainer}>
-          <Text style={styles.logo}>V-WING</Text>
+          <Text style={styles.logo}>NetraOps</Text>
           <Text style={styles.tagline}>SECURITY MANAGEMENT</Text>
         </View>
 

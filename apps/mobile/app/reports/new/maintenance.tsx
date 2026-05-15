@@ -37,9 +37,9 @@ export default function MaintenanceReportForm() {
   const [enhanced,     setEnhanced]     = useState<string | null>(null);
   const [originalDesc, setOriginalDesc] = useState<string | null>(null);
 
-  const { activeSession } = useShiftStore();
+  const { activeShift, activeSession } = useShiftStore();
   const { submitReport }  = useOfflineStore();
-  const photos            = usePhotoAttachments(3);
+  const photos            = usePhotoAttachments(activeShift?.effective_photo_limit ?? 5);
 
   async function handleEnhance() {
     if (description.trim().length < 10) return;
@@ -200,7 +200,7 @@ export default function MaintenanceReportForm() {
             attachments={photos.attachments}
             onAdd={photos.addPhoto}
             onRemove={photos.removePhoto}
-            maxPhotos={3}
+            maxPhotos={activeShift?.effective_photo_limit ?? 5}
             disabled={submitting}
           />
         </View>

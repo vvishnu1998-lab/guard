@@ -34,9 +34,9 @@ export default function IncidentReportForm() {
   const [enhanced,     setEnhanced]     = useState<string | null>(null);
   const [originalDesc, setOriginalDesc] = useState<string | null>(null);
 
-  const { activeSession } = useShiftStore();
+  const { activeShift, activeSession } = useShiftStore();
   const { submitReport }  = useOfflineStore();
-  const photos            = usePhotoAttachments(5); // incidents allow up to 5 photos
+  const photos            = usePhotoAttachments(activeShift?.effective_photo_limit ?? 5);
 
   async function handleEnhance() {
     if (description.trim().length < 10) return;
@@ -221,7 +221,7 @@ export default function IncidentReportForm() {
               attachments={photos.attachments}
               onAdd={photos.addPhoto}
               onRemove={photos.removePhoto}
-              maxPhotos={5}
+              maxPhotos={activeShift?.effective_photo_limit ?? 5}
               disabled={submitting}
             />
           </View>

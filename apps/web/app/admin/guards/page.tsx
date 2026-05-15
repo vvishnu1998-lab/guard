@@ -229,7 +229,14 @@ export default function GuardsPage() {
                 <div key={key}>
                   <label className="block text-gray-500 text-xs tracking-widest mb-1">{label} <span className="text-amber-400">*</span></label>
                   <input type={type} placeholder={ph} value={(form as any)[key]}
-                    onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+                    onChange={(e) => {
+                      setForm((f) => ({ ...f, [key]: e.target.value }));
+                      if (key === 'temp_password' && (e.target.value.length < 6 || e.target.value.length > 8)) {
+                        setFormError('Temporary password must be 6–8 characters');
+                      } else if (key === 'temp_password') {
+                        setFormError('');
+                      }
+                    }}
                     className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-3 text-gray-200 text-base focus:outline-none focus:border-amber-400"
                   />
                 </div>

@@ -364,7 +364,7 @@ export async function sendTempPasswordEmail(
     html: `<style>${BASE_STYLE}</style>
     <div class="card">
       <div class="hdr">
-        <div class="brand">V-WING</div>
+        <div class="brand">NetraOps</div>
         <h1>PASSWORD RESET</h1>
         <p>${label.toUpperCase()}</p>
       </div>
@@ -417,7 +417,7 @@ export async function sendPasswordResetEmail(
     html: `<style>${BASE_STYLE}</style>
     <div class="card">
       <div class="hdr">
-        <div class="brand">V-WING</div>
+        <div class="brand">NetraOps</div>
         <h1>PASSWORD RESET</h1>
         <p>${label.toUpperCase()}</p>
       </div>

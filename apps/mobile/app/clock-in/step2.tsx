@@ -85,14 +85,14 @@ export default function ClockInStep2() {
   function usePhoto() {
     if (!preview?.uri) return;
     setSelfie(preview);
-    router.push('/clock-in/step3');
+    router.push('/clock-in/step4');
   }
 
   // ── Preview screen ───────────────────────────────────────────────────────────
   if (preview) {
     return (
       <View style={styles.container}>
-        <Text style={styles.step}>CLOCK IN · STEP 2 OF 4</Text>
+        <Text style={styles.step}>CLOCK IN · STEP 2 OF 3</Text>
         <Text style={styles.previewLabel}>PHOTO PREVIEW</Text>
 
         <Image source={{ uri: preview.uri }} style={styles.previewImage} resizeMode="cover" />
@@ -114,7 +114,7 @@ export default function ClockInStep2() {
   // ── Camera screen ────────────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
-      <Text style={styles.step}>CLOCK IN · STEP 2 OF 4</Text>
+      <Text style={styles.step}>CLOCK IN · STEP 2 OF 3</Text>
       <Text style={styles.instruction}>Take a clear photo of yourself</Text>
 
       <View style={styles.cameraContainer}>

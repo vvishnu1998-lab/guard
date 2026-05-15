@@ -15,7 +15,7 @@ import { apiClient }       from '../../lib/apiClient';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
-const STEPS = ['Uploading selfie…', 'Uploading site photo…', 'Starting shift…', 'Saving verification…'];
+const STEPS = ['Uploading selfie…', 'Starting shift…', 'Saving verification…'];
 
 export default function ClockInStep4() {
   const [submitting,  setSubmitting]  = useState(false);
@@ -35,8 +35,8 @@ export default function ClockInStep4() {
 
   const { pendingShift, setActiveSession } = useShiftStore();
 
-  // ── Guard: all three proofs must be present ──────────────────────────────
-  if (!verifiedLatitude || !selfie || !sitePhoto || !pendingShiftId) {
+  // ── Guard: selfie proof must be present ──────────────────────────────
+  if (!verifiedLatitude || !selfie || !pendingShiftId) {
     return (
       <View style={styles.container}>
         <Text style={styles.errorTitle}>INCOMPLETE DATA</Text>
@@ -60,27 +60,19 @@ export default function ClockInStep4() {
         selfieUrl = selfieUpload.public_url;
       } catch { /* S3 not configured — continue without photo URL */ }
 
-      // Step 2 — upload site photo
+      // Step 2 — clock in (creates shift_session + triggers task instance generation)
       setStatusStep(1);
-      let sitePhotoUrl = 'pending';
-      try {
-        const sitePhotoUpload = await uploadToS3(sitePhoto!.uri, 'clock_in');
-        sitePhotoUrl = sitePhotoUpload.public_url;
-      } catch { /* S3 not configured — continue without photo URL */ }
-
-      // Step 3 — clock in (creates shift_session + triggers task instance generation)
-      setStatusStep(2);
       const session = await apiClient.post<{ id: string; site_id: string; clocked_in_at: string }>(
         `/shifts/${pendingShiftId}/clock-in`,
         { clock_in_coords: `(${verifiedLatitude},${verifiedLongitude})` }
       );
 
-      // Step 4 — save photo verification proofs
-      setStatusStep(3);
+      // Step 3 — save photo verification proofs
+      setStatusStep(2);
       await apiClient.post('/locations/clock-in-verification', {
         shift_session_id:   session.id,
         selfie_url:         selfieUrl,
-        site_photo_url:     sitePhotoUrl,
+        site_photo_url:     null,
         verified_lat:       verifiedLatitude,
         verified_lng:       verifiedLongitude,
         is_within_geofence: true,
@@ -94,7 +86,7 @@ export default function ClockInStep4() {
         scheduled_start: session.clocked_in_at,
         scheduled_end:   session.clocked_in_at,
       };
-      setActiveSession(shiftForStore, session);
+      setActiveSession(shiftForStore, { ...session, shift_id: pendingShiftId });
       resetClockIn();
 
       const pdfUrl = pendingShift?.instructions_pdf_url ?? null;
@@ -147,7 +139,7 @@ export default function ClockInStep4() {
       </View>
     </Modal>
     <ScrollView contentContainerStyle={styles.scroll} style={styles.bg}>
-      <Text style={styles.step}>CLOCK IN · STEP 4 OF 4</Text>
+      <Text style={styles.step}>CLOCK IN · STEP 3 OF 3</Text>
       <Text style={styles.title}>CONFIRM & START</Text>
 
       {/* ── Proof 1: GPS ──────────────────────────────────────────── */}
@@ -190,21 +182,6 @@ export default function ClockInStep4() {
         <View style={styles.metaRow}>
           <Text style={styles.metaText}>{fmtCoord(selfie.latitude)}, {fmtCoord(selfie.longitude)}</Text>
           <Text style={styles.metaText}>{new Date(selfie.takenAt).toLocaleTimeString()}</Text>
-        </View>
-      </View>
-
-      {/* ── Proof 3: Site Photo ────────────────────────────────────── */}
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <View style={[styles.badge, { backgroundColor: Colors.action }]}>
-            <Text style={styles.badgeText}>3</Text>
-          </View>
-          <Text style={styles.cardLabel}>SITE PHOTO</Text>
-        </View>
-        <Image source={{ uri: sitePhoto.uri }} style={styles.photoThumb} resizeMode="cover" />
-        <View style={styles.metaRow}>
-          <Text style={styles.metaText}>{fmtCoord(sitePhoto.latitude)}, {fmtCoord(sitePhoto.longitude)}</Text>
-          <Text style={styles.metaText}>{new Date(sitePhoto.takenAt).toLocaleTimeString()}</Text>
         </View>
       </View>
 

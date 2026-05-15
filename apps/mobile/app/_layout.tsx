@@ -28,7 +28,7 @@ export default function RootLayout() {
       if (mustChangePassword) {
         // Force the user through change-password before any other route
         router.replace('/(auth)/change-password');
-      } else if (inAuth || segments.length === 0) {
+      } else if (inAuth || !segments.length) {
         router.replace('/(tabs)/home');
       }
     }

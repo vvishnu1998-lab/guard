@@ -88,3 +88,25 @@ export async function sendGeofenceViolationAlert(params: {
     params.adminFcmTokens.map((token) => admin.messaging().send({ ...message, token }))
   );
 }
+
+/** Send a ping alert to Star admin devices */
+export async function sendPingAlert(params: {
+  adminFcmTokens: string[];
+  guardName: string;
+  siteName: string;
+}) {
+  if (!admin.apps.length || !params.adminFcmTokens.length) return;
+  const message = {
+    notification: {
+      title: `Location Ping — ${params.siteName}`,
+      body: `${params.guardName} has submitted a 30-minute ping.`,
+    },
+    data: { type: 'ping' },
+    android: { priority: 'normal' as const },
+    apns: { payload: { aps: { sound: 'default', badge: 1 } } },
+  };
+
+  await Promise.allSettled(
+    params.adminFcmTokens.map((token) => admin.messaging().send({ ...message, token }))
+  );
+}

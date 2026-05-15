@@ -104,6 +104,9 @@ export default function CompaniesPage() {
     if (!adminForm.name.trim() || !adminForm.email.trim() || !adminForm.password) {
       setAdminError('All fields are required'); return;
     }
+    if (adminForm.password.length < 6 || adminForm.password.length > 8) {
+      setAdminError('Password must be 6–8 characters'); return;
+    }
     setAdminSaving(true); setAdminError('');
     try {
       const { vishnuPost: vp } = await import('../../../lib/vishnuApi');

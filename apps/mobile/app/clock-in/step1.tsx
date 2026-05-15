@@ -56,7 +56,7 @@ export default function ClockInStep1() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.step}>CLOCK IN · STEP 1 OF 4</Text>
+      <Text style={styles.step}>CLOCK IN · STEP 1 OF 3</Text>
       <Text style={styles.title}>GPS VERIFICATION</Text>
 
       <View style={styles.pulseContainer}>

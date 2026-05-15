@@ -10,7 +10,7 @@ interface AuthState {
   mustChangePassword: boolean;
 
   // Actions
-  loginWithEmail: (email: string, password: string) => Promise<void>;
+  loginWithEmail: (email: string, password: string, fcmToken?: string) => Promise<void>;
   changePassword: (current: string, next: string) => Promise<void>;
   forgotPassword: (email: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -30,8 +30,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   companyId: null,
   mustChangePassword: false,
 
-  loginWithEmail: async (email, password) => {
-    const data = await _request('/auth/guard/login', { email, password });
+  loginWithEmail: async (email, password, fcmToken) => {
+    const data = await _request('/auth/guard/login', { email, password, fcm_token: fcmToken });
     await _saveSession(data);
     set({
       status: 'authenticated',

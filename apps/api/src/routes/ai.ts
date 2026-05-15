@@ -59,14 +59,30 @@ ${text.trim()}
 Rewrite this as a professional security report entry:`;
 
   try {
-    const message = await anthropic.messages.create({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: userPrompt }],
-      system: systemPrompt,
-    });
+    let enhanced = '';
+    let retries = 3;
+    let delay = 1000;
+    while (retries > 0) {
+      try {
+        const message = await anthropic.messages.create({
+          model: ANTHROPIC_MODEL,
+          max_tokens: 1024,
+          messages: [{ role: 'user', content: userPrompt }],
+          system: systemPrompt,
+        });
+        enhanced = (message.content[0] as { type: string; text: string }).text?.trim() || '';
+        break;
+      } catch (err: any) {
+        if (err?.status === 529 && retries > 1) {
+          retries--;
+          await new Promise(r => setTimeout(r, delay));
+          delay *= 2;
+        } else {
+          throw err;
+        }
+      }
+    }
 
-    const enhanced = (message.content[0] as { type: string; text: string }).text?.trim();
     if (!enhanced) {
       return res.status(500).json({ error: 'Empty response from AI' });
     }

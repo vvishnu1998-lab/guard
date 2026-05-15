@@ -154,7 +154,7 @@ const CW = MR - ML;
 
 function drawHeader(doc: InstanceType<typeof PDFDocument>, title: string, pageNum: number, totalPages: number) {
   doc.rect(0, 0, PAGE_W, 72).fill(NAVY);
-  doc.fontSize(18).fillColor(WHITE).font('Helvetica-Bold').text('V-WING', ML, 18, { lineBreak: false });
+  doc.fontSize(18).fillColor(WHITE).font('Helvetica-Bold').text('NetraOps', ML, 18, { lineBreak: false });
   doc.fontSize(9).fillColor('#94A3B8').font('Helvetica').text('SECURITY MANAGEMENT', ML, 40);
   doc.fontSize(13).fillColor(WHITE).font('Helvetica-Bold').text(title, 0, 26, { align: 'right', width: PAGE_W - ML });
   doc.fontSize(8).fillColor('#64748B').font('Helvetica').text(`${pageNum} / ${totalPages}`, 0, 44, { align: 'right', width: PAGE_W - ML });
@@ -324,7 +324,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
 
   // ── Build PDF ─────────────────────────────────────────────────────────────────
   const doc = new PDFDocument({ margin: 0, size: 'A4', autoFirstPage: true });
-  const filename = `v-wing-report-${siteName.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().slice(0, 10)}.pdf`;
+  const filename = `netraops-report-${siteName.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().slice(0, 10)}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

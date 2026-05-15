@@ -46,7 +46,7 @@ export default function AdminNav() {
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
           <div>
-            <p className="text-white font-black tracking-[0.2em] text-base leading-none">V-WING</p>
+            <p className="text-white font-black tracking-[0.2em] text-base leading-none">NetraOps</p>
             <p className="text-amber-500 text-[9px] tracking-[0.25em] mt-1 font-medium">ADMIN</p>
           </div>
         </div>
@@ -105,7 +105,7 @@ export default function AdminNav() {
             className="object-contain"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
           />
-          <span className="text-white font-black tracking-[0.2em] text-sm">V-WING</span>
+          <span className="text-white font-black tracking-[0.2em] text-sm">NetraOps</span>
           <span className="text-amber-500 text-[9px] tracking-[0.2em] font-medium">ADMIN</span>
         </div>
       </div>

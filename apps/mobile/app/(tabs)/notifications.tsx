@@ -51,9 +51,9 @@ function toNotifItem(v: Violation): NotifItem {
 
   let icon = '🔴';
   let title = 'Geofence Violation';
-  let titleColor = Colors.danger;
+  let titleColor: string = Colors.danger;
   let description = 'You were detected outside the site boundary.';
-  let borderColor = Colors.danger;
+  let borderColor: string = Colors.danger;
 
   if (isExcused) {
     icon = '⚠️';
