@@ -12,6 +12,7 @@ import {
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../lib/apiClient';
+import { useUnreadStore } from '../../store/unreadStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 interface ChatMessage {
@@ -48,11 +49,25 @@ export default function ChatRoomScreen() {
     }
   }, [roomId]);
 
+  // On mount: load messages + mark room read on server so the chat-tab
+  // badge resets. Mark-read again on each poll tick so any messages that
+  // arrived during the polling interval don't keep the badge stuck.
   useEffect(() => {
+    if (!roomId) return;
+    const refreshUnread = useUnreadStore.getState().refresh;
+    const markRead = () =>
+      apiClient.post(`/chat/rooms/${roomId}/mark-read`, {})
+        .then(() => refreshUnread())
+        .catch(() => { /* badge will resync on next refresh */ });
+
     loadMessages();
-    pollRef.current = setInterval(() => loadMessages(true), 10000);
+    markRead();
+    pollRef.current = setInterval(() => {
+      loadMessages(true);
+      markRead();
+    }, 10000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [loadMessages]);
+  }, [loadMessages, roomId]);
 
   // Scroll to end when messages change
   useEffect(() => {

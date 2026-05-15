@@ -2,6 +2,7 @@ import { View } from 'react-native';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import DrawerOverlay from '../../components/DrawerOverlay';
+import { useUnreadStore } from '../../store/unreadStore';
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -19,6 +20,9 @@ function TabIcon(name: IoniconsName, focused: boolean) {
 }
 
 export default function TabLayout() {
+  const notificationUnread = useUnreadStore((s) => s.notificationUnread);
+  const chatUnread         = useUnreadStore((s) => s.chatUnread);
+
   return (
     <View style={{ flex: 1 }}>
       <Tabs
@@ -60,6 +64,12 @@ export default function TabLayout() {
           options={{
             title: 'ALERTS',
             tabBarIcon: ({ focused }) => TabIcon('notifications', focused),
+            tabBarBadge: notificationUnread > 0 ? notificationUnread : undefined,
+            tabBarBadgeStyle: {
+              backgroundColor: '#FF5C5C',
+              color: '#FFFFFF',
+              fontSize: 11,
+            },
           }}
         />
 
@@ -68,6 +78,12 @@ export default function TabLayout() {
           options={{
             title: 'CHAT',
             tabBarIcon: ({ focused }) => TabIcon('chatbubbles', focused),
+            tabBarBadge: chatUnread > 0 ? chatUnread : undefined,
+            tabBarBadgeStyle: {
+              backgroundColor: '#FF5C5C',
+              color: '#FFFFFF',
+              fontSize: 11,
+            },
           }}
         />
 

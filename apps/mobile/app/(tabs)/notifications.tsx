@@ -1,7 +1,12 @@
 /**
- * Notifications Tab — geofence violations styled as notification feed.
- * Fetches GET /api/locations/violations (guard-scoped).
- * Groups by TODAY / YESTERDAY / EARLIER.
+ * Notifications Tab — feed of every push the guard has received
+ * (ping, activity report, task, chat, geofence breach).
+ *
+ * Fetches GET /api/notifications. Mark-all-read fires on every focus so
+ * the home-tab badge resets the moment the guard opens the tab; the
+ * "isRead" visual treatment is preserved on individual rows until refresh.
+ * Tap routes to the relevant screen via the shared navigateForNotification
+ * helper (also used by the OS push-tap listener).
  */
 import { useCallback, useState } from 'react';
 import {
@@ -10,30 +15,40 @@ import {
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { apiClient } from '../../lib/apiClient';
+import { navigateForNotification } from '../../lib/navigateForNotification';
+import { useUnreadStore } from '../../store/unreadStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
-interface Violation {
-  id:                  string;
-  occurred_at:         string;
-  resolved_at:         string | null;
-  duration_minutes:    number | null;
-  violation_lat:       number;
-  violation_lng:       number;
-  supervisor_override: boolean;
-  site_name:           string;
+type NotificationType =
+  | 'ping_reminder'
+  | 'activity_report_reminder'
+  | 'task_reminder'
+  | 'chat'
+  | 'geofence_breach';
+
+interface NotificationRow {
+  id:         string;
+  type:       NotificationType;
+  title:      string;
+  body:       string;
+  data:       Record<string, any>;
+  read_at:    string | null;
+  created_at: string;
 }
 
-interface NotifItem {
-  id: string;
-  icon: string;
-  title: string;
-  titleColor: string;
-  subtitle: string;
-  description: string;
+interface VisualSpec {
+  icon:        string;
+  titleColor:  string;
   borderColor: string;
-  occurred_at: string;
-  isRead: boolean;
 }
+
+const VISUAL_BY_TYPE: Record<NotificationType, VisualSpec> = {
+  ping_reminder:            { icon: '📍', titleColor: Colors.action,  borderColor: Colors.action },
+  activity_report_reminder: { icon: '📝', titleColor: Colors.action,  borderColor: Colors.action },
+  task_reminder:            { icon: '✅', titleColor: Colors.action,  borderColor: Colors.action },
+  chat:                     { icon: '💬', titleColor: Colors.action,  borderColor: Colors.action },
+  geofence_breach:          { icon: '🔴', titleColor: Colors.danger,  borderColor: Colors.danger },
+};
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -45,121 +60,94 @@ function timeAgo(iso: string) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function toNotifItem(v: Violation): NotifItem {
-  const isOpen    = !v.resolved_at;
-  const isExcused = v.supervisor_override;
-
-  let icon = '🔴';
-  let title = 'Geofence Violation';
-  let titleColor: string = Colors.danger;
-  let description = 'You were detected outside the site boundary.';
-  let borderColor: string = Colors.danger;
-
-  if (isExcused) {
-    icon = '⚠️';
-    title = 'Violation Excused';
-    titleColor = Colors.warning;
-    description = 'This violation was excused by a supervisor.';
-    borderColor = Colors.warning;
-  } else if (!isOpen) {
-    icon = '✅';
-    title = 'Boundary Restored';
-    titleColor = Colors.success;
-    description = v.duration_minutes != null
-      ? `You were outside for ${Math.round(v.duration_minutes)} min. Now resolved.`
-      : 'You returned within the boundary. Resolved.';
-    borderColor = Colors.success;
-  } else {
-    description = 'You may still be outside the boundary. Return immediately.';
-  }
-
-  return {
-    id: v.id,
-    icon,
-    title,
-    titleColor,
-    subtitle: `${v.site_name}  ·  ${timeAgo(v.occurred_at)}`,
-    description,
-    borderColor,
-    occurred_at: v.occurred_at,
-    isRead: !isOpen,
-  };
-}
-
 interface Section {
   title: string;
-  data: NotifItem[];
+  data:  NotificationRow[];
 }
 
 export default function NotificationsScreen() {
-  const [violations,  setViolations]  = useState<Violation[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [refreshing,  setRefreshing]  = useState(false);
-  const [error,       setError]       = useState<string | null>(null);
-  const [allRead,     setAllRead]     = useState(false);
+  const [rows,       setRows]       = useState<NotificationRow[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error,      setError]      = useState<string | null>(null);
 
-  async function fetchViolations() {
+  const { resetNotifications, refresh } = useUnreadStore();
+
+  const fetchNotifications = useCallback(async () => {
     try {
-      const data = await apiClient.get<Violation[]>('/locations/violations');
-      setViolations(data);
+      const data = await apiClient.get<NotificationRow[]>('/notifications');
+      setRows(data);
       setError(null);
     } catch (err: any) {
       setError(err?.message ?? 'Could not load notifications');
     }
-  }
+  }, []);
 
+  // On every focus: refetch + server-side mark-all-read + reset local badge.
   useFocusEffect(
     useCallback(() => {
       setLoading(true);
-      setAllRead(false);
-      fetchViolations().finally(() => setLoading(false));
-    }, [])
+      (async () => {
+        await fetchNotifications();
+        try {
+          await apiClient.post('/notifications/mark-all-read');
+          resetNotifications();
+        } catch { /* badge will resync on next refresh */ }
+        setLoading(false);
+      })();
+    }, [fetchNotifications, resetNotifications]),
   );
 
   async function onRefresh() {
     setRefreshing(true);
-    await fetchViolations();
+    await fetchNotifications();
+    await refresh();
     setRefreshing(false);
   }
 
+  function handleTap(row: NotificationRow) {
+    navigateForNotification(row.type, row.data);
+  }
+
+  // Group into TODAY / YESTERDAY / EARLIER
   const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterdayStart = new Date(todayStart.getTime() - 86400000);
+  const todayStart     = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart.getTime() - 86_400_000);
 
-  const items = violations.map(toNotifItem);
-
-  const unreadCount = allRead ? 0 : items.filter(i => !i.isRead).length;
-
-  // Group into sections
-  const todayItems     = items.filter(i => new Date(i.occurred_at) >= todayStart);
-  const yesterdayItems = items.filter(i => {
-    const d = new Date(i.occurred_at);
+  const todayRows     = rows.filter((r) => new Date(r.created_at) >= todayStart);
+  const yesterdayRows = rows.filter((r) => {
+    const d = new Date(r.created_at);
     return d >= yesterdayStart && d < todayStart;
   });
-  const earlierItems   = items.filter(i => new Date(i.occurred_at) < yesterdayStart);
+  const earlierRows = rows.filter((r) => new Date(r.created_at) < yesterdayStart);
 
   const sections: Section[] = [
-    ...(todayItems.length     > 0 ? [{ title: 'TODAY',     data: todayItems     }] : []),
-    ...(yesterdayItems.length > 0 ? [{ title: 'YESTERDAY', data: yesterdayItems }] : []),
-    ...(earlierItems.length   > 0 ? [{ title: 'EARLIER',   data: earlierItems   }] : []),
+    ...(todayRows.length     > 0 ? [{ title: 'TODAY',     data: todayRows     }] : []),
+    ...(yesterdayRows.length > 0 ? [{ title: 'YESTERDAY', data: yesterdayRows }] : []),
+    ...(earlierRows.length   > 0 ? [{ title: 'EARLIER',   data: earlierRows   }] : []),
   ];
 
-  function renderItem({ item }: { item: NotifItem }) {
-    const isUnread = !item.isRead && !allRead;
+  function renderItem({ item }: { item: NotificationRow }) {
+    const spec = VISUAL_BY_TYPE[item.type] ?? VISUAL_BY_TYPE.chat;
+    const isUnread = !item.read_at;
     return (
-      <View style={[styles.card, { borderLeftColor: item.borderColor }, isUnread && styles.cardUnread]}>
+      <TouchableOpacity
+        style={[styles.card, { borderLeftColor: spec.borderColor }, isUnread && styles.cardUnread]}
+        onPress={() => handleTap(item)}
+        activeOpacity={0.7}
+      >
         <View style={styles.cardRow}>
-          <Text style={styles.cardIcon}>{item.icon}</Text>
+          <Text style={styles.cardIcon}>{spec.icon}</Text>
           <View style={{ flex: 1 }}>
             <View style={styles.cardTitleRow}>
-              <Text style={[styles.cardTitle, { color: item.titleColor }]}>{item.title}</Text>
+              <Text style={[styles.cardTitle, { color: spec.titleColor }]}>{item.title}</Text>
               {isUnread && <View style={styles.unreadDot} />}
             </View>
-            <Text style={styles.cardSubtitle}>{item.subtitle}</Text>
-            <Text style={styles.cardDesc}>{item.description}</Text>
+            <Text style={styles.cardSubtitle}>{timeAgo(item.created_at)}</Text>
+            <Text style={styles.cardDesc}>{item.body}</Text>
           </View>
         </View>
-      </View>
+      </TouchableOpacity>
     );
   }
 
@@ -167,15 +155,7 @@ export default function NotificationsScreen() {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.title}>NOTIFICATIONS</Text>
-          {unreadCount > 0 && (
-            <Text style={styles.unreadCount}>{unreadCount} unread</Text>
-          )}
-        </View>
-        <TouchableOpacity onPress={() => setAllRead(true)}>
-          <Text style={styles.markReadBtn}>Mark all read</Text>
-        </TouchableOpacity>
+        <Text style={styles.title}>NOTIFICATIONS</Text>
       </View>
 
       {loading ? (
@@ -193,7 +173,7 @@ export default function NotificationsScreen() {
         <View style={styles.center}>
           <Text style={styles.emptyIcon}>🔔</Text>
           <Text style={styles.emptyText}>No notifications</Text>
-          <Text style={styles.emptySub}>Geofence alerts will appear here</Text>
+          <Text style={styles.emptySub}>Reminders and alerts will appear here</Text>
         </View>
       ) : (
         <SectionList
@@ -221,9 +201,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.bg },
 
   header: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    justifyContent: 'space-between',
     paddingHorizontal: Spacing.lg,
     paddingTop: 60,
     paddingBottom: Spacing.md,
@@ -235,18 +212,6 @@ const styles = StyleSheet.create({
     color: Colors.textPrimary,
     fontSize: 24,
     letterSpacing: 4,
-  },
-  unreadCount: {
-    color: Colors.action,
-    fontSize: 13,
-    marginTop: 2,
-    letterSpacing: 0.5,
-  },
-  markReadBtn: {
-    color: Colors.action,
-    fontSize: 14,
-    letterSpacing: 0.3,
-    paddingBottom: 2,
   },
 
   listContent: { padding: Spacing.md },

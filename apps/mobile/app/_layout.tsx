@@ -6,6 +6,8 @@
  *   - Auto-refresh of the Expo push token whenever the guard is authenticated
  *     (covers the case where a returning user gets in via persisted refresh token
  *     and never goes through the login button handler).
+ *   - Tab-bar badge counts (notifications + chat) via the unread store —
+ *     refreshed on auth, on incoming push, and on tab focus.
  *
  * Guards stay logged in until they explicitly log out (no auto-lock).
  */
@@ -14,7 +16,9 @@ import { Stack, router, useSegments } from 'expo-router';
 import { useFonts, BarlowCondensed_500Medium, BarlowCondensed_700Bold } from '@expo-google-fonts/barlow-condensed';
 import * as Notifications from 'expo-notifications';
 import { useAuthStore } from '../store/authStore';
+import { useUnreadStore } from '../store/unreadStore';
 import { apiClient } from '../lib/apiClient';
+import { navigateForNotification } from '../lib/navigateForNotification';
 
 const EAS_PROJECT_ID = '5fd28125-2461-4165-b9df-7f34ced8b194';
 
@@ -33,6 +37,9 @@ Notifications.setNotificationHandler({
 export default function RootLayout() {
   const { status, mustChangePassword, loadSession } = useAuthStore();
   const segments = useSegments();
+  const refreshUnread = useUnreadStore((s) => s.refresh);
+  const bumpNotifications = useUnreadStore((s) => s.bumpNotifications);
+  const bumpChat = useUnreadStore((s) => s.bumpChat);
 
   const [fontsLoaded] = useFonts({ BarlowCondensed_500Medium, BarlowCondensed_700Bold });
 
@@ -56,51 +63,52 @@ export default function RootLayout() {
     }
   }, [fontsLoaded, status, mustChangePassword, segments]);
 
-  // Auto-register / refresh the Expo push token whenever the guard is authenticated.
-  // This is the durable path; the login button handler also captures it as a fast path,
-  // but this effect covers auto-login via refresh token (no login handler fires).
+  // Auto-register / refresh the Expo push token + load unread counts whenever
+  // the guard is authenticated. This is the durable path; the login button
+  // handler also captures it as a fast path, but this effect covers auto-login
+  // via refresh token (no login handler fires).
   useEffect(() => {
     if (status !== 'authenticated' || mustChangePassword) return;
     (async () => {
       try {
         const { status: permStatus } = await Notifications.requestPermissionsAsync();
-        if (permStatus !== 'granted') return;
-        const t = await Notifications.getExpoPushTokenAsync({ projectId: EAS_PROJECT_ID });
-        await apiClient.post('/auth/guard/fcm-token', { fcm_token: t.data });
+        if (permStatus === 'granted') {
+          const t = await Notifications.getExpoPushTokenAsync({ projectId: EAS_PROJECT_ID });
+          await apiClient.post('/auth/guard/fcm-token', { fcm_token: t.data });
+        }
       } catch (err) {
         console.warn('[push] Failed to register push token:', err);
       }
+      // Always pull the latest unread counts so the badge isn't stale on launch.
+      refreshUnread();
     })();
-  }, [status, mustChangePassword]);
+  }, [status, mustChangePassword, refreshUnread]);
 
   // Tap routing — open the right screen when the user taps a push notification.
-  // Payloads come from the API: pingReminder.ts (ping_reminder /
-  // activity_report_reminder / task_reminder), chat.ts (chat with roomId),
-  // and the mobile background geofence task (geofence_breach).
   useEffect(() => {
     const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
       const data = resp.notification.request.content.data as Record<string, any> | undefined;
-      if (!data?.type) return;
-      switch (data.type) {
-        case 'ping_reminder':
-          router.push('/ping');                // always photo+GPS capture flow
-          break;
-        case 'activity_report_reminder':
-          router.push('/(tabs)/reports');      // list tab, not the new-report form
-          break;
-        case 'task_reminder':
-          router.push('/(tabs)/tasks');
-          break;
-        case 'chat':
-          if (typeof data.roomId === 'string') router.push(`/chat/${data.roomId}`);
-          break;
-        case 'geofence_breach':
-          router.push('/(tabs)/notifications');
-          break;
-      }
+      navigateForNotification(data?.type, data);
     });
     return () => sub.remove();
   }, []);
+
+  // Foreground reception — bump the appropriate badge counter optimistically,
+  // then re-sync against the server so we self-correct if the optimistic bump
+  // drifted (e.g. push arrived while the user was actively in the chat room).
+  useEffect(() => {
+    const sub = Notifications.addNotificationReceivedListener((notif) => {
+      const data = notif.request.content.data as Record<string, any> | undefined;
+      if (data?.type === 'chat') {
+        bumpChat(1);
+      } else if (data?.type) {
+        bumpNotifications(1);
+      }
+      // Re-sync from server shortly after — the new notification row should be visible.
+      setTimeout(() => refreshUnread(), 500);
+    });
+    return () => sub.remove();
+  }, [bumpChat, bumpNotifications, refreshUnread]);
 
   if (!fontsLoaded || status === 'unknown') return null;
 
