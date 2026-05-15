@@ -1,11 +1,15 @@
 'use client';
 /**
- * Client Read-Only Portal — Reports Feed (Section 10)
- * CRITICAL: All data must be scoped to client's site_id only (Section 11.5)
+ * Client Read-Only Portal — Site Activity Log (Section 10)
+ * CRITICAL: server scopes data to the client's site_id (Section 11.5).
+ *
+ * Layout: activity log table on the left (2/3 width), download +
+ * retention notice panels on the right (1/3 width). Same table component
+ * as /admin/reports — see components/ActivityLogTable.tsx.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { clientGet } from '../../lib/clientApi';
-import ReportsFeed from '../../components/client/ReportsFeed';
+import ActivityLogTable from '../../components/ActivityLogTable';
 import DownloadPanel from '../../components/client/DownloadPanel';
 import RetentionNotice from '../../components/client/RetentionNotice';
 
@@ -16,30 +20,16 @@ interface SiteInfo {
   days_until_deletion: number | null;
 }
 
-interface Report {
-  id:          string;
-  report_type: 'activity' | 'incident' | 'maintenance';
-  description: string;
-  severity?:   string;
-  reported_at: string;
-  guard_name:  string;
-  photos?:     string[];
-  email_sent?: boolean;
-}
-
 export default function ClientPortal() {
   const [site,    setSite]    = useState<SiteInfo | null>(null);
-  const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
 
   const load = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([
-        clientGet<SiteInfo>('/api/client/site'),
-        clientGet<Report[]>('/api/client/reports'),
-      ]);
-      setSite(s); setReports(r); setError('');
+      const s = await clientGet<SiteInfo>('/api/client/site');
+      setSite(s);
+      setError('');
     } catch (e: any) {
       if (e.message?.includes('401') || e.message?.includes('Missing') || e.message?.includes('Invalid')) {
         window.location.href = '/client/login';
@@ -57,7 +47,7 @@ export default function ClientPortal() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-widest text-blue-400">SITE REPORTS</h1>
+          <h1 className="text-3xl font-bold tracking-widest text-blue-400">SITE ACTIVITY</h1>
           {site && <p className="text-gray-500 text-xs tracking-widest mt-1">{site.name}</p>}
         </div>
       </div>
@@ -75,7 +65,11 @@ export default function ClientPortal() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <ReportsFeed reports={reports} />
+            <ActivityLogTable
+              fetcher={clientGet}
+              accentClass="text-blue-400"
+              heading="SITE ACTIVITY LOG"
+            />
           </div>
           <div>
             <DownloadPanel />
