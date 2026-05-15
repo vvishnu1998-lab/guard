@@ -49,7 +49,7 @@ interface SessionRow {
 interface PingRow {
   id:                string;
   shift_session_id:  string;
-  created_at:        string;
+  pinged_at:         string;
   photo_url:         string | null;
   latitude:          number;
   longitude:         number;
@@ -160,12 +160,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
   const pings: PingRow[] = [];
   if (sessionIds.length > 0) {
     const pingsResult = await pool.query<PingRow>(
-      `SELECT id, shift_session_id, created_at, photo_url, latitude, longitude
+      `SELECT id, shift_session_id, pinged_at, photo_url, latitude, longitude
        FROM location_pings
        WHERE shift_session_id = ANY($1::uuid[])
-         AND created_at >= $2
-         AND created_at <= $3
-       ORDER BY created_at ASC`,
+         AND pinged_at >= $2
+         AND pinged_at <= $3
+       ORDER BY pinged_at ASC`,
       [sessionIds, fromIso, toIso],
     );
     pings.push(...pingsResult.rows);
@@ -228,12 +228,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       // Date range filter: skip windows outside [fromMs, toMs]
       if (windowEnd > fromMs && windowStart < toMs) {
         const ping = sessionPings.find((p) => {
-          const pt = Date.parse(p.created_at);
+          const pt = Date.parse(p.pinged_at);
           return pt >= windowStart && pt < windowEnd;
         });
 
         if (ping) {
-          const deltaMin = (Date.parse(ping.created_at) - windowStart) / 60_000;
+          const deltaMin = (Date.parse(ping.pinged_at) - windowStart) / 60_000;
           const status   = buildPingStatus(deltaMin);
           rows.push({
             id:            ping.id,
@@ -244,9 +244,9 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
             site_name:     s.site_name,
             status:        status.text,
             status_kind:   status.kind,
-            log_time:      ping.created_at,
+            log_time:      ping.pinged_at,
             log_media_url: ping.photo_url,
-            event_time:    ping.created_at,
+            event_time:    ping.pinged_at,
             detail_id:     ping.id,
           });
         } else {
