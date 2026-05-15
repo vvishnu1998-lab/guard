@@ -74,21 +74,28 @@ export default function RootLayout() {
   }, [status, mustChangePassword]);
 
   // Tap routing — open the right screen when the user taps a push notification.
-  // Payloads come from the API: pingReminder.ts and chat.ts already send the
-  // appropriate `data.type` and `data.roomId` fields.
+  // Payloads come from the API: pingReminder.ts (ping_reminder /
+  // activity_report_reminder / task_reminder), chat.ts (chat with roomId),
+  // and the mobile background geofence task (geofence_breach).
   useEffect(() => {
     const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
       const data = resp.notification.request.content.data as Record<string, any> | undefined;
       if (!data?.type) return;
       switch (data.type) {
         case 'ping_reminder':
-          router.push('/ping');
+          router.push('/ping');                // always photo+GPS capture flow
           break;
         case 'activity_report_reminder':
-          router.push('/reports/new/activity');
+          router.push('/(tabs)/reports');      // list tab, not the new-report form
+          break;
+        case 'task_reminder':
+          router.push('/(tabs)/tasks');
           break;
         case 'chat':
           if (typeof data.roomId === 'string') router.push(`/chat/${data.roomId}`);
+          break;
+        case 'geofence_breach':
+          router.push('/(tabs)/notifications');
           break;
       }
     });

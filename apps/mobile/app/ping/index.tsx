@@ -1,9 +1,8 @@
 /**
- * Ping Router (Section 5.4)
- * Determines ping type based on shift elapsed time:
- *   - On-hour pings (0, 60, 120 min elapsed) → GPS + Photo (amber)
- *   - Half-hour pings (30, 90, 150 min elapsed) → GPS only (blue)
- * Guards can also manually trigger a ping from the active shift screen.
+ * Ping Router — always routes to the photo+GPS capture flow.
+ * (Previously alternated between photo and GPS-only every 30 min;
+ * product decision moved to "always photo" so admin/client review
+ * gets a consistent visual record at every ping.)
  */
 import { useEffect } from 'react';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
@@ -19,13 +18,7 @@ export default function PingRouter() {
       router.replace('/(tabs)/home');
       return;
     }
-
-    const elapsedMin = (Date.now() - new Date(activeSession.clocked_in_at).getTime()) / 60_000;
-    // Alternating: 0=photo, 30=gps, 60=photo, 90=gps …
-    const pingIndex = Math.floor(elapsedMin / 30);
-    const isPhotoRequired = pingIndex % 2 === 0;
-
-    router.replace(isPhotoRequired ? '/ping/photo' : '/ping/gps-only');
+    router.replace('/ping/photo');
   }, []);
 
   return (
