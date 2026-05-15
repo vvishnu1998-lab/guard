@@ -114,9 +114,9 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   if (!description?.trim()) {
     return res.status(400).json({ error: 'description is required' });
   }
-  if (report_type === 'incident' && !severity) {
-    return res.status(400).json({ error: 'severity is required for incident reports' });
-  }
+  // Severity is optional for all report types — incidents no longer require it
+  // (UX simplification 2026-05-15; was previously incident-only mandatory).
+  // The DB column stays nullable so historical incidents keep their severity.
 
   // V5 / audit/WEEK1.md §C6 — incident reports must carry at least one
   // chain-of-custody photo.  The mobile form already enforces this client-

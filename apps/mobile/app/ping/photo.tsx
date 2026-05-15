@@ -34,7 +34,19 @@ export default function PhotoPing() {
   }
 
   async function capture() {
-    if (!cameraRef.current || capturing || !activeSession) return;
+    if (capturing) return;
+    if (!activeSession) {
+      Alert.alert(
+        'No Active Shift',
+        'Your shift has ended or hasn’t been clocked into yet. Pings can only be submitted while on shift.',
+        [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }],
+      );
+      return;
+    }
+    if (!cameraRef.current) {
+      Alert.alert('Camera not ready', 'Wait a moment and try again.');
+      return;
+    }
     setCapturing(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();

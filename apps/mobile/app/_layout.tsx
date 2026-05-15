@@ -15,6 +15,7 @@ import { useEffect } from 'react';
 import { Stack, router, useSegments } from 'expo-router';
 import { useFonts, BarlowCondensed_500Medium, BarlowCondensed_700Bold } from '@expo-google-fonts/barlow-condensed';
 import * as Notifications from 'expo-notifications';
+import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
 import { useAuthStore } from '../store/authStore';
 import { useUnreadStore } from '../store/unreadStore';
@@ -86,6 +87,26 @@ export default function RootLayout() {
       refreshUnread();
     })();
   }, [status, mustChangePassword, refreshUnread]);
+
+  // Request location permissions up front on first authenticated launch — both
+  // foreground ("While Using") and background ("Always"). iOS prompts the
+  // user in sequence and silently no-ops on subsequent calls when already
+  // granted. Without this, the "Always" prompt would only appear once the
+  // guard clocks into their first shift, which left existing installs without
+  // background geofencing (the bug james hit on 2026-05-15).
+  useEffect(() => {
+    if (status !== 'authenticated' || mustChangePassword) return;
+    (async () => {
+      try {
+        const fg = await Location.requestForegroundPermissionsAsync();
+        if (fg.status === 'granted') {
+          await Location.requestBackgroundPermissionsAsync();
+        }
+      } catch (err) {
+        console.warn('[location] permission request failed:', err);
+      }
+    })();
+  }, [status, mustChangePassword]);
 
   // Tap routing — open the right screen when the user taps a push notification.
   useEffect(() => {

@@ -159,7 +159,7 @@ export default function HomeScreen() {
           </View>
         </TouchableOpacity>
 
-        <Text style={styles.logo}>NETRAOPS</Text>
+        <Text style={styles.logo}>NETRA</Text>
 
         <Text style={styles.timeDisplay}>{currentTime}</Text>
       </View>
