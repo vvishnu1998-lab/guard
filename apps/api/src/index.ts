@@ -21,6 +21,7 @@ import clientPortalRoutes from './routes/clientPortal';
 import aiRoutes from './routes/ai';
 import billingRoutes from './routes/billing';
 import chatRoutes from './routes/chat';
+import notificationsRoutes from './routes/notifications';
 
 // Cron jobs
 import './jobs/nightlyPurge';
@@ -105,6 +106,7 @@ app.use('/api/client', clientPortalRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/notifications', notificationsRoutes);
 
 app.listen(PORT, () => {
   console.log(`API server running on port ${PORT}`);

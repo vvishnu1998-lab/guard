@@ -1,11 +1,12 @@
 /**
  * Nightly purge — runs at 00:00 UTC (Section 11.2)
  *
- * Four independent operations, in order:
+ * Five independent operations, in order:
  *  1. Delete location_ping photos older than 7 days (skip retain_as_evidence = true)
  *  2. Disable client/Star access at day 90 and update sites.client_access_disabled_at
  *  3. Send Vishnu email warning at day 140 (10 days before deletion)
  *  4. Hard-delete all operational data for sites past day 150
+ *  5. Delete notification rows older than 30 days
  */
 
 import cron from 'node-cron';
@@ -94,6 +95,13 @@ cron.schedule('0 0 * * *', async () => {
     await hardDeleteSiteData(row.site_id);
   }
   console.log(`[nightly-purge] Step 4: Hard-deleted data for ${toDelete.rows.length} sites`);
+
+  // ── Step 5: Trim notification log to 30 days ─────────────────────────────
+  const trimmed = await pool.query(
+    `DELETE FROM notifications WHERE created_at < NOW() - INTERVAL '30 days' RETURNING id`,
+  );
+  console.log(`[nightly-purge] Step 5: Trimmed ${trimmed.rowCount} old notifications`);
+
   console.log('[nightly-purge] Complete');
 });
 

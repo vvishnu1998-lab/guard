@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { isPointInPolygon } from '../services/geofence';
 import { sendGeofenceViolationAlert } from '../services/firebase';
+import { insertNotification } from '../services/notifications';
 
 const router = Router();
 
@@ -73,8 +74,9 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
     [shift_session_id, guardId, siteId, latitude, longitude, photo_url || null]
   );
+  const violationId = result.rows[0].id;
 
-  // Fire FCM push to all company admin devices — non-blocking
+  // Fire admin push + write a notification row for the guard — non-blocking
   pool.query(
     `SELECT g.name AS guard_name, s.name AS site_name,
             array_agg(ca.fcm_token) FILTER (WHERE ca.fcm_token IS NOT NULL) AS admin_tokens
@@ -87,13 +89,27 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
      GROUP BY g.name, s.name`,
     [shift_session_id]
   ).then(({ rows }) => {
-    if (!rows[0] || !rows[0].admin_tokens?.length) return;
-    sendGeofenceViolationAlert({
-      adminFcmTokens: rows[0].admin_tokens,
-      guardName:      rows[0].guard_name,
-      siteName:       rows[0].site_name,
-      sessionId:      shift_session_id,
-    }).catch((err) => console.error('[fcm] violation push failed:', err));
+    const r = rows[0];
+    if (!r) return;
+    // Admin push (existing behavior)
+    if (r.admin_tokens?.length) {
+      sendGeofenceViolationAlert({
+        adminFcmTokens: r.admin_tokens,
+        guardName:      r.guard_name,
+        siteName:       r.site_name,
+        sessionId:      shift_session_id,
+      }).catch((err) => console.error('[fcm] violation push failed:', err));
+    }
+    // Persistent log on the Notifications tab for the guard — the mobile app
+    // already self-fires a local notification on detection, so we don't double
+    // push from here; this row is just the record.
+    insertNotification({
+      guardId,
+      type:  'geofence_breach',
+      title: 'Outside post boundary',
+      body:  `You're outside the permitted radius at ${r.site_name}. Return to the post.`,
+      data:  { violationId, siteName: r.site_name },
+    });
   }).catch((err) => console.error('[fcm] admin token lookup failed:', err));
 
   res.status(201).json(result.rows[0]);
