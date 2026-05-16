@@ -2,7 +2,8 @@
  * Active Shift Screen (Section 5.3)
  * Shown after successful clock-in. Stays active until clock-out.
  * - Elapsed timer strip (updates every second)
- * - Next ping countdown (30-min alternating schedule)
+ * - Next ping countdown (30-min cadence; every ping is GPS + photo —
+ *   the prior on-hour/half-hour alternation was retired in /app/ping/index.tsx)
  * - Action grid: Ping Now / Report / Tasks / Break
  * - Clock-Out button (amber, bottom of scroll)
  */
@@ -168,11 +169,7 @@ export default function ActiveShiftScreen() {
         <Text style={[styles.pingValue, pingUrgent && styles.pingValueUrgent]}>
           {formatCountdown(nextPingMs)}
         </Text>
-        <Text style={styles.pingNote}>
-          {Math.floor(elapsedSeconds / 1800) % 2 === 0
-            ? 'NEXT: GPS + PHOTO'
-            : 'NEXT: GPS ONLY'}
-        </Text>
+        <Text style={styles.pingNote}>NEXT: GPS + PHOTO</Text>
       </View>
 
       {/* ── Action grid ─────────────────────────────────────────────── */}
