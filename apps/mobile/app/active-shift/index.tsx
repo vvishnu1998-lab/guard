@@ -2,8 +2,9 @@
  * Active Shift Screen (Section 5.3)
  * Shown after successful clock-in. Stays active until clock-out.
  * - Elapsed timer strip (updates every second)
- * - Next ping countdown (30-min cadence; every ping is GPS + photo —
- *   the prior on-hour/half-hour alternation was retired in /app/ping/index.tsx)
+ * - Next ping countdown (per-site cadence from sites.ping_interval_minutes,
+ *   default 30 min — Item 8; every ping is GPS + photo, the prior
+ *   on-hour/half-hour alternation was retired in /app/ping/index.tsx)
  * - Action grid: Ping Now / Report / Tasks / Break
  * - Clock-Out button (amber, bottom of scroll)
  */
@@ -17,9 +18,6 @@ import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
 import { pingState }     from '../../lib/pingState';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-
-// How long between pings (ms)
-const PING_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
 
@@ -42,8 +40,14 @@ export default function ActiveShiftScreen() {
   const { activeShift, activeSession } = useShiftStore();
   const { guardId } = useAuthStore();
 
+  // Per-site cadence — captured ONCE at component mount via the store's
+  // current value, NOT re-read reactively. Admin edits to the site's
+  // ping_interval_minutes mid-shift do NOT disturb the active shift; the
+  // new cadence is picked up at the next clock-in (Q37 semantics).
+  const pingIntervalMs = (activeShift?.ping_interval_minutes ?? 30) * 60 * 1000;
+
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [nextPingMs,     setNextPingMs]     = useState(PING_INTERVAL_MS);
+  const [nextPingMs,     setNextPingMs]     = useState(pingIntervalMs);
   const [clockingOut,    setClockingOut]    = useState(false);
 
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -76,8 +80,8 @@ export default function ActiveShiftScreen() {
     function computeRemaining() {
       const clockInMs   = new Date(activeSession!.clocked_in_at).getTime();
       const elapsedMs   = Date.now() - clockInMs;
-      const timeInCycle = elapsedMs % PING_INTERVAL_MS;
-      return PING_INTERVAL_MS - timeInCycle;
+      const timeInCycle = elapsedMs % pingIntervalMs;
+      return pingIntervalMs - timeInCycle;
     }
 
     // Set immediately so there's no 1 s delay on mount
@@ -88,13 +92,13 @@ export default function ActiveShiftScreen() {
       setNextPingMs(remaining);
 
       // When the cycle rolls over, prompt the guard to ping
-      if (remaining >= PING_INTERVAL_MS - 2000) {
+      if (remaining >= pingIntervalMs - 2000) {
         const snoozed = Date.now() < pingSnoozedUntilRef.current || Date.now() < pingState.suppressAlertUntil;
         if (!pingAlertShownRef.current && !snoozed) {
           pingAlertShownRef.current = true;
           Alert.alert(
             'PING DUE',
-            'Your 30-minute check-in is due. Submit your location now.',
+            `Your ${Math.round(pingIntervalMs / 60000)}-minute check-in is due. Submit your location now.`,
             [
               { text: 'Later', style: 'cancel', onPress: () => {
                 // Snooze for 5 minutes before re-alerting

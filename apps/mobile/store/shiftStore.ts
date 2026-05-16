@@ -16,6 +16,11 @@ interface Shift {
   scheduled_end: string;
   instructions_pdf_url?: string | null;
   effective_photo_limit?: number;
+  /** Per-site ping cadence in minutes. Set from sites.ping_interval_minutes
+   *  at active-session restore / clock-in. Optional on the wire for
+   *  backwards compat with pre-Item-8 API responses; consumers should
+   *  fall back to 30 when absent. */
+  ping_interval_minutes?: number;
   geofence?: Geofence;
 }
 

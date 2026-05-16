@@ -28,7 +28,16 @@ interface ApiShift {
 }
 
 interface ActiveSessionResponse {
-  shift:   { id: string; site_id: string; site_name: string; scheduled_start: string; scheduled_end: string };
+  shift:   {
+    id: string;
+    site_id: string;
+    site_name: string;
+    scheduled_start: string;
+    scheduled_end: string;
+    /** Per-site ping cadence (Item 8). Optional in the type for backwards
+     *  compat with older API versions; consumers fall back to 30. */
+    ping_interval_minutes?: number;
+  };
   session: { id: string; shift_id: string; clocked_in_at: string };
 }
 

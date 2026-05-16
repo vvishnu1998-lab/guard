@@ -132,11 +132,18 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
 });
 
 // GET /api/shifts/active-session — returns the guard's current active shift+session (for store restoration)
+//
+// Item 8: now returns sites.ping_interval_minutes so the mobile reads the
+// per-site cadence at restore/clock-in time. The value is cached on the
+// mobile for the lifetime of the active session — admin edits mid-shift
+// do NOT disturb in-flight shifts; the new cadence is picked up at the
+// next clock-in (matches Q37 semantics).
 router.get('/active-session', requireAuth('guard'), async (req, res) => {
   const result = await pool.query(
     `SELECT s.id as shift_id, s.site_id, s.scheduled_start, s.scheduled_end,
             si.name as site_name, si.instructions_pdf_url,
             si.photo_limit_override,
+            si.ping_interval_minutes,
             co.default_photo_limit,
             ss.id as session_id, ss.clocked_in_at
      FROM shifts s
@@ -152,7 +159,16 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
   const r = result.rows[0];
   const effectivePhotoLimit = r.photo_limit_override ?? r.default_photo_limit ?? 5;
   res.json({
-    shift:   { id: r.shift_id, site_id: r.site_id, site_name: r.site_name, scheduled_start: r.scheduled_start, scheduled_end: r.scheduled_end, instructions_pdf_url: r.instructions_pdf_url ?? null, effective_photo_limit: effectivePhotoLimit },
+    shift:   {
+      id: r.shift_id,
+      site_id: r.site_id,
+      site_name: r.site_name,
+      scheduled_start: r.scheduled_start,
+      scheduled_end: r.scheduled_end,
+      instructions_pdf_url: r.instructions_pdf_url ?? null,
+      effective_photo_limit: effectivePhotoLimit,
+      ping_interval_minutes: r.ping_interval_minutes,
+    },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
   });
 });
