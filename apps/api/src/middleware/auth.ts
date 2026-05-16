@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
+import { tagRequest } from '../services/sentry';
 
 export type UserRole = 'guard' | 'company_admin' | 'client' | 'vishnu';
 
@@ -84,6 +85,7 @@ export function requireAuth(...roles: UserRole[]) {
     }
 
     req.user = payload;
+    tagRequest(req, payload);
     next();
   };
 }
