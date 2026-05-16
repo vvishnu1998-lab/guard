@@ -23,7 +23,8 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app"
+        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_ENV": "preview"
       }
     },
     "production": {
@@ -35,7 +36,8 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app"
+        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_ENV": "production"
       }
     }
   },

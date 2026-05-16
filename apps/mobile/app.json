@@ -73,6 +73,14 @@
         {
           "cameraPermission": "NetraOps uses the camera for clock-in verification and reports."
         }
+      ],
+      [
+        "@sentry/react-native/expo",
+        {
+          "organization": "netraops",
+          "project": "netraops-mobile",
+          "url": "https://sentry.io/"
+        }
       ]
     ],
     "platforms": [

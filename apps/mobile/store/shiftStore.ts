@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { setShiftTag } from '../lib/sentry';
 
 interface Geofence {
   polygon_coordinates: { lat: number; lng: number }[];
@@ -40,9 +41,13 @@ export const useShiftStore = create<ShiftState>((set) => ({
 
   setPendingShift: (shift) => set({ pendingShift: shift }),
 
-  setActiveSession: (shift, session) =>
-    set({ activeShift: shift, activeSession: session, pendingShift: null }),
+  setActiveSession: (shift, session) => {
+    set({ activeShift: shift, activeSession: session, pendingShift: null });
+    setShiftTag(session.id);
+  },
 
-  clearSession: () =>
-    set({ activeShift: null, activeSession: null, pendingShift: null }),
+  clearSession: () => {
+    set({ activeShift: null, activeSession: null, pendingShift: null });
+    setShiftTag(null);
+  },
 }));

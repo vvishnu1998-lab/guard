@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
+import { setUserTags } from '../lib/sentry';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -33,12 +34,16 @@ export const useAuthStore = create<AuthState>((set) => ({
   loginWithEmail: async (email, password, fcmToken) => {
     const data = await _request('/auth/guard/login', { email, password, fcm_token: fcmToken });
     await _saveSession(data);
+    const payload = _decodeJwt(data.access);
+    const guardId = data.guard_id ?? payload.sub;
+    const companyId = payload.company_id ?? null;
     set({
       status: 'authenticated',
-      guardId: data.guard_id ?? _decodeJwt(data.access).sub,
-      companyId: _decodeJwt(data.access).company_id,
+      guardId,
+      companyId,
       mustChangePassword: data.must_change_password ?? false,
     });
+    setUserTags({ guardId, companyId, role: payload.role });
   },
 
   changePassword: async (current, next) => {
@@ -77,6 +82,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     } catch { /* best-effort */ }
     await Promise.all(Object.values(KEYS).map((k) => SecureStore.deleteItemAsync(k)));
     set({ status: 'unauthenticated', guardId: null, companyId: null, mustChangePassword: false });
+    setUserTags({ guardId: null, companyId: null });
   },
 
   loadSession: async () => {
@@ -90,12 +96,14 @@ export const useAuthStore = create<AuthState>((set) => ({
         const fresh = await SecureStore.getItemAsync(KEYS.ACCESS);
         const freshPayload = _decodeJwt(fresh!);
         set({ status: 'authenticated', guardId: freshPayload.sub, companyId: freshPayload.company_id });
+        setUserTags({ guardId: freshPayload.sub, companyId: freshPayload.company_id ?? null, role: freshPayload.role });
       } catch {
         set({ status: 'unauthenticated' });
       }
       return;
     }
     set({ status: 'authenticated', guardId: payload.sub, companyId: payload.company_id });
+    setUserTags({ guardId: payload.sub, companyId: payload.company_id ?? null, role: payload.role });
   },
 }));
 
