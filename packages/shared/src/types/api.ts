@@ -43,6 +43,10 @@ export interface LocationPingRequest {
   longitude: number;
   ping_type: 'gps_only' | 'gps_photo';
   photo_url?: string;
+  /** Item 7 — set by the mobile battery-throttle hook when the cadence
+   *  was multiplied (low battery or low-power-mode). Server writes to
+   *  location_pings.throttle_reason. Absent / undefined = normal cadence. */
+  throttle_reason?: 'low_battery' | 'low_power_mode';
 }
 
 export interface GeofenceViolationRequest {

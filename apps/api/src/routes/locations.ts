@@ -107,8 +107,20 @@ router.get('/violations', requireAuth('guard'), async (req, res) => {
 });
 
 // POST /api/locations/ping — guard submits a location ping (audit record)
+const ALLOWED_THROTTLE_REASONS = new Set(['low_battery', 'low_power_mode']);
+
 router.post('/ping', requireAuth('guard'), async (req, res) => {
-  const { shift_session_id, latitude, longitude, ping_type, photo_url } = req.body;
+  const { shift_session_id, latitude, longitude, ping_type, photo_url, throttle_reason } = req.body;
+
+  // Item 7 — validate throttle_reason against the schema_v14 CHECK enum.
+  // Absent / null = normal cadence (most pings). Defensive validation here
+  // belts the DB CHECK's suspenders so a typo from a future client surfaces
+  // as 400, not as a 23514 the route handler doesn't expect.
+  if (throttle_reason != null && !ALLOWED_THROTTLE_REASONS.has(throttle_reason)) {
+    return res.status(400).json({
+      error: `throttle_reason must be one of: low_battery, low_power_mode (got: ${throttle_reason})`,
+    });
+  }
 
   const sessionResult = await pool.query(
     'SELECT site_id, clocked_in_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
@@ -142,9 +154,9 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
 
   const result = await pool.query(
     `INSERT INTO location_pings
-       (shift_session_id, guard_id, site_id, latitude, longitude, is_within_geofence, ping_type, photo_url, photo_delete_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-    [shift_session_id, req.user!.sub, site_id, latitude, longitude, isWithin, ping_type, photo_url || null, photoDeleteAt]
+       (shift_session_id, guard_id, site_id, latitude, longitude, is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [shift_session_id, req.user!.sub, site_id, latitude, longitude, isWithin, ping_type, photo_url || null, photoDeleteAt, throttle_reason ?? null]
   );
 
   res.status(201).json(result.rows[0]);
