@@ -13,6 +13,7 @@ import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient }       from '../../lib/apiClient';
 import { uploadToS3 }      from '../../lib/uploadToS3';
+import { uuidv4 }          from '../../lib/uuid';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const STEPS = ['Uploading selfie…', 'Starting shift…', 'Saving verification…'];
@@ -22,6 +23,14 @@ export default function ClockInStep4() {
   const [statusStep,  setStatusStep]  = useState(0);
   const [showInstructions, setShowInstructions] = useState(false);
   const [instructionsPdfUrl, setInstructionsPdfUrl] = useState<string | null>(null);
+
+  // Idempotency key for the clock-in POST. Generated once per mount via
+  // lazy useState — stable across re-renders, regenerated when the user
+  // backs out and re-enters the screen (expo-router unmounts on replace).
+  // A retry of the same logical attempt (e.g. tap-tap, or auto-retry after
+  // a network blip) reuses the same key → server replays the cached
+  // response instead of double-creating a session.
+  const [clockInIdempotencyKey] = useState(() => uuidv4());
 
   const {
     verifiedLatitude,
@@ -69,6 +78,9 @@ export default function ClockInStep4() {
       // Step 2 — clock in (creates shift_session + triggers task instance generation)
       // Server validates lat/lng/accuracy against the site geofence inside the
       // clock-in transaction; on fail returns 422 GEOFENCE_FAILED.
+      // Idempotency-Key makes the POST safely retryable: the same key inside
+      // the 10-min server window returns the cached response instead of
+      // re-running the transaction.
       setStatusStep(1);
       const session = await apiClient.post<{ id: string; site_id: string; clocked_in_at: string }>(
         `/shifts/${pendingShiftId}/clock-in`,
@@ -78,6 +90,7 @@ export default function ClockInStep4() {
           lng,
           accuracy,
         },
+        { headers: { 'Idempotency-Key': clockInIdempotencyKey } },
       );
 
       // Step 3 — save photo verification proofs.

@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateClockInGeofence } from '../services/geofence';
+import { idempotent } from '../services/idempotency';
 
 const router = Router();
 
@@ -219,7 +220,7 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
 //   - Server validates via validateClockInGeofence inside the same
 //     transaction, so the geofence read is consistent with the session
 //     insert. Reject → ROLLBACK + 422 GEOFENCE_FAILED.
-router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
+router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async (req, res) => {
   const { id } = req.params;
   const { clock_in_coords, lat, lng, accuracy } = req.body as {
     clock_in_coords?: string;

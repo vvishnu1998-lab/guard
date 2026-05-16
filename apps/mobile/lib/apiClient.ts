@@ -29,15 +29,28 @@ async function refreshAccessToken(): Promise<string> {
   return data.access;
 }
 
+export interface ApiRequestOptions {
+  /** Extra headers to merge in (e.g. Idempotency-Key). Caller-supplied
+   *  values cannot overwrite Content-Type or Authorization. */
+  headers?: Record<string, string>;
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  retry = true
+  options?: ApiRequestOptions,
+  retry = true,
 ): Promise<T> {
   const token = await getAccessToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (options?.headers) {
+    for (const [k, v] of Object.entries(options.headers)) {
+      if (k === 'Content-Type' || k === 'Authorization') continue;
+      headers[k] = v;
+    }
+  }
 
   const res = await fetch(`${BASE}/api${path}`, {
     method,
@@ -48,7 +61,7 @@ async function request<T>(
   if (res.status === 401 && retry) {
     try {
       await refreshAccessToken();
-      return request<T>(method, path, body, false);
+      return request<T>(method, path, body, options, false);
     } catch {
       const { useAuthStore } = await import('../store/authStore');
       useAuthStore.getState().logout();
@@ -65,8 +78,8 @@ async function request<T>(
 }
 
 export const apiClient = {
-  get:    <T>(path: string)                   => request<T>('GET', path),
-  post:   <T>(path: string, body?: unknown)   => request<T>('POST', path, body),
-  patch:  <T>(path: string, body?: unknown)   => request<T>('PATCH', path, body),
-  delete: <T>(path: string)                   => request<T>('DELETE', path),
+  get:    <T>(path: string, options?: ApiRequestOptions)                   => request<T>('GET', path, undefined, options),
+  post:   <T>(path: string, body?: unknown, options?: ApiRequestOptions)   => request<T>('POST', path, body, options),
+  patch:  <T>(path: string, body?: unknown, options?: ApiRequestOptions)   => request<T>('PATCH', path, body, options),
+  delete: <T>(path: string, options?: ApiRequestOptions)                   => request<T>('DELETE', path, undefined, options),
 };
