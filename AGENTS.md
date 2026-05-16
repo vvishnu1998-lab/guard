@@ -28,6 +28,14 @@ NetraOps. Navy `#0B1526` + cyan `#00C8FF`. Logos and bundle IDs already updated 
 - S3 uploads: server-side **byte-level (magic-byte) validation** required in addition to MIME. PE/EXE bytes must be rejected even if Content-Type says `image/jpeg`.
 - Photo/report writes must respect retention: 90 days full → 60 days Vishnu-only → permanent delete at day 150. Ping photos: 7-day rolling delete.
 - Photos: max 5 per report, 800 KB compression, no video.
+- **Photo uploads must route through `ImageManipulator.manipulateAsync`.** The
+  Expo manipulator's native pipeline (iOS `UIImage.jpegData`, Android
+  `Bitmap.compress`) strips EXIF — including GPS — as a side effect of
+  decoding to a bitmap and re-encoding. Bypassing the manipulator (e.g.
+  uploading raw `takePictureAsync` output, or piping a library-picked file
+  straight to S3) would silently leak GPS metadata to the bucket. The 5
+  current upload paths have an inline comment marking the contract; any new
+  photo-upload code path inherits the same rule.
 - Run `npm run lint` and `npm test` in the affected package before declaring a task done.
 - Never push to `main` directly. Branch + PR.
 

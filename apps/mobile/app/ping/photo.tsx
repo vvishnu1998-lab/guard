@@ -101,6 +101,8 @@ export default function PhotoPing() {
       // 2) Compress (best-effort)
       let compressed: { uri: string } = { uri: photo.uri };
       try {
+        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
+        // Android Bitmap.compress). Do NOT bypass the manipulator for uploads.
         const result = await ImageManipulator.manipulateAsync(
           photo.uri,
           [{ resize: { width: 1080 } }],
