@@ -41,7 +41,7 @@ NetraOps. Navy `#0B1526` + cyan `#00C8FF`. Logos and bundle IDs already updated 
 
 ## Business logic
 - Per-site monthly billing: ~$149/site → $69/site at 25+ sites.
-- Location pings every 30 min, alternating: GPS+photo on the hour, GPS-only on the half hour.
+- Location pings every 30 min (default; configurable per site after Item 8 lands), always GPS + photo.
 - Incident emails: instant to clients. Shift report emails: daily 9 AM next morning.
 - BIPA compliance: deferred pending target-state decision.
 
