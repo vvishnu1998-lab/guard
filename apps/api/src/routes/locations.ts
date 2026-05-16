@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
-import { isPointInPolygon } from '../services/geofence';
+import { isPointInPolygon, validateClockInGeofence } from '../services/geofence';
 import { sendGeofenceViolationAlert } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
 
@@ -130,11 +130,71 @@ router.patch('/violation/:id/resolve', requireAuth('guard'), async (req, res) =>
 });
 
 // POST /api/locations/clock-in-verification
+//
+// Geofence validation (Item 3 — closes V6 audit hole):
+//   - The client-supplied `is_within_geofence` field is IGNORED. Server
+//     computes its own from verified_lat/lng/accuracy via the same helper
+//     used by the clock-in transaction, then stores the server-computed
+//     value (overriding whatever the client claimed). Older app versions
+//     can still send the field — kept for wire compat per Q14 — but its
+//     value is never trusted.
 router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => {
-  const { shift_session_id, selfie_url, site_photo_url, verified_lat, verified_lng, is_within_geofence } = req.body;
+  const {
+    shift_session_id,
+    selfie_url,
+    site_photo_url,
+    verified_lat,
+    verified_lng,
+    accuracy,
+  } = req.body as {
+    shift_session_id?: string;
+    selfie_url?: string | null;
+    site_photo_url?: string | null;
+    verified_lat?: number;
+    verified_lng?: number;
+    accuracy?: number;
+    is_within_geofence?: boolean; // accepted on wire but ignored — server overrides
+  };
 
-  if (!is_within_geofence) {
-    return res.status(400).json({ error: 'Guard is outside geofence — clock-in blocked' });
+  if (
+    !shift_session_id ||
+    typeof verified_lat !== 'number' ||
+    typeof verified_lng !== 'number' ||
+    typeof accuracy !== 'number'
+  ) {
+    return res.status(400).json({
+      error: 'Missing shift_session_id / verified_lat / verified_lng / accuracy. Update the app.',
+    });
+  }
+
+  // Resolve site_id from the session (NEVER trust a client-supplied site_id —
+  // that would be a tampering vector per Q15).
+  const sessionRow = await pool.query(
+    `SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2`,
+    [shift_session_id, req.user!.sub],
+  );
+  if (!sessionRow.rows[0]) {
+    return res.status(404).json({ error: 'Shift session not found' });
+  }
+  const siteId = sessionRow.rows[0].site_id;
+
+  const fence = await validateClockInGeofence(
+    { lat: verified_lat, lng: verified_lng, accuracy_m: accuracy },
+    siteId,
+    pool,
+  );
+  if (!fence.allowed) {
+    console.log(
+      `geofence.reject site=${siteId} guard=${req.user!.sub} shift=${shift_session_id} ` +
+      `distance=${fence.distance_m?.toFixed(1) ?? 'null'} accuracy=${accuracy} reason=${fence.reason}`,
+    );
+    return res.status(422).json({
+      error: 'GEOFENCE_FAILED',
+      message: 'You appear to be outside the site post. Move to the post entrance and try again.',
+      distance_m: fence.distance_m,
+      accuracy_m: accuracy,
+      reason: fence.reason,
+    });
   }
 
   const result = await pool.query(
@@ -143,7 +203,7 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
      SELECT $1, ss.guard_id, ss.site_id, $2, $3, $4, $5, $6
      FROM shift_sessions ss WHERE ss.id = $1
      RETURNING *`,
-    [shift_session_id, selfie_url, site_photo_url, verified_lat, verified_lng, is_within_geofence]
+    [shift_session_id, selfie_url ?? null, site_photo_url ?? null, verified_lat, verified_lng, true],
   );
 
   res.status(201).json(result.rows[0]);

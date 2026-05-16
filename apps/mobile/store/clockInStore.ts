@@ -15,6 +15,10 @@ interface ClockInState {
   // Step 1 — GPS verification result
   verifiedLatitude:         number | null;
   verifiedLongitude:        number | null;
+  /** GPS accuracy in meters (expo-location coords.accuracy). Plumbed through
+   *  to the API so server-side geofence validation can apply it as a tolerance
+   *  budget. Item 3. */
+  verifiedAccuracy:         number | null;
   verifiedAt:               string | null;
 
   // Step 2 — Guard selfie
@@ -30,7 +34,7 @@ interface ClockInState {
   pendingShiftId:           string | null;
 
   // Actions
-  setGpsVerified:           (lat: number, lng: number) => void;
+  setGpsVerified:           (lat: number, lng: number, accuracy: number) => void;
   setSelfie:                (proof: PhotoProof) => void;
   setSitePhoto:             (proof: PhotoProof) => void;
   setPendingShift:          (shiftId: string, instruction?: string) => void;
@@ -40,6 +44,7 @@ interface ClockInState {
 const initialState = {
   verifiedLatitude:        null,
   verifiedLongitude:       null,
+  verifiedAccuracy:        null,
   verifiedAt:              null,
   selfie:                  null,
   sitePhoto:               null,
@@ -50,10 +55,11 @@ const initialState = {
 export const useClockInStore = create<ClockInState>((set) => ({
   ...initialState,
 
-  setGpsVerified: (lat, lng) =>
+  setGpsVerified: (lat, lng, accuracy) =>
     set({
       verifiedLatitude:  lat,
       verifiedLongitude: lng,
+      verifiedAccuracy:  accuracy,
       verifiedAt:        new Date().toISOString(),
     }),
 

@@ -26,6 +26,7 @@ export default function ClockInStep4() {
   const {
     verifiedLatitude,
     verifiedLongitude,
+    verifiedAccuracy,
     verifiedAt,
     selfie,
     sitePhoto,
@@ -50,6 +51,11 @@ export default function ClockInStep4() {
 
   async function startShift() {
     if (submitting) return;
+    // Validators below were already gated on these — narrowing for TS clarity
+    // so we can pass non-null primitives to the API.
+    const lat = verifiedLatitude!;
+    const lng = verifiedLongitude!;
+    const accuracy = verifiedAccuracy ?? 30; // step1 defaults null → 30; keep parity
     setSubmitting(true);
     try {
       // Step 1 — upload selfie (S3 optional; use placeholder if not configured)
@@ -61,20 +67,31 @@ export default function ClockInStep4() {
       } catch { /* S3 not configured — continue without photo URL */ }
 
       // Step 2 — clock in (creates shift_session + triggers task instance generation)
+      // Server validates lat/lng/accuracy against the site geofence inside the
+      // clock-in transaction; on fail returns 422 GEOFENCE_FAILED.
       setStatusStep(1);
       const session = await apiClient.post<{ id: string; site_id: string; clocked_in_at: string }>(
         `/shifts/${pendingShiftId}/clock-in`,
-        { clock_in_coords: `(${verifiedLatitude},${verifiedLongitude})` }
+        {
+          clock_in_coords: `(${lat},${lng})`,
+          lat,
+          lng,
+          accuracy,
+        },
       );
 
-      // Step 3 — save photo verification proofs
+      // Step 3 — save photo verification proofs.
+      // is_within_geofence is sent for wire compatibility but the server
+      // computes its own truth from verified_lat/lng/accuracy and overrides
+      // whatever we claim here.
       setStatusStep(2);
       await apiClient.post('/locations/clock-in-verification', {
         shift_session_id:   session.id,
         selfie_url:         selfieUrl,
         site_photo_url:     null,
-        verified_lat:       verifiedLatitude,
-        verified_lng:       verifiedLongitude,
+        verified_lat:       lat,
+        verified_lng:       lng,
+        accuracy,
         is_within_geofence: true,
       });
 
@@ -97,6 +114,18 @@ export default function ClockInStep4() {
         router.replace('/(tabs)/home');
       }
     } catch (err: any) {
+      if (err?.message === 'GEOFENCE_FAILED') {
+        // Server-side geofence rejected this clock-in. Send the guard back to
+        // step 1 so they re-fetch GPS at the post entrance rather than retry
+        // with stale coords. 3-strike escalation flow is a follow-up commit.
+        Alert.alert(
+          'Outside Site',
+          'You appear to be outside the site post. Move to the post entrance and try again.',
+          [{ text: 'OK', onPress: () => router.replace('/clock-in/step1') }],
+          { cancelable: false },
+        );
+        return;
+      }
       Alert.alert('Clock-In Failed', err?.message ?? 'Could not start shift. Please try again.');
     } finally {
       setSubmitting(false);
