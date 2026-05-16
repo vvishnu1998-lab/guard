@@ -136,6 +136,7 @@ The following are present in the codebase as of commit `fa01481` (2026-05-16), w
 | Daily 9 AM client digest email | SendGrid, anchored to America/Los_Angeles wall clock | `apps/api/src/jobs/dailyShiftEmail.ts` |
 | Live map (admin portal) | Polling-based guard location display | `apps/web/app/admin/live-map/page.tsx` |
 | PDF + XLSX export | Admin can pull a report range; client can pull daily PDF | `apps/api/src/routes/exports.ts` |
+| Server-side AI report enhancement | `POST /api/ai/enhance-description` proxies to Claude Sonnet 4.5 (model ID overridable via `ANTHROPIC_MODEL` env without redeploy); rewrites a guard's raw description into a professional security-report entry. Available to guard + company_admin roles. Optional — if the upstream call fails, the guard can still submit the raw description and the report goes through. | `apps/api/src/routes/ai.ts` |
 | Data retention model | 90-day client window, 60-day admin window, 150-day delete | schema_v3-v7, `apps/api/src/jobs/nightlyPurge.ts` |
 | Privacy policy + terms pages | Public, BIPA-aware language for biometric login | `apps/web/app/privacy/page.tsx`, `apps/web/app/terms/page.tsx` |
 
