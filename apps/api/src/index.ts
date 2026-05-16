@@ -1,4 +1,7 @@
-import 'dotenv/config';
+// Sentry init MUST run before `express` is imported so @sentry/node v8's
+// auto-instrumentation can patch the Express prototype. The Sentry module
+// also loads dotenv first so SENTRY_DSN resolves.
+import { Sentry } from './services/sentry';
 import 'express-async-errors';
 import express from 'express';
 import cors from 'cors';
@@ -109,6 +112,12 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/activity-log', activityLogRoutes);
+
+// Sentry error handler — MUST come after all routes and BEFORE any other
+// error-handling middleware. It captures the error then calls next(err),
+// so the existing express-async-errors / default 500 response chain is
+// unaffected — clients still get the same response shape.
+Sentry.setupExpressErrorHandler(app);
 
 app.listen(PORT, () => {
   console.log(`API server running on port ${PORT}`);

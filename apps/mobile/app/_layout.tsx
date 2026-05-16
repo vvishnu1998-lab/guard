@@ -23,6 +23,11 @@ import { useShiftStore } from '../store/shiftStore';
 import { apiClient } from '../lib/apiClient';
 import { navigateForNotification } from '../lib/navigateForNotification';
 import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locationBackground';
+import { initSentry } from '../lib/sentry';
+
+// Initialize at module load — before any component mounts — so early native
+// crashes during startup are captured.
+initSentry();
 
 const EAS_PROJECT_ID = '5fd28125-2461-4165-b9df-7f34ced8b194';
 

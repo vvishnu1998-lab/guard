@@ -74,6 +74,10 @@ export function usePhotoAttachments(maxPhotos = 3) {
       // Compress to max 1080px / 80% quality
       let compressed: { uri: string } = { uri: asset.uri };
       try {
+        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
+        // Android Bitmap.compress). Library-picked photos carry EXIF on disk;
+        // re-encoding here is what removes it. Do NOT bypass the manipulator
+        // for uploads.
         const result = await ImageManipulator.manipulateAsync(
           asset.uri,
           [{ resize: { width: 1080 } }],

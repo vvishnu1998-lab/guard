@@ -31,11 +31,14 @@ export default function ClockInStep1() {
 
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
       const point = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      // expo-location may return null accuracy on iOS simulator / coarse-grant devices.
+      // Default to a conservative 30m so the server-side check still has SOME tolerance.
+      const accuracy = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
       setCoords(point);
 
       const geofence = pendingShift?.geofence;
       if (!geofence) {
-        setGpsVerified(point.lat, point.lng);
+        setGpsVerified(point.lat, point.lng, accuracy);
         setState('inside');
         return;
       } // no geofence = always allow
@@ -47,7 +50,7 @@ export default function ClockInStep1() {
         return;
       }
       const inside = isPointInPolygon(point, geofence.polygon_coordinates);
-      if (inside) setGpsVerified(point.lat, point.lng);
+      if (inside) setGpsVerified(point.lat, point.lng, accuracy);
       setState(inside ? 'inside' : 'outside');
     } catch {
       setState('error');

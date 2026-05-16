@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
+import { validateClockInGeofence } from '../services/geofence';
+import { idempotent } from '../services/idempotency';
 
 const router = Router();
 
@@ -130,11 +132,18 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
 });
 
 // GET /api/shifts/active-session — returns the guard's current active shift+session (for store restoration)
+//
+// Item 8: now returns sites.ping_interval_minutes so the mobile reads the
+// per-site cadence at restore/clock-in time. The value is cached on the
+// mobile for the lifetime of the active session — admin edits mid-shift
+// do NOT disturb in-flight shifts; the new cadence is picked up at the
+// next clock-in (matches Q37 semantics).
 router.get('/active-session', requireAuth('guard'), async (req, res) => {
   const result = await pool.query(
     `SELECT s.id as shift_id, s.site_id, s.scheduled_start, s.scheduled_end,
             si.name as site_name, si.instructions_pdf_url,
             si.photo_limit_override,
+            si.ping_interval_minutes,
             co.default_photo_limit,
             ss.id as session_id, ss.clocked_in_at
      FROM shifts s
@@ -150,7 +159,16 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
   const r = result.rows[0];
   const effectivePhotoLimit = r.photo_limit_override ?? r.default_photo_limit ?? 5;
   res.json({
-    shift:   { id: r.shift_id, site_id: r.site_id, site_name: r.site_name, scheduled_start: r.scheduled_start, scheduled_end: r.scheduled_end, instructions_pdf_url: r.instructions_pdf_url ?? null, effective_photo_limit: effectivePhotoLimit },
+    shift:   {
+      id: r.shift_id,
+      site_id: r.site_id,
+      site_name: r.site_name,
+      scheduled_start: r.scheduled_start,
+      scheduled_end: r.scheduled_end,
+      instructions_pdf_url: r.instructions_pdf_url ?? null,
+      effective_photo_limit: effectivePhotoLimit,
+      ping_interval_minutes: r.ping_interval_minutes,
+    },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
   });
 });
@@ -212,9 +230,34 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
 //   - The partial unique index `idx_shift_sessions_one_open_per_guard`
 //     (schema_v9.sql) is the last-line backstop: if the FOR UPDATE check
 //     races past somehow, the INSERT raises 23505 and we return 409.
-router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
+//
+// Geofence validation (Item 3 — closes V6 audit hole):
+//   - Mobile sends lat/lng/accuracy (NOT a client-decided boolean).
+//   - Server validates via validateClockInGeofence inside the same
+//     transaction, so the geofence read is consistent with the session
+//     insert. Reject → ROLLBACK + 422 GEOFENCE_FAILED.
+router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async (req, res) => {
   const { id } = req.params;
-  const { clock_in_coords } = req.body;
+  const { clock_in_coords, lat, lng, accuracy } = req.body as {
+    clock_in_coords?: string;
+    lat?: number;
+    lng?: number;
+    accuracy?: number;
+  };
+
+  // Required for geofence validation. Legacy clients without these fields
+  // are blocked — forces a mobile update before they can clock in.
+  if (
+    typeof lat !== 'number' ||
+    typeof lng !== 'number' ||
+    typeof accuracy !== 'number'
+  ) {
+    return res.status(400).json({
+      error: 'Missing lat/lng/accuracy. Update the app to the latest version.',
+    });
+  }
+
+  const coords = clock_in_coords ?? `(${lat},${lng})`;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -227,10 +270,34 @@ router.post('/:id/clock-in', requireAuth('guard'), async (req, res) => {
       return res.status(404).json({ error: 'Shift not found or not schedulable' });
     }
     const shift = shiftResult.rows[0];
+
+    // Server-side geofence check. Inside the transaction so the fence read
+    // is consistent with the session insert (and so we can ROLLBACK on fail
+    // without leaving the shift row partially mutated).
+    const fence = await validateClockInGeofence(
+      { lat, lng, accuracy_m: accuracy },
+      shift.site_id,
+      client,
+    );
+    if (!fence.allowed) {
+      await client.query('ROLLBACK');
+      console.log(
+        `geofence.reject site=${shift.site_id} guard=${req.user!.sub} shift=${id} ` +
+        `distance=${fence.distance_m?.toFixed(1) ?? 'null'} accuracy=${accuracy} reason=${fence.reason}`,
+      );
+      return res.status(422).json({
+        error: 'GEOFENCE_FAILED',
+        message: 'You appear to be outside the site post. Move to the post entrance and try again.',
+        distance_m: fence.distance_m,
+        accuracy_m: accuracy,
+        reason: fence.reason,
+      });
+    }
+
     const sessionResult = await client.query(
       `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords)
        VALUES ($1, $2, $3, NOW(), $4) RETURNING *`,
-      [id, req.user!.sub, shift.site_id, clock_in_coords]
+      [id, req.user!.sub, shift.site_id, coords]
     );
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['active', id]);
     const session = sessionResult.rows[0];

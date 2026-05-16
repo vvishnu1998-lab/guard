@@ -13,6 +13,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
     "@sendgrid/mail": "^8.1.1",
+    "@sentry/node": "^8.55.2",
     "@types/pdfkit": "^0.17.5",
     "aws-sdk": "^2.1550.0",
     "bcrypt": "^5.1.1",

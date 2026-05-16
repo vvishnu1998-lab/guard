@@ -23,6 +23,7 @@ import { router } from 'expo-router';
 import { useShiftStore }   from '../../store/shiftStore';
 import { useOfflineStore } from '../../store/offlineStore';
 import { pingState }       from '../../lib/pingState';
+import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const CAMERA_READY_FALLBACK_MS = 3000;
@@ -101,6 +102,8 @@ export default function PhotoPing() {
       // 2) Compress (best-effort)
       let compressed: { uri: string } = { uri: photo.uri };
       try {
+        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
+        // Android Bitmap.compress). Do NOT bypass the manipulator for uploads.
         const result = await ImageManipulator.manipulateAsync(
           photo.uri,
           [{ resize: { width: 1080 } }],
@@ -138,6 +141,11 @@ export default function PhotoPing() {
 
       // 4) Submit. submitPing already wraps the network call and queues on
       //    failure, so we don't need an extra timeout here.
+      // throttle_reason is null in the normal case; populated when the
+      // battery hook on active-shift has the device in low-battery /
+      // low-power-mode. Server writes it to location_pings.throttle_reason
+      // so the client portal can distinguish a throttled cadence from a
+      // missed ping.
       console.log('[ping] submitting…');
       await submitPing({
         shift_session_id: activeSession.id,
@@ -145,6 +153,7 @@ export default function PhotoPing() {
         longitude:        lng,
         ping_type:        'gps_photo',
         photo_url:        compressed.uri,
+        throttle_reason:  getCurrentThrottleReason() ?? undefined,
       });
       console.log('[ping] submit complete');
 

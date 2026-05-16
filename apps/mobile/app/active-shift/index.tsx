@@ -2,7 +2,9 @@
  * Active Shift Screen (Section 5.3)
  * Shown after successful clock-in. Stays active until clock-out.
  * - Elapsed timer strip (updates every second)
- * - Next ping countdown (30-min alternating schedule)
+ * - Next ping countdown (per-site cadence from sites.ping_interval_minutes,
+ *   default 30 min — Item 8; every ping is GPS + photo, the prior
+ *   on-hour/half-hour alternation was retired in /app/ping/index.tsx)
  * - Action grid: Ping Now / Report / Tasks / Break
  * - Clock-Out button (amber, bottom of scroll)
  */
@@ -15,10 +17,8 @@ import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
 import { pingState }     from '../../lib/pingState';
+import { useBatteryThrottle } from '../../lib/batteryThrottle';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-
-// How long between pings (ms)
-const PING_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
 
@@ -41,8 +41,21 @@ export default function ActiveShiftScreen() {
   const { activeShift, activeSession } = useShiftStore();
   const { guardId } = useAuthStore();
 
+  // Per-site cadence — captured ONCE at component mount via the store's
+  // current value, NOT re-read reactively. Admin edits to the site's
+  // ping_interval_minutes mid-shift do NOT disturb the active shift; the
+  // new cadence is picked up at the next clock-in (Q37 semantics).
+  const baseIntervalMs = (activeShift?.ping_interval_minutes ?? 30) * 60 * 1000;
+
+  // Item 7 — battery-aware throttling layered on top of site cadence.
+  // Low battery / low-power-mode multiplies the interval (2x / 3x) so a
+  // failing phone makes fewer pings rather than dying mid-shift. The
+  // returned throttleReason is also stamped onto each ping row so the
+  // client portal can show "throttled" instead of "missed".
+  const { intervalMs: pingIntervalMs, isThrottled } = useBatteryThrottle(baseIntervalMs);
+
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [nextPingMs,     setNextPingMs]     = useState(PING_INTERVAL_MS);
+  const [nextPingMs,     setNextPingMs]     = useState(pingIntervalMs);
   const [clockingOut,    setClockingOut]    = useState(false);
 
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -75,8 +88,8 @@ export default function ActiveShiftScreen() {
     function computeRemaining() {
       const clockInMs   = new Date(activeSession!.clocked_in_at).getTime();
       const elapsedMs   = Date.now() - clockInMs;
-      const timeInCycle = elapsedMs % PING_INTERVAL_MS;
-      return PING_INTERVAL_MS - timeInCycle;
+      const timeInCycle = elapsedMs % pingIntervalMs;
+      return pingIntervalMs - timeInCycle;
     }
 
     // Set immediately so there's no 1 s delay on mount
@@ -87,13 +100,13 @@ export default function ActiveShiftScreen() {
       setNextPingMs(remaining);
 
       // When the cycle rolls over, prompt the guard to ping
-      if (remaining >= PING_INTERVAL_MS - 2000) {
+      if (remaining >= pingIntervalMs - 2000) {
         const snoozed = Date.now() < pingSnoozedUntilRef.current || Date.now() < pingState.suppressAlertUntil;
         if (!pingAlertShownRef.current && !snoozed) {
           pingAlertShownRef.current = true;
           Alert.alert(
             'PING DUE',
-            'Your 30-minute check-in is due. Submit your location now.',
+            `Your ${Math.round(pingIntervalMs / 60000)}-minute check-in is due. Submit your location now.`,
             [
               { text: 'Later', style: 'cancel', onPress: () => {
                 // Snooze for 5 minutes before re-alerting
@@ -162,17 +175,22 @@ export default function ActiveShiftScreen() {
         <Text style={styles.siteName}>{activeShift.site_name?.toUpperCase()}</Text>
       </View>
 
+      {/* ── Battery-throttle banner (Item 7) ────────────────────────── */}
+      {isThrottled && (
+        <View style={styles.throttleBanner}>
+          <Text style={styles.throttleBannerText}>
+            Low battery — pings reduced to every {Math.round(pingIntervalMs / 60000)} minutes. Plug in when possible.
+          </Text>
+        </View>
+      )}
+
       {/* ── Ping countdown ──────────────────────────────────────────── */}
       <View style={[styles.pingCard, pingUrgent && styles.pingCardUrgent]}>
         <Text style={styles.pingLabel}>NEXT PING IN</Text>
         <Text style={[styles.pingValue, pingUrgent && styles.pingValueUrgent]}>
           {formatCountdown(nextPingMs)}
         </Text>
-        <Text style={styles.pingNote}>
-          {Math.floor(elapsedSeconds / 1800) % 2 === 0
-            ? 'NEXT: GPS + PHOTO'
-            : 'NEXT: GPS ONLY'}
-        </Text>
+        <Text style={styles.pingNote}>NEXT: GPS + PHOTO</Text>
       </View>
 
       {/* ── Action grid ─────────────────────────────────────────────── */}
@@ -260,6 +278,24 @@ const styles = StyleSheet.create({
   timerLabel: { color: Colors.muted, fontSize: 11, letterSpacing: 3, marginBottom: Spacing.xs },
   timerValue: { fontFamily: 'monospace', color: Colors.base, fontSize: 52, letterSpacing: 4 },
   siteName:   { color: Colors.action, fontSize: 13, letterSpacing: 3, marginTop: Spacing.xs, fontFamily: Fonts.heading },
+
+  // Battery-throttle banner (Item 7) — amber, persistent, not dismissible.
+  throttleBanner: {
+    width: '92%',
+    backgroundColor: '#3A2410', // dark amber tint compatible with the dark theme
+    borderRadius: Radius.md,
+    borderLeftWidth: 4,
+    borderLeftColor: Colors.action,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+  },
+  throttleBannerText: {
+    color: Colors.action,
+    fontSize: 12,
+    lineHeight: 16,
+    letterSpacing: 0.5,
+  },
 
   // Ping countdown
   pingCard: {
