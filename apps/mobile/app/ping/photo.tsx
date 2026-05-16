@@ -149,7 +149,13 @@ export default function PhotoPing() {
       console.log('[ping] submit complete');
 
       pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
-      router.replace('/active-shift');
+      // Confirmation to the guard (was missing — submit used to silently
+      // navigate away which made guards unsure whether the ping landed).
+      Alert.alert(
+        'Ping Submitted',
+        'Photo and location saved.',
+        [{ text: 'OK', onPress: () => router.replace('/active-shift') }],
+      );
     } catch (err: any) {
       console.error('[ping] capture failed:', err);
       Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
