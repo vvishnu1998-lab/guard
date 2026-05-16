@@ -77,7 +77,7 @@
       [
         "@sentry/react-native/expo",
         {
-          "organization": "netraops",
+          "organization": "netraopscom",
           "project": "netraops-mobile",
           "url": "https://sentry.io/"
         }
