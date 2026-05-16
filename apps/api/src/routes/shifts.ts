@@ -266,11 +266,16 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Close the session and grab the existing clocked_in_at for math
+    // Close the session and grab the existing clocked_in_at + scheduled_start
+    // for math (option C: pay from MAX(clock_in, scheduled_start) onwards).
     const sessionResult = await client.query(
-      `UPDATE shift_sessions SET clocked_out_at = NOW()
-       WHERE shift_id = $1 AND guard_id = $2 AND clocked_out_at IS NULL
-       RETURNING id, clocked_in_at, clocked_out_at`,
+      `UPDATE shift_sessions ss SET clocked_out_at = NOW()
+       FROM shifts s
+       WHERE ss.shift_id = s.id
+         AND ss.shift_id = $1
+         AND ss.guard_id = $2
+         AND ss.clocked_out_at IS NULL
+       RETURNING ss.id, ss.clocked_in_at, ss.clocked_out_at, s.scheduled_start`,
       [id, req.user!.sub]
     );
     if (!sessionResult.rows[0]) {
@@ -291,15 +296,20 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
       [session.id]
     );
 
-    // Compute total_hours = gross − breaks (matches autoCompleteShifts math)
+    // Compute total_hours = (clock_out − MAX(clock_in, scheduled_start)) − breaks.
+    // Early arrivals don't earn pay before scheduled_start; late stays still count.
+    // Matches autoCompleteShifts math (kept identical so manual + auto closes agree).
     const breaksResult = await client.query(
       'SELECT COALESCE(SUM(duration_minutes), 0) AS total_break_mins FROM break_sessions WHERE shift_session_id = $1',
       [session.id]
     );
-    const grossHours = (new Date(session.clocked_out_at).getTime()
-                       - new Date(session.clocked_in_at).getTime()) / 3_600_000;
-    const breakHours = Number(breaksResult.rows[0].total_break_mins) / 60;
-    const netHours   = Math.max(0, grossHours - breakHours);
+    const clockOutMs    = new Date(session.clocked_out_at).getTime();
+    const clockInMs     = new Date(session.clocked_in_at).getTime();
+    const scheduledMs   = new Date(session.scheduled_start).getTime();
+    const payStartMs    = Math.max(clockInMs, scheduledMs);
+    const grossHours    = Math.max(0, (clockOutMs - payStartMs) / 3_600_000);
+    const breakHours    = Number(breaksResult.rows[0].total_break_mins) / 60;
+    const netHours      = Math.max(0, grossHours - breakHours);
 
     await client.query(
       'UPDATE shift_sessions SET total_hours = $1, handover_notes = $2 WHERE id = $3',

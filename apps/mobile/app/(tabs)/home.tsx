@@ -70,14 +70,23 @@ export default function HomeScreen() {
     return () => clearInterval(id);
   }, []);
 
-  // Working hours ticker
+  // Working hours ticker.
+  // Option C: pay starts at MAX(clocked_in_at, scheduled_start) — early
+  // arrivals show 0m until scheduled_start, then accumulate. Late stays
+  // continue past scheduled_end. Mirrors the server math in
+  // apps/api/src/routes/shifts.ts and apps/api/src/jobs/autoCompleteShifts.ts.
   useEffect(() => {
     if (!activeSession?.clocked_in_at) { setElapsed(0); return; }
-    const compute = () => Date.now() - new Date(activeSession.clocked_in_at).getTime();
+    const clockInMs   = new Date(activeSession.clocked_in_at).getTime();
+    const scheduledMs = activeShift?.scheduled_start
+      ? new Date(activeShift.scheduled_start).getTime()
+      : clockInMs;
+    const payStartMs  = Math.max(clockInMs, scheduledMs);
+    const compute = () => Math.max(0, Date.now() - payStartMs);
     setElapsed(compute());
     const id = setInterval(() => setElapsed(compute()), 10000);
     return () => clearInterval(id);
-  }, [activeSession?.clocked_in_at]);
+  }, [activeSession?.clocked_in_at, activeShift?.scheduled_start]);
 
   useEffect(() => {
     Location.getLastKnownPositionAsync()

@@ -53,26 +53,27 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     );
 
     // Step 2: Close any open shift_sessions, computing total_hours as
-    //         gross-minus-break-minutes (matches manual clock-out math).
+    //         (clock_out − MAX(clock_in, scheduled_start)) − breaks
+    //         (option C: early arrivals not paid, late stays paid).
+    //         Matches manual clock-out math in routes/shifts.ts.
     const sessions = await client.query(
       `UPDATE shift_sessions ss
        SET clocked_out_at = NOW(),
            total_hours = GREATEST(
              0,
-             EXTRACT(EPOCH FROM (NOW() - ss.clocked_in_at)) / 3600.0
+             EXTRACT(EPOCH FROM (NOW() - GREATEST(ss.clocked_in_at, s.scheduled_start))) / 3600.0
              - COALESCE((
                  SELECT SUM(duration_minutes)
                    FROM break_sessions bs
                   WHERE bs.shift_session_id = ss.id
                ), 0) / 60.0
            )
-       WHERE ss.clocked_out_at IS NULL
-         AND ss.shift_id IN (
-           SELECT id FROM shifts
-           WHERE scheduled_end <= NOW()
-             AND status IN ('active', 'scheduled')
-         )
-       RETURNING id`
+       FROM shifts s
+       WHERE ss.shift_id = s.id
+         AND ss.clocked_out_at IS NULL
+         AND s.scheduled_end <= NOW()
+         AND s.status IN ('active', 'scheduled')
+       RETURNING ss.id`
     );
 
     // Step 3: Mark the overdue shifts as completed.
