@@ -96,7 +96,7 @@ Source: [apps/web/package.json](apps/web/package.json).
 Source: [apps/api/package.json](apps/api/package.json).
 
 ### Infrastructure
-- **PostgreSQL 16** on Railway managed Postgres (project `adorable-courage`).
+- **PostgreSQL 18.3** on Railway managed Postgres (project `adorable-courage`). Verified via `SELECT version();` against the live database on 2026-05-16: `PostgreSQL 18.3 (Debian 18.3-1.pgdg13+1)`. Railway rolled their managed PG floor from 16 to 18.3 between this TRD's authoring and the Schema doc's read-pass verification. Railway's PG version is mutable infrastructure — track via `SELECT version();` during periodic doc reviews and flag if a major version rolls.
 - **AWS S3 bucket** `starguard-media` in `us-east-2`. Bucket policy: private, no public-read ACL. Mobile uploads via presigned POST; admin reads via presigned GET.
 - **Firebase Cloud Messaging** project; Sender ID `872564523776`.
 - **SendGrid** with verified sender domain `alerts@netraops.com`.
@@ -342,23 +342,28 @@ Cron schedule: `0 0 * * *` UTC ([apps/api/src/jobs/nightlyPurge.ts:17](apps/api/
 
 ## 10. Known Technical Debt
 
-### 10.1 `chat_rooms` and `chat_messages` not reproducible from migrations (Operational + Recovery — highest severity in the doc set)
+### 10.1 Four production tables not reproducible from migrations (Operational + Recovery — highest severity in the doc set)
 
-**Finding**: [apps/api/src/routes/chat.ts:36-40](apps/api/src/routes/chat.ts:36) queries `chat_messages` (`cm.message`, `cm.created_at`, `cm.sender_role`); [apps/api/src/db/schema_v13.sql:34](apps/api/src/db/schema_v13.sql:34) has `REFERENCES chat_rooms(id) ON DELETE CASCADE`. Neither `CREATE TABLE chat_rooms` nor `CREATE TABLE chat_messages` exists in any of the 16 schema files (`schema.sql`, `schema_auth.sql`, `schema_v2.sql` … `schema_v14.sql`).
+**Finding**: Four tables exist in the live Railway database but have **no corresponding committed migration file**. Verified via `psql` enumeration of `information_schema.tables` on 2026-05-16 (29 live tables vs. 25 in committed migrations). The four orphans:
 
-**How it got this way**: the chat feature was likely added by hand-running `CREATE TABLE` against the live Railway database without committing a corresponding schema file. Subsequent migrations passed because the FK target existed in prod. The hole is silent until you try to reproduce the schema from scratch.
+- **`chat_rooms`** — backing table for the admin↔guard chat surface. Referenced by [apps/api/src/routes/chat.ts](apps/api/src/routes/chat.ts) and FK'd into by [apps/api/src/db/schema_v13.sql:34](apps/api/src/db/schema_v13.sql:34) (`REFERENCES chat_rooms(id) ON DELETE CASCADE`). Live DDL: PK on `id`, UNIQUE on `(site_id, guard_id)` (one room per guard-site pair), FKs to `companies`, `sites`, `guards`.
+- **`chat_messages`** — message rows for the chat surface. Queried by [apps/api/src/routes/chat.ts:36-40](apps/api/src/routes/chat.ts:36) (`cm.message`, `cm.created_at`, `cm.sender_role`). Live DDL: `sender_role text CHECK (sender_role IN ('admin','guard'))` — intentional structural constraint that chat is binary, not multi-party.
+- **`monthly_hours_reports`** — backing table for the monthly XLSX report cron ([apps/api/src/jobs/monthlyHoursReport.ts](apps/api/src/jobs/monthlyHoursReport.ts)). One row per `(company_id, month, year)` with the S3 URL of the generated XLSX. CHECK on month 1–12, UNIQUE on `(company_id, month, year)`.
+- **`password_reset_tokens`** — backing table for the forgot-password flow. CHECK on `portal IN ('admin','client','vishnu')` — notably excludes `'guard'` (guards have no self-serve password reset; admin-mediated only).
 
-**Blast radius**:
-- Disaster recovery from a Railway-backup restore to a fresh instance: chat tables won't exist; `schema_v13.sql`'s `CREATE TABLE chat_room_reads ... REFERENCES chat_rooms(id)` fails at migration time.
+**How it got this way**: each of the four was added by hand-running `CREATE TABLE` against the live Railway database without committing a corresponding schema file. Subsequent migrations passed because the FK targets existed in prod. The forensic tell: hand-created tables use `gen_random_uuid()` defaults (PG 13+ native, no extension), while migration-managed tables use `uuid_generate_v4()` (requires `uuid-ossp`). Different default style = different creation moment.
+
+**Blast radius (twice as wide as the original 2-table framing)**:
+- Disaster recovery from a Railway-backup restore to a fresh instance: chat tables, monthly_hours_reports, and password_reset_tokens won't exist; `schema_v13.sql`'s `CREATE TABLE chat_room_reads ... REFERENCES chat_rooms(id)` fails at migration time; the chat routes, monthly-hours cron, and forgot-password flow all break.
 - Spinning up a local development environment: same failure.
 - New engineer joining the team running `npm run db:migrate`: same failure.
 - Spinning up a staging environment: same failure.
 
-**Suggested action**: capture the actual definitions from production via `pg_dump --schema-only --table=chat_rooms --table=chat_messages` against the live Railway DB. Create `apps/api/src/db/schema_v15.sql` with the recovered definitions plus any indexes that exist in prod. Append `'schema_v15.sql'` to the `migrate.ts` file list. Verify by spinning up a fresh local Postgres (Docker container) and running the full migration sequence; if the app boots end-to-end with `npm run db:migrate && npm start && curl /health`, the fix is good.
+**Suggested action**: create `apps/api/src/db/schema_v15.sql` with all four `CREATE TABLE` statements reconstructed from the live DDL (use `psql \d+ <table>` + `pg_indexes` queries — local `pg_dump 14` cannot dump from PG 18.3 due to client-version-too-old). Include all CHECK constraints, FK relationships, and indexes captured from production. Append `'schema_v15.sql'` to the `migrate.ts` file list. Header comment on the migration file must state: "These four tables exist in production as of 2026-05-16 but had no committed migration file. Captured via `psql` against Railway production. Fresh-deploy reproduction depends on this file. The original timestamps and any historical rows for these tables are NOT in this migration — this file reproduces the schema, not the data. Data restoration is via Railway snapshots." Verify by spinning up a fresh local Postgres (Docker container) and running the full migration sequence; if the app boots end-to-end with `npm run db:migrate && npm start && curl /health`, the fix is good.
 
 **Severity**: Operational + Recovery.
 
-**Owner**: Decision needed on timing (this week vs. next session). Disaster recovery is not a defer-able concern. Tracked in `06-IMPLEMENTATION-PLAN.md` Immediate Backlog.
+**Owner**: Decision needed on timing (this week vs. next session). Disaster recovery is not a defer-able concern, and the blast radius is now four tables, not two. Tracked in `06-IMPLEMENTATION-PLAN.md` Immediate Backlog.
 
 ### 10.2 API start script does not run migrations (Operational — high severity)
 
