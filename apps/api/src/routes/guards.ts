@@ -44,10 +44,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   if (!email?.trim())        return res.status(400).json({ error: 'Email is required' });
   if (!badge_number?.trim()) return res.status(400).json({ error: 'Badge number is required' });
   if (!temp_password)        return res.status(400).json({ error: 'Temporary password is required' });
-  // Password policy: 6–8 characters/digits. Forced rotation on first login is
-  // wired separately via guards.must_change_password DEFAULT true.
-  if (temp_password.length < 6 || temp_password.length > 8) {
-    return res.status(400).json({ error: 'Temporary password must be 6–8 characters' });
+  // Forced rotation on first login is wired via guards.must_change_password DEFAULT true.
+  if (temp_password.length < 6 || temp_password.length > 128) {
+    return res.status(400).json({ error: 'Minimum 6 characters.' });
   }
 
   try {
