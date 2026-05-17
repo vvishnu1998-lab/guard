@@ -4,6 +4,7 @@ import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateClockInGeofence } from '../services/geofence';
 import { idempotent } from '../services/idempotency';
+import { sendPushNotification } from '../services/firebase';
 
 const router = Router();
 
@@ -102,6 +103,159 @@ router.patch('/:id/assign-guard', requireAuth('company_admin'), async (req, res)
   res.json(result.rows[0]);
 });
 
+// PATCH /api/shifts/:id/reassign — admin reassigns a shift to a different guard.
+// Writes shifts.guard_id and an audit row in shift_reassignments atomically.
+// Sends best-effort FCM notifications to old and new guards after commit;
+// push failures are logged but never fail the API call.
+router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { user }   = req;
+  const { id }     = req.params;
+  const { new_guard_id, reason } = req.body as { new_guard_id?: string; reason?: string };
+
+  if (!new_guard_id || typeof new_guard_id !== 'string') {
+    return res.status(400).json({ error: 'new_guard_id is required' });
+  }
+  if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
+    return res.status(400).json({ error: 'reason must be a string up to 500 chars' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Load the shift + its company (via site) and lock the row for the txn.
+    const shiftRes = await client.query(
+      `SELECT sh.id, sh.guard_id AS old_guard_id, sh.site_id, sh.status,
+              sh.scheduled_start, sh.scheduled_end,
+              si.company_id, si.name AS site_name
+         FROM shifts sh
+         JOIN sites si ON si.id = sh.site_id
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    // company_admin can only touch their own company's shifts; vishnu has no
+    // company scope.
+    if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+
+    // Past shifts cannot be reassigned (auto-complete cron has already
+    // settled their status as 'completed' or 'missed').
+    if (shift.status === 'completed' || shift.status === 'missed') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'This shift cannot be reassigned — it has already completed or was marked missed.',
+      });
+    }
+
+    // New guard must belong to the same company and be active.
+    const guardRes = await client.query(
+      `SELECT id FROM guards
+        WHERE id = $1 AND company_id = $2 AND is_active = true`,
+      [new_guard_id, shift.company_id],
+    );
+    if (!guardRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Guard not found, inactive, or belongs to a different company.' });
+    }
+
+    // Overlap check: any OTHER scheduled/active shift the new guard holds in
+    // the same time window. Past shifts (completed/missed) can't overlap a
+    // future window in any meaningful sense, but we filter them explicitly
+    // for clarity.
+    const overlap = await client.query(
+      `SELECT 1 FROM shifts
+        WHERE guard_id = $1
+          AND id      != $2
+          AND status IN ('scheduled','active')
+          AND scheduled_start < $4
+          AND scheduled_end   > $3
+        LIMIT 1`,
+      [new_guard_id, id, shift.scheduled_start, shift.scheduled_end],
+    );
+    if (overlap.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Selected guard has an overlapping shift in the same time window.',
+      });
+    }
+
+    // Atomic update + audit insert. status reset to 'scheduled' covers the
+    // case where the shift was already 'scheduled' with a missed-alert sent
+    // (clearing the timestamp lets the new guard's own no-show re-trigger).
+    const updated = await client.query(
+      `UPDATE shifts
+          SET guard_id = $1,
+              status   = 'scheduled',
+              missed_alert_sent_at = NULL
+        WHERE id = $2
+        RETURNING *`,
+      [new_guard_id, id],
+    );
+
+    await client.query(
+      `INSERT INTO shift_reassignments
+         (shift_id, old_guard_id, new_guard_id,
+          reassigned_by_admin_id, reassigned_by_role, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, shift.old_guard_id, new_guard_id, user!.sub, user!.role, reason ?? null],
+    );
+
+    await client.query('COMMIT');
+
+    // ── Best-effort FCM pushes (Imp 1a will verify e2e on devices) ───────
+    // Both wrapped in try/catch so a push failure does NOT undo the
+    // committed reassignment. Pulled OUT of the transaction by design.
+    const tokensRes = await pool.query(
+      `SELECT id, fcm_token FROM guards WHERE id IN ($1, $2) AND fcm_token IS NOT NULL`,
+      [new_guard_id, shift.old_guard_id ?? new_guard_id],
+    );
+    const tokenByGuardId: Record<string, string> = {};
+    for (const row of tokensRes.rows) tokenByGuardId[row.id] = row.fcm_token;
+
+    const startIso = new Date(shift.scheduled_start).toISOString();
+    const dateLabel = new Date(shift.scheduled_start).toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles',
+    });
+
+    const newToken = tokenByGuardId[new_guard_id];
+    if (newToken) {
+      sendPushNotification({
+        token: newToken,
+        title: `Shift assigned at ${shift.site_name}`,
+        body:  `Starts ${dateLabel}. Tap to view details.`,
+        data:  { type: 'shift_assigned', shift_id: id, scheduled_start: startIso },
+      }).catch((err) => console.error('[reassign] FCM push to new guard failed:', err));
+    }
+
+    const oldToken = shift.old_guard_id ? tokenByGuardId[shift.old_guard_id] : undefined;
+    if (oldToken && shift.old_guard_id !== new_guard_id) {
+      sendPushNotification({
+        token: oldToken,
+        title: `Shift reassigned`,
+        body:  `Your ${dateLabel} shift at ${shift.site_name} has been reassigned. You no longer need to cover it.`,
+        data:  { type: 'shift_reassigned_away', shift_id: id, scheduled_start: startIso },
+      }).catch((err) => console.error('[reassign] FCM push to old guard failed:', err));
+    }
+
+    res.json(updated.rows[0]);
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[reassign] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to reassign shift' });
+  } finally {
+    client.release();
+  }
+});
+
 // GET /api/shifts  — guard sees their shifts; admin sees all for company
 router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
   const { user } = req;
@@ -189,6 +343,50 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
     },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
   });
+});
+
+// GET /api/shifts/:id — admin shift detail with joined site/guard + reassignment history.
+// Used by the admin shift detail page (apps/web/app/admin/shifts/[shiftId]).
+// company_admin sees only their company's shifts; vishnu sees any.
+//
+// Placed AFTER /active-session because Express matches routes in declaration
+// order: a /:id catch-all defined earlier would shadow the literal /active-session.
+router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { user } = req;
+  const shiftResult = await pool.query(
+    `SELECT sh.id, sh.guard_id, sh.site_id, sh.scheduled_start, sh.scheduled_end,
+            sh.status, sh.missed_alert_sent_at, sh.created_at,
+            si.name AS site_name, si.address AS site_address, si.company_id,
+            g.name AS guard_name, g.badge_number, g.phone_number AS guard_phone
+       FROM shifts sh
+       JOIN sites  si ON si.id = sh.site_id
+       LEFT JOIN guards g ON g.id = sh.guard_id
+      WHERE sh.id = $1`,
+    [req.params.id],
+  );
+  if (!shiftResult.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+  const shift = shiftResult.rows[0];
+
+  if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
+    return res.status(404).json({ error: 'Shift not found' });
+  }
+
+  const historyResult = await pool.query(
+    `SELECT sr.id, sr.created_at, sr.reason,
+            sr.reassigned_by_admin_id, sr.reassigned_by_role,
+            sr.old_guard_id, og.name AS old_guard_name,
+            sr.new_guard_id, ng.name AS new_guard_name,
+            ca.name AS reassigned_by_name
+       FROM shift_reassignments sr
+       LEFT JOIN guards og         ON og.id = sr.old_guard_id
+       LEFT JOIN guards ng         ON ng.id = sr.new_guard_id
+       LEFT JOIN company_admins ca ON ca.id = sr.reassigned_by_admin_id
+      WHERE sr.shift_id = $1
+      ORDER BY sr.created_at DESC`,
+    [req.params.id],
+  );
+
+  res.json({ ...shift, reassignment_history: historyResult.rows });
 });
 
 // POST /api/shifts/break-start — guard starts a break
