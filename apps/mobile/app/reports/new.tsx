@@ -30,7 +30,7 @@ import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
 
-const MIN_ENHANCE_WORDS = 75;
+const MIN_ENHANCE_WORDS = 15;
 function countWords(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
