@@ -327,28 +327,41 @@ export default function HomeScreen() {
   );
 }
 
+/**
+ * Server fires reminders at wall-clock :00 and :30 (UTC, which matches local
+ * since common timezone offsets are 30-min multiples). A guard clocked in
+ * within the last 5 min of an aligned slot skips that slot — matches the
+ * `clocked_in_at <= NOW() - 5 min` filter in apps/api/src/jobs/pingReminder.ts.
+ */
+function nextPingAt(clockedInAt: Date, now: Date): Date {
+  const m = now.getMinutes();
+  const minutesToNextSlot = m < 30 ? 30 - m : 60 - m;
+  let next = new Date(now.getTime() + minutesToNextSlot * 60_000);
+  next.setSeconds(0, 0);
+  if (next.getTime() - clockedInAt.getTime() < 5 * 60_000) {
+    next = new Date(next.getTime() + 30 * 60_000);
+  }
+  return next;
+}
+
 function PingCountdownBanner({ clockedInAt }: { clockedInAt?: string }) {
-  const PING_MS = 30 * 60 * 1000;
-  const [remaining, setRemaining] = useState(PING_MS);
+  const [remaining, setRemaining] = useState(0);
   const ref = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!clockedInAt) return;
+    const clockedInDate = new Date(clockedInAt);
     function compute() {
-      const elapsed = Date.now() - new Date(clockedInAt!).getTime();
-      return PING_MS - (elapsed % PING_MS);
+      return Math.max(0, nextPingAt(clockedInDate, new Date()).getTime() - Date.now());
     }
     setRemaining(compute());
     ref.current = setInterval(() => setRemaining(compute()), 1000);
     return () => { if (ref.current) clearInterval(ref.current); };
   }, [clockedInAt]);
 
-  const elapsedMs = clockedInAt ? Date.now() - new Date(clockedInAt).getTime() : 0;
-  const pingIndex = Math.floor(elapsedMs / PING_MS);
-  const pingType  = pingIndex % 2 === 0 ? 'GPS + PHOTO' : 'GPS ONLY';
   const mins = Math.floor(remaining / 60000);
   const secs = Math.floor((remaining % 60000) / 1000);
-  const label = `Next ping in ${mins}:${String(secs).padStart(2, '0')} · ${pingType}`;
+  const label = `Next ping in ${mins}:${String(secs).padStart(2, '0')}`;
 
   return (
     <View style={styles.pingBanner}>
