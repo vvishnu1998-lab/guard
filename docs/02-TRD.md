@@ -416,6 +416,16 @@ Single API instance, single Postgres instance, single Redis-less idempotency cac
 
 **Path forward when scaling matters**: Railway's autoscaling features for the API service; PgBouncer or Railway's managed pooler for Postgres; Redis for idempotency cache.
 
+### 10.9 Magic-byte validation does not cover task-completion uploads (Security — regression hole)
+
+Three of the four photo-upload endpoints (reports, ping, clock-in-verification) run server-side magic-byte validation via `validatePhotoOrQuarantine`. The fourth — `POST /api/tasks/instances/:id/complete` ([apps/api/src/routes/tasks.ts:40-73](apps/api/src/routes/tasks.ts:40)) — does not. Verified by grep: `validatePhotoOrQuarantine`, `isAllowedContentType`, `magicMatches`, and `s3KeyFromPublicUrl` are not referenced anywhere in `tasks.ts`.
+
+The mobile task-completion path uses the same presigned-POST architecture as the protected endpoints, so a guard with a valid JWT can upload arbitrary bytes (PHP, HTML, ZIP) up to the 5 MiB cap to S3 and submit the resulting URL — the bytes end up linked into `task_completions.photo_url` with no validation. Same attack vector that commit `16c3ee6` closed for ping and clock-in-verification; task completion was missed during that rollout.
+
+**Remediation**: same one-file extension as `16c3ee6` — wrap the inbound `photo_url` with `validatePhotoOrQuarantine` before the `task_completions` INSERT. ~15-line addition mirroring the existing call sites. See `04-APP-FLOW.md` DRIFT FINDINGS for the full attack-surface analysis.
+
+**Owner**: Focused commit in next session, before any new customer rollout. Tracked in `06-IMPLEMENTATION-PLAN.md` Immediate Backlog.
+
 ---
 
 ## DRIFT FINDINGS
