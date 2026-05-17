@@ -5,6 +5,9 @@
  *  :30 → ping reminder
  *  :00 → ping reminder + activity-report reminder + task reminder (only if N>0)
  *
+ * Guards clocked in within the last 5 minutes are skipped on the next aligned
+ * tick (otherwise a 6:59:30 clock-in would get a 7:00 ping 30 seconds later).
+ *
  * Every push is mirrored into the `notifications` table so it shows up in
  * the mobile Notifications tab.
  */
@@ -56,6 +59,11 @@ cron.schedule('* * * * *', async () => {
     // Select all guards with an open shift session (regardless of fcm_token —
     // notification rows are written even when push can't be delivered, so the
     // user still sees them in the Notifications tab on next foreground).
+    //
+    // The `clocked_in_at <= NOW() - 5 min` guard skips guards who just clocked
+    // in within the last 5 minutes of an aligned :00/:30 tick — without it, a
+    // guard clocking in at 6:59:30 would receive the 7:00 ping 30 seconds
+    // later. Mobile countdown in home.tsx applies the same guard.
     const { rows } = await pool.query<ActiveGuardRow>(
       `SELECT ss.id AS shift_session_id,
               g.id  AS guard_id,
@@ -63,7 +71,8 @@ cron.schedule('* * * * *', async () => {
               g.fcm_token
        FROM shift_sessions ss
        JOIN guards g ON g.id = ss.guard_id
-       WHERE ss.clocked_out_at IS NULL`,
+       WHERE ss.clocked_out_at IS NULL
+         AND ss.clocked_in_at <= NOW() - INTERVAL '5 minutes'`,
     );
 
     if (!rows.length) return;
