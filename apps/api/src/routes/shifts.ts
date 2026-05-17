@@ -107,12 +107,30 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
   const { user } = req;
   let result;
   if (user!.role === 'guard') {
+    // total_hours_worked: sum of completed shift_sessions.total_hours for this
+    // shift, plus live elapsed since clocked_in_at for any still-open session.
+    // Replaces the mobile profile's old (scheduled_end - scheduled_start)
+    // calculation, which credited no-show shifts with the full scheduled time.
     result = await pool.query(
       `SELECT s.*, si.name as site_name, si.instructions_pdf_url,
-              COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit
+              COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit,
+              COALESCE(ss_agg.sum_completed_hours, 0)
+                + CASE
+                    WHEN ss_agg.open_clocked_in_at IS NOT NULL
+                      THEN GREATEST(0, EXTRACT(EPOCH FROM (NOW() - ss_agg.open_clocked_in_at)) / 3600.0)
+                    ELSE 0
+                  END AS total_hours_worked
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
        JOIN companies co ON co.id = si.company_id
+       LEFT JOIN (
+         SELECT shift_id,
+                COALESCE(SUM(total_hours), 0) AS sum_completed_hours,
+                MAX(CASE WHEN clocked_out_at IS NULL THEN clocked_in_at END) AS open_clocked_in_at
+         FROM shift_sessions
+         WHERE guard_id = $1
+         GROUP BY shift_id
+       ) ss_agg ON ss_agg.shift_id = s.id
        WHERE s.guard_id = $1 ORDER BY s.scheduled_start DESC LIMIT 50`,
       [user!.sub]
     );
