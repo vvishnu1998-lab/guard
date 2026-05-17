@@ -15,6 +15,10 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
 
 const FROM   = process.env.SENDGRID_FROM_EMAIL ?? 'alerts@netraops.com';
 const PORTAL = process.env.CLIENT_PORTAL_URL ?? '';
+// Base URL for admin-portal deep links in operator alerts. CLIENT_PORTAL_URL
+// historically pointed at a stale Vercel preview; this is the canonical
+// production web app and is independent of the client portal path.
+const WEB_BASE = process.env.WEB_PORTAL_URL ?? 'https://app.netraops.com';
 
 // ── Shared helpers ─────────────────────────────────────────────────────────────
 
@@ -23,6 +27,44 @@ function fmtDT(dt: Date | string): string {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
   }) + ' UTC';
+}
+
+// Pacific-time formatter for operator alerts (currently used only by the
+// missed-shift email). Hardcoded to America/Los_Angeles — works for Starnet
+// because William Pen Hotel is in SF. Multi-tenant support requires a
+// per-site timezone column (logged as a separate follow-up). Output looks
+// like "17 May 2026, 10:01 PM PDT" / "PST" with the abbreviation chosen by
+// the runtime per DST.
+function fmtDTPacific(dt: Date | string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: 'America/Los_Angeles',
+    timeZoneName: 'short',
+  }).formatToParts(new Date(dt));
+  const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  return `${pick('day')} ${pick('month')} ${pick('year')}, ` +
+         `${pick('hour')}:${pick('minute')} ${pick('dayPeriod')} ${pick('timeZoneName')}`;
+}
+
+// Coarse "X units ago" for human readability in operator alerts.
+// Null → "Never" (used for guards who have never logged in).
+function relTime(d: Date | string | null | undefined): string {
+  if (!d) return 'Never';
+  const ms = Date.now() - new Date(d).getTime();
+  if (ms < 0)               return 'just now';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60)             return `${sec} sec ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60)             return `${min} min ago`;
+  const hr  = Math.floor(min / 60);
+  if (hr  < 24)             return `${hr} hour${hr === 1 ? '' : 's'} ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30)             return `${day} day${day === 1 ? '' : 's'} ago`;
+  const mo  = Math.floor(day / 30);
+  if (mo  < 12)             return `${mo} month${mo === 1 ? '' : 's'} ago`;
+  const yr  = Math.floor(mo / 12);
+  return `${yr} year${yr === 1 ? '' : 's'} ago`;
 }
 
 function typeBadgeHtml(type: string, severity?: string | null): string {
@@ -293,14 +335,32 @@ export async function sendRetentionNotice(
 // ── Email Type 5 — Missed Shift Alert ────────────────────────────────────────
 
 export async function sendMissedShiftAlert(shiftId: string) {
+  // SELECT: kept primary-admin-only (ca.is_primary = true) per spec; client_email
+  // still SELECTed but discarded (intentional — clients are not on this email).
+  // New fields: sh.scheduled_end, si.address, last_login_at (from auth_events),
+  // upcoming_shifts_count (count of this guard's other scheduled shifts in the
+  // next 24h, excluding the current missed one).
   const result = await pool.query(
-    `SELECT sh.scheduled_start,
-            si.name     AS site_name,
-            g.name      AS guard_name,
+    `SELECT sh.id,
+            sh.scheduled_start,
+            sh.scheduled_end,
+            sh.guard_id,
+            si.name        AS site_name,
+            si.address     AS site_address,
+            g.name         AS guard_name,
             g.badge_number,
             g.phone_number AS guard_phone,
-            c.email     AS client_email,
-            ca.email    AS admin_email
+            c.email        AS client_email,
+            ca.email       AS admin_email,
+            (SELECT MAX(created_at) FROM auth_events
+              WHERE actor_id = g.id AND event_type = 'login_success'
+            ) AS last_login_at,
+            (SELECT COUNT(*) FROM shifts s2
+              WHERE s2.guard_id = g.id
+                AND s2.id      != sh.id
+                AND s2.status   = 'scheduled'
+                AND s2.scheduled_start BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+            ) AS upcoming_shifts_count
      FROM shifts sh
      JOIN sites          si ON si.id = sh.site_id
      JOIN guards         g  ON g.id  = sh.guard_id
@@ -311,42 +371,99 @@ export async function sendMissedShiftAlert(shiftId: string) {
     [shiftId],
   );
   if (!result.rows[0]) return;
-  const { scheduled_start, site_name, guard_name, badge_number, guard_phone, client_email, admin_email } = result.rows[0];
-
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:#7F1D1D">
-      <h1>MISSED SHIFT ALERT</h1><p>${site_name.toUpperCase()}</p>
-    </div>
-    <div class="body">
-      <div class="meta">
-        <strong>Scheduled Start:</strong> ${fmtDT(scheduled_start)}<br/>
-        <strong>Guard:</strong> ${guard_name} (${badge_number})${guard_phone ? `<br/><strong>Guard Phone:</strong> ${guard_phone}` : ''}
-      </div>
-      <p style="font-size:15px;color:#DC2626;font-weight:bold;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px">
-        ⚠️ No guard has clocked in for this shift. It is now 10 minutes past the scheduled start time.
-      </p>
-      <p style="color:#555;font-size:13px;margin-top:14px">
-        Please contact the assigned guard immediately or arrange cover for <strong>${site_name}</strong>.
-      </p>
-      <a class="btn" href="${PORTAL}">View Shift in Portal</a>
-    </div>
-    <div class="footer">NetraOps — Automated Alert</div>
-  </div>`;
+  const {
+    scheduled_start, scheduled_end, site_name, site_address,
+    guard_name, badge_number, guard_phone,
+    admin_email, last_login_at, upcoming_shifts_count,
+  } = result.rows[0];
 
   if (!admin_email) return;
 
-  await sgMail.send({
-    to: admin_email,
-    from: FROM,
-    subject: `⚠️ Missed Shift Alert — ${site_name} — Guard not clocked in`,
-    html,
-  });
+  const { subject, html } = renderMissedShiftAlert(result.rows[0]);
+
+  await sgMail.send({ to: admin_email, from: FROM, subject, html });
 
   await pool.query(
     'UPDATE shifts SET missed_alert_sent_at = NOW() WHERE id = $1',
     [shiftId],
   );
+}
+
+/**
+ * Pure renderer for the missed-shift alert. Exported so testing scripts can
+ * exercise the same template against real production rows without invoking
+ * the SendGrid send path or writing missed_alert_sent_at.
+ *
+ * Input: the row shape returned by sendMissedShiftAlert's SELECT.
+ * Output: { subject, html } — the caller is responsible for the To: address.
+ */
+export function renderMissedShiftAlert(row: {
+  id:              string;
+  scheduled_start: Date | string;
+  scheduled_end:   Date | string;
+  site_name:       string;
+  site_address:    string;
+  guard_name:      string;
+  badge_number:    string;
+  guard_phone:     string | null;
+  last_login_at:   Date | string | null;
+  upcoming_shifts_count: number | string;
+}): { subject: string; html: string } {
+  // Minutes late computed at render time (cron fires at T+10 min minimum, but
+  // actual delay can be 10–15 min depending on the */5 tick alignment).
+  const minutesLate = Math.max(0, Math.floor(
+    (Date.now() - new Date(row.scheduled_start).getTime()) / 60_000
+  ));
+
+  // Reassign deep link to the admin shift-detail page. WEB_BASE comes from
+  // process.env.WEB_PORTAL_URL with a hardcoded fallback to the canonical
+  // production web app (set in code so a missing env var doesn't break the
+  // alert). Note: the /admin/shifts/:id route is planned for Improvement 2
+  // and does not exist in apps/web today — until that ships the link 404s.
+  const reassignUrl = `${WEB_BASE}/admin/shifts/${row.id}`;
+
+  const upcoming = Number(row.upcoming_shifts_count) || 0;
+  const upcomingText = upcoming === 0
+    ? `No other upcoming shifts in the next 24h — calling may not get coverage.`
+    : `${upcoming} other upcoming shift${upcoming === 1 ? '' : 's'} in the next 24h.`;
+
+  const phoneRow = row.guard_phone
+    ? `<br/><strong>Phone:</strong> <a href="tel:${row.guard_phone}" style="color:#0B1526;text-decoration:underline">${row.guard_phone}</a>`
+    : '';
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    <div class="hdr" style="background:#7F1D1D">
+      <h1>MISSED SHIFT ALERT</h1><p>${row.site_name.toUpperCase()} — ${minutesLate} MIN LATE</p>
+    </div>
+    <div class="body">
+      <p style="font-size:15px;color:#DC2626;font-weight:bold;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin-top:0">
+        ⚠️ ${row.guard_name} has not clocked in. ${minutesLate} minutes past the scheduled start.
+      </p>
+
+      <div class="meta">
+        <strong>Site:</strong> ${row.site_name}<br/>
+        <strong>Address:</strong> ${row.site_address}<br/>
+        <strong>Scheduled Start:</strong> ${fmtDTPacific(row.scheduled_start)}<br/>
+        <strong>Scheduled End:</strong> ${fmtDTPacific(row.scheduled_end)}
+      </div>
+
+      <div class="meta">
+        <strong>Guard:</strong> ${row.guard_name} (${row.badge_number})${phoneRow}<br/>
+        <strong>Last opened app:</strong> ${relTime(row.last_login_at)}<br/>
+        <strong>Coverage availability:</strong> ${upcomingText}
+      </div>
+
+      <p style="color:#555;font-size:13px;margin-top:14px">
+        Please contact the guard immediately or reassign the shift to another guard at <strong>${row.site_name}</strong>.
+      </p>
+      <a class="btn" href="${reassignUrl}">Reassign Guard</a>
+    </div>
+    <div class="footer">NetraOps — Automated Alert</div>
+  </div>`;
+
+  const subject = `⚠️ MISSED SHIFT — ${row.site_name} — ${row.guard_name} is ${minutesLate} min late`;
+  return { subject, html };
 }
 
 // ── Email Type 6b — Temporary Password (forgot-password flow) ────────────────
