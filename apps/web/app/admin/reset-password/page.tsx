@@ -40,7 +40,7 @@ function ResetPasswordForm() {
 
   async function handleSubmit() {
     setError('');
-    if (password.length < 6 || password.length > 8) { setError('Password must be 6–8 characters.'); return; }
+    if (password.length < 6 || password.length > 128) { setError('Minimum 6 characters.'); return; }
     if (password !== confirm) { setError('Passwords do not match.'); return; }
     setLoading(true);
     try {

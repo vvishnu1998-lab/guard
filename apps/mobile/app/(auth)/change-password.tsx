@@ -23,8 +23,8 @@ export default function ChangePasswordScreen() {
   const { changePassword, logout } = useAuthStore();
 
   async function handleChange() {
-    if (next.length < 6 || next.length > 8) {
-      Alert.alert('Invalid', 'New password must be 6–8 characters.'); return;
+    if (next.length < 6 || next.length > 128) {
+      Alert.alert('Invalid', 'Minimum 6 characters.'); return;
     }
     if (next !== confirm) {
       Alert.alert('Mismatch', 'New passwords do not match.'); return;
