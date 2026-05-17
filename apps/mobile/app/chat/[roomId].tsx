@@ -162,7 +162,6 @@ export default function ChatRoomScreen() {
           onSubmitEditing={sendMessage}
           blurOnSubmit={false}
           returnKeyType="send"
-          keyboardAppearance="dark"
         />
         <TouchableOpacity
           onPress={sendMessage}

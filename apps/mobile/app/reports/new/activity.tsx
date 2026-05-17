@@ -124,7 +124,6 @@ export default function ActivityReportForm() {
             numberOfLines={6}
             maxLength={2000}
             textAlignVertical="top"
-            keyboardAppearance="dark"
           />
           <Text style={styles.charCount}>{description.length}/2000</Text>
 
