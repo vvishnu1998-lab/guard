@@ -255,20 +255,37 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
 });
 
 // GET /api/admin/dashboard-sites — site summary for dashboard table
+//
+// Cartesian fix (2026-05-17): the previous version LEFT JOINed shift_sessions,
+// reports, AND data_retention_log to sites, then summed total_hours across the
+// resulting cross-product. SUM had no DISTINCT guard, so each session's hours
+// were multiplied by (reports_count × retention_log_count) per site. Symptom:
+// William Pen Hotel showed 300.7h (real value 37.6h × 8 reports × 1 retention
+// row). guard_count and reports_today were always correct because they used
+// COUNT(DISTINCT …).
+//
+// Fix: pull guard_count and hours_this_week into scalar subqueries against
+// shift_sessions directly. The LEFT JOIN on shift_sessions is removed; reports
+// and data_retention_log remain joined (DISTINCT keeps reports_today safe,
+// data_retention_log is one row per site so days_until_deletion is unaffected).
 router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
   const result = await pool.query(
     `SELECT
        s.id, s.name,
-       COUNT(DISTINCT ss.guard_id) FILTER (WHERE ss.clocked_out_at IS NULL) AS guard_count,
-       COUNT(DISTINCT r.id) FILTER (WHERE r.reported_at >= CURRENT_DATE)    AS reports_today,
-       COALESCE(SUM(ss.total_hours) FILTER (
-         WHERE ss.clocked_in_at >= DATE_TRUNC('week', NOW())
+       COALESCE((
+         SELECT COUNT(DISTINCT ss2.guard_id) FROM shift_sessions ss2
+          WHERE ss2.site_id = s.id AND ss2.clocked_out_at IS NULL
+       ), 0) AS guard_count,
+       COUNT(DISTINCT r.id) FILTER (WHERE r.reported_at >= CURRENT_DATE) AS reports_today,
+       COALESCE((
+         SELECT SUM(ss2.total_hours) FROM shift_sessions ss2
+          WHERE ss2.site_id = s.id
+            AND ss2.clocked_in_at >= DATE_TRUNC('week', NOW())
        ), 0) AS hours_this_week,
        CASE WHEN s.contract_end >= NOW() THEN 'active' ELSE 'inactive' END AS status,
        CEIL(EXTRACT(EPOCH FROM (drl.data_delete_at - NOW())) / 86400)::INT AS days_until_deletion
      FROM sites s
-     LEFT JOIN shift_sessions ss ON ss.site_id = s.id
      LEFT JOIN reports r ON r.site_id = s.id
      LEFT JOIN data_retention_log drl ON drl.site_id = s.id
      WHERE s.company_id = $1
