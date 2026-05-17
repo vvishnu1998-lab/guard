@@ -349,21 +349,29 @@ Cron schedule: `0 0 * * *` UTC ([apps/api/src/jobs/nightlyPurge.ts:17](apps/api/
 - **`chat_rooms`** — backing table for the admin↔guard chat surface. Referenced by [apps/api/src/routes/chat.ts](apps/api/src/routes/chat.ts) and FK'd into by [apps/api/src/db/schema_v13.sql:34](apps/api/src/db/schema_v13.sql:34) (`REFERENCES chat_rooms(id) ON DELETE CASCADE`). Live DDL: PK on `id`, UNIQUE on `(site_id, guard_id)` (one room per guard-site pair), FKs to `companies`, `sites`, `guards`.
 - **`chat_messages`** — message rows for the chat surface. Queried by [apps/api/src/routes/chat.ts:36-40](apps/api/src/routes/chat.ts:36) (`cm.message`, `cm.created_at`, `cm.sender_role`). Live DDL: `sender_role text CHECK (sender_role IN ('admin','guard'))` — intentional structural constraint that chat is binary, not multi-party.
 - **`monthly_hours_reports`** — backing table for the monthly XLSX report cron ([apps/api/src/jobs/monthlyHoursReport.ts](apps/api/src/jobs/monthlyHoursReport.ts)). One row per `(company_id, month, year)` with the S3 URL of the generated XLSX. CHECK on month 1–12, UNIQUE on `(company_id, month, year)`.
-- **`password_reset_tokens`** — backing table for the forgot-password flow. CHECK on `portal IN ('admin','client','vishnu')` — notably excludes `'guard'` (guards have no self-serve password reset; admin-mediated only).
+- **`password_reset_tokens`** — orphan migration of **dead schema**. Verified by `grep -rn password_reset_tokens apps/` returning zero matches. CHECK on `portal IN ('admin','client','vishnu')` excludes `'guard'`, consistent with the table being scaffolding from an earlier token-based reset design that was superseded. The current forgot-password flow at [apps/api/src/routes/auth.ts:440-513](apps/api/src/routes/auth.ts:440) uses a direct temp-password update via SendGrid (no token table involved): generate 8-char temp, bcrypt-hash it directly onto the user's `password_hash`, set `must_change_password = true`, email the plaintext. **Guards ARE included** in this flow (the `portal IN ('admin','client','guard','vishnu')` accept-list on the route handler; vishnu short-circuits because super-admin password lives in env, not DB). The forced `/change-password` route at [apps/api/src/routes/auth.ts:148](apps/api/src/routes/auth.ts:148) gates the next session. Documented here as a production-parity item, not as a live dependency.
 
 **How it got this way**: each of the four was added by hand-running `CREATE TABLE` against the live Railway database without committing a corresponding schema file. Subsequent migrations passed because the FK targets existed in prod. The forensic tell: hand-created tables use `gen_random_uuid()` defaults (PG 13+ native, no extension), while migration-managed tables use `uuid_generate_v4()` (requires `uuid-ossp`). Different default style = different creation moment.
 
-**Blast radius (twice as wide as the original 2-table framing)**:
-- Disaster recovery from a Railway-backup restore to a fresh instance: chat tables, monthly_hours_reports, and password_reset_tokens won't exist; `schema_v13.sql`'s `CREATE TABLE chat_room_reads ... REFERENCES chat_rooms(id)` fails at migration time; the chat routes, monthly-hours cron, and forgot-password flow all break.
-- Spinning up a local development environment: same failure.
-- New engineer joining the team running `npm run db:migrate`: same failure.
-- Spinning up a staging environment: same failure.
+The `password_reset_tokens` case is one step further: hand-created, then deprecated when the implementer switched to the simpler temp-password-direct-update approach without dropping the table.
+
+**Blast radius — split by orphan type**:
+
+**3 live-orphan tables (urgent — disaster-recovery blocker)**: `chat_rooms`, `chat_messages`, `monthly_hours_reports` are actively used by application code. A fresh DB built from migrations alone would fail at `schema_v13.sql`'s `CREATE TABLE chat_room_reads ... REFERENCES chat_rooms(id)`, the chat routes would 500, and the monthly-hours cron would throw on every monthly tick.
+
+**1 dead-schema-orphan table (housekeeping — production-parity, not blocker)**: `password_reset_tokens` is unused by any code path. A fresh DB without it would still boot, the forgot-password flow would still work, and no migration FK references it. The harm is structural: live DB and restored DB would differ, which is confusing in audits and undermines DR confidence even though the app functions.
+
+Both classes manifest the same way for **disaster recovery from a Railway backup restore to a fresh instance**, **local development setup**, **new engineer onboarding via `npm run db:migrate`**, and **staging environment provisioning** — fresh DBs cannot reproduce production schema without manual intervention. The urgency differs, the surface area does not.
 
 **Suggested action**: create `apps/api/src/db/schema_v15.sql` with all four `CREATE TABLE` statements reconstructed from the live DDL (use `psql \d+ <table>` + `pg_indexes` queries — local `pg_dump 14` cannot dump from PG 18.3 due to client-version-too-old). Include all CHECK constraints, FK relationships, and indexes captured from production. Append `'schema_v15.sql'` to the `migrate.ts` file list. Header comment on the migration file must state: "These four tables exist in production as of 2026-05-16 but had no committed migration file. Captured via `psql` against Railway production. Fresh-deploy reproduction depends on this file. The original timestamps and any historical rows for these tables are NOT in this migration — this file reproduces the schema, not the data. Data restoration is via Railway snapshots." Verify by spinning up a fresh local Postgres (Docker container) and running the full migration sequence; if the app boots end-to-end with `npm run db:migrate && npm start && curl /health`, the fix is good.
 
+**`schema_v15.sql` includes `password_reset_tokens` for production parity** even though it's dead schema. Reasoning: a fresh restore that recreated only the 3 live tables would leave the live DB and restored DB structurally different — confusing in audits and corrosive to DR confidence. Reproduce the schema as-is; cleanup is a separate decision.
+
+**Optional follow-up `schema_v16.sql`** to drop `password_reset_tokens` outright, gated on a confirmation grep that nothing in `apps/` references it. Low priority; the table is harmless. Group with similar dead-schema cleanup if other dead tables are discovered later. Tracked in Implementation Plan deferred items.
+
 **Severity**: Operational + Recovery.
 
-**Owner**: Decision needed on timing (this week vs. next session). Disaster recovery is not a defer-able concern, and the blast radius is now four tables, not two. Tracked in `06-IMPLEMENTATION-PLAN.md` Immediate Backlog.
+**Owner**: Decision needed on timing (this week vs. next session) for `schema_v15.sql` covering the 3 live-orphan tables — that's the urgent piece. `password_reset_tokens` reproduction can ship in the same file (recommended for parity) or a follow-up commit. The optional `schema_v16.sql` drop is low-priority cleanup. Tracked in `06-IMPLEMENTATION-PLAN.md` Immediate Backlog.
 
 ### 10.2 API start script does not run migrations (Operational — high severity)
 
