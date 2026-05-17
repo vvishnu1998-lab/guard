@@ -216,6 +216,7 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
       title: 'Outside post boundary',
       body:  `You're outside the permitted radius at ${r.site_name}. Return to the post.`,
       data:  { violationId, siteName: r.site_name },
+      shiftSessionId: shift_session_id,
     });
   }).catch((err) => console.error('[fcm] admin token lookup failed:', err));
 

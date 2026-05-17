@@ -22,9 +22,17 @@ router.get('/', requireAuth('guard', 'company_admin', 'client'), async (req, res
              WHERE r.site_id = $1`;
     params = [user!.site_id];
   } else if (user!.role === 'guard') {
+    // Mobile Reports tab is scoped to the guard's currently-active shift
+    // session only (no history view). If they're not clocked in, the
+    // subquery returns NULL and no rows match — an empty list is correct.
     query = `SELECT r.* FROM reports r
              JOIN shift_sessions ss ON ss.id = r.shift_session_id
-             WHERE ss.guard_id = $1`;
+             WHERE ss.guard_id = $1
+               AND r.shift_session_id = (
+                 SELECT id FROM shift_sessions
+                 WHERE guard_id = $1 AND clocked_out_at IS NULL
+                 LIMIT 1
+               )`;
     params = [user!.sub];
   } else {
     // company_admin: scoped to company
