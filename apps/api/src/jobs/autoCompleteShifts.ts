@@ -76,13 +76,24 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
        RETURNING ss.id`
     );
 
-    // Step 3: Mark the overdue shifts as completed.
+    // Step 3: Mark the overdue shifts. Shifts with at least one
+    //         shift_sessions row → 'completed' (guard worked, may or may
+    //         not have clocked out). Shifts with zero session rows →
+    //         'missed' (no-show: guard never clocked in).
+    //         Previously this flipped everything to 'completed', which
+    //         silently rolled no-shows into the completed bucket and made
+    //         them indistinguishable from worked shifts in admin views,
+    //         the daily client email, and the mobile profile rollups.
     const shifts = await client.query(
-      `UPDATE shifts
-       SET status = 'completed'
-       WHERE scheduled_end <= NOW()
-         AND status IN ('active', 'scheduled')
-       RETURNING id`
+      `UPDATE shifts s
+       SET status = CASE
+         WHEN EXISTS (SELECT 1 FROM shift_sessions ss WHERE ss.shift_id = s.id)
+           THEN 'completed'
+         ELSE 'missed'
+       END
+       WHERE s.scheduled_end <= NOW()
+         AND s.status IN ('active', 'scheduled')
+       RETURNING id, status`
     );
 
     await client.query('COMMIT');
