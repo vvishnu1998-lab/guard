@@ -302,7 +302,12 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
 
        UNION ALL
 
-       -- Missed shifts — scheduled but no clock-in 15 min after start
+       -- Missed shifts — scheduled but no clock-in 15 min after start.
+       -- Status filter accepts both 'scheduled' (alert fired, shift still
+       -- before scheduled_end) and 'missed' (auto-complete cron has since
+       -- flipped the status because scheduled_end passed with zero
+       -- sessions). The 24-hour cap on missed_alert_sent_at keeps the
+       -- alert visible on the dashboard the morning after, then drops it.
        SELECT
          sh.id::text,
          'missed_shift'                                          AS type,
@@ -315,9 +320,10 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
        JOIN sites  s ON s.id = sh.site_id
        JOIN guards g ON g.id = sh.guard_id
        WHERE s.company_id = $1
-         AND sh.status = 'scheduled'
+         AND sh.status IN ('scheduled', 'missed')
          AND sh.scheduled_start + INTERVAL '15 minutes' <= NOW()
          AND sh.missed_alert_sent_at IS NOT NULL
+         AND sh.missed_alert_sent_at >= NOW() - INTERVAL '24 hours'
 
      ) combined
      ORDER BY occurred_at DESC
