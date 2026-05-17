@@ -5,6 +5,7 @@
  * The original Schedule Shift modal is preserved.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { adminGet, adminPost, adminPatch } from '../../../lib/adminApi';
 
 interface Shift {
@@ -174,6 +175,7 @@ function GuardAvatar({ name, photoUrl, size = 'md' }: { name: string; photoUrl?:
 }
 
 export default function ShiftsPage() {
+  const router = useRouter();
   const [shifts,  setShifts]  = useState<Shift[]>([]);
   const [guards,  setGuards]  = useState<Guard[]>([]);
   const [sites,   setSites]   = useState<Site[]>([]);
@@ -440,7 +442,11 @@ export default function ShiftsPage() {
                 </thead>
                 <tbody>
                   {selectedGuardShifts.map((s) => (
-                    <tr key={s.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
+                    <tr
+                      key={s.id}
+                      onClick={() => router.push(`/admin/shifts/${s.id}`)}
+                      className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors cursor-pointer"
+                    >
                       <td className="p-4 text-gray-300 text-xs font-mono">{fmtDateShort(s.scheduled_start)}</td>
                       <td className="p-4 text-gray-400 text-xs">{s.site_name}</td>
                       <td className="p-4 text-gray-400 text-xs font-mono">
