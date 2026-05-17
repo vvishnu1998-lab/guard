@@ -179,6 +179,7 @@ export default function IncidentReportForm() {
             numberOfLines={7}
             maxLength={3000}
             textAlignVertical="top"
+            keyboardAppearance="dark"
           />
           <Text style={styles.charCount}>{description.length}/3000</Text>
 

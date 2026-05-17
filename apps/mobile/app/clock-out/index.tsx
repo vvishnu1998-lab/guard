@@ -105,6 +105,7 @@ export default function ClockOutScreen() {
           numberOfLines={4}
           maxLength={1000}
           textAlignVertical="top"
+          keyboardAppearance="dark"
         />
         <Text style={styles.charCount}>{notes.length}/1000</Text>
       </View>
