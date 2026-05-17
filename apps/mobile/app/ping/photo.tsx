@@ -21,7 +21,8 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useShiftStore }   from '../../store/shiftStore';
-import { useOfflineStore } from '../../store/offlineStore';
+import { apiClient }       from '../../lib/apiClient';
+import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
 import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
@@ -46,7 +47,6 @@ export default function PhotoPing() {
   const [capturing, setCapturing]       = useState(false);
 
   const { activeSession } = useShiftStore();
-  const { submitPing }    = useOfflineStore();
 
   // Android often never fires onCameraReady — force-enable after 3s so the
   // shutter doesn't sit disabled indefinitely.
@@ -139,20 +139,24 @@ export default function PhotoPing() {
         console.warn('[ping] GPS read failed — submitting with 0,0:', err);
       }
 
-      // 4) Submit. submitPing already wraps the network call and queues on
-      //    failure, so we don't need an extra timeout here.
-      // throttle_reason is null in the normal case; populated when the
-      // battery hook on active-shift has the device in low-battery /
-      // low-power-mode. Server writes it to location_pings.throttle_reason
-      // so the client portal can distinguish a throttled cadence from a
-      // missed ping.
+      // 4) Upload the photo to S3. Hard-fail on error — the API rejects
+      //    file:// URLs at the photo validator, so a queued ping pointing
+      //    at a local URI would silently dead-letter forever.
+      console.log('[ping] uploading photo to S3…');
+      const { public_url } = await uploadToS3(compressed.uri, 'ping');
+      console.log('[ping] photo uploaded:', public_url);
+
+      // 5) Submit directly (not via useOfflineStore.submitPing) so a
+      //    failure throws to the outer catch and the guard sees it. The
+      //    offline-queue fallback is unsafe for ping-with-photo: a queued
+      //    payload referencing a no-longer-existing local URI can't sync.
       console.log('[ping] submitting…');
-      await submitPing({
+      await apiClient.post('/locations/ping', {
         shift_session_id: activeSession.id,
         latitude:         lat,
         longitude:        lng,
         ping_type:        'gps_photo',
-        photo_url:        compressed.uri,
+        photo_url:        public_url,
         throttle_reason:  getCurrentThrottleReason() ?? undefined,
       });
       console.log('[ping] submit complete');
