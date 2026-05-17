@@ -23,11 +23,14 @@ interface GuardProfile {
 }
 
 interface ShiftRecord {
-  id:              string;
-  site_name:       string;
-  scheduled_start: string;
-  scheduled_end:   string;
-  status:          string;
+  id:                 string;
+  site_name:          string;
+  scheduled_start:    string;
+  scheduled_end:      string;
+  status:             string;
+  // Sum of shift_sessions.total_hours for this shift, plus live elapsed for
+  // any still-open session. 0 for no-shows (no session rows).
+  total_hours_worked: number | string | null;
 }
 
 export default function ProfileScreen() {
@@ -49,7 +52,11 @@ export default function ProfileScreen() {
   );
 
   function hoursWorked(shift: ShiftRecord) {
-    return (new Date(shift.scheduled_end).getTime() - new Date(shift.scheduled_start).getTime()) / 3_600_000;
+    // pg returns NUMERIC as string; coerce. Null/undefined → 0.
+    const v = shift.total_hours_worked;
+    if (v == null) return 0;
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) ? n : 0;
   }
 
   const now       = new Date();
