@@ -2,13 +2,17 @@
  * Active Shift Screen (Section 5.3)
  * Shown after successful clock-in. Stays active until clock-out.
  * - Elapsed timer strip (updates every second)
- * - Next ping countdown (per-site cadence from sites.ping_interval_minutes,
- *   default 30 min — Item 8; every ping is GPS + photo, the prior
- *   on-hour/half-hour alternation was retired in /app/ping/index.tsx)
+ * - Next ping countdown — aligned to wall-clock :00 / :30 to match the server
+ *   cron in apps/api/src/jobs/pingReminder.ts (every ping is GPS + photo;
+ *   the prior on-hour/half-hour alternation was retired in /app/ping/index.tsx).
+ *   Per-site `ping_interval_minutes` and battery-throttle multipliers no
+ *   longer drive the countdown — the server fires every aligned tick
+ *   regardless — but the battery hook still runs so its `throttleReason`
+ *   continues to stamp ping rows for the client portal.
  * - Action grid: Ping Now / Report / Tasks / Break
  * - Clock-Out button (amber, bottom of scroll)
  */
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   ScrollView, Alert, AppState,
@@ -18,6 +22,7 @@ import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
 import { pingState }     from '../../lib/pingState';
 import { useBatteryThrottle } from '../../lib/batteryThrottle';
+import { nextPingAt, remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
@@ -41,21 +46,16 @@ export default function ActiveShiftScreen() {
   const { activeShift, activeSession } = useShiftStore();
   const { guardId } = useAuthStore();
 
-  // Per-site cadence — captured ONCE at component mount via the store's
-  // current value, NOT re-read reactively. Admin edits to the site's
-  // ping_interval_minutes mid-shift do NOT disturb the active shift; the
-  // new cadence is picked up at the next clock-in (Q37 semantics).
+  // Item 7 — battery-aware throttling hook. The server now pings every active
+  // session at wall-clock :00/:30 regardless of cadence, so `intervalMs` no
+  // longer drives the countdown. The hook still runs because its
+  // `throttleReason` is stamped onto each ping row so the client portal can
+  // show "throttled" instead of "missed" when battery is low.
   const baseIntervalMs = (activeShift?.ping_interval_minutes ?? 30) * 60 * 1000;
-
-  // Item 7 — battery-aware throttling layered on top of site cadence.
-  // Low battery / low-power-mode multiplies the interval (2x / 3x) so a
-  // failing phone makes fewer pings rather than dying mid-shift. The
-  // returned throttleReason is also stamped onto each ping row so the
-  // client portal can show "throttled" instead of "missed".
-  const { intervalMs: pingIntervalMs, isThrottled } = useBatteryThrottle(baseIntervalMs);
+  const { intervalMs: throttledIntervalMs, isThrottled } = useBatteryThrottle(baseIntervalMs);
 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [nextPingMs,     setNextPingMs]     = useState(pingIntervalMs);
+  const [nextPingMs,     setNextPingMs]     = useState(0);
   const [clockingOut,    setClockingOut]    = useState(false);
 
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -77,50 +77,43 @@ export default function ActiveShiftScreen() {
   }, [activeSession?.clocked_in_at]);
 
   // ── Ping countdown ─────────────────────────────────────────────────────
-  // Aligned to clock-in time so the cycle is correct even if the guard
-  // navigates away and returns, or opens the app mid-shift.
-  const pingAlertShownRef = useRef(false);
+  // Aligned to wall-clock :00 / :30 via shared helper in lib/pingSchedule.ts.
+  // Detect rollover by watching the target slot timestamp — when the next
+  // slot changes, the previous one just fired.
   const pingSnoozedUntilRef = useRef(0); // epoch ms — suppress re-alert until this time
+  const trackedSlotRef = useRef<number>(0);
 
   useEffect(() => {
     if (!activeSession?.clocked_in_at) return;
+    const clockedInDate = new Date(activeSession.clocked_in_at);
 
-    function computeRemaining() {
-      const clockInMs   = new Date(activeSession!.clocked_in_at).getTime();
-      const elapsedMs   = Date.now() - clockInMs;
-      const timeInCycle = elapsedMs % pingIntervalMs;
-      return pingIntervalMs - timeInCycle;
-    }
-
-    // Set immediately so there's no 1 s delay on mount
-    setNextPingMs(computeRemaining());
+    trackedSlotRef.current = nextPingAt(clockedInDate).getTime();
+    setNextPingMs(remainingMsUntilNextPing(clockedInDate));
 
     pingRef.current = setInterval(() => {
-      const remaining = computeRemaining();
-      setNextPingMs(remaining);
+      const now = new Date();
+      const slot = nextPingAt(clockedInDate, now).getTime();
+      setNextPingMs(Math.max(0, slot - now.getTime()));
 
-      // When the cycle rolls over, prompt the guard to ping
-      if (remaining >= pingIntervalMs - 2000) {
+      // Slot changed → the previous aligned tick just passed → ping due
+      if (trackedSlotRef.current !== 0 && slot !== trackedSlotRef.current) {
+        trackedSlotRef.current = slot;
         const snoozed = Date.now() < pingSnoozedUntilRef.current || Date.now() < pingState.suppressAlertUntil;
-        if (!pingAlertShownRef.current && !snoozed) {
-          pingAlertShownRef.current = true;
+        if (!snoozed) {
           Alert.alert(
             'PING DUE',
-            `Your ${Math.round(pingIntervalMs / 60000)}-minute check-in is due. Submit your location now.`,
+            'Your check-in is due. Submit your location now.',
             [
               { text: 'Later', style: 'cancel', onPress: () => {
-                // Snooze for 5 minutes before re-alerting
                 pingSnoozedUntilRef.current = Date.now() + 5 * 60 * 1000;
-                pingAlertShownRef.current = false;
               }},
-              { text: 'PING NOW', onPress: () => { pingAlertShownRef.current = false; router.push('/ping'); } },
+              { text: 'PING NOW', onPress: () => router.push('/ping') },
             ],
             { cancelable: false }
           );
         }
       } else {
-        pingAlertShownRef.current = false;
-        pingSnoozedUntilRef.current = 0;
+        trackedSlotRef.current = slot;
       }
     }, 1000);
 
@@ -179,7 +172,7 @@ export default function ActiveShiftScreen() {
       {isThrottled && (
         <View style={styles.throttleBanner}>
           <Text style={styles.throttleBannerText}>
-            Low battery — pings reduced to every {Math.round(pingIntervalMs / 60000)} minutes. Plug in when possible.
+            Low battery — pings reduced to every {Math.round(throttledIntervalMs / 60000)} minutes. Plug in when possible.
           </Text>
         </View>
       )}
@@ -190,7 +183,6 @@ export default function ActiveShiftScreen() {
         <Text style={[styles.pingValue, pingUrgent && styles.pingValueUrgent]}>
           {formatCountdown(nextPingMs)}
         </Text>
-        <Text style={styles.pingNote}>NEXT: GPS + PHOTO</Text>
       </View>
 
       {/* ── Action grid ─────────────────────────────────────────────── */}

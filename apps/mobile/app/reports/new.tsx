@@ -30,6 +30,11 @@ import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
 
+const MIN_ENHANCE_WORDS = 75;
+function countWords(s: string): number {
+  return s.trim().split(/\s+/).filter(Boolean).length;
+}
+
 const TYPES: { value: ReportType; label: string; icon: string; color: string; desc: string }[] = [
   { value: 'activity',    label: 'Activity',    icon: '📋', color: Colors.action, desc: 'Routine patrol log, observations, completed rounds' },
   { value: 'incident',    label: 'Incident',    icon: '⚠',  color: '#EF4444',     desc: 'Security breach, injury, unauthorized access, emergency' },
@@ -64,7 +69,7 @@ export default function CreateReport() {
   }
 
   async function handleEnhance() {
-    if (description.trim().length < 10) return;
+    if (countWords(description) < MIN_ENHANCE_WORDS) return;
     setEnhancing(true);
     try {
       setOriginalDesc(description);
@@ -149,7 +154,9 @@ export default function CreateReport() {
     }
   }
 
-  const showEnhanceBtn = description.trim().length >= 10 && !enhancing && !enhanced;
+  const wordCount = countWords(description);
+  const enhanceReady = wordCount >= MIN_ENHANCE_WORDS;
+  const showEnhanceBtn = !enhancing && !enhanced;
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -204,9 +211,22 @@ export default function CreateReport() {
           <Text style={styles.charCount}>{description.length}/3000</Text>
 
           {showEnhanceBtn && (
-            <TouchableOpacity style={styles.enhanceBtn} onPress={handleEnhance}>
-              <Text style={styles.enhanceBtnText}>✦ Enhance with AI</Text>
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity
+                style={[styles.enhanceBtn, !enhanceReady && styles.enhanceBtnDisabled]}
+                onPress={handleEnhance}
+                disabled={!enhanceReady}
+              >
+                <Text style={[styles.enhanceBtnText, !enhanceReady && styles.enhanceBtnTextDisabled]}>
+                  ✦ Enhance with AI
+                </Text>
+              </TouchableOpacity>
+              {!enhanceReady && (
+                <Text style={styles.enhanceHint}>
+                  Write at least {MIN_ENHANCE_WORDS} words to enhance. (Currently {wordCount} {wordCount === 1 ? 'word' : 'words'}.)
+                </Text>
+              )}
+            </>
           )}
           {enhancing && (
             <View style={styles.enhancingRow}>
@@ -341,7 +361,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#F59E0B',
     backgroundColor: 'rgba(245,158,11,0.08)',
   },
+  enhanceBtnDisabled: {
+    borderColor: Colors.border,
+    backgroundColor: 'transparent',
+  },
   enhanceBtnText: { color: '#F59E0B', fontSize: 13, letterSpacing: 1 },
+  enhanceBtnTextDisabled: { color: Colors.muted },
+  enhanceHint: { color: Colors.muted, fontSize: 12, marginTop: 6 },
 
   enhancingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginTop: Spacing.sm },
   enhancingText: { color: Colors.muted, fontSize: 13 },

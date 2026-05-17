@@ -13,6 +13,7 @@ import { useOfflineStore } from '../../store/offlineStore';
 import { useDrawerStore } from '../../store/drawerStore';
 import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
+import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -328,27 +329,21 @@ export default function HomeScreen() {
 }
 
 function PingCountdownBanner({ clockedInAt }: { clockedInAt?: string }) {
-  const PING_MS = 30 * 60 * 1000;
-  const [remaining, setRemaining] = useState(PING_MS);
+  const [remaining, setRemaining] = useState(0);
   const ref = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!clockedInAt) return;
-    function compute() {
-      const elapsed = Date.now() - new Date(clockedInAt!).getTime();
-      return PING_MS - (elapsed % PING_MS);
-    }
+    const clockedInDate = new Date(clockedInAt);
+    const compute = () => remainingMsUntilNextPing(clockedInDate);
     setRemaining(compute());
     ref.current = setInterval(() => setRemaining(compute()), 1000);
     return () => { if (ref.current) clearInterval(ref.current); };
   }, [clockedInAt]);
 
-  const elapsedMs = clockedInAt ? Date.now() - new Date(clockedInAt).getTime() : 0;
-  const pingIndex = Math.floor(elapsedMs / PING_MS);
-  const pingType  = pingIndex % 2 === 0 ? 'GPS + PHOTO' : 'GPS ONLY';
   const mins = Math.floor(remaining / 60000);
   const secs = Math.floor((remaining % 60000) / 1000);
-  const label = `Next ping in ${mins}:${String(secs).padStart(2, '0')} · ${pingType}`;
+  const label = `Next ping in ${mins}:${String(secs).padStart(2, '0')}`;
 
   return (
     <View style={styles.pingBanner}>
