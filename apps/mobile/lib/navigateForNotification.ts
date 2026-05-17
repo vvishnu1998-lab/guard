@@ -19,6 +19,13 @@ export function navigateForNotification(type: string | undefined, data: Notifica
     case 'task_reminder':
       router.push('/(tabs)/tasks');
       break;
+    case 'pre_shift_reminder':
+    case 'shift_start_reminder':
+      // Home tab renders the upcoming-shift card with the CLOCK IN button.
+      // Clock-in flow itself is not deep-linkable — it reads pendingShift
+      // from useShiftStore which home.tsx's handleClockIn() populates.
+      router.push('/(tabs)/home');
+      break;
     case 'chat':
       if (typeof data?.roomId === 'string') router.push(`/chat/${data.roomId}`);
       break;
