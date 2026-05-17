@@ -13,6 +13,7 @@ import { useOfflineStore } from '../../store/offlineStore';
 import { useDrawerStore } from '../../store/drawerStore';
 import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
+import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -327,23 +328,6 @@ export default function HomeScreen() {
   );
 }
 
-/**
- * Server fires reminders at wall-clock :00 and :30 (UTC, which matches local
- * since common timezone offsets are 30-min multiples). A guard clocked in
- * within the last 5 min of an aligned slot skips that slot — matches the
- * `clocked_in_at <= NOW() - 5 min` filter in apps/api/src/jobs/pingReminder.ts.
- */
-function nextPingAt(clockedInAt: Date, now: Date): Date {
-  const m = now.getMinutes();
-  const minutesToNextSlot = m < 30 ? 30 - m : 60 - m;
-  let next = new Date(now.getTime() + minutesToNextSlot * 60_000);
-  next.setSeconds(0, 0);
-  if (next.getTime() - clockedInAt.getTime() < 5 * 60_000) {
-    next = new Date(next.getTime() + 30 * 60_000);
-  }
-  return next;
-}
-
 function PingCountdownBanner({ clockedInAt }: { clockedInAt?: string }) {
   const [remaining, setRemaining] = useState(0);
   const ref = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -351,9 +335,7 @@ function PingCountdownBanner({ clockedInAt }: { clockedInAt?: string }) {
   useEffect(() => {
     if (!clockedInAt) return;
     const clockedInDate = new Date(clockedInAt);
-    function compute() {
-      return Math.max(0, nextPingAt(clockedInDate, new Date()).getTime() - Date.now());
-    }
+    const compute = () => remainingMsUntilNextPing(clockedInDate);
     setRemaining(compute());
     ref.current = setInterval(() => setRemaining(compute()), 1000);
     return () => { if (ref.current) clearInterval(ref.current); };
