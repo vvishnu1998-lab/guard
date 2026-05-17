@@ -22,12 +22,60 @@ const VALID_TYPES: NotificationType[] = [
   'geofence_breach',
 ];
 
-// GET /api/notifications — most recent 100 for the authed guard
+// Shared WHERE fragment for the Notifications tab (GET /) and its badge
+// counter (GET /unread-count). Two halves:
+//   1. Scope: chat is always shown; everything else must be tied to the
+//      guard's currently-active shift session.
+//   2. Auto-erase: a per-type completion check hides reminders whose
+//      action has been satisfied. The CASE branches mirror the contracts
+//      documented in the schema_v16 migration header.
+// $1 is the authed guard_id (used twice — once for the outer scope and
+// once inside the active-session subquery).
+const SHIFT_SCOPED_AND_NOT_COMPLETED = `
+  notifications.guard_id = $1
+  AND (
+    notifications.type = 'chat'
+    OR notifications.shift_session_id = (
+      SELECT id FROM shift_sessions
+      WHERE guard_id = $1 AND clocked_out_at IS NULL
+      LIMIT 1
+    )
+  )
+  AND CASE notifications.type
+    WHEN 'ping_reminder' THEN NOT EXISTS (
+      SELECT 1 FROM location_pings lp
+      WHERE lp.shift_session_id = notifications.shift_session_id
+        AND lp.pinged_at > notifications.created_at
+    )
+    WHEN 'activity_report_reminder' THEN NOT EXISTS (
+      SELECT 1 FROM reports r
+      WHERE r.shift_session_id = notifications.shift_session_id
+        AND r.report_type = 'activity'
+        AND r.reported_at > notifications.created_at
+    )
+    WHEN 'task_reminder' THEN EXISTS (
+      SELECT 1 FROM task_instances ti
+      JOIN shift_sessions ss ON ss.shift_id = ti.shift_id
+      WHERE ss.id = notifications.shift_session_id
+        AND ti.status = 'pending'
+    )
+    WHEN 'geofence_breach' THEN NOT (
+      notifications.data ? 'violationId' AND EXISTS (
+        SELECT 1 FROM geofence_violations gv
+        WHERE gv.id = (notifications.data->>'violationId')::uuid
+          AND gv.resolved_at IS NOT NULL
+      )
+    )
+    ELSE TRUE
+  END
+`;
+
+// GET /api/notifications — current shift only, excluding completed actions.
 router.get('/', requireAuth('guard'), async (req: Request, res: Response) => {
   const result = await pool.query(
     `SELECT id, type, title, body, data, read_at, created_at
      FROM notifications
-     WHERE guard_id = $1
+     WHERE ${SHIFT_SCOPED_AND_NOT_COMPLETED}
      ORDER BY created_at DESC
      LIMIT 100`,
     [req.user!.sub],
@@ -35,16 +83,23 @@ router.get('/', requireAuth('guard'), async (req: Request, res: Response) => {
   res.json(result.rows);
 });
 
-// GET /api/notifications/unread-count — count for the home-tab badge
+// GET /api/notifications/unread-count — badge for the home tab. Mirrors
+// the GET / filter so the badge count and visible list always match.
 router.get('/unread-count', requireAuth('guard'), async (req: Request, res: Response) => {
   const result = await pool.query(
-    'SELECT COUNT(*)::int AS count FROM notifications WHERE guard_id = $1 AND read_at IS NULL',
+    `SELECT COUNT(*)::int AS count
+     FROM notifications
+     WHERE ${SHIFT_SCOPED_AND_NOT_COMPLETED}
+       AND read_at IS NULL`,
     [req.user!.sub],
   );
   res.json({ count: result.rows[0]?.count ?? 0 });
 });
 
-// POST /api/notifications — mobile self-reports an event (eg geofence breach detected on-device)
+// POST /api/notifications — mobile self-reports an event (eg geofence
+// breach detected on-device). Server derives shift_session_id from the
+// guard's active session; if they're off-shift the row is still written
+// with shift_session_id = NULL (invisible to the new tab, per design).
 router.post('/', requireAuth('guard'), async (req: Request, res: Response) => {
   const { type, title, body, data } = req.body;
   if (typeof type !== 'string' || !VALID_TYPES.includes(type as NotificationType)) {
@@ -53,14 +108,21 @@ router.post('/', requireAuth('guard'), async (req: Request, res: Response) => {
   if (typeof title !== 'string' || typeof body !== 'string') {
     return res.status(400).json({ error: 'title and body are required' });
   }
+  const sessionResult = await pool.query<{ id: string }>(
+    `SELECT id FROM shift_sessions
+     WHERE guard_id = $1 AND clocked_out_at IS NULL
+     LIMIT 1`,
+    [req.user!.sub],
+  );
   await insertNotification({
     guardId: req.user!.sub,
     type: type as NotificationType,
     title,
     body,
     data: data ?? {},
+    shiftSessionId: sessionResult.rows[0]?.id ?? null,
   });
-  res.status(201).json({ ok: true });
+  res.status(200).json({ ok: true });
 });
 
 // POST /api/notifications/:id/read — mark a single notification read

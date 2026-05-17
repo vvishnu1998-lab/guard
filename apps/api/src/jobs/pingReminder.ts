@@ -40,6 +40,7 @@ async function sendReminder(
       title,
       body,
       data,
+      shiftSessionId: row.shift_session_id,
     }),
   ]);
 }

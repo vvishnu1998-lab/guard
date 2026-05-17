@@ -38,12 +38,22 @@ export async function insertNotification(params: {
   title: string;
   body: string;
   data?: Record<string, unknown>;
+  // Shift-scoping (schema v16). NULL is valid and intentional for chat and
+  // for events that fire while the guard has no active session.
+  shiftSessionId?: string | null;
 }): Promise<void> {
   try {
     await pool.query(
-      `INSERT INTO notifications (guard_id, type, title, body, data)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [params.guardId, params.type, params.title, params.body, params.data ?? {}],
+      `INSERT INTO notifications (guard_id, type, title, body, data, shift_session_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        params.guardId,
+        params.type,
+        params.title,
+        params.body,
+        params.data ?? {},
+        params.shiftSessionId ?? null,
+      ],
     );
   } catch (err) {
     console.error('[notifications] insert failed:', err);
