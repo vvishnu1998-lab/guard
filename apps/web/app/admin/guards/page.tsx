@@ -231,8 +231,8 @@ export default function GuardsPage() {
                   <input type={type} placeholder={ph} value={(form as any)[key]}
                     onChange={(e) => {
                       setForm((f) => ({ ...f, [key]: e.target.value }));
-                      if (key === 'temp_password' && (e.target.value.length < 6 || e.target.value.length > 8)) {
-                        setFormError('Temporary password must be 6–8 characters');
+                      if (key === 'temp_password' && (e.target.value.length < 6 || e.target.value.length > 128)) {
+                        setFormError('Minimum 6 characters.');
                       } else if (key === 'temp_password') {
                         setFormError('');
                       }

@@ -59,7 +59,7 @@ export default function ClientPortalsPage() {
   async function createClient() {
     const { site_id, name, email, password } = form;
     if (!site_id || !name || !email || !password) { setFormError('All fields required'); return; }
-    if (password.length < 6 || password.length > 8) { setFormError('Password must be 6–8 characters'); return; }
+    if (password.length < 6 || password.length > 128) { setFormError('Minimum 6 characters.'); return; }
     setSaving(true); setFormError('');
     try {
       await adminPost('/api/clients', form);
