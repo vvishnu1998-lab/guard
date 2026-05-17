@@ -23,7 +23,7 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
             <th className="text-left p-4">SITE</th>
             <th className="text-right p-4">GUARDS</th>
             <th className="text-right p-4">REPORTS</th>
-            <th className="text-right p-4">HOURS</th>
+            <th className="text-right p-4">HOURS THIS WEEK</th>
             <th className="text-right p-4">STATUS</th>
           </tr>
         </thead>
