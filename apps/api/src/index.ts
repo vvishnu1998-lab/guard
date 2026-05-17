@@ -73,10 +73,22 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   .map((o) => o.trim())
   .filter(Boolean);
 
+// Pattern allowance for our Vercel project's auto-generated origins. Static
+// ALLOWED_ORIGINS handles canonical hosts (app.netraops.com etc.); this
+// regex covers the two auto-generated shapes Vercel ships for our project:
+//   https://guard-vvishnu1998-labs-projects.vercel.app                   (production-deploy team alias)
+//   https://guard-git-{branch}-vvishnu1998-labs-projects.vercel.app      (any branch preview)
+// Both the project name (`guard`) and team slug (`vvishnu1998-labs-projects`)
+// are pinned, so unrelated *.vercel.app sites can't slip through and the
+// allowance can't be abused by a phishing site hosted on Vercel. Per-deploy
+// hash URLs are intentionally NOT matched — admins don't browse those directly.
+const VERCEL_PREVIEW_PATTERN = /^https:\/\/guard(?:-git-[a-z0-9-]+)?-vvishnu1998-labs-projects\.vercel\.app$/;
+
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);               // native app / curl / health
     if (allowedOrigins.includes(origin)) return cb(null, true);
+    if (VERCEL_PREVIEW_PATTERN.test(origin)) return cb(null, true);
     return cb(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
