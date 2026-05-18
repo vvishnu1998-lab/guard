@@ -214,16 +214,11 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     }
   }
 
-  // Geofence validation — block submission if guard has an unresolved violation
-  const violationResult = await pool.query(
-    `SELECT id FROM geofence_violations
-     WHERE shift_session_id = $1 AND resolved_at IS NULL
-     LIMIT 1`,
-    [shift_session_id]
-  );
-  if (violationResult.rows[0]) {
-    return res.status(403).json({ error: 'Cannot submit report while a geofence violation is unresolved' });
-  }
+  // (T2-D — 2026-05-17 audit) Removed the pre-existing "cannot submit
+  // while violation unresolved" block. The T2-D policy is FLAG, do not
+  // block — emergency reports must always go through, even when the
+  // guard has an open violation. The off-post detection below stamps
+  // is_within_geofence on the report and fires the breach alert flow.
 
   // Get site contract_end for delete_at calculation
   const siteResult = await pool.query('SELECT contract_end FROM sites WHERE id = $1', [site_id]);
