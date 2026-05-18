@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
-import { validateClockInGeofence } from '../services/geofence';
+import { validateAtSite } from '../services/geofence';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 
@@ -449,7 +449,7 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
 //
 // Geofence validation (Item 3 — closes V6 audit hole):
 //   - Mobile sends lat/lng/accuracy (NOT a client-decided boolean).
-//   - Server validates via validateClockInGeofence inside the same
+//   - Server validates via validateAtSite inside the same
 //     transaction, so the geofence read is consistent with the session
 //     insert. Reject → ROLLBACK + 422 GEOFENCE_FAILED.
 router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async (req, res) => {
@@ -490,7 +490,7 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     // Server-side geofence check. Inside the transaction so the fence read
     // is consistent with the session insert (and so we can ROLLBACK on fail
     // without leaving the shift row partially mutated).
-    const fence = await validateClockInGeofence(
+    const fence = await validateAtSite(
       { lat, lng, accuracy_m: accuracy },
       shift.site_id,
       client,

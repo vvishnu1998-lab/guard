@@ -32,7 +32,10 @@ export function haversineDistance(
 }
 
 /**
- * Server-side geofence validation for clock-in and clock-in-verification.
+ * Server-side geofence validation, shared across every endpoint that
+ * accepts a lat/lng/accuracy from a guard: clock-in, clock-in-verification,
+ * ping (Wave A — T1-A/B), clock-out, task completion, report submission
+ * (Wave A T2-A/C/D).
  *
  * Closes the audit hole where the mobile client could send
  * `is_within_geofence: true` regardless of actual position. The server now
@@ -70,7 +73,7 @@ type Queryable = {
 
 const SAFETY_MARGIN_M = 50;
 
-export async function validateClockInGeofence(
+export async function validateAtSite(
   point: GeofenceValidationInput,
   siteId: string,
   db: Queryable,

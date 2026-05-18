@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
-import { validateClockInGeofence, GeofenceValidationResult } from '../services/geofence';
+import { validateAtSite, GeofenceValidationResult } from '../services/geofence';
 import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 import { insertNotification } from '../services/notifications';
@@ -167,7 +167,7 @@ router.get('/violations', requireAuth('guard'), async (req, res) => {
 // Audit Tier 1 wiring (2026-05-17 location-services audit):
 //   T1-C-server: reject malformed coords + (0,0) before any other processing
 //   T1-B:        accept optional `accuracy`, persist to accuracy_meters,
-//                feed into the shared validateClockInGeofence helper
+//                feed into the shared validateAtSite helper
 //   T1-A:        on off-site (is_within_geofence=false), INSERT a
 //                geofence_violations row INSIDE the same transaction
 //                (with ON CONFLICT DO NOTHING via the partial unique index
@@ -190,7 +190,7 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     return res.status(400).json({ error: 'Invalid coordinates. GPS lock required.' });
   }
 
-  // T1-B — accuracy is optional. Null when missing → validateClockInGeofence
+  // T1-B — accuracy is optional. Null when missing → validateAtSite
   // receives accuracy_m=0 below, so the only slack is the helper's hardcoded
   // 50m SAFETY_MARGIN. New clients that send a real accuracy get a tighter,
   // accuracy-aware check.
@@ -234,7 +234,7 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    fence = await validateClockInGeofence(
+    fence = await validateAtSite(
       { lat: latitude, lng: longitude, accuracy_m: accuracyM ?? 0 },
       site_id,
       client,
@@ -423,7 +423,7 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
     }
   }
 
-  const fence = await validateClockInGeofence(
+  const fence = await validateAtSite(
     { lat: verified_lat, lng: verified_lng, accuracy_m: accuracy },
     siteId,
     pool,
