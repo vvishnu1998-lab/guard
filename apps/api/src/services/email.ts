@@ -620,16 +620,28 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
 // ── Email Type 5 — Geofence Breach Alert (T1-D, 2026-05-17 audit) ────────────
 //
 // Fires from fireBreachAlerts in routes/locations.ts when a fresh
-// geofence_violations row is INSERTed (either via the ping endpoint's
-// T1-A wiring or the background-task POST /violation path). Recipient
-// policy mirrors sendMissedShiftAlert: primary company admin only.
-// client_email is SELECTed but discarded — opt-in client breach alerts
-// would need a per-site flag (out of scope; logged as follow-up).
+// geofence_violations row is INSERTed. Two contexts as of T2-D:
+//   kind='ping'   — guard ping fired off-post (Wave A default)
+//   kind='report' — guard filed a report from off-post (T2-D)
+// Subject + body branch on context.
+//
+// Recipient policy mirrors sendMissedShiftAlert: primary company admin
+// only. client_email is SELECTed but discarded — opt-in client breach
+// alerts would need a per-site flag (out of scope; logged as follow-up).
 //
 // Best-effort: callers wrap in .catch() to keep alert dispatch
 // non-blocking on email failures.
 
-export async function sendGeofenceBreachAlert(violationId: string): Promise<void> {
+export interface BreachAlertContext {
+  kind: 'ping' | 'report';
+  /** Required when kind === 'report'. e.g. 'activity', 'incident', 'maintenance'. */
+  reportType?: string;
+}
+
+export async function sendGeofenceBreachAlert(
+  violationId: string,
+  context: BreachAlertContext = { kind: 'ping' },
+): Promise<void> {
   const result = await pool.query(
     `SELECT v.id, v.violation_lat, v.violation_lng, v.occurred_at, v.photo_url,
             v.shift_session_id,
@@ -655,7 +667,7 @@ export async function sendGeofenceBreachAlert(violationId: string): Promise<void
   const row = result.rows[0];
   if (!row.admin_email) return;
 
-  const { subject, html } = renderGeofenceBreachAlert(row);
+  const { subject, html } = renderGeofenceBreachAlert(row, context);
 
   await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
 }
@@ -663,6 +675,9 @@ export async function sendGeofenceBreachAlert(violationId: string): Promise<void
 /**
  * Pure renderer for the geofence-breach alert. Exported so testing scripts
  * can render against real production rows without the SendGrid send path.
+ * Context switches subject + header + body framing:
+ *   kind='ping'   — guard ping fired off-post (Wave A default)
+ *   kind='report' — guard filed a {reportType} report from off-post (T2-D)
  */
 export function renderGeofenceBreachAlert(row: {
   id:               string;
@@ -677,7 +692,7 @@ export function renderGeofenceBreachAlert(row: {
   center_lng:       number | null;
   guard_name:       string;
   badge_number:     string;
-}): { subject: string; html: string } {
+}, context: BreachAlertContext = { kind: 'ping' }): { subject: string; html: string } {
   const distanceM =
     row.center_lat != null && row.center_lng != null
       ? Math.round(
@@ -685,7 +700,19 @@ export function renderGeofenceBreachAlert(row: {
         )
       : null;
 
-  const subject = `⚠️ Geofence breach — ${row.guard_name} off-site at ${row.site_name}`;
+  const isReport = context.kind === 'report';
+  const reportTypeLabel = context.reportType ?? 'report';
+
+  const subject = isReport
+    ? `⚠️ Off-post report — ${row.guard_name} filed ${reportTypeLabel} away from ${row.site_name}`
+    : `⚠️ Geofence breach — ${row.guard_name} off-site at ${row.site_name}`;
+
+  const headerTitle = isReport ? 'OFF-POST REPORT' : 'GEOFENCE BREACH';
+  const headerSub   = isReport ? 'FILED FROM OFF-SITE' : 'GUARD OFF-SITE';
+
+  const bodyFraming = isReport
+    ? `The guard submitted a ${reportTypeLabel} report while outside the permitted boundary. The report was accepted and saved; this alert flags the off-post submission for review.`
+    : `The guard was outside the permitted boundary when this alert fired. The breach auto-resolves when they return inside the post; no admin action required unless the situation persists.`;
 
   const distanceLine =
     distanceM != null
@@ -701,7 +728,7 @@ export function renderGeofenceBreachAlert(row: {
   const html = `<style>${BASE_STYLE}</style>
     <div class="card">
       <div class="hdr" style="background:#7F1D1D">
-        <h1>GEOFENCE BREACH</h1><p>GUARD OFF-SITE</p>
+        <h1>${headerTitle}</h1><p>${headerSub}</p>
       </div>
       <div class="body">
         <div class="meta">
@@ -718,9 +745,7 @@ export function renderGeofenceBreachAlert(row: {
           VIEW LIVE STATUS
         </a>
         <p style="color:#666;font-size:13px;margin-top:20px">
-          The guard was outside the permitted boundary when this alert fired.
-          The breach auto-resolves when they return inside the post; no admin
-          action required unless the situation persists.
+          ${bodyFraming}
         </p>
       </div>
       <div class="footer">NetraOps — Operator Alert</div>

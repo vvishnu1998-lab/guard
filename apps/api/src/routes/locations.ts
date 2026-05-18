@@ -5,17 +5,21 @@ import { validateAtSite, GeofenceValidationResult } from '../services/geofence';
 import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 import { insertNotification } from '../services/notifications';
-import { sendGeofenceBreachAlert } from '../services/email';
+import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
 
 /**
  * Fire guard notification row + admin email for a fresh geofence violation.
- * Shared by POST /ping (audit Tier 1-A) and POST /violation (background-task
- * self-report).
+ * Shared by POST /ping (audit Tier 1-A), POST /violation (background-task
+ * self-report), and POST /reports off-post flag (T2-D).
  *
  * Two channels, each with its own error catch so one failure can't block
  * the other:
  *   (1) Guard notification — insertNotification (Notifications tab record)
  *   (2) Admin email        — sendGeofenceBreachAlert (T1-D)
+ *
+ * Context switches the text on both channels:
+ *   kind='ping'   — guard ping fired off-post (Wave A default)
+ *   kind='report' — guard filed a {reportType} report from off-post (T2-D)
  *
  * Admin FCM mobile push is intentionally NOT wired: company_admins has no
  * fcm_token column and no admin mobile auth flow exists. The original SQL
@@ -26,14 +30,19 @@ import { sendGeofenceBreachAlert } from '../services/email';
  * real device. Discovered during the Wave A walk-test (2026-05-17).
  * See project memory: project_admin_notification_surfaces.md.
  *
+ * Exported (Wave A this was file-local) so routes/reports.ts T2-D flag
+ * path can call it without duplicating the dispatch logic.
+ *
  * The function as a whole is non-blocking from the caller's perspective:
  * `fireBreachAlerts(...).catch(console.error)`.
  */
-async function fireBreachAlerts(params: {
+export async function fireBreachAlerts(params: {
   shiftSessionId: string;
   guardId: string;
   violationId: string;
+  context?: BreachAlertContext;
 }): Promise<void> {
+  const ctx: BreachAlertContext = params.context ?? { kind: 'ping' };
   const { rows } = await pool.query(
     `SELECT g.name AS guard_name, s.name AS site_name
      FROM shift_sessions ss
@@ -45,12 +54,22 @@ async function fireBreachAlerts(params: {
   const r = rows[0];
   if (!r) return;
 
+  const notif = ctx.kind === 'report'
+    ? {
+        title: 'Off-post report saved',
+        body:  `Your ${ctx.reportType ?? 'report'} was filed while outside ${r.site_name}. Admin notified.`,
+      }
+    : {
+        title: 'Outside post boundary',
+        body:  `You're outside the permitted radius at ${r.site_name}. Return to the post.`,
+      };
+
   await insertNotification({
     guardId:        params.guardId,
     type:           'geofence_breach',
-    title:          'Outside post boundary',
-    body:           `You're outside the permitted radius at ${r.site_name}. Return to the post.`,
-    data:           { violationId: params.violationId, siteName: r.site_name },
+    title:          notif.title,
+    body:           notif.body,
+    data:           { violationId: params.violationId, siteName: r.site_name, kind: ctx.kind },
     shiftSessionId: params.shiftSessionId,
   });
 
@@ -58,7 +77,7 @@ async function fireBreachAlerts(params: {
   // its own .catch() so an email send failure can't block the guard
   // notification insert (the order here doesn't matter for that anymore,
   // but keep the pattern explicit in case channels are reordered later).
-  await sendGeofenceBreachAlert(params.violationId).catch((err) =>
+  await sendGeofenceBreachAlert(params.violationId, ctx).catch((err) =>
     console.error('[email] breach alert failed:', err),
   );
 }
