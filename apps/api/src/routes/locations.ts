@@ -6,13 +6,20 @@ import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 import { sendGeofenceViolationAlert } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
+import { sendGeofenceBreachAlert } from '../services/email';
 
 /**
- * Fire admin FCM push + guard notification row for a fresh geofence violation.
- * Shared by POST /ping (audit Tier 1-A) and POST /violation (background-task
- * self-report). Email channel (T1-D) will plug in here in a follow-up commit.
+ * Fire admin FCM push + guard notification row + admin email for a fresh
+ * geofence violation. Shared by POST /ping (audit Tier 1-A) and POST
+ * /violation (background-task self-report).
  *
- * Non-blocking by design — call as `fireBreachAlerts(...).catch(console.error)`.
+ * Three channels, each non-blocking with its own error catch:
+ *   (1) Admin FCM push     — sendGeofenceViolationAlert
+ *   (2) Guard notification — insertNotification (Notifications tab record)
+ *   (3) Admin email        — sendGeofenceBreachAlert (T1-D)
+ *
+ * The function as a whole is non-blocking from the caller's perspective:
+ * `fireBreachAlerts(...).catch(console.error)`.
  */
 async function fireBreachAlerts(params: {
   shiftSessionId: string;
@@ -51,6 +58,12 @@ async function fireBreachAlerts(params: {
     data:           { violationId: params.violationId, siteName: r.site_name },
     shiftSessionId: params.shiftSessionId,
   });
+
+  // T1-D — durable email channel for admin breach alerts. Survives device-off /
+  // FCM-flaky scenarios that lose the push. Best-effort like the push.
+  await sendGeofenceBreachAlert(params.violationId).catch((err) =>
+    console.error('[email] breach alert failed:', err),
+  );
 }
 
 const router = Router();
