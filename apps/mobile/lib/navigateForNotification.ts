@@ -30,7 +30,13 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       if (typeof data?.roomId === 'string') router.push(`/chat/${data.roomId}`);
       break;
     case 'geofence_breach':
-      // stay on the notifications tab; tapping just dismisses
+      // Takeover screen at /violation/[violationId] (T1-E). The server
+      // (routes/locations.ts fireBreachAlerts) puts violationId in the
+      // push data payload. Without the id we can't deep-link to the
+      // specific violation, so fall through to dismiss in that case.
+      if (typeof data?.violationId === 'string' && data.violationId.length > 0) {
+        router.push(`/violation/${data.violationId}`);
+      }
       break;
   }
 }

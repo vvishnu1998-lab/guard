@@ -3,11 +3,17 @@
  * Full-screen red takeover. Cannot be dismissed by swiping.
  * Blocks report submission. Resolves when guard returns inside boundary.
  * Polls GPS every 10 seconds — clears automatically when back inside.
+ *
+ * Route: /violation/[violationId]. The violationId comes from the
+ * geofence_breach push payload's `data.violationId` (server-side dispatch
+ * in apps/api/src/routes/locations.ts fireBreachAlerts) and is needed
+ * for the re-entry PATCH /api/locations/violation/:id/resolve call
+ * (T1-E.B, follow-up commit).
  */
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, BackHandler, Animated, Easing } from 'react-native';
 import * as Location from 'expo-location';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore }  from '../../store/shiftStore';
 import { isPointInPolygon, haversineDistance } from '../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
@@ -18,6 +24,10 @@ const RED    = '#EF4444';
 const DARKRED = '#7F1D1D';
 
 export default function ViolationScreen() {
+  // Route param. Expo Router guarantees the segment is present (dynamic
+  // route would 404 otherwise), but type as optional for defensive use.
+  const { violationId } = useLocalSearchParams<{ violationId: string }>();
+
   const [lat, setLat]         = useState<number | null>(null);
   const [lng, setLng]         = useState<number | null>(null);
   const [distance, setDist]   = useState<number | null>(null);
