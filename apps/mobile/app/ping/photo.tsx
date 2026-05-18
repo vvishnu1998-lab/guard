@@ -116,8 +116,13 @@ export default function PhotoPing() {
 
       // 3) GPS with a 3s race — never block the submit on a slow GPS fix.
       //    Prefer the cached last-known position; fall back to a live read.
-      let lat = 0;
-      let lng = 0;
+      //    On total GPS failure → throw so the outer catch surfaces the
+      //    user-facing message. DO NOT submit (0,0) — the API rejects it
+      //    with 400 anyway (audit T1-C-server, schema_v18 era), but the
+      //    wasted S3 upload + round-trip + generic 400 are a worse UX
+      //    than failing here.
+      let lat: number | null = null;
+      let lng: number | null = null;
       try {
         const last = await Location.getLastKnownPositionAsync();
         if (last) {
@@ -131,12 +136,13 @@ export default function PhotoPing() {
           if (live) {
             lat = (live as Location.LocationObject).coords.latitude;
             lng = (live as Location.LocationObject).coords.longitude;
-          } else {
-            console.warn('[ping] GPS timed out — submitting with 0,0');
           }
         }
       } catch (err) {
-        console.warn('[ping] GPS read failed — submitting with 0,0:', err);
+        console.warn('[ping] GPS read threw:', err);
+      }
+      if (lat === null || lng === null) {
+        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
       }
 
       // 4) Upload the photo to S3. Hard-fail on error — the API rejects
