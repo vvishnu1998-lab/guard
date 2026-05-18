@@ -4,19 +4,27 @@ import { pool } from '../db/pool';
 import { validateClockInGeofence, GeofenceValidationResult } from '../services/geofence';
 import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
-import { sendGeofenceViolationAlert } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
 import { sendGeofenceBreachAlert } from '../services/email';
 
 /**
- * Fire admin FCM push + guard notification row + admin email for a fresh
- * geofence violation. Shared by POST /ping (audit Tier 1-A) and POST
- * /violation (background-task self-report).
+ * Fire guard notification row + admin email for a fresh geofence violation.
+ * Shared by POST /ping (audit Tier 1-A) and POST /violation (background-task
+ * self-report).
  *
- * Three channels, each non-blocking with its own error catch:
- *   (1) Admin FCM push     — sendGeofenceViolationAlert
- *   (2) Guard notification — insertNotification (Notifications tab record)
- *   (3) Admin email        — sendGeofenceBreachAlert (T1-D)
+ * Two channels, each with its own error catch so one failure can't block
+ * the other:
+ *   (1) Guard notification — insertNotification (Notifications tab record)
+ *   (2) Admin email        — sendGeofenceBreachAlert (T1-D)
+ *
+ * Admin FCM mobile push is intentionally NOT wired: company_admins has no
+ * fcm_token column and no admin mobile auth flow exists. The original SQL
+ * here (and in the pre-Wave-A POST /violation handler) referenced
+ * `ca.fcm_token` from `company_admins` and threw "column does not exist"
+ * on every call — the .catch() at the call site swallowed the error so
+ * the dead channel looked alive in code review but never delivered to a
+ * real device. Discovered during the Wave A walk-test (2026-05-17).
+ * See project memory: project_admin_notification_surfaces.md.
  *
  * The function as a whole is non-blocking from the caller's perspective:
  * `fireBreachAlerts(...).catch(console.error)`.
@@ -27,28 +35,15 @@ async function fireBreachAlerts(params: {
   violationId: string;
 }): Promise<void> {
   const { rows } = await pool.query(
-    `SELECT g.name AS guard_name, s.name AS site_name,
-            array_agg(ca.fcm_token) FILTER (WHERE ca.fcm_token IS NOT NULL) AS admin_tokens
+    `SELECT g.name AS guard_name, s.name AS site_name
      FROM shift_sessions ss
-     JOIN guards g  ON g.id  = ss.guard_id
-     JOIN sites  s  ON s.id  = ss.site_id
-     JOIN companies co ON co.id = s.company_id
-     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_active = true
-     WHERE ss.id = $1
-     GROUP BY g.name, s.name`,
+     JOIN guards g ON g.id = ss.guard_id
+     JOIN sites  s ON s.id = ss.site_id
+     WHERE ss.id = $1`,
     [params.shiftSessionId],
   );
   const r = rows[0];
   if (!r) return;
-
-  if (r.admin_tokens?.length) {
-    await sendGeofenceViolationAlert({
-      adminFcmTokens: r.admin_tokens,
-      guardName:      r.guard_name,
-      siteName:       r.site_name,
-      sessionId:      params.shiftSessionId,
-    }).catch((err) => console.error('[fcm] violation push failed:', err));
-  }
 
   await insertNotification({
     guardId:        params.guardId,
@@ -59,8 +54,10 @@ async function fireBreachAlerts(params: {
     shiftSessionId: params.shiftSessionId,
   });
 
-  // T1-D — durable email channel for admin breach alerts. Survives device-off /
-  // FCM-flaky scenarios that lose the push. Best-effort like the push.
+  // T1-D — durable email channel for admin breach alerts. Best-effort —
+  // its own .catch() so an email send failure can't block the guard
+  // notification insert (the order here doesn't matter for that anymore,
+  // but keep the pattern explicit in case channels are reordered later).
   await sendGeofenceBreachAlert(params.violationId).catch((err) =>
     console.error('[email] breach alert failed:', err),
   );
