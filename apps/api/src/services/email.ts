@@ -10,6 +10,7 @@
 
 import sgMail from '@sendgrid/mail';
 import { pool } from '../db/pool';
+import { haversineDistance } from './geofence';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
 
@@ -614,4 +615,116 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
       <div class="footer">NetraOps — Internal Alert</div>
     </div>`,
   });
+}
+
+// ── Email Type 5 — Geofence Breach Alert (T1-D, 2026-05-17 audit) ────────────
+//
+// Fires from fireBreachAlerts in routes/locations.ts when a fresh
+// geofence_violations row is INSERTed (either via the ping endpoint's
+// T1-A wiring or the background-task POST /violation path). Recipient
+// policy mirrors sendMissedShiftAlert: primary company admin only.
+// client_email is SELECTed but discarded — opt-in client breach alerts
+// would need a per-site flag (out of scope; logged as follow-up).
+//
+// Best-effort: callers wrap in .catch() to keep alert dispatch
+// non-blocking on email failures.
+
+export async function sendGeofenceBreachAlert(violationId: string): Promise<void> {
+  const result = await pool.query(
+    `SELECT v.id, v.violation_lat, v.violation_lng, v.occurred_at, v.photo_url,
+            v.shift_session_id,
+            si.name      AS site_name,
+            si.address   AS site_address,
+            sg.center_lat,
+            sg.center_lng,
+            g.name       AS guard_name,
+            g.badge_number,
+            c.email      AS client_email,
+            ca.email     AS admin_email
+     FROM geofence_violations v
+     JOIN sites          si ON si.id = v.site_id
+     LEFT JOIN site_geofence sg ON sg.site_id = si.id
+     JOIN guards         g  ON g.id  = v.guard_id
+     LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
+     JOIN companies      co ON co.id = si.company_id
+     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
+     WHERE v.id = $1`,
+    [violationId],
+  );
+  if (!result.rows[0]) return;
+  const row = result.rows[0];
+  if (!row.admin_email) return;
+
+  const { subject, html } = renderGeofenceBreachAlert(row);
+
+  await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
+}
+
+/**
+ * Pure renderer for the geofence-breach alert. Exported so testing scripts
+ * can render against real production rows without the SendGrid send path.
+ */
+export function renderGeofenceBreachAlert(row: {
+  id:               string;
+  shift_session_id: string;
+  occurred_at:      Date | string;
+  violation_lat:    number;
+  violation_lng:    number;
+  photo_url:        string | null;
+  site_name:        string;
+  site_address:     string;
+  center_lat:       number | null;
+  center_lng:       number | null;
+  guard_name:       string;
+  badge_number:     string;
+}): { subject: string; html: string } {
+  const distanceM =
+    row.center_lat != null && row.center_lng != null
+      ? Math.round(
+          haversineDistance(row.violation_lat, row.violation_lng, row.center_lat, row.center_lng),
+        )
+      : null;
+
+  const subject = `⚠️ Geofence breach — ${row.guard_name} off-site at ${row.site_name}`;
+
+  const distanceLine =
+    distanceM != null
+      ? `<strong>Distance from post:</strong> ${distanceM} meters`
+      : `<strong>Distance from post:</strong> <em>(site geofence center not configured)</em>`;
+
+  const photoBlock = row.photo_url
+    ? `<p><strong>Photo at breach:</strong> <a href="${row.photo_url}">View captured photo</a></p>`
+    : `<p><em>No photo captured at breach.</em></p>`;
+
+  const deepLink = `${WEB_BASE}/admin/live-map`;
+
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr" style="background:#7F1D1D">
+        <h1>GEOFENCE BREACH</h1><p>GUARD OFF-SITE</p>
+      </div>
+      <div class="body">
+        <div class="meta">
+          <strong>Guard:</strong> ${row.guard_name} (${row.badge_number})<br/>
+          <strong>Site:</strong> ${row.site_name}<br/>
+          <strong>Address:</strong> ${row.site_address}<br/>
+          <strong>Time:</strong> ${fmtDTPacific(row.occurred_at)}<br/>
+          ${distanceLine}<br/>
+          <strong>Coords:</strong>
+          <code style="background:#f5f5f5;padding:1px 5px;border-radius:3px">${row.violation_lat.toFixed(6)}, ${row.violation_lng.toFixed(6)}</code>
+        </div>
+        ${photoBlock}
+        <a href="${deepLink}" style="display:inline-block;background:#DC2626;color:#fff;font-weight:700;padding:12px 28px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:14px;margin-top:12px">
+          VIEW LIVE STATUS
+        </a>
+        <p style="color:#666;font-size:13px;margin-top:20px">
+          The guard was outside the permitted boundary when this alert fired.
+          The breach auto-resolves when they return inside the post; no admin
+          action required unless the situation persists.
+        </p>
+      </div>
+      <div class="footer">NetraOps — Operator Alert</div>
+    </div>`;
+
+  return { subject, html };
 }
