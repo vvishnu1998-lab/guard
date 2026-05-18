@@ -4,6 +4,8 @@ import { pool } from '../db/pool';
 import { sendIncidentAlert } from '../services/email';
 import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
+import { validateAtSite } from '../services/geofence';
+import { fireBreachAlerts } from './locations';
 
 const router = Router();
 
@@ -113,8 +115,20 @@ router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, 
 });
 
 // POST /api/reports — guard submits a report
+//
+// T2-D geofence flagging (2026-05-17 audit Wave A): when all of
+// {latitude, longitude, accuracy} are present, validateAtSite decides.
+// Off-post → INSERT geofence_violations + fire admin email + guard
+// notification (via fireBreachAlerts with context kind='report').
+// Does NOT reject — emergency reports must always go through. The
+// flag is_within_geofence stamps the row for admin filtering.
+//
+// (Note: the existing line-204 block on already-open violations is a
+// SEPARATE pre-existing rule and stays in place. If you also want
+// emergency reports to bypass that block, a follow-up commit can drop
+// it; the T2-D policy doesn't strictly require it.)
 router.post('/', requireAuth('guard'), async (req, res) => {
-  const { shift_session_id, report_type, description, severity, photo_urls, latitude, longitude } = req.body;
+  const { shift_session_id, report_type, description, severity, photo_urls, latitude, longitude, accuracy } = req.body;
 
   if (!['activity', 'incident', 'maintenance'].includes(report_type)) {
     return res.status(400).json({ error: 'report_type must be activity, incident, or maintenance' });
@@ -216,10 +230,35 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   const deleteAt = new Date(siteResult.rows[0].contract_end);
   deleteAt.setDate(deleteAt.getDate() + 150);
 
+  // T2-D — geofence flag (do NOT block). When all of {lat, lng, accuracy}
+  // are present, validateAtSite decides. Result is persisted on the report
+  // row; downstream breach alert flow runs after the report INSERT.
+  const haveCoords =
+    typeof latitude === 'number' && Number.isFinite(latitude) &&
+    typeof longitude === 'number' && Number.isFinite(longitude) &&
+    typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0;
+  let isWithin: boolean | null = null;
+  if (haveCoords) {
+    const fence = await validateAtSite(
+      { lat: latitude, lng: longitude, accuracy_m: accuracy },
+      site_id,
+      pool,
+    );
+    isWithin = fence.allowed;
+  }
+
   const reportResult = await pool.query(
-    `INSERT INTO reports (shift_session_id, site_id, report_type, description, severity, delete_at)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [shift_session_id, site_id, report_type, description, severity || null, deleteAt]
+    `INSERT INTO reports
+       (shift_session_id, site_id, report_type, description, severity, delete_at,
+        latitude, longitude, accuracy_meters, is_within_geofence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [
+      shift_session_id, site_id, report_type, description, severity || null, deleteAt,
+      haveCoords ? latitude  : null,
+      haveCoords ? longitude : null,
+      haveCoords ? accuracy  : null,
+      isWithin,
+    ]
   );
   const report = reportResult.rows[0];
 
@@ -237,6 +276,39 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   // Email: only incident reports trigger immediate alert (Section 4)
   if (report_type === 'incident') {
     sendIncidentAlert(report, site_id).catch(console.error);
+  }
+
+  // T2-D — off-post flag flow. INSERT a violation row (ON CONFLICT against
+  // schema_v18's partial unique index, same de-dup pattern as ping) and
+  // fire the breach alerts in 'report' context. Best-effort: the report
+  // is already 201; any failure here logs but doesn't surface to the user.
+  if (isWithin === false) {
+    let freshViolationId: string | null = null;
+    try {
+      const violationInsert = await pool.query(
+        `INSERT INTO geofence_violations
+           (shift_session_id, guard_id, site_id, violation_lat, violation_lng)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
+         RETURNING id`,
+        [shift_session_id, req.user!.sub, site_id, latitude, longitude],
+      );
+      if (violationInsert.rows[0]) freshViolationId = violationInsert.rows[0].id;
+    } catch (err) {
+      console.error('[report.flag] violation INSERT failed:', err);
+    }
+    console.log(
+      `[report.flag] report=${report.id} session=${shift_session_id} ` +
+      `type=${report_type} fresh_violation=${!!freshViolationId}`,
+    );
+    if (freshViolationId) {
+      fireBreachAlerts({
+        shiftSessionId: shift_session_id,
+        guardId:        req.user!.sub,
+        violationId:    freshViolationId,
+        context:        { kind: 'report', reportType: report_type },
+      }).catch((err) => console.error('[report.flag] alert dispatch failed:', err));
+    }
   }
 
   res.status(201).json(report);

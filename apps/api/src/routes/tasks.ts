@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { validateAtSite } from '../services/geofence';
 
 const router = Router();
 
@@ -37,8 +38,16 @@ router.get('/instances', requireAuth('guard'), async (req, res) => {
 });
 
 // POST /api/tasks/instances/:id/complete
+//
+// T2-C geofence validation (2026-05-17 audit Wave A): when all of
+// {completion_lat, completion_lng, accuracy} are present in the body,
+// validateAtSite decides via the shared helper. Reject → ROLLBACK + 422
+// TASK_OFF_POST so the task stays pending and the guard can retry from
+// the post. Old clients that don't send accuracy skip validation
+// entirely; their submissions land as before (now with NULL coords
+// permitted, per schema_v19 latent-bug fix).
 router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) => {
-  const { completion_lat, completion_lng, photo_url, shift_session_id } = req.body;
+  const { completion_lat, completion_lng, photo_url, shift_session_id, accuracy } = req.body;
 
   // Verify task requires_photo constraint
   const taskResult = await pool.query(
@@ -53,13 +62,62 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
     return res.status(400).json({ error: 'Photo required to complete this task' });
   }
 
+  const haveCoords =
+    typeof completion_lat === 'number' && Number.isFinite(completion_lat) &&
+    typeof completion_lng === 'number' && Number.isFinite(completion_lng) &&
+    typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0;
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // T2-C — resolve site_id from session, validate. ROLLBACK on reject
+    // leaves task_instances.status='pending', task_completions empty.
+    let within: boolean | null = null;
+    if (haveCoords) {
+      const ssr = await client.query(
+        'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+        [shift_session_id, req.user!.sub],
+      );
+      if (!ssr.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Session not found' });
+      }
+      const fence = await validateAtSite(
+        { lat: completion_lat, lng: completion_lng, accuracy_m: accuracy },
+        ssr.rows[0].site_id,
+        client,
+      );
+      if (!fence.allowed) {
+        await client.query('ROLLBACK');
+        console.log(
+          `[task.reject] task=${req.params.id} session=${shift_session_id} guard=${req.user!.sub} ` +
+          `distance=${fence.distance_m?.toFixed(1) ?? 'null'}m accuracy=${accuracy}m reason=${fence.reason}`,
+        );
+        return res.status(422).json({
+          error: 'TASK_OFF_POST',
+          message: 'You appear to be outside the post. Return to the site and try again.',
+          distance_m: fence.distance_m,
+          accuracy_m: accuracy,
+          reason: fence.reason,
+        });
+      }
+      within = true;
+    }
+
     await client.query(
-      `INSERT INTO task_completions (task_instance_id, shift_session_id, guard_id, completion_lat, completion_lng, photo_url)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [req.params.id, shift_session_id, req.user!.sub, completion_lat, completion_lng, photo_url || null]
+      `INSERT INTO task_completions
+         (task_instance_id, shift_session_id, guard_id,
+          completion_lat, completion_lng, completion_accuracy_meters,
+          completion_within_geofence, photo_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        req.params.id, shift_session_id, req.user!.sub,
+        completion_lat ?? null, completion_lng ?? null,
+        haveCoords ? accuracy : null,
+        within,
+        photo_url || null,
+      ]
     );
     await client.query("UPDATE task_instances SET status = 'completed' WHERE id = $1", [req.params.id]);
     await client.query('COMMIT');

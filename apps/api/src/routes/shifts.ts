@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
-import { validateClockInGeofence } from '../services/geofence';
+import { validateAtSite } from '../services/geofence';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 
@@ -449,7 +449,7 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
 //
 // Geofence validation (Item 3 — closes V6 audit hole):
 //   - Mobile sends lat/lng/accuracy (NOT a client-decided boolean).
-//   - Server validates via validateClockInGeofence inside the same
+//   - Server validates via validateAtSite inside the same
 //     transaction, so the geofence read is consistent with the session
 //     insert. Reject → ROLLBACK + 422 GEOFENCE_FAILED.
 router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async (req, res) => {
@@ -490,7 +490,7 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     // Server-side geofence check. Inside the transaction so the fence read
     // is consistent with the session insert (and so we can ROLLBACK on fail
     // without leaving the shift row partially mutated).
-    const fence = await validateClockInGeofence(
+    const fence = await validateAtSite(
       { lat, lng, accuracy_m: accuracy },
       shift.site_id,
       client,
@@ -542,15 +542,34 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
 // total_hours NULL or shifts.status stuck on 'active'.  Now closes the open
 // session, sets total_hours = gross − breaks, and completes the shift in one
 // atomic unit.
+//
+// T2-A geofence validation (2026-05-17 audit Wave A): when all of
+// {lat, lng, accuracy} are present in the body, validateAtSite decides
+// the same way clock-in does. Reject → ROLLBACK + 422 CLOCK_OUT_OFF_POST;
+// the session stays open so the guard can return to the post and retry.
+// Build 24 + older clients that don't send coords skip validation
+// entirely (backward compat — tightens once mobile companion ships).
 router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
-  const { handover_notes } = req.body;
+  const { handover_notes, lat, lng, accuracy } = req.body as {
+    handover_notes?: string | null;
+    lat?: number;
+    lng?: number;
+    accuracy?: number;
+  };
+
+  const haveCoords =
+    typeof lat === 'number' && Number.isFinite(lat) &&
+    typeof lng === 'number' && Number.isFinite(lng) &&
+    typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0;
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     // Close the session and grab the existing clocked_in_at + scheduled_start
     // for math (option C: pay from MAX(clock_in, scheduled_start) onwards).
+    // Also pull site_id for the geofence validation below.
     const sessionResult = await client.query(
       `UPDATE shift_sessions ss SET clocked_out_at = NOW()
        FROM shifts s
@@ -558,7 +577,7 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
          AND ss.shift_id = $1
          AND ss.guard_id = $2
          AND ss.clocked_out_at IS NULL
-       RETURNING ss.id, ss.clocked_in_at, ss.clocked_out_at, s.scheduled_start`,
+       RETURNING ss.id, ss.clocked_in_at, ss.clocked_out_at, s.scheduled_start, ss.site_id`,
       [id, req.user!.sub]
     );
     if (!sessionResult.rows[0]) {
@@ -566,6 +585,31 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
       return res.status(404).json({ error: 'Active session not found' });
     }
     const session = sessionResult.rows[0];
+
+    // T2-A — validate coords against site geofence when present.
+    // ROLLBACK on reject so clocked_out_at gets un-set, leaving the
+    // session open for retry from on-post.
+    if (haveCoords) {
+      const fence = await validateAtSite(
+        { lat: lat!, lng: lng!, accuracy_m: accuracy! },
+        session.site_id,
+        client,
+      );
+      if (!fence.allowed) {
+        await client.query('ROLLBACK');
+        console.log(
+          `[clock-out.reject] session=${session.id} guard=${req.user!.sub} ` +
+          `distance=${fence.distance_m?.toFixed(1) ?? 'null'}m accuracy=${accuracy}m reason=${fence.reason}`,
+        );
+        return res.status(422).json({
+          error: 'CLOCK_OUT_OFF_POST',
+          message: 'You appear to be outside the post. Return to the site and try again.',
+          distance_m: fence.distance_m,
+          accuracy_m: accuracy,
+          reason: fence.reason,
+        });
+      }
+    }
 
     // Close any break that was still open when the guard clocked out
     await client.query(
@@ -595,8 +639,20 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
     const netHours      = Math.max(0, grossHours - breakHours);
 
     await client.query(
-      'UPDATE shift_sessions SET total_hours = $1, handover_notes = $2 WHERE id = $3',
-      [netHours, handover_notes ?? null, session.id]
+      `UPDATE shift_sessions
+       SET total_hours = $1, handover_notes = $2,
+           clock_out_lat = $3, clock_out_lng = $4,
+           clock_out_accuracy_meters = $5, clock_out_within_geofence = $6
+       WHERE id = $7`,
+      [
+        netHours,
+        handover_notes ?? null,
+        haveCoords ? lat  : null,
+        haveCoords ? lng  : null,
+        haveCoords ? accuracy : null,
+        haveCoords ? true : null, // null = "not validated" (old clients); true = "validated, allowed"
+        session.id,
+      ]
     );
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);
 
