@@ -35,6 +35,10 @@ export interface SubmitReportRequest {
   photo_urls?: { url: string; size_kb: number }[];
   latitude?: number;
   longitude?: number;
+  /** GPS horizontal accuracy in meters (T2-D C3). When all of
+   *  {latitude, longitude, accuracy} are present, server validates
+   *  via validateAtSite; off-post → flag + breach alert (not reject). */
+  accuracy?: number;
 }
 
 export interface LocationPingRequest {

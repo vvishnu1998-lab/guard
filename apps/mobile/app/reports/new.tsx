@@ -121,13 +121,25 @@ export default function CreateReport() {
 
     setSubmitting(true);
     try {
-      let latitude: number | undefined;
-      let longitude: number | undefined;
+      // C3 (T2-D) — GPS hard-fail on no lock (mirrors T1-C-client photo.tsx
+      // pattern). Server's validateAtSite flags off-post (does NOT reject —
+      // T2-D policy is "never block emergency reports"). Capturing accuracy
+      // is required to actually trigger validation server-side; without all
+      // three of {lat,lng,accuracy}, the server skips the check.
+      let latitude: number | null = null;
+      let longitude: number | null = null;
+      let acc: number | null = null;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         latitude  = loc.coords.latitude;
         longitude = loc.coords.longitude;
-      } catch { /* GPS failure — still submit */ }
+        acc       = loc.coords.accuracy;
+      } catch (err) {
+        console.warn('[report] GPS read threw:', err);
+      }
+      if (latitude === null || longitude === null) {
+        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+      }
 
       await submitReport({
         shift_session_id: activeSession.id,
@@ -136,6 +148,7 @@ export default function CreateReport() {
         photo_urls:       photos.toPayload(),
         latitude,
         longitude,
+        accuracy:         acc ?? 30,
       });
 
       if (reportType === 'incident') {
@@ -148,7 +161,7 @@ export default function CreateReport() {
         router.replace('/(tabs)/reports');
       }
     } catch (err: any) {
-      Alert.alert('Submit Failed', err?.message ?? 'Could not submit report.');
+      Alert.alert('Report Submission Failed', err?.message ?? 'Could not submit report.');
     } finally {
       setSubmitting(false);
     }
