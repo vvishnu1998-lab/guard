@@ -123,11 +123,13 @@ export default function PhotoPing() {
       //    than failing here.
       let lat: number | null = null;
       let lng: number | null = null;
+      let acc: number | null = null;
       try {
         const last = await Location.getLastKnownPositionAsync();
         if (last) {
           lat = last.coords.latitude;
           lng = last.coords.longitude;
+          acc = last.coords.accuracy;
         } else {
           const live = await Promise.race([
             Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
@@ -136,6 +138,7 @@ export default function PhotoPing() {
           if (live) {
             lat = (live as Location.LocationObject).coords.latitude;
             lng = (live as Location.LocationObject).coords.longitude;
+            acc = (live as Location.LocationObject).coords.accuracy;
           }
         }
       } catch (err) {
@@ -161,6 +164,7 @@ export default function PhotoPing() {
         shift_session_id: activeSession.id,
         latitude:         lat,
         longitude:        lng,
+        accuracy:         acc ?? 30, // T2-H — server expands fence by (radius + accuracy + 50m safety)
         ping_type:        'gps_photo',
         photo_url:        public_url,
         throttle_reason:  getCurrentThrottleReason() ?? undefined,
