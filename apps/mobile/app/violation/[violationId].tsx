@@ -15,6 +15,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert, BackHandler, Animated,
 import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore }  from '../../store/shiftStore';
+import { apiClient }      from '../../lib/apiClient';
 import { isPointInPolygon, haversineDistance } from '../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -84,6 +85,19 @@ export default function ViolationScreen() {
           // Guard is back — clear violation and return to shift
           setRes(true);
           if (pollRef.current) clearInterval(pollRef.current);
+
+          // T1-E.B — tell the server the violation is resolved. Fire-and-
+          // forget: don't block the 1.5s redirect on network latency. On
+          // failure the violation stays open on the server, which means
+          // /alerts will show it and the next breach won't fire a fresh
+          // alert (ON CONFLICT de-dups). That's a known downside of the
+          // best-effort approach; spec said don't block the user, and
+          // there's no foreground-event retry infra to plug into here.
+          if (violationId) {
+            apiClient.patch(`/locations/violation/${violationId}/resolve`)
+              .catch((err) => console.warn('[violation] resolve PATCH failed:', err));
+          }
+
           setTimeout(() => router.replace('/active-shift'), 1500);
         }
       } catch {
