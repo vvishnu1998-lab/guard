@@ -155,25 +155,67 @@ export async function sendIncidentAlert(
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────
 
+// Pacific-locked calendar date for the subject/header ("14 May 2026").
+// en-GB to match fmtDTPacific's "14 May 2026, 10:01 PM PDT" — keeps subject
+// and body day-month-year order consistent.
+function fmtDatePacific(dt: Date | string): string {
+  return new Date(dt).toLocaleDateString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    timeZone: 'America/Los_Angeles',
+  });
+}
+
+// Title-cases each whitespace-delimited word. "james vince" → "James Vince".
+// Common-name edge cases (McDonald, O'Brien, hyphens) intentionally not
+// handled — accepted limitation for the first pass.
+function titleCase(name: string | null | undefined): string {
+  if (!name) return '';
+  return name.trim().split(/\s+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
+}
+
+// First-name extractor for the greeting. "david payne" → "David".
+function firstName(fullName: string | null | undefined): string {
+  if (!fullName) return 'there';
+  return titleCase(fullName).split(' ')[0] || 'there';
+}
+
 export async function sendDailyShiftReport(shiftId: string) {
+  // company_admins is LEFT-joined (was inner) — primary admin's email is used
+  // as Reply-To only, not a recipient. If no primary admin exists, the email
+  // still ships to the client without a Reply-To override.
   const shiftResult = await pool.query(
     `SELECT sh.id, sh.scheduled_start,
             si.name     AS site_name,
             g.name      AS guard_name,
             g.badge_number,
+            c.name      AS client_name,
             c.email     AS client_email,
-            ca.email    AS admin_email
+            co.name     AS company_name,
+            ca.email    AS admin_reply_to
      FROM shifts sh
      JOIN sites          si ON si.id = sh.site_id
      JOIN guards         g  ON g.id  = sh.guard_id
      LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
-     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
+     LEFT JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE sh.id = $1 AND sh.daily_report_email_sent = false`,
     [shiftId],
   );
   if (!shiftResult.rows[0]) return;
   const sh = shiftResult.rows[0];
+
+  // No active client → nothing to send. Flag the row anyway so the cron does
+  // not retry this shift every morning forever.
+  if (!sh.client_email) {
+    console.log(`[email] sendDailyShiftReport: skipped — no active client for site "${sh.site_name}" (shift ${shiftId})`);
+    await pool.query(
+      'UPDATE shifts SET daily_report_email_sent = true, daily_report_email_sent_at = NOW() WHERE id = $1',
+      [shiftId],
+    );
+    return;
+  }
 
   const sessionResult = await pool.query(
     `SELECT id, clocked_in_at, clocked_out_at,
@@ -181,10 +223,7 @@ export async function sendDailyShiftReport(shiftId: string) {
      FROM shift_sessions WHERE shift_id = $1 ORDER BY clocked_in_at DESC LIMIT 1`,
     [shiftId],
   );
-  const session      = sessionResult.rows[0];
-  const totalHours   = session?.total_hours ? `${session.total_hours}h` : '—';
-  const clockIn      = session ? fmtDT(session.clocked_in_at)  : '—';
-  const clockOut     = session?.clocked_out_at ? fmtDT(session.clocked_out_at) : 'In progress';
+  const session = sessionResult.rows[0];
 
   const [reportsResult, tasksResult, taskTotalResult] = await Promise.all([
     pool.query(
@@ -202,24 +241,82 @@ export async function sendDailyShiftReport(shiftId: string) {
     ),
   ]);
 
-  const reports       = reportsResult.rows;
-  const tasksCompleted = parseInt(tasksResult.rows[0]?.completed  ?? 0);
-  const tasksTotal     = parseInt(taskTotalResult.rows[0]?.total  ?? 0);
+  const { subject, html } = renderDailyShiftReport({
+    site_name:       sh.site_name,
+    scheduled_start: sh.scheduled_start,
+    guard_name:      sh.guard_name,
+    badge_number:    sh.badge_number,
+    client_name:     sh.client_name,
+    company_name:    sh.company_name,
+    clocked_in_at:   session?.clocked_in_at ?? null,
+    clocked_out_at:  session?.clocked_out_at ?? null,
+    total_hours:     session?.total_hours ?? null,
+    reports:         reportsResult.rows,
+    tasks_completed: parseInt(tasksResult.rows[0]?.completed ?? 0),
+    tasks_total:     parseInt(taskTotalResult.rows[0]?.total ?? 0),
+  });
+
+  const sendOpts: sgMail.MailDataRequired = {
+    to:      sh.client_email,
+    from:    FROM,
+    subject,
+    html,
+  };
+  if (sh.admin_reply_to) sendOpts.replyTo = sh.admin_reply_to;
+
+  await sgMail.send(sendOpts);
+
+  await pool.query(
+    'UPDATE shifts SET daily_report_email_sent = true, daily_report_email_sent_at = NOW() WHERE id = $1',
+    [shiftId],
+  );
+}
+
+/**
+ * Pure renderer for the daily shift report. Exported so the test-send script
+ * can render the same template against real shift data without invoking the
+ * SendGrid path or writing daily_report_email_sent.
+ *
+ * All event timestamps render in America/Los_Angeles via fmtDTPacific (PDT in
+ * summer, PST in winter — abbreviation chosen by the runtime). Multi-tenant
+ * per-site timezone support is logged as a separate follow-up.
+ */
+export function renderDailyShiftReport(data: {
+  site_name:       string;
+  scheduled_start: Date | string;
+  guard_name:      string;
+  badge_number:    string;
+  client_name:     string | null;
+  company_name:    string;
+  clocked_in_at:   Date | string | null;
+  clocked_out_at:  Date | string | null;
+  total_hours:     string | number | null;
+  reports:         Array<{ report_type: string; severity: string | null; description: string; reported_at: Date | string }>;
+  tasks_completed: number;
+  tasks_total:     number;
+}): { subject: string; html: string } {
+  const dateLabel  = fmtDatePacific(data.scheduled_start);
+  const totalHours = data.total_hours != null
+    ? `${parseFloat(String(data.total_hours))}h`
+    : '—';
+  const clockIn    = data.clocked_in_at  ? fmtDTPacific(data.clocked_in_at)  : '—';
+  const clockOut   = data.clocked_out_at ? fmtDTPacific(data.clocked_out_at) : 'In progress';
+  const greetName  = firstName(data.client_name);
 
   const borderColors: Record<string, string> = {
     activity: '#D97706', incident: '#DC2626', maintenance: '#2563EB',
   };
-  const reportRows = reports.map((r) =>
-    `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
-      <p>${typeBadgeHtml(r.report_type, r.severity)} &nbsp;
-         <span style="color:#999;font-size:12px">${fmtDT(r.reported_at)}</span></p>
-      <p style="color:#333">${r.description.slice(0, 300)}${r.description.length > 300 ? '…' : ''}</p>
-    </div>`,
-  ).join('');
+  const reportRows = data.reports.map((r) => {
+    const desc = r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description;
+    return `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
+      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTPacific(r.reported_at)}</span></p>
+      <p style="margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
+    </div>`;
+  }).join('');
 
-  const incidentCount = reports.filter((r) => r.report_type === 'incident').length;
+  const incidentCount = data.reports.filter((r) => r.report_type === 'incident').length;
   const incidentNote  = incidentCount > 0
-    ? `<p style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:10px 14px;color:#DC2626;font-size:13px;margin-top:16px">
+    ? `<p style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:11px 14px;color:#B91C1C;font-size:13px;margin:18px 0 6px 0">
         ⚠️ ${incidentCount} incident report${incidentCount > 1 ? 's' : ''} filed during this shift.
        </p>`
     : '';
@@ -227,41 +324,45 @@ export async function sendDailyShiftReport(shiftId: string) {
   const html = `<style>${BASE_STYLE}</style>
   <div class="card">
     <div class="hdr">
-      <h1>DAILY SHIFT REPORT</h1><p>${sh.site_name.toUpperCase()}</p>
+      <div class="brand">NETRAOPS</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${data.site_name} · ${dateLabel}</p>
     </div>
     <div class="body">
-      <div class="meta">
-        <strong>Guard:</strong> ${sh.guard_name} (${sh.badge_number})<br/>
-        <strong>Clock-in:</strong> ${clockIn} &nbsp;&nbsp; <strong>Clock-out:</strong> ${clockOut}
+      <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${greetName},</p>
+      <p style="color:#555;font-size:14px;margin:0 0 22px 0">Here is the shift summary for your site.</p>
+
+      <div style="text-align:center;margin-bottom:22px">
+        <div class="kpi"><div class="n">${totalHours}</div><div class="l">HOURS</div></div>
+        <div class="kpi"><div class="n">${data.reports.length}</div><div class="l">REPORTS</div></div>
+        <div class="kpi"><div class="n">${data.tasks_completed}/${data.tasks_total}</div><div class="l">TASKS</div></div>
       </div>
-      <div>
-        <div class="kpi"><div class="n">${totalHours}</div><div class="l">HOURS WORKED</div></div>
-        <div class="kpi"><div class="n">${reports.length}</div><div class="l">REPORTS FILED</div></div>
-        <div class="kpi"><div class="n">${tasksCompleted}/${tasksTotal}</div><div class="l">TASKS DONE</div></div>
-      </div>
+
+      <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
+        <tr><td style="padding:6px 0;color:#888;width:110px">Guard</td><td style="padding:6px 0">${titleCase(data.guard_name)} <span style="color:#888">(${data.badge_number})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">Clock-in</td><td style="padding:6px 0">${clockIn}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Clock-out</td><td style="padding:6px 0">${clockOut}</td></tr>
+      </table>
+
       ${incidentNote}
-      ${reports.length > 0
-        ? `<h3 style="margin:20px 0 8px;font-size:13px;color:#666;letter-spacing:1px">REPORTS</h3>${reportRows}`
-        : '<p style="color:#aaa;font-size:13px;margin-top:20px">No reports filed during this shift.</p>'}
-      <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
+
+      ${data.reports.length > 0
+        ? `<h3 style="margin:22px 0 10px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Reports</h3>${reportRows}`
+        : `<p style="color:#888;font-size:14px;margin-top:22px;font-style:italic">No reports filed during this shift.</p>`}
+
+      <div style="text-align:center;margin-top:28px">
+        <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
+      </div>
     </div>
-    <div class="footer">NetraOps — Confidential</div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in Pacific Time.<br/>
+      Provided by <strong style="color:#666">${data.company_name}</strong>.<br/>
+      Reply to this email to contact ${data.company_name}.
+    </div>
   </div>`;
 
-  const recipients = [sh.client_email, sh.admin_email].filter(Boolean) as string[];
-  if (recipients.length === 0) return;
-
-  await sgMail.sendMultiple({
-    to: recipients,
-    from: FROM,
-    subject: `Daily Shift Report — ${sh.site_name} — ${new Date(sh.scheduled_start).toLocaleDateString('en-GB')}`,
-    html,
-  });
-
-  await pool.query(
-    'UPDATE shifts SET daily_report_email_sent = true, daily_report_email_sent_at = NOW() WHERE id = $1',
-    [shiftId],
-  );
+  const subject = `Shift Report — ${data.site_name} — ${dateLabel}`;
+  return { subject, html };
 }
 
 // ── Email Type 3 — Data Retention Notice ─────────────────────────────────────
