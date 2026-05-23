@@ -102,55 +102,113 @@ const BASE_STYLE = `
 
 // ── Email Type 1 — Incident Alert ─────────────────────────────────────────────
 
+const INCIDENT_SEVERITY_COLORS: Record<string, string> = {
+  critical: '#DC2626', high: '#EA580C', medium: '#CA8A04', low: '#6B7280',
+};
+
 export async function sendIncidentAlert(
   report: { id: string; description: string; severity: string; reported_at: Date },
   siteId: string,
 ) {
+  // Active client only (recipient). Company admin email is fetched as
+  // Reply-To target so client replies route back to the security company.
   const result = await pool.query(
-    `SELECT s.name AS site_name, c.email AS client_email
-     FROM sites s JOIN clients c ON c.site_id = s.id
+    `SELECT s.name AS site_name,
+            c.name AS client_name,
+            c.email AS client_email,
+            co.name AS company_name,
+            ca.email AS admin_reply_to
+     FROM sites s
+     JOIN clients c ON c.site_id = s.id
+     JOIN companies co ON co.id = s.company_id
+     LEFT JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE s.id = $1 AND c.is_active = true`,
     [siteId],
   );
-  // G2: log result for Railway diagnostics
   if (!result.rows[0]) {
     console.warn(`[email] sendIncidentAlert: no active client found for site_id=${siteId} — email not sent`);
     return;
   }
-  const { site_name, client_email } = result.rows[0];
+  const { site_name, client_name, client_email, company_name, admin_reply_to } = result.rows[0];
   console.log(`[email] sendIncidentAlert: sending to ${client_email} for site=${site_name} (report=${report.id})`);
 
-  const sevColors: Record<string, string> = {
-    critical: '#DC2626', high: '#EA580C', medium: '#CA8A04', low: '#6B7280',
+  const { subject, html } = renderIncidentAlert({
+    report_id:    report.id,
+    description:  report.description,
+    severity:     report.severity,
+    reported_at:  report.reported_at,
+    site_name,
+    client_name,
+    company_name,
+  });
+
+  const sendOpts: sgMail.MailDataRequired = {
+    to: client_email, from: FROM, subject, html,
   };
-  const sevColor = sevColors[report.severity] ?? '#6B7280';
+  if (admin_reply_to) sendOpts.replyTo = admin_reply_to;
 
   try {
-    await sgMail.send({
-      to: client_email,
-      from: FROM,
-      subject: `🚨 Incident Alert — ${site_name} [${report.severity.toUpperCase()}]`,
-      html: `<style>${BASE_STYLE}</style>
-      <div class="card">
-        <div class="hdr" style="background:#7F1D1D">
-          <h1>INCIDENT ALERT</h1><p>${site_name.toUpperCase()}</p>
-        </div>
-        <div class="body">
-          <div class="meta">
-            <strong>Date/Time:</strong> ${fmtDT(report.reported_at)}<br/>
-            <strong>Severity:</strong> <span style="color:${sevColor};font-weight:bold">${report.severity.toUpperCase()}</span>
-          </div>
-          <p style="font-size:14px;color:#333;line-height:1.6">${report.description}</p>
-          <a class="btn" href="${PORTAL}">View in Client Portal</a>
-        </div>
-        <div class="footer">NetraOps — Confidential</div>
-      </div>`,
-    });
+    await sgMail.send(sendOpts);
     console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${client_email}`);
   } catch (err: any) {
     console.error(`[email] sendIncidentAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     throw err;
   }
+}
+
+/**
+ * Pure renderer for the incident alert email. Exported for testability —
+ * mirrors the renderDailyShiftReport / renderMissedShiftAlert pattern.
+ * Client-property tone: NetraOps-branded header, personalized greeting via
+ * firstName(client_name), full description (no truncation), Pacific-time
+ * timestamp, branded footer with company attribution + reply-to-company.
+ */
+export function renderIncidentAlert(data: {
+  report_id:   string;
+  description: string;
+  severity:    string;
+  reported_at: Date | string;
+  site_name:   string;
+  client_name: string | null;
+  company_name: string;
+}): { subject: string; html: string } {
+  const dateLabel  = fmtDatePacific(data.reported_at);
+  const greetName  = firstName(data.client_name);
+  const sevColor   = INCIDENT_SEVERITY_COLORS[data.severity] ?? '#6B7280';
+  const sevLabel   = data.severity.toUpperCase();
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    <div class="hdr">
+      <div class="brand">NETRAOPS</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${data.site_name} · ${dateLabel}</p>
+    </div>
+    <div class="body">
+      <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${greetName},</p>
+      <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
+
+      <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
+        <span style="background:${sevColor};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;letter-spacing:1px">${sevLabel}</span>
+        <span style="color:#666;font-size:13px;margin-left:12px">${fmtDTPacific(data.reported_at)}</span>
+      </div>
+
+      <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
+      <p style="margin:0;color:#333;font-size:14px;line-height:1.6;white-space:pre-wrap">${data.description}</p>
+
+      <div style="text-align:center;margin-top:28px">
+        <a class="btn" href="${PORTAL}">View Incident in Portal</a>
+      </div>
+    </div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in Pacific Time.<br/>
+      Provided by <strong style="color:#666">${data.company_name}</strong>.<br/>
+      Reply to this email to contact ${data.company_name}.
+    </div>
+  </div>`;
+
+  const subject = `Incident Reported — ${data.site_name} — ${sevLabel} — ${dateLabel}`;
+  return { subject, html };
 }
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────
@@ -383,12 +441,16 @@ export function renderDailyShiftReport(data: {
 export async function sendRetentionNotice(
   siteId: string,
   daysRemaining: number,
-  milestone: 'day60' | 'day89' | 'monthly' = 'monthly',
+  milestone: RetentionMilestone = 'monthly',
 ) {
+  // NOTE: clients join intentionally has NO is_active = true filter today;
+  // policy question about whether inactive clients should still receive
+  // retention notices is tracked as a separate follow-up.
   const result = await pool.query(
     `SELECT si.name AS site_name,
             c.email AS client_email,
             ca.email AS admin_email,
+            co.name AS company_name,
             drl.data_delete_at,
             drl.client_star_access_until
      FROM sites si
@@ -400,41 +462,16 @@ export async function sendRetentionNotice(
     [siteId],
   );
   if (!result.rows[0]) return;
-  const { site_name, client_email, admin_email, data_delete_at, client_star_access_until } = result.rows[0];
+  const { site_name, client_email, admin_email, company_name, data_delete_at, client_star_access_until } = result.rows[0];
 
-  const accessUntil = new Date(client_star_access_until).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  const deleteDate  = new Date(data_delete_at).toLocaleDateString('en-GB',          { day: '2-digit', month: 'short', year: 'numeric' });
-  const isUrgent    = daysRemaining <= 30;
-
-  const subjectPfx  = milestone === 'day89' ? '⚠️ Final Access Warning' :
-                      isUrgent              ? '⚠️ Data Retention Notice' :
-                                              'Data Retention Notice';
-
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:${isUrgent ? '#7F1D1D' : '#0B1526'}">
-      <h1>DATA RETENTION NOTICE</h1><p>${site_name.toUpperCase()}</p>
-    </div>
-    <div class="body">
-      <p style="font-size:15px;color:#333">
-        Portal access for <strong>${site_name}</strong> will expire on
-        <strong style="color:${isUrgent ? '#DC2626' : '#D97706'}">${accessUntil}</strong>.
-        All site data will be permanently deleted on <strong>${deleteDate}</strong>.
-      </p>
-      <div style="margin:20px 0">
-        <div class="kpi" style="background:${isUrgent ? '#FEF2F2' : '#FFFBEB'}">
-          <div class="n" style="color:${isUrgent ? '#DC2626' : '#D97706'}">${daysRemaining}</div>
-          <div class="l">DAYS REMAINING</div>
-        </div>
-      </div>
-      <p style="color:#666;font-size:13px">
-        Please download all reports you wish to keep before access is disabled.
-        After the deletion date, this data cannot be recovered.
-      </p>
-      <a class="btn" href="${PORTAL}/download">Download Reports Now</a>
-    </div>
-    <div class="footer">NetraOps — Confidential</div>
-  </div>`;
+  const { subject, html } = renderRetentionNotice({
+    site_name,
+    company_name,
+    milestone,
+    days_remaining:           daysRemaining,
+    client_star_access_until,
+    data_delete_at,
+  });
 
   const recipients = [client_email, admin_email].filter(Boolean) as string[];
   if (recipients.length === 0) return;
@@ -442,9 +479,102 @@ export async function sendRetentionNotice(
   await sgMail.sendMultiple({
     to: recipients,
     from: FROM,
-    subject: `${subjectPfx} — ${site_name} (${daysRemaining} days)`,
+    subject,
     html,
   });
+}
+
+export type RetentionMilestone = 'day60' | 'day89' | 'monthly';
+
+/**
+ * Pure renderer for the retention notice. Single render to both client and
+ * primary admin — neutral "Hello," greeting (no per-recipient personalization;
+ * a system/lifecycle notice rather than a personal touch). Milestone drives
+ * visual urgency:
+ *   day89   → red header,  "Final Access Warning" title
+ *   day60   → navy header w/ amber KPI tile,  "Data Retention Notice" title
+ *   monthly → navy header w/ default KPI,     "Data Retention Notice" title
+ * Footer omits the reply-to-company line (a system notice; reply isn't
+ * expected to route anywhere meaningful).
+ */
+export function renderRetentionNotice(data: {
+  site_name:                string;
+  company_name:             string;
+  milestone:                RetentionMilestone;
+  days_remaining:           number;
+  client_star_access_until: Date | string;
+  data_delete_at:           Date | string;
+}): { subject: string; html: string } {
+  const accessUntil = fmtDatePacific(data.client_star_access_until);
+  const deleteDate  = fmtDatePacific(data.data_delete_at);
+  const isDay89     = data.milestone === 'day89';
+  const isDay60     = data.milestone === 'day60';
+
+  // Visual treatment per milestone
+  const headerBg     = isDay89 ? '#7F1D1D' : '#0B1526';
+  const brandColor   = isDay89 ? '#FCA5A5' : '#F59E0B';
+  const subheadColor = isDay89 ? '#FCA5A5' : '#F59E0B';
+  const kpiBg        = isDay89 ? '#FEF2F2' : isDay60 ? '#FFFBEB' : '#f5f5f5';
+  const kpiColor     = isDay89 ? '#DC2626' : isDay60 ? '#D97706' : '#0B1526';
+
+  // Title + subhead per milestone
+  const title = isDay89 ? 'Final Access Warning' : 'Data Retention Notice';
+  const daysLabel = data.days_remaining === 1 ? '1 day remaining' : `${data.days_remaining} days remaining`;
+  const subhead = data.milestone === 'monthly'
+    ? `${data.site_name} · monthly reminder`
+    : `${data.site_name} · ${daysLabel}`;
+
+  // Intro: lead with the factual statement (expiry date + deletion date)
+  // for day60 and monthly; day89 (≤1d) gets its dedicated "tomorrow" phrasing.
+  // KPI tile and subject carry the days-remaining count; the intro does NOT
+  // re-assert a day count that could contradict them.
+  const intro = isDay89
+    ? `Portal access for <strong>${data.site_name}</strong> expires tomorrow. After expiry, all site data will be permanently deleted on <strong>${deleteDate}</strong>.`
+    : `Portal access for <strong>${data.site_name}</strong> expires on <strong>${accessUntil}</strong>, and all site data will be permanently deleted on <strong>${deleteDate}</strong>.`;
+
+  // Subject per milestone
+  const subject = isDay89
+    ? `Final Access Warning — ${data.site_name} — ${daysLabel}`
+    : isDay60
+    ? `Data Retention Notice — ${data.site_name} — ${daysLabel}`
+    : `Data Retention Notice — ${data.site_name}`;
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    <div class="hdr" style="background:${headerBg}">
+      <div class="brand" style="color:${brandColor}">NETRAOPS</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${title}</h1>
+      <p style="color:${subheadColor};letter-spacing:0;font-size:13px;margin:6px 0 0 0">${subhead}</p>
+    </div>
+    <div class="body">
+      <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hello,</p>
+      <p style="color:#555;font-size:14px;margin:0 0 22px 0">${intro}</p>
+
+      <div style="text-align:center;margin-bottom:22px">
+        <div class="kpi" style="background:${kpiBg};padding:14px 28px"><div class="n" style="color:${kpiColor}">${data.days_remaining}</div><div class="l">${data.days_remaining === 1 ? 'DAY' : 'DAYS'} REMAINING</div></div>
+      </div>
+
+      <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
+        <tr><td style="padding:6px 0;color:#888;width:140px">Site</td><td style="padding:6px 0">${data.site_name}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Access expires</td><td style="padding:6px 0">${accessUntil}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Data deletion</td><td style="padding:6px 0">${deleteDate}</td></tr>
+      </table>
+
+      <p style="color:#555;font-size:13px;margin:22px 0 0 0">
+        Please download any reports you wish to keep before access is disabled. After the deletion date, this data cannot be recovered.
+      </p>
+
+      <div style="text-align:center;margin-top:24px">
+        <a class="btn" href="${PORTAL}/download">Download Reports</a>
+      </div>
+    </div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in Pacific Time.<br/>
+      Provided by <strong style="color:#666">${data.company_name}</strong>.
+    </div>
+  </div>`;
+
+  return { subject, html };
 }
 
 // ── Email Type 5 — Missed Shift Alert ────────────────────────────────────────
@@ -716,7 +846,7 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
   );
   if (!result.rows[0]) return;
   const { site_name, company_name, data_delete_at } = result.rows[0];
-  const deleteDate = new Date(data_delete_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const deleteDate = fmtDatePacific(data_delete_at);
 
   await sgMail.send({
     to: process.env.VISHNU_EMAIL!,
