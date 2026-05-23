@@ -165,6 +165,19 @@ function fmtDatePacific(dt: Date | string): string {
   });
 }
 
+// Pacific-locked time-only ("10:01 PM PDT"). Used for the same-day collapse
+// on schedule ranges where the date appears once on the start side and only
+// the time is needed on the end side.
+function fmtTimePacific(dt: Date | string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: 'America/Los_Angeles',
+    timeZoneName: 'short',
+  }).formatToParts(new Date(dt));
+  const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  return `${pick('hour')}:${pick('minute')} ${pick('dayPeriod')} ${pick('timeZoneName')}`;
+}
+
 // Title-cases each whitespace-delimited word. "james vince" → "James Vince".
 // Common-name edge cases (McDonald, O'Brien, hyphens) intentionally not
 // handled — accepted limitation for the first pass.
@@ -517,12 +530,24 @@ export function renderMissedShiftAlert(row: {
     (Date.now() - new Date(row.scheduled_start).getTime()) / 60_000
   ));
 
-  // Reassign deep link to the admin shift-detail page. WEB_BASE comes from
-  // process.env.WEB_PORTAL_URL with a hardcoded fallback to the canonical
-  // production web app (set in code so a missing env var doesn't break the
-  // alert). Note: the /admin/shifts/:id route is planned for Improvement 2
-  // and does not exist in apps/web today — until that ships the link 404s.
-  const reassignUrl = `${WEB_BASE}/admin/shifts/${row.id}`;
+  // Deep link to the admin shift-detail / reassign page
+  // (apps/web/app/admin/shifts/[shiftId]/page.tsx, shipped in f130d6b).
+  // WEB_BASE has a hardcoded fallback so a missing env var doesn't break the
+  // alert.
+  const dashboardUrl = `${WEB_BASE}/admin/shifts/${row.id}`;
+
+  const guardTitle = titleCase(row.guard_name);
+
+  // Same-day collapse: if scheduled_start and scheduled_end fall on the
+  // same Pacific calendar day, drop the redundant end-date prefix.
+  // "14 May 2026, 6:29 AM PDT → 10:29 AM PDT" vs cross-midnight
+  // "14 May 2026, 11:25 PM PDT → 15 May 2026, 8:00 AM PDT".
+  // Comparison is on the Pacific date string so DST and UTC offset don't
+  // cause edge-case mis-grouping.
+  const sameDay = fmtDatePacific(row.scheduled_start) === fmtDatePacific(row.scheduled_end);
+  const scheduledLabel = sameDay
+    ? `${fmtDTPacific(row.scheduled_start)} → ${fmtTimePacific(row.scheduled_end)}`
+    : `${fmtDTPacific(row.scheduled_start)} → ${fmtDTPacific(row.scheduled_end)}`;
 
   const upcoming = Number(row.upcoming_shifts_count) || 0;
   const upcomingText = upcoming === 0
@@ -530,41 +555,46 @@ export function renderMissedShiftAlert(row: {
     : `${upcoming} other upcoming shift${upcoming === 1 ? '' : 's'} in the next 24h.`;
 
   const phoneRow = row.guard_phone
-    ? `<br/><strong>Phone:</strong> <a href="tel:${row.guard_phone}" style="color:#0B1526;text-decoration:underline">${row.guard_phone}</a>`
+    ? `<tr><td style="padding:6px 0;color:#888;width:120px">Phone</td><td style="padding:6px 0"><a href="tel:${row.guard_phone}" style="color:#0B1526;text-decoration:underline">${row.guard_phone}</a></td></tr>`
     : '';
 
   const html = `<style>${BASE_STYLE}</style>
   <div class="card">
     <div class="hdr" style="background:#7F1D1D">
-      <h1>MISSED SHIFT ALERT</h1><p>${row.site_name.toUpperCase()} — ${minutesLate} MIN LATE</p>
+      <div class="brand" style="color:#FCA5A5">NETRAOPS · ALERT</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Missed Shift</h1>
+      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${row.site_name} · ${guardTitle} is ${minutesLate} min late</p>
     </div>
     <div class="body">
-      <p style="font-size:15px;color:#DC2626;font-weight:bold;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin-top:0">
-        ⚠️ ${row.guard_name} has not clocked in. ${minutesLate} minutes past the scheduled start.
+      <p style="font-size:15px;color:#B91C1C;font-weight:600;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
+        ⚠️ ${guardTitle} did not clock in. ${minutesLate} minutes past the scheduled start.
       </p>
 
-      <div class="meta">
-        <strong>Site:</strong> ${row.site_name}<br/>
-        <strong>Address:</strong> ${row.site_address}<br/>
-        <strong>Scheduled Start:</strong> ${fmtDTPacific(row.scheduled_start)}<br/>
-        <strong>Scheduled End:</strong> ${fmtDTPacific(row.scheduled_end)}
-      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
+        <tr><td style="padding:6px 0;color:#888;width:120px">Guard</td><td style="padding:6px 0">${guardTitle} <span style="color:#888">(${row.badge_number})</span></td></tr>
+        ${phoneRow}
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Address</td><td style="padding:6px 0">${row.site_address}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Scheduled</td><td style="padding:6px 0">${scheduledLabel}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Last app login</td><td style="padding:6px 0">${relTime(row.last_login_at)}</td></tr>
+        <tr><td style="padding:6px 0;color:#888;vertical-align:top">Coverage</td><td style="padding:6px 0">${upcomingText}</td></tr>
+      </table>
 
-      <div class="meta">
-        <strong>Guard:</strong> ${row.guard_name} (${row.badge_number})${phoneRow}<br/>
-        <strong>Last opened app:</strong> ${relTime(row.last_login_at)}<br/>
-        <strong>Coverage availability:</strong> ${upcomingText}
-      </div>
-
-      <p style="color:#555;font-size:13px;margin-top:14px">
+      <p style="color:#555;font-size:13px;margin:22px 0 0 0">
         Please contact the guard immediately or reassign the shift to another guard at <strong>${row.site_name}</strong>.
       </p>
-      <a class="btn" href="${reassignUrl}">Reassign Guard</a>
+
+      <div style="text-align:center;margin-top:24px">
+        <a class="btn" href="${dashboardUrl}">Open in Admin Dashboard</a>
+      </div>
     </div>
-    <div class="footer">NetraOps — Automated Alert</div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in Pacific Time.<br/>
+      NetraOps · Automated alert
+    </div>
   </div>`;
 
-  const subject = `⚠️ MISSED SHIFT — ${row.site_name} — ${row.guard_name} is ${minutesLate} min late`;
+  const subject = `⚠️ MISSED SHIFT — ${row.site_name} — ${guardTitle} is ${minutesLate} min late`;
   return { subject, html };
 }
 
