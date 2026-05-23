@@ -833,54 +833,87 @@ export function renderGeofenceBreachAlert(row: {
 
   const isReport = context.kind === 'report';
   const reportTypeLabel = context.reportType ?? 'report';
+  const guardTitle = titleCase(row.guard_name);
+  const article = /^[aeiouAEIOU]/.test(reportTypeLabel) ? 'an' : 'a';
+  const distanceFragment = distanceM != null ? `${distanceM}m` : 'off-site';
 
+  // Subject mirrors the missed-shift pattern: "⚠️ ALERT — Site — detail".
   const subject = isReport
-    ? `⚠️ Off-post report — ${row.guard_name} filed ${reportTypeLabel} away from ${row.site_name}`
-    : `⚠️ Geofence breach — ${row.guard_name} off-site at ${row.site_name}`;
+    ? `⚠️ OFF-POST REPORT — ${row.site_name} — ${guardTitle} filed ${reportTypeLabel} ${distanceFragment} off-post`
+    : `⚠️ GEOFENCE BREACH — ${row.site_name} — ${guardTitle} ${distanceFragment} off-site`;
 
-  const headerTitle = isReport ? 'OFF-POST REPORT' : 'GEOFENCE BREACH';
-  const headerSub   = isReport ? 'FILED FROM OFF-SITE' : 'GUARD OFF-SITE';
+  // Header
+  const headerTitle = isReport ? 'Off-post Report' : 'Geofence Breach';
+  const headerSub   = isReport
+    ? `${row.site_name} · ${reportTypeLabel} report filed off-post`
+    : `${row.site_name} · ${guardTitle} ${distanceFragment} off-site`;
 
+  // Headline banner (the red-on-pink stripe inside the body)
+  const distanceClause = distanceM != null
+    ? ` — ${distanceM}m outside the geofence.`
+    : ' — outside the permitted boundary.';
+  const headlineText = isReport
+    ? `⚠️ ${guardTitle} filed ${article} ${reportTypeLabel} report${distanceM != null ? ` ${distanceM}m off-post` : ' off-post'} at ${row.site_name}.`
+    : `⚠️ ${guardTitle} left the post at ${row.site_name}${distanceClause}`;
+
+  // Body framing paragraph — explanatory copy under the meta table
   const bodyFraming = isReport
-    ? `The guard submitted a ${reportTypeLabel} report while outside the permitted boundary. The report was accepted and saved; this alert flags the off-post submission for review.`
+    ? `The guard submitted ${article} ${reportTypeLabel} report while outside the permitted boundary. The report was accepted and saved; this alert flags the off-post submission for review.`
     : `The guard was outside the permitted boundary when this alert fired. The breach auto-resolves when they return inside the post; no admin action required unless the situation persists.`;
 
-  const distanceLine =
-    distanceM != null
-      ? `<strong>Distance from post:</strong> ${distanceM} meters`
-      : `<strong>Distance from post:</strong> <em>(site geofence center not configured)</em>`;
+  // Meta table rows
+  const distanceRow = distanceM != null
+    ? `<tr><td style="padding:6px 0;color:#888">Distance from post</td><td style="padding:6px 0">${distanceM} m</td></tr>`
+    : `<tr><td style="padding:6px 0;color:#888">Distance from post</td><td style="padding:6px 0;color:#888"><em>(site geofence center not configured)</em></td></tr>`;
+  const reportTypeRow = isReport
+    ? `<tr><td style="padding:6px 0;color:#888">Report type</td><td style="padding:6px 0">${reportTypeLabel}</td></tr>`
+    : '';
+  const coordsRow = `<tr><td style="padding:6px 0;color:#888;vertical-align:top">Coords</td><td style="padding:6px 0"><code style="background:#f5f5f5;padding:1px 6px;border-radius:3px;font-size:12px">${row.violation_lat.toFixed(6)}, ${row.violation_lng.toFixed(6)}</code></td></tr>`;
 
+  // Photo block — link only when present; no "no photo" filler
   const photoBlock = row.photo_url
-    ? `<p><strong>Photo at breach:</strong> <a href="${row.photo_url}">View captured photo</a></p>`
-    : `<p><em>No photo captured at breach.</em></p>`;
+    ? `<p style="margin:16px 0 0 0;font-size:13px;color:#555"><strong style="color:#333">Photo at breach:</strong> <a href="${row.photo_url}" style="color:#0B1526;text-decoration:underline">View captured photo →</a></p>`
+    : '';
 
   const deepLink = `${WEB_BASE}/admin/live-map`;
 
   const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr" style="background:#7F1D1D">
-        <h1>${headerTitle}</h1><p>${headerSub}</p>
+  <div class="card">
+    <div class="hdr" style="background:#7F1D1D">
+      <div class="brand" style="color:#FCA5A5">NETRAOPS · ALERT</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headerTitle}</h1>
+      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headerSub}</p>
+    </div>
+    <div class="body">
+      <p style="font-size:15px;color:#B91C1C;font-weight:600;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
+        ${headlineText}
+      </p>
+
+      <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
+        <tr><td style="padding:6px 0;color:#888;width:140px">Guard</td><td style="padding:6px 0">${guardTitle} <span style="color:#888">(${row.badge_number})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Address</td><td style="padding:6px 0">${row.site_address}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Time</td><td style="padding:6px 0">${fmtDTPacific(row.occurred_at)}</td></tr>
+        ${distanceRow}
+        ${reportTypeRow}
+        ${coordsRow}
+      </table>
+
+      ${photoBlock}
+
+      <p style="color:#555;font-size:13px;margin:22px 0 0 0">
+        ${bodyFraming}
+      </p>
+
+      <div style="text-align:center;margin-top:24px">
+        <a class="btn" href="${deepLink}">Open Live Map</a>
       </div>
-      <div class="body">
-        <div class="meta">
-          <strong>Guard:</strong> ${row.guard_name} (${row.badge_number})<br/>
-          <strong>Site:</strong> ${row.site_name}<br/>
-          <strong>Address:</strong> ${row.site_address}<br/>
-          <strong>Time:</strong> ${fmtDTPacific(row.occurred_at)}<br/>
-          ${distanceLine}<br/>
-          <strong>Coords:</strong>
-          <code style="background:#f5f5f5;padding:1px 5px;border-radius:3px">${row.violation_lat.toFixed(6)}, ${row.violation_lng.toFixed(6)}</code>
-        </div>
-        ${photoBlock}
-        <a href="${deepLink}" style="display:inline-block;background:#DC2626;color:#fff;font-weight:700;padding:12px 28px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:14px;margin-top:12px">
-          VIEW LIVE STATUS
-        </a>
-        <p style="color:#666;font-size:13px;margin-top:20px">
-          ${bodyFraming}
-        </p>
-      </div>
-      <div class="footer">NetraOps — Operator Alert</div>
-    </div>`;
+    </div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in Pacific Time.<br/>
+      NetraOps · Automated alert
+    </div>
+  </div>`;
 
   return { subject, html };
 }
