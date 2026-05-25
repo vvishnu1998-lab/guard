@@ -60,7 +60,7 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     const siteResult = await client.query(
       `INSERT INTO sites (company_id, name, address, contract_start, contract_end, instructions_pdf_url)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.user!.company_id, name, address, contract_start, contract_end || null, instructions_pdf_url || null]
+      [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, instructions_pdf_url || null]
     );
     const site = siteResult.rows[0];
     const accessUntil = contract_end ? (() => { const d = new Date(contract_end); d.setDate(d.getDate() + 90); return d; })() : null;
@@ -97,7 +97,7 @@ router.put('/:id', requireAuth('company_admin'), async (req, res) => {
        contract_end = COALESCE($4, contract_end),
        instructions_pdf_url = COALESCE($5, instructions_pdf_url)
      WHERE id = $6 RETURNING *`,
-    [name || null, address || null, contract_start || null, contract_end || null, instructions_pdf_url ?? null, req.params.id]
+    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, instructions_pdf_url ?? null, req.params.id]
   );
   res.json(result.rows[0]);
 });
