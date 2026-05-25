@@ -82,13 +82,25 @@ export default function ChatPage() {
     finally { if (!silent) setLoadingMsgs(false); }
   }, []);
 
+  // When a room is selected: load its messages, mark it read on the
+  // server (so unread_count decrements + the per-room badge clears),
+  // then poll on a 10s tick. Mark-read is called again on every tick
+  // so any messages that arrive while the admin is sitting on the
+  // thread don't keep the badge stuck. Mirrors the mobile pattern at
+  // apps/mobile/app/chat/[roomId].tsx:55-69.
   useEffect(() => {
     if (!selected) { setMessages([]); return; }
+    const markRead = () =>
+      adminPost(`/api/chat/rooms/${selected.id}/mark-read`, {})
+        .then(() => loadRooms())
+        .catch(() => { /* badge will resync on next poll tick */ });
+
     loadMessages(selected.id);
+    markRead();
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(() => {
       loadMessages(selected.id, true);
-      loadRooms();
+      markRead();
     }, 10000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [selected, loadMessages, loadRooms]);
