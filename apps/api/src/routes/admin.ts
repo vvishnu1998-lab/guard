@@ -252,6 +252,70 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
   res.json(result.rows);
 });
 
+// GET /api/admin/violations?since=24h|7d|30d&status=all|open|resolved&limit=N
+//
+// Company-scoped geofence breach history for the admin live-status page's
+// "RECENT BREACHES" section. Returns one row per geofence_violations row in
+// the company's sites, newest first. Defaults: since=24h, status=all, limit=100
+// (capped at 500).
+//
+// photo_url is returned as the raw S3 URL stored on the row. The
+// guard-media-prod bucket is configured for public read, so no fresh
+// presigning is needed at fetch time. URLs MAY be dead in two cases:
+//   1. The breach had no photo capture (photo_url is NULL).
+//   2. The S3 object was purged by the nightly purge — for ping-attached
+//      breach photos, this happens once the violation resolves AND the
+//      associated location_pings row's photo_delete_at passes
+//      (location_pings keeps its retain_as_evidence flag set while the
+//      violation is open).
+// The UI handles both cases as "photo unavailable".
+router.get('/violations', requireAuth('company_admin'), async (req, res) => {
+  const cid    = req.user!.company_id;
+  const sinceQ  = (req.query.since  as string | undefined) ?? '24h';
+  const statusQ = (req.query.status as string | undefined) ?? 'all';
+  const limitQ  = req.query.limit   as string | undefined;
+
+  // Whitelist-only mapping — no user input flows directly into SQL.
+  const SINCE_INTERVALS: Record<string, string> = {
+    '24h': '24 hours', '7d': '7 days', '30d': '30 days',
+  };
+  const sinceInterval = SINCE_INTERVALS[sinceQ] ?? SINCE_INTERVALS['24h'];
+
+  const statusVal = (['all', 'open', 'resolved'] as const).includes(statusQ as 'all' | 'open' | 'resolved')
+    ? (statusQ as 'all' | 'open' | 'resolved')
+    : 'all';
+  const statusClause =
+    statusVal === 'open'     ? 'AND gv.resolved_at IS NULL'
+  : statusVal === 'resolved' ? 'AND gv.resolved_at IS NOT NULL'
+  :                            '';
+
+  const limit = Math.min(500, Math.max(1, parseInt(limitQ ?? '100', 10) || 100));
+
+  const result = await pool.query(
+    `SELECT gv.id,
+            gv.occurred_at,
+            gv.resolved_at,
+            gv.duration_minutes,
+            gv.violation_lat,
+            gv.violation_lng,
+            gv.photo_url,
+            (gv.resolved_at IS NOT NULL) AS is_resolved,
+            g.name         AS guard_name,
+            g.badge_number,
+            s.name         AS site_name
+     FROM geofence_violations gv
+     JOIN sites  s ON s.id = gv.site_id
+     JOIN guards g ON g.id = gv.guard_id
+     WHERE s.company_id = $1
+       AND gv.occurred_at >= NOW() - INTERVAL '${sinceInterval}'
+       ${statusClause}
+     ORDER BY gv.occurred_at DESC
+     LIMIT $2`,
+    [cid, limit],
+  );
+  res.json(result.rows);
+});
+
 // GET /api/admin/dashboard-sites — site summary for dashboard table
 //
 // Cartesian fix (2026-05-17): the previous version LEFT JOINed shift_sessions,
