@@ -88,9 +88,8 @@ router.get('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => {
 router.post('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || !email || !password) return res.status(400).json({ error: 'name, email and password are required' });
-  if (password.length < 6 || password.length > 128) {
-    return res.status(400).json({ error: 'Minimum 6 characters.' });
-  }
+  const policyErr = validatePassword(password);
+  if (policyErr) return res.status(400).json({ error: policyErr });
 
   const bcrypt = require('bcrypt');
   const password_hash = await bcrypt.hash(password, 10);

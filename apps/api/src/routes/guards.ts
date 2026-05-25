@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
+import { validatePassword } from './auth';
 
 const router = Router();
 
@@ -45,9 +46,8 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   if (!badge_number?.trim()) return res.status(400).json({ error: 'Badge number is required' });
   if (!temp_password)        return res.status(400).json({ error: 'Temporary password is required' });
   // Forced rotation on first login is wired via guards.must_change_password DEFAULT true.
-  if (temp_password.length < 6 || temp_password.length > 128) {
-    return res.status(400).json({ error: 'Minimum 6 characters.' });
-  }
+  const policyErr = validatePassword(temp_password);
+  if (policyErr) return res.status(400).json({ error: policyErr });
 
   try {
     const password_hash = await bcrypt.hash(temp_password, 12);
