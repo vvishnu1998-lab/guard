@@ -443,9 +443,11 @@ export async function sendRetentionNotice(
   daysRemaining: number,
   milestone: RetentionMilestone = 'monthly',
 ) {
-  // NOTE: clients join intentionally has NO is_active = true filter today;
-  // policy question about whether inactive clients should still receive
-  // retention notices is tracked as a separate follow-up.
+  // Clients join filters is_active in the ON-clause (not the WHERE): for
+  // inactive clients, c.email comes back NULL and the .filter(Boolean) on
+  // recipients drops it, but the site + admin path is preserved so the
+  // company admin still receives the notice. Inactive clients have lost
+  // portal access and can't act on it, so emailing them is noise.
   const result = await pool.query(
     `SELECT si.name AS site_name,
             c.email AS client_email,
@@ -454,7 +456,7 @@ export async function sendRetentionNotice(
             drl.data_delete_at,
             drl.client_star_access_until
      FROM sites si
-     LEFT JOIN clients c    ON c.site_id = si.id
+     LEFT JOIN clients c    ON c.site_id = si.id AND c.is_active = true
      JOIN companies co      ON co.id = si.company_id
      JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      JOIN data_retention_log drl ON drl.site_id = si.id
