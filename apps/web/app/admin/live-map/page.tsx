@@ -21,6 +21,23 @@ interface LiveGuard {
   has_violation:  boolean;
 }
 
+interface Breach {
+  id:               string;
+  occurred_at:      string;
+  resolved_at:      string | null;
+  duration_minutes: number | null;
+  violation_lat:    number;
+  violation_lng:    number;
+  photo_url:        string | null;
+  is_resolved:      boolean;
+  guard_name:       string;
+  badge_number:     string;
+  site_name:        string;
+}
+
+type SinceFilter  = '24h' | '7d' | '30d';
+type StatusFilter = 'all' | 'open' | 'resolved';
+
 const PING_LABEL: Record<string, string> = {
   gps_only:   'GPS',
   gps_photo:  'GPS + PHOTO',
@@ -46,17 +63,53 @@ function pingAge(iso: string | null): { label: string; urgent: boolean } {
   return { label: elapsed(iso), urgent: mins >= 35 };
 }
 
+function fmtBreachTime(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const diffDays = Math.floor((now.getTime() - d.getTime()) / 86_400_000);
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  if (diffDays === 0) return `${time} today`;
+  if (diffDays === 1) return `${time} yesterday`;
+  return `${d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} ${time}`;
+}
+
+function fmtDuration(mins: number | null): string {
+  if (mins == null) return '—';
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m.toString().padStart(2, '0')}m`;
+}
+
 export default function LiveMapPage() {
   const [guards,      setGuards]      = useState<LiveGuard[]>([]);
+  const [breaches,    setBreaches]    = useState<Breach[]>([]);
   const [loading,     setLoading]     = useState(true);
+  const [breachesLoading, setBreachesLoading] = useState(true);
   const [error,       setError]       = useState('');
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [countdown,   setCountdown]   = useState(30);
+  const [sinceFilter,  setSinceFilter]  = useState<SinceFilter>('24h');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadBreaches = useCallback(async (since: SinceFilter, status: StatusFilter) => {
+    try {
+      const data = await adminGet<Breach[]>(
+        `/api/admin/violations?since=${since}&status=${status}&limit=100`,
+      );
+      setBreaches(data);
+    } catch (e: any) { setError(e.message); }
+    finally { setBreachesLoading(false); }
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      setGuards(await adminGet<LiveGuard[]>('/api/admin/live-guards'));
+      const [g] = await Promise.all([
+        adminGet<LiveGuard[]>('/api/admin/live-guards'),
+        loadBreaches(sinceFilter, statusFilter),
+      ]);
+      setGuards(g);
       setError('');
     } catch (e: any) { setError(e.message); }
     finally {
@@ -64,9 +117,14 @@ export default function LiveMapPage() {
       setLastRefresh(new Date());
       setCountdown(30);
     }
-  }, []);
+  }, [loadBreaches, sinceFilter, statusFilter]);
 
+  // `load` is recreated when sinceFilter/statusFilter change, so this effect
+  // re-runs: it fires an immediate fetch (taking the new filters into account)
+  // and restarts the 30s interval. Cadence drifts slightly on filter change
+  // — acceptable for an admin debug view.
   useEffect(() => {
+    setBreachesLoading(true);
     load();
     timerRef.current = setInterval(load, 30_000);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
@@ -195,6 +253,120 @@ export default function LiveMapPage() {
             })}
           </tbody>
         </table>
+      </div>
+
+      {/* ── RECENT BREACHES — geofence violation history ───────────────── */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-amber-400 font-bold tracking-widest text-sm">RECENT BREACHES</h2>
+            <p className="text-gray-600 text-xs mt-1">Geofence violations across all sites</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {/* Time-range chips */}
+            <div className="flex items-center gap-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-1">
+              {(['24h', '7d', '30d'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setSinceFilter(s)}
+                  className={`px-3 py-1 rounded text-xs tracking-widest transition-colors ${
+                    sinceFilter === s
+                      ? 'bg-amber-500 text-black font-bold'
+                      : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {s.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            {/* Status chips */}
+            <div className="flex items-center gap-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-1">
+              {(['all', 'open', 'resolved'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setStatusFilter(s)}
+                  className={`px-3 py-1 rounded text-xs tracking-widest transition-colors ${
+                    statusFilter === s
+                      ? 'bg-amber-500 text-black font-bold'
+                      : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {s.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
+                <th className="text-left p-4">OCCURRED</th>
+                <th className="text-left p-4">GUARD</th>
+                <th className="text-left p-4">SITE</th>
+                <th className="text-left p-4">COORDS</th>
+                <th className="text-left p-4">DURATION</th>
+                <th className="text-center p-4">STATUS</th>
+                <th className="text-center p-4">PHOTO</th>
+              </tr>
+            </thead>
+            <tbody>
+              {breachesLoading && (
+                <tr><td colSpan={7} className="text-center text-gray-500 py-10">Loading…</td></tr>
+              )}
+              {!breachesLoading && breaches.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="text-center text-gray-500 py-10">
+                    No breaches in this range.
+                  </td>
+                </tr>
+              )}
+              {!breachesLoading && breaches.map((b) => (
+                <tr
+                  key={b.id}
+                  className={`border-b border-[#1A3050] transition-colors ${
+                    !b.is_resolved ? 'bg-red-950/30 hover:bg-red-950/50' : 'hover:bg-[#0B1526]'
+                  }`}
+                >
+                  <td className="p-4 text-gray-300 text-xs whitespace-nowrap">
+                    {fmtBreachTime(b.occurred_at)}
+                  </td>
+                  <td className="p-4">
+                    <p className="text-gray-200 text-sm">{b.guard_name}</p>
+                    <p className="text-gray-600 text-xs font-mono">{b.badge_number}</p>
+                  </td>
+                  <td className="p-4 text-gray-400 text-xs">{b.site_name}</td>
+                  <td className="p-4 text-gray-600 text-xs font-mono whitespace-nowrap">
+                    {b.violation_lat.toFixed(5)}, {b.violation_lng.toFixed(5)}
+                  </td>
+                  <td className="p-4 text-gray-400 text-xs">{fmtDuration(b.duration_minutes)}</td>
+                  <td className="p-4 text-center">
+                    {b.is_resolved ? (
+                      <span className="text-xs tracking-widest text-green-400">RESOLVED</span>
+                    ) : (
+                      <span className="text-xs tracking-widest text-red-400 font-bold animate-pulse">OPEN</span>
+                    )}
+                  </td>
+                  <td className="p-4 text-center">
+                    {b.photo_url ? (
+                      <a
+                        href={b.photo_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs tracking-widest text-amber-400 hover:text-amber-300 underline"
+                      >
+                        VIEW
+                      </a>
+                    ) : (
+                      <span className="text-gray-700 text-xs">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
