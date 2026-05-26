@@ -40,6 +40,14 @@ interface ActivityRow {
   log_media_urls:  string[];
   event_time:      string;
   detail_id:       string | null;
+  // Ping-only fields. Server gates these to admin role — clients receive
+  // null across the board (privacy by design). Reports + synthesized
+  // missed-ping rows are also always null.
+  latitude:           number  | null;
+  longitude:          number  | null;
+  accuracy_m:         number  | null;
+  is_within_geofence: boolean | null;
+  ping_type:          string  | null;
 }
 
 interface ActivityLogResponse {
@@ -276,10 +284,19 @@ export default function ActivityLogTable({
 
       {/* Table */}
       <div className="bg-[#0B1526] border border-[#1A3050] rounded-xl overflow-hidden">
-        <div className="grid grid-cols-[1fr_180px_220px_180px_60px] gap-4 px-4 py-3 border-b border-[#1A3050] bg-[#0F1E35]">
+        {/* Grid template diverges by mode — admin gets an extra COORDS column.
+            Both arbitrary class names appear literally below so Tailwind's JIT
+            picks them up at build time. */}
+        <div className={`grid ${mode === 'admin'
+          ? 'grid-cols-[1fr_180px_220px_160px_180px_60px]'
+          : 'grid-cols-[1fr_180px_220px_180px_60px]'
+        } gap-4 px-4 py-3 border-b border-[#1A3050] bg-[#0F1E35]`}>
           <span className="text-[10px] text-gray-500 tracking-widest">GUARD NAME</span>
           <span className="text-[10px] text-gray-500 tracking-widest">STATUS</span>
           <span className="text-[10px] text-gray-500 tracking-widest">LOG TIME</span>
+          {mode === 'admin' && (
+            <span className="text-[10px] text-gray-500 tracking-widest">COORDS</span>
+          )}
           <span className="text-[10px] text-gray-500 tracking-widest">LOG MEDIA</span>
           <span className="text-[10px] text-gray-500 tracking-widest text-right">ACTIONS</span>
         </div>
@@ -297,10 +314,14 @@ export default function ActivityLogTable({
           const photos = r.log_media_urls ?? [];
           const visible = photos.slice(0, 3);
           const remaining = photos.length - visible.length;
+          const offPost = mode === 'admin' && r.kind === 'ping' && r.is_within_geofence === false;
           return (
             <div
               key={r.id}
-              className="grid grid-cols-[1fr_180px_220px_180px_60px] gap-4 px-4 py-3 border-b border-[#1A3050] items-center hover:bg-[#0F1E35] transition-colors"
+              className={`grid ${mode === 'admin'
+                ? 'grid-cols-[1fr_180px_220px_160px_180px_60px]'
+                : 'grid-cols-[1fr_180px_220px_180px_60px]'
+              } gap-4 px-4 py-3 border-b border-[#1A3050] items-center hover:bg-[#0F1E35] transition-colors`}
             >
               {/* Guard */}
               <div className="flex items-center gap-2 min-w-0">
@@ -310,13 +331,32 @@ export default function ActivityLogTable({
                 <span className="text-sm text-gray-200 truncate">{r.guard_name}</span>
               </div>
 
-              {/* Status */}
-              <span className={`text-sm font-medium ${STATUS_COLOR[r.status_kind] ?? 'text-gray-300'}`}>
-                {r.status}
-              </span>
+              {/* Status (+ OFF-POST badge for admin pings outside the geofence) */}
+              <div className="flex items-center gap-2 min-w-0">
+                <span className={`text-sm font-medium ${STATUS_COLOR[r.status_kind] ?? 'text-gray-300'} truncate`}>
+                  {r.status}
+                </span>
+                {offPost && (
+                  <span
+                    className="shrink-0 inline-flex items-center text-[9px] font-bold tracking-widest text-red-300 bg-red-900/40 border border-red-700 rounded px-1.5 py-0.5"
+                    title="Ping landed outside the site geofence"
+                  >
+                    OFF-POST
+                  </span>
+                )}
+              </div>
 
               {/* Log time */}
               <span className="text-xs text-gray-400">{fmtLogTime(r.log_time)}</span>
+
+              {/* Coords (admin-only column) */}
+              {mode === 'admin' && (
+                <span className="text-xs text-gray-500 font-mono truncate">
+                  {r.latitude != null && r.longitude != null
+                    ? `${r.latitude.toFixed(5)}, ${r.longitude.toFixed(5)}`
+                    : '—'}
+                </span>
+              )}
 
               {/* Log media */}
               <div>
