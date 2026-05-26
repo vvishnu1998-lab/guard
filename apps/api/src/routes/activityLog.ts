@@ -47,12 +47,15 @@ interface SessionRow {
 }
 
 interface PingRow {
-  id:                string;
-  shift_session_id:  string;
-  pinged_at:         string;
-  photo_url:         string | null;
-  latitude:          number;
-  longitude:         number;
+  id:                  string;
+  shift_session_id:    string;
+  pinged_at:           string;
+  photo_url:           string | null;
+  latitude:            number;
+  longitude:           number;
+  accuracy_meters:     number | null;
+  is_within_geofence:  boolean;
+  ping_type:           string;
 }
 
 interface ReportRow {
@@ -84,6 +87,16 @@ export interface ActivityRow {
   log_media_urls: string[];
   event_time:     string;        // used for sort + ordering only
   detail_id:      string | null; // ping id or report id; null for synthesized missed rows
+
+  // Ping-only fields, server-side gated to admin role. Clients receive `null`
+  // across the board for these — guard movements are not exposed over the
+  // wire to client portals by design. Reports and synthesized missed-ping
+  // rows also have `null` here regardless of role.
+  latitude:           number  | null;
+  longitude:          number  | null;
+  accuracy_m:         number  | null;
+  is_within_geofence: boolean | null;
+  ping_type:          string  | null;
 }
 
 /** Round up to the next UTC :00 or :30 boundary. */
@@ -175,7 +188,8 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
   const pings: PingRow[] = [];
   if (sessionIds.length > 0) {
     const pingsResult = await pool.query<PingRow>(
-      `SELECT id, shift_session_id, pinged_at, photo_url, latitude, longitude
+      `SELECT id, shift_session_id, pinged_at, photo_url, latitude, longitude,
+              accuracy_meters, is_within_geofence, ping_type
        FROM location_pings
        WHERE shift_session_id = ANY($1::uuid[])
          AND pinged_at >= $2
@@ -272,6 +286,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
             log_media_urls: ping.photo_url ? [ping.photo_url] : [],
             event_time:     ping.pinged_at,
             detail_id:      ping.id,
+            // Admin-only ping fields; nulled for client-role requests.
+            latitude:           isAdmin ? ping.latitude           : null,
+            longitude:          isAdmin ? ping.longitude          : null,
+            accuracy_m:         isAdmin ? ping.accuracy_meters    : null,
+            is_within_geofence: isAdmin ? ping.is_within_geofence : null,
+            ping_type:          isAdmin ? ping.ping_type          : null,
           });
         } else {
           rows.push({
@@ -288,6 +308,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
             log_media_urls: [],
             event_time:     new Date(windowStart).toISOString(),
             detail_id:      null,
+            // Missed-ping synth rows have no underlying ping; always null.
+            latitude:           null,
+            longitude:          null,
+            accuracy_m:         null,
+            is_within_geofence: null,
+            ping_type:          null,
           });
         }
       }
@@ -314,6 +340,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       log_media_urls: photos,
       event_time:     r.reported_at,
       detail_id:      r.id,
+      // Reports are not pings — always null on these fields regardless of role.
+      latitude:           null,
+      longitude:          null,
+      accuracy_m:         null,
+      is_within_geofence: null,
+      ping_type:          null,
     });
   }
 
