@@ -8,7 +8,7 @@ Multi-tenant SaaS for security guard management. Three parties: super admin (Vis
 - Web portals: Next.js, deployed on Vercel → app.netraops.com
 - API: Node/Express on Railway → guard-production-6be4.up.railway.app (project: adorable-courage)
 - DB: PostgreSQL on Railway (22 tables, multi-tenant by company_id)
-- Storage: AWS S3 bucket `starguard-media` (us-east-2)
+- Storage: AWS S3 bucket `guard-media-prod` (us-east-1)
 - Push: Firebase/FCM (Sender ID: 872564523776)
 - Email: SendGrid (sender: alerts@netraops.com, domain verified)
 - Maps: Google Maps
@@ -51,7 +51,7 @@ NetraOps. Navy `#0B1526` + cyan `#00C8FF`. Logos and bundle IDs already updated 
 - Phase C: CB1–CB6 code fixes (IN PROGRESS — CB1 race condition on clock-in, NULL total_hours on auto-completed shifts, etc.)
 - Phase D: S3 presigned POST hardening + post-upload byte validation (PENDING — V6 attack confirmed live vuln)
 - Phase E: full re-verification (PENDING)
-- CB11 outstanding: confirm JWT secrets removed from Vercel env vars.
+- CB11a outstanding: confirm JWT secrets removed from Vercel env vars (web/Vercel cleanup). Distinct from CB11b in the pre-launch security punchlist, which is API-side VISHNU_JWT_SECRET wiring.
 
 ## Out of scope this week
 Twilio SMS OTP, Stripe billing, 2FA, full automated test suite, BIPA remediation.
