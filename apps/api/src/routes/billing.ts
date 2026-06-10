@@ -10,7 +10,7 @@ import { Router } from 'express';
 import * as XLSX from 'xlsx';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
-import { uploadBufferToS3 } from '../services/s3';
+import { uploadBufferToS3, urlOrPresign } from '../services/s3';
 
 const router = Router();
 
@@ -133,6 +133,10 @@ router.get('/hours-export/monthly', requireAuth('company_admin', 'vishnu'), asyn
      ORDER BY year DESC, month DESC`,
     [companyId]
   );
+  // S3 lockdown (PR2): re-sign the monthly-report download URLs.
+  for (const row of result.rows) {
+    row.s3_url = await urlOrPresign(row.s3_url);
+  }
   res.json(result.rows);
 });
 

@@ -5,6 +5,7 @@ import { sendIncidentAlert } from '../services/email';
 import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 import { validateAtSite } from '../services/geofence';
+import { presignAll } from '../services/s3';
 import { fireBreachAlerts } from './locations';
 
 const router = Router();
@@ -59,6 +60,13 @@ router.get('/', requireAuth('guard', 'company_admin', 'client'), async (req, res
   query += ' ORDER BY r.reported_at DESC LIMIT 100';
 
   const result = await pool.query(query, params);
+  // S3 lockdown (PR2): the `photos[]` aggregate column is present on the
+  // client + admin shapes (the guard shape skips the array_agg).
+  for (const row of result.rows) {
+    if (Array.isArray(row.photos)) {
+      row.photos = await presignAll(row.photos);
+    }
+  }
   res.json(result.rows);
 });
 
@@ -110,7 +118,7 @@ router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, 
     reported_at: row.reported_at,
     site_name:   row.site_name,
     guard_name:  row.guard_name,
-    photos:      row.photos ?? [],
+    photos:      await presignAll(row.photos),
   });
 });
 

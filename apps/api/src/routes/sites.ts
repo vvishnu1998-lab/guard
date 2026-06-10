@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
-import { uploadBufferToS3 } from '../services/s3';
+import { uploadBufferToS3, urlOrPresign } from '../services/s3';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -26,6 +26,10 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
      ORDER BY s.created_at DESC`,
     isVishnu ? [] : [req.user!.company_id]
   );
+  // S3 lockdown (PR2): re-sign the stored PDF URLs.
+  for (const row of result.rows) {
+    row.instructions_pdf_url = await urlOrPresign(row.instructions_pdf_url);
+  }
   res.json(result.rows);
 });
 
@@ -45,6 +49,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
     isVishnu ? [req.params.id] : [req.params.id, req.user!.company_id]
   );
   if (!result.rows[0]) return res.status(404).json({ error: 'Site not found' });
+  result.rows[0].instructions_pdf_url = await urlOrPresign(result.rows[0].instructions_pdf_url);
   res.json(result.rows[0]);
 });
 

@@ -20,6 +20,7 @@ import { pool } from '../db/pool';
 import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
+import { presignAll } from '../services/s3';
 
 const router = Router();
 
@@ -86,6 +87,12 @@ router.get('/reports', requireAuth('client'), async (req: Request, res: Response
   query += ' GROUP BY r.id, g.name ORDER BY r.reported_at DESC LIMIT 200';
 
   const result = await pool.query(query, params);
+  // S3 lockdown (PR2): re-sign every photo URL on the client portal feed.
+  for (const row of result.rows) {
+    if (Array.isArray(row.photos)) {
+      row.photos = await presignAll(row.photos);
+    }
+  }
   res.json(result.rows);
 });
 

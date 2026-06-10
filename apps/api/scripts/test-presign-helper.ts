@@ -12,6 +12,7 @@ import {
   presignGet,
   extractS3Key,
   urlOrPresign,
+  presignAll,
   PRESIGN_GET_TTL_SECONDS,
 } from '../src/services/s3';
 
@@ -82,6 +83,56 @@ async function main() {
   const out2 = await urlOrPresign(sampleKey);
   ok('urlOrPresign(bare key) returns a signed URL', !!out2 && out2.includes('X-Amz-Signature='));
   ok('urlOrPresign(bare key) signed URL contains the key path', !!out2 && out2.includes('report/'));
+
+  // ── presignAll — the `photos[]` aggregate shape ─────────────────────────
+  eq('presignAll(null) → []', await presignAll(null), []);
+  eq('presignAll(undefined) → []', await presignAll(undefined), []);
+  eq('presignAll([]) → []', await presignAll([]), []);
+  const arr1 = await presignAll([fullUrl, fullUrl]);
+  ok('presignAll returns same-length array', arr1.length === 2);
+  ok('presignAll items are signed URLs', arr1.every((u) => u.includes('X-Amz-Signature=')));
+  // Mixed null inside the array (e.g. a partially-failed array_agg) — drops null
+  const arr2 = await presignAll([fullUrl, null, sampleKey]);
+  ok('presignAll drops null items', arr2.length === 2);
+  ok('presignAll preserves order across nulls',
+    arr2[0].includes(encodeURIComponent('test.jpg')) || arr2[0].includes('test.jpg'),
+    'first item should still be the full-URL input after signing');
+
+  // ── End-to-end shape verification — simulate the transform per endpoint ─
+  // Reports list: row.photos = await presignAll(row.photos)
+  const reportsRow = { id: 'r1', photos: [fullUrl, sampleKey] };
+  reportsRow.photos = await presignAll(reportsRow.photos);
+  ok('reports list row.photos[*] are all signed',
+    reportsRow.photos.every((u: string) => u.includes('X-Amz-Signature=')));
+
+  // Activity log: r.log_media_url + r.log_media_urls together
+  const activityRow = { log_media_url: sampleKey as string | null, log_media_urls: [fullUrl] };
+  activityRow.log_media_url = await urlOrPresign(activityRow.log_media_url);
+  activityRow.log_media_urls = await presignAll(activityRow.log_media_urls);
+  ok('activity row log_media_url is a signed URL',
+    !!activityRow.log_media_url && activityRow.log_media_url.includes('X-Amz-Signature='));
+  ok('activity row log_media_urls[0] is a signed URL',
+    activityRow.log_media_urls[0]?.includes('X-Amz-Signature='));
+
+  // Sites GET: row.instructions_pdf_url
+  const siteRow = { id: 's1', instructions_pdf_url: sampleKey as string | null };
+  siteRow.instructions_pdf_url = await urlOrPresign(siteRow.instructions_pdf_url);
+  ok('site row instructions_pdf_url is a signed URL',
+    !!siteRow.instructions_pdf_url && siteRow.instructions_pdf_url.includes('X-Amz-Signature='));
+
+  // Sites GET on row with no PDF
+  const noPdfSite = { id: 's2', instructions_pdf_url: null as string | null };
+  noPdfSite.instructions_pdf_url = await urlOrPresign(noPdfSite.instructions_pdf_url);
+  ok('site row with null pdf stays null', noPdfSite.instructions_pdf_url === null);
+
+  // Breach (admin /violations): row.photo_url null-safe
+  const breachRow = { id: 'b1', photo_url: null as string | null };
+  breachRow.photo_url = await urlOrPresign(breachRow.photo_url);
+  ok('breach row with null photo_url stays null', breachRow.photo_url === null);
+  const breachWithPhoto = { id: 'b2', photo_url: fullUrl as string | null };
+  breachWithPhoto.photo_url = await urlOrPresign(breachWithPhoto.photo_url);
+  ok('breach row with photo gets signed URL',
+    !!breachWithPhoto.photo_url && breachWithPhoto.photo_url.includes('X-Amz-Signature='));
 
   // ── Summary ─────────────────────────────────────────────────────────────
   console.log('');
