@@ -4,9 +4,11 @@ Surfaced 2026-06-10 during PR4 prep. Not for Sunday; queue after the flip beds i
 
 ## 1. Pre-Apr-23 cohort
 
-29 objects in `guard-media-prod` modified before the 2026-04-23 D1+D2
-upload-hardening window. All are `clock_in/*` and `report/*` JPEGs from
-2026-04-08 → 2026-04-19, two companies' guards (343102a1 + b062f601).
+**28 objects** in `guard-media-prod` modified before the 2026-04-23 D1+D2
+upload-hardening window (was 29 — one malicious test artifact deleted
+pre-flip; see "RESOLVED PRE-FLIP" entry below). All remaining are
+`clock_in/*` and `report/*` JPEGs from 2026-04-08 → 2026-04-19, two
+companies' guards (343102a1 + b062f601).
 
 **Spot check (2026-06-10):** 5 random samples — all valid JFIF JPEGs
 (`ffd8ffe0` magic-byte prefix). Cohort presumed clean.
@@ -23,32 +25,29 @@ upload-hardening window. All are `clock_in/*` and `report/*` JPEGs from
    each — none have it set today, which only matters if a downstream
    consumer ever inspects metadata. Currently nothing does.
 
-### Confirmed malicious / test artifact — DELETE BEFORE LAUNCH
+### Confirmed malicious / test artifact — RESOLVED PRE-FLIP 2026-06-10T22:22:07Z
 
 `report/b062f601-6173-461c-897e-af2c427e0fd7/2026-04-19/02321e6a-e9be-486a-9478-c0a277617715.jpg`
 (49 bytes, uploaded 2026-04-19, **before D1/D2 hardening landed ~Apr 23**)
 
-**What `file` reports:** `MS-DOS executable`
+**What `file` reported:** `MS-DOS executable`
 **Hex header:** `4D 5A 90 00 03 00 00 00` (DOS `MZ` magic + PE stub)
 **Strings:** `FAKE_EXECUTABLE_DATA_masquerading_as_jpeg`
 
 Almost certainly an artifact of the V6 audit attack that confirmed the
-pre-D1 PUT-presigner had no Content-Type or size validation. Someone
-(probably the auditor or you) proved arbitrary bytes could land under
-a `.jpg` key. The bytes are inert at rest — no execution context — but
-this should not survive to launch.
+pre-D1 PUT-presigner had no Content-Type or size validation. Inert at
+rest, but exposed via the public-read bucket policy that's about to
+flip on Sunday — operator chose to delete pre-flip to (a) avoid the
+versioning-delete-marker followup post-PR4 and (b) close the
+public-read exposure window immediately.
 
-**Action: delete immediately.** No retention obligation (it's not real
-guard data); preserving it as audit evidence isn't necessary since the
-hex header + strings dump are already captured in this doc.
-
-```bash
-aws s3api delete-object --bucket guard-media-prod \
-  --key 'report/b062f601-6173-461c-897e-af2c427e0fd7/2026-04-19/02321e6a-e9be-486a-9478-c0a277617715.jpg'
-```
-
-If versioning is already enabled (will be post-PR4), also delete the
-version permanently with `--version-id <id>`.
+**Status: DELETED 2026-06-10T22:22:07Z.**
+- `aws s3 rm s3://guard-media-prod/report/b062f601-…/02321e6a-….jpg` → confirmed deleted
+- `aws s3api head-object` → 404 Not Found
+- Pre-Apr-23 cohort count: 29 → 28
+- Versioning not yet enabled at delete time, so the delete is permanent;
+  no version-marker cleanup needed in PR5.
+- Do NOT re-process in PR5. Cohort sweep can skip this key.
 
 ## 2. `starguard-media` ghost bucket
 
