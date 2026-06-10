@@ -5,7 +5,7 @@
 // [lng,lat] arrays) matches what validateAtSite already expects, so no API
 // change is needed.
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useCallback } from 'react';
 import { MapContainer, TileLayer, FeatureGroup, Polygon as LPolygon, Marker, useMap } from 'react-leaflet';
 import { EditControl } from 'react-leaflet-draw';
 import L from 'leaflet';
@@ -47,6 +47,9 @@ function FitToPolygon({ polygon }: { polygon: LatLng[] }) {
 
 export default function GeofenceMapEditor({ initialPolygon, initialCentre, centreOverride, onChange }: Props) {
   const featureGroupRef = useRef<L.FeatureGroup | null>(null);
+  // Pre-seed exactly once. Using a ref guards against React Strict Mode
+  // running the ref callback twice or re-renders re-invoking it.
+  const seededRef = useRef(false);
 
   const initialView = useMemo<{ centre: LatLng; zoom: number }>(() => {
     if (initialPolygon.length >= 3) {
@@ -77,23 +80,23 @@ export default function GeofenceMapEditor({ initialPolygon, initialCentre, centr
   }
 
   // Pre-seed the FeatureGroup with the initial polygon so EditControl can
-  // edit/delete it. Runs once after mount.
-  useEffect(() => {
-    const group = featureGroupRef.current;
-    if (!group || initialPolygon.length < 3) return;
-    const layer = L.polygon(initialPolygon.map((p) => [p.lat, p.lng] as [number, number]), {
-      color: '#fbbf24',
-      weight: 2,
-      fillOpacity: 0.15,
-    });
-    group.addLayer(layer);
-    return () => {
-      group.removeLayer(layer);
-    };
-    // initial-mount only — don't re-add on every initialPolygon change (would
-    // wipe in-flight edits).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // edit/delete it. We do this inside the ref callback (not a useEffect)
+  // because react-leaflet v4's ref attaches AFTER the effect's mount pass —
+  // a useEffect with [] deps reads featureGroupRef.current as null.
+  // The seededRef guard prevents double-add on Strict Mode / re-render.
+  const handleFeatureGroupRef = useCallback(
+    (fg: L.FeatureGroup | null) => {
+      featureGroupRef.current = fg ?? null;
+      if (!fg || seededRef.current || initialPolygon.length < 3) return;
+      const layer = L.polygon(
+        initialPolygon.map((p) => [p.lat, p.lng] as [number, number]),
+        { color: '#fbbf24', weight: 2, fillOpacity: 0.15 },
+      );
+      fg.addLayer(layer);
+      seededRef.current = true;
+    },
+    [initialPolygon],
+  );
 
   return (
     <div className="relative h-[400px] w-full rounded-lg overflow-hidden border border-[#1A3050]">
@@ -111,11 +114,7 @@ export default function GeofenceMapEditor({ initialPolygon, initialCentre, centr
 
         <FitToPolygon polygon={initialPolygon} />
 
-        <FeatureGroup
-          ref={(ref) => {
-            featureGroupRef.current = (ref as unknown as L.FeatureGroup) ?? null;
-          }}
-        >
+        <FeatureGroup ref={handleFeatureGroupRef as never}>
           <EditControl
             position="topright"
             onCreated={handleChange}

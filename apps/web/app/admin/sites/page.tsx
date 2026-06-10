@@ -144,11 +144,21 @@ export default function SitesPage() {
   /* ── Set geofence ────────────────────────────────────────────────── */
   function openGeo(site: Site) {
     setGeoSite(site);
-    const existing = site.polygon_coordinates ?? [];
+    // Defend against the API returning the polygon as a JSON string instead
+    // of a parsed array — observed once on a deploy where node-pg's JSONB
+    // type parser was overridden. Treat anything non-array as "no polygon".
+    const raw = site.polygon_coordinates;
+    const existing: LatLng[] = Array.isArray(raw) ? raw : [];
     const validExisting = existing.length >= 3;
     // Re-opening an existing fence: a 16-vertex equal-radius ring looks like
     // the legacy radius synth → default to Radius mode. Anything else → Draw.
     const defaultMode: GeoMode = validExisting && !looksLikeCircleSynth(existing) ? 'draw' : 'radius';
+    if (site.has_geofence && !validExisting) {
+      // eslint-disable-next-line no-console
+      console.warn('[geofence] site marked has_geofence=true but polygon missing/short — defaulting to Radius mode', {
+        siteId: site.id, rawType: typeof raw, isArray: Array.isArray(raw), length: Array.isArray(raw) ? raw.length : null,
+      });
+    }
     setGeoMode(defaultMode);
     setDrawnPolygon(validExisting ? existing : []);
     setGeo({

@@ -13,6 +13,7 @@ function getToken(): string {
 
 export async function adminFetch(path: string, options?: RequestInit): Promise<Response> {
   return fetch(`${API}${path}`, {
+    cache: 'no-store',  // never serve a stale list — refetches after mutations must reflect them
     ...options,
     headers: {
       'Content-Type': 'application/json',
