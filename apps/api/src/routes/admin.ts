@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
 import { validatePassword } from './auth';
+import { urlOrPresign } from '../services/s3';
 
 const router = Router();
 
@@ -313,6 +314,10 @@ router.get('/violations', requireAuth('company_admin'), async (req, res) => {
      LIMIT $2`,
     [cid, limit],
   );
+  // S3 lockdown (PR2): re-sign the breach photo URLs.
+  for (const row of result.rows) {
+    row.photo_url = await urlOrPresign(row.photo_url);
+  }
   res.json(result.rows);
 });
 

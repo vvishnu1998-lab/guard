@@ -30,6 +30,7 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db/pool';
 import { requireAuth } from '../middleware/auth';
+import { urlOrPresign, presignAll } from '../services/s3';
 
 const router = Router();
 
@@ -355,6 +356,13 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
   // Paginate in memory
   const total    = rows.length;
   const pageRows = rows.slice(offset, offset + pageSize);
+
+  // S3 lockdown (PR2): re-sign every photo URL on the paginated rows.
+  // Done AFTER pagination so we never sign URLs we're about to discard.
+  for (const r of pageRows) {
+    r.log_media_url  = await urlOrPresign(r.log_media_url);
+    r.log_media_urls = await presignAll(r.log_media_urls);
+  }
 
   res.json({
     rows:        pageRows,

@@ -228,3 +228,19 @@ export async function urlOrPresign(
   const key = extractS3Key(stored);
   return presignGet(key, ttlSec);
 }
+
+/**
+ * Array version of `urlOrPresign` — for the `photos[]` aggregates returned
+ * by `array_agg(rp.storage_url ORDER BY rp.photo_index)`. Null/empty input
+ * → `[]`. Items that fail presigning are dropped silently (the array
+ * shape ≥ 0 items is preserved; a single broken row doesn't tank the
+ * whole report). Order is preserved.
+ */
+export async function presignAll(
+  stored: (string | null)[] | null | undefined,
+  ttlSec: number = PRESIGN_GET_TTL_SECONDS,
+): Promise<string[]> {
+  if (!stored || stored.length === 0) return [];
+  const signed = await Promise.all(stored.map((u) => urlOrPresign(u, ttlSec)));
+  return signed.filter((u): u is string => u !== null);
+}
