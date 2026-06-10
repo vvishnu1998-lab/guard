@@ -5,6 +5,7 @@
  * Auto-refreshes every 30 seconds.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { adminGet } from '../../../lib/adminApi';
 
 interface LiveGuard {
@@ -93,6 +94,22 @@ export default function LiveMapPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Breach-alert email deep-link: /admin/live-map?breach=<violation_id>
+  // Scrolls the matching breach row into view + flashes a highlight ring
+  // once the breaches list loads. Filter window is widened to 7d when the
+  // deep-link is present so older breaches aren't accidentally hidden.
+  const searchParams       = useSearchParams();
+  const targetBreachId     = searchParams?.get('breach') ?? null;
+  const targetBreachIdRef  = useRef<string | null>(targetBreachId);
+  const breachRowRefs      = useRef<Map<string, HTMLTableRowElement>>(new Map());
+  const [highlightedBreachId, setHighlightedBreachId] = useState<string | null>(null);
+  useEffect(() => {
+    // Auto-widen the time filter when arriving from an email so older
+    // breaches (>24h) are still reachable. Only fires once on initial
+    // mount with a target id; subsequent filter changes are user-driven.
+    if (targetBreachIdRef.current) setSinceFilter('7d');
+  }, []);
+
   const loadBreaches = useCallback(async (since: SinceFilter, status: StatusFilter) => {
     try {
       const data = await adminGet<Breach[]>(
@@ -102,6 +119,23 @@ export default function LiveMapPage() {
     } catch (e: any) { setError(e.message); }
     finally { setBreachesLoading(false); }
   }, []);
+
+  // Scroll-into-view + flash highlight when the breach-alert deep-link
+  // lands on a known breach id. Fires after each breaches load until the
+  // target id is found (handles the case where the initial 24h window
+  // misses an older breach and the 7d auto-widen kicks in).
+  useEffect(() => {
+    if (!targetBreachId || breachesLoading) return;
+    const match = breaches.find((b) => b.id === targetBreachId);
+    if (!match) return;
+    const row = breachRowRefs.current.get(targetBreachId);
+    if (row) {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightedBreachId(targetBreachId);
+      const t = setTimeout(() => setHighlightedBreachId(null), 4000);
+      return () => clearTimeout(t);
+    }
+  }, [breaches, breachesLoading, targetBreachId]);
 
   const load = useCallback(async () => {
     try {
@@ -325,9 +359,13 @@ export default function LiveMapPage() {
               {!breachesLoading && breaches.map((b) => (
                 <tr
                   key={b.id}
+                  ref={(el) => {
+                    if (el) breachRowRefs.current.set(b.id, el);
+                    else    breachRowRefs.current.delete(b.id);
+                  }}
                   className={`border-b border-[#1A3050] transition-colors ${
                     !b.is_resolved ? 'bg-red-950/30 hover:bg-red-950/50' : 'hover:bg-[#0B1526]'
-                  }`}
+                  } ${highlightedBreachId === b.id ? 'ring-2 ring-amber-400 ring-inset' : ''}`}
                 >
                   <td className="p-4 text-gray-300 text-xs whitespace-nowrap">
                     {fmtBreachTime(b.occurred_at)}
