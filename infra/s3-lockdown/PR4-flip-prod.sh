@@ -110,7 +110,60 @@ SIGNED_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SIGNED_URL")
 [ "$SIGNED_CODE" = "200" ] || fail "presigned GET expected 200, got $SIGNED_CODE"
 ok "presigned GET → 200 (works as expected)"
 
-log "DONE — bucket is private, presigned reads + uploads still flow"
+log "DONE (steps 0-7) — bucket is private, presigned reads + uploads still flow"
 echo ""
-echo "Watch the API for the next ~15 min for any 403s in Railway logs."
-echo "If anything breaks, run PR4-rollback-prod.sh."
+
+# ── 8. Railway 15-min 403 watch ──────────────────────────────────────────────
+# Tails the Railway API service for 15 minutes filtering for any line that
+# mentions a 403 against an upload-presign or photo-serving route. If any
+# fire during the window the script PROMPTS before printing the final
+# "flip confirmed" line — so the operator can decide to roll back instead.
+#
+# Railway CLI does not have a flag for "tail for N minutes then stop" so
+# we wrap `railway logs --tail` in a background process + sleep + kill.
+
+log "8. Watching Railway logs for 403s on upload + photo routes (15 min)"
+
+WATCH_LOG=$(mktemp)
+WATCH_DURATION=900  # 15 minutes
+PATTERNS='403|/api/uploads/presign|photo_url|storage_url|selfie_url|site_photo_url|instructions_pdf_url|/api/admin/violations|/api/activity-log|/api/reports|/api/client/reports|/api/billing/hours-export'
+
+if command -v railway >/dev/null 2>&1; then
+  echo "  → tailing 'railway logs' for ${WATCH_DURATION}s into $WATCH_LOG"
+  railway logs > "$WATCH_LOG" 2>&1 &
+  WATCH_PID=$!
+  # Sleep but allow ctrl-C cleanup
+  trap 'kill $WATCH_PID 2>/dev/null; rm -f "$WATCH_LOG"; exit 130' INT
+  sleep "$WATCH_DURATION"
+  kill "$WATCH_PID" 2>/dev/null || true
+  wait "$WATCH_PID" 2>/dev/null || true
+  trap - INT
+
+  HITS=$(grep -E "$PATTERNS" "$WATCH_LOG" | grep -E '403|forbidden|access denied|accessdenied' -i || true)
+  if [ -n "$HITS" ]; then
+    echo ""
+    printf "\033[1;31m== STEP 8 — 403s OBSERVED IN 15-MIN WATCH ==\033[0m\n"
+    echo "$HITS" | head -30
+    echo ""
+    echo "Full capture: $WATCH_LOG (saved for review)"
+    echo ""
+    read -p "Confirm flip succeeded anyway? [y/N] " ack
+    [ "$ack" = "y" ] || [ "$ack" = "Y" ] || fail "operator declined — investigate or run PR4-rollback-prod.sh"
+    ok "operator confirmed despite 403s"
+  else
+    ok "no 403s observed during 15-min window"
+    rm -f "$WATCH_LOG"
+  fi
+else
+  # 8a — manual fallback: print the command for the operator to run
+  printf "\033[1;33m== STEP 8a — MANUAL: run this in a second terminal ==\033[0m\n"
+  cat <<MANUAL
+  railway logs | grep -E '403|forbidden|access denied' \\
+    | grep -E '/api/uploads/presign|photo_url|storage_url|selfie_url|site_photo_url|instructions_pdf_url|/api/admin/violations|/api/activity-log|/api/reports|/api/client/reports|/api/billing/hours-export'
+
+  Watch for ~15 minutes. If anything matches, run PR4-rollback-prod.sh.
+MANUAL
+  read -p "Press [Enter] after 15 minutes of clean logs to confirm the flip…"
+fi
+
+log "FLIP CONFIRMED — bucket is private, 15-min watch complete, no rollback triggered"

@@ -23,10 +23,32 @@ upload-hardening window. All are `clock_in/*` and `report/*` JPEGs from
    each — none have it set today, which only matters if a downstream
    consumer ever inspects metadata. Currently nothing does.
 
-**One suspicious-looking row in the table:**
-`report/b062f601-…/2026-04-19/02321e6a-….jpg` is **49 bytes** — way
-smaller than a real photo. Could be a truncated upload from the pre-D1
-era. Inspect manually before assuming it's a valid image.
+### Confirmed malicious / test artifact — DELETE BEFORE LAUNCH
+
+`report/b062f601-6173-461c-897e-af2c427e0fd7/2026-04-19/02321e6a-e9be-486a-9478-c0a277617715.jpg`
+(49 bytes, uploaded 2026-04-19, **before D1/D2 hardening landed ~Apr 23**)
+
+**What `file` reports:** `MS-DOS executable`
+**Hex header:** `4D 5A 90 00 03 00 00 00` (DOS `MZ` magic + PE stub)
+**Strings:** `FAKE_EXECUTABLE_DATA_masquerading_as_jpeg`
+
+Almost certainly an artifact of the V6 audit attack that confirmed the
+pre-D1 PUT-presigner had no Content-Type or size validation. Someone
+(probably the auditor or you) proved arbitrary bytes could land under
+a `.jpg` key. The bytes are inert at rest — no execution context — but
+this should not survive to launch.
+
+**Action: delete immediately.** No retention obligation (it's not real
+guard data); preserving it as audit evidence isn't necessary since the
+hex header + strings dump are already captured in this doc.
+
+```bash
+aws s3api delete-object --bucket guard-media-prod \
+  --key 'report/b062f601-6173-461c-897e-af2c427e0fd7/2026-04-19/02321e6a-e9be-486a-9478-c0a277617715.jpg'
+```
+
+If versioning is already enabled (will be post-PR4), also delete the
+version permanently with `--version-id <id>`.
 
 ## 2. `starguard-media` ghost bucket
 
