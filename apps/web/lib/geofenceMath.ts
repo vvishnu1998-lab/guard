@@ -62,29 +62,11 @@ export function isSelfIntersecting(polygon: LatLng[]): boolean {
  *  Used to decide the modal's default mode when re-opening an existing
  *  fence — circle-synth → default to Radius mode, real polygon → Draw. */
 export function looksLikeCircleSynth(polygon: LatLng[]): boolean {
-  // === BUG 2 DIAGNOSTIC — TEMPORARY ============================================
-  /* eslint-disable no-console */
-  console.log('[geofence.looksLikeCircleSynth] called with:', {
-    isArray: Array.isArray(polygon),
-    length: polygon?.length,
-    typeofPolygon: typeof polygon,
-    first: polygon?.[0],
-  });
-  /* eslint-enable no-console */
-  // === END DIAGNOSTIC ==========================================================
-  if (polygon.length !== 16) {
-    /* eslint-disable no-console */
-    console.log('[geofence.looksLikeCircleSynth] early-returning false (length !== 16):', polygon.length);
-    /* eslint-enable no-console */
-    return false;
-  }
+  if (polygon.length !== 16) return false;
   const centre = centroidOf(polygon);
   const distances = polygon.map((p) => haversineMeters(centre, p));
   const max = Math.max(...distances);
   const min = Math.min(...distances);
-  /* eslint-disable no-console */
-  console.log('[geofence.looksLikeCircleSynth] distance variance:', { max, min, ratio: max === 0 ? 'div0' : (max - min) / max });
-  /* eslint-enable no-console */
   if (max === 0) return false;
   return (max - min) / max < 0.05;
 }

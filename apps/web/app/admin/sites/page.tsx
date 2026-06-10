@@ -92,23 +92,6 @@ export default function SitesPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  // === BUG 2 DIAGNOSTIC — TEMPORARY ============================================
-  // Log every time geoMode changes after a geoSite is selected, including the
-  // initial transition. If openGeo sets 'draw' but a later render disagrees,
-  // we'll see two log lines and the gap between them.
-  useEffect(() => {
-    if (!geoSite) return;
-    /* eslint-disable no-console */
-    console.log('[geofence.render] post-render observation', {
-      geoSiteId: geoSite.id,
-      geoMode,
-      drawnPolygonLength: drawnPolygon.length,
-      hasGeo: !!(geo.center_lat && geo.center_lng && geo.radius_meters),
-    });
-    /* eslint-enable no-console */
-  }, [geoSite, geoMode, drawnPolygon.length, geo.center_lat, geo.center_lng, geo.radius_meters]);
-  // === END DIAGNOSTIC ==========================================================
-
   /* ── Upload PDF to a site ───────────────────────────────────────── */
   async function uploadPdfToSite(siteId: string, file: File): Promise<void> {
     const fd = new FormData();
@@ -161,49 +144,15 @@ export default function SitesPage() {
   /* ── Set geofence ────────────────────────────────────────────────── */
   function openGeo(site: Site) {
     setGeoSite(site);
-    // === BUG 2 DIAGNOSTIC — TEMPORARY ============================================
-    // Logging every decision point so we can see why a real prod 4-vertex
-    // polygon defaults to Radius when the local stub defaults to Draw.
-    // Remove this block once BUG 2 is resolved.
-    /* eslint-disable no-console */
-    console.log('[geofence.openGeo] (1) full site object:', JSON.stringify(site));
-    const raw = site.polygon_coordinates;
-    console.log('[geofence.openGeo] (2) raw polygon_coordinates:', {
-      value: raw,
-      typeof: typeof raw,
-      isArray: Array.isArray(raw),
-      length: raw == null ? null : (raw as { length?: number }).length,
-      firstElement: Array.isArray(raw) && raw.length > 0 ? raw[0] : null,
-      firstElementTypeof: Array.isArray(raw) && raw.length > 0 ? typeof raw[0] : null,
-      ctorName: raw && typeof raw === 'object' ? (raw as object).constructor?.name : null,
-    });
-    /* eslint-enable no-console */
-    // === END DIAGNOSTIC ==========================================================
-
     // Defend against the API returning the polygon as a JSON string instead
-    // of a parsed array — observed once on a deploy where node-pg's JSONB
-    // type parser was overridden. Treat anything non-array as "no polygon".
+    // of a parsed array — would happen if node-pg's JSONB type parser were
+    // ever overridden. Treat anything non-array as "no polygon".
+    const raw = site.polygon_coordinates;
     const existing: LatLng[] = Array.isArray(raw) ? raw : [];
     const validExisting = existing.length >= 3;
-    /* eslint-disable no-console */
-    console.log('[geofence.openGeo] (3) validExisting computation:', {
-      validExisting,
-      checkedAgainst: 'Array.isArray(raw) AND existing.length >= 3',
-      existingLength: existing.length,
-    });
-    const synthish = validExisting && looksLikeCircleSynth(existing);
-    console.log('[geofence.openGeo] (4) looksLikeCircleSynth:', {
-      result: synthish,
-      vertexCount: existing.length,
-    });
-    /* eslint-enable no-console */
     // Re-opening an existing fence: a 16-vertex equal-radius ring looks like
     // the legacy radius synth → default to Radius mode. Anything else → Draw.
-    const defaultMode: GeoMode = validExisting && !synthish ? 'draw' : 'radius';
-    /* eslint-disable no-console */
-    console.log('[geofence.openGeo] (5) final defaultMode:', defaultMode);
-    /* eslint-enable no-console */
-
+    const defaultMode: GeoMode = validExisting && !looksLikeCircleSynth(existing) ? 'draw' : 'radius';
     if (site.has_geofence && !validExisting) {
       // eslint-disable-next-line no-console
       console.warn('[geofence] site marked has_geofence=true but polygon missing/short — defaulting to Radius mode', {
@@ -532,22 +481,15 @@ export default function SitesPage() {
       )}
 
       {/* ── Set Geofence Modal ────────────────────────────────────────── */}
-      {geoSite && (() => {
-        // === BUG 2 DIAGNOSTIC — TEMPORARY ====================================
-        /* eslint-disable no-console */
-        console.log('[geofence.render] modal JSX evaluated with geoMode:', geoMode, 'for site:', geoSite.id);
-        /* eslint-enable no-console */
-        return null;
-      })()}
       {geoSite && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8" data-geofence-mode={geoMode} data-geofence-site={geoSite.id}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8">
           <div className="w-full max-w-3xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">SET GEOFENCE</h2>
               <button onClick={() => setGeoSite(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
             </div>
             <p className="text-gray-500 text-xs mb-4">
-              Site: <span className="text-gray-300">{geoSite.name}</span> <span className="text-amber-400/50">[debug: mode={geoMode}]</span>
+              Site: <span className="text-gray-300">{geoSite.name}</span>
             </p>
 
             {/* Mode toggle */}
