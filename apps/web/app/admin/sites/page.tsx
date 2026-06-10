@@ -4,7 +4,26 @@
  * List sites, create new site, set geofence, toggle client portal access, PDF instructions.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { adminGet, adminPost, adminPatch } from '../../../lib/adminApi';
+import {
+  centroidOf,
+  boundingRadiusMeters,
+  isSelfIntersecting,
+  looksLikeCircleSynth,
+  circlePolygon,
+  type LatLng,
+} from '../../../lib/geofenceMath';
+
+// next/dynamic + ssr:false because Leaflet touches `window` at import time.
+const GeofenceMapEditor = dynamic(() => import('../../../components/GeofenceMapEditor'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-[400px] w-full rounded-lg border border-[#1A3050] bg-[#0B1526] flex items-center justify-center text-gray-500 text-sm">
+      Loading map…
+    </div>
+  ),
+});
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 function getAdminToken() {
@@ -25,29 +44,14 @@ interface Site {
   center_lat:                  number | null;
   center_lng:                  number | null;
   radius_meters:               number | null;
+  polygon_coordinates:         LatLng[] | null;
   instructions_pdf_url:        string | null;
 }
 
+type GeoMode = 'radius' | 'draw';
+
 const EMPTY_FORM = { name: '', address: '', contract_start: '', contract_end: '' as string };
 const EMPTY_GEO  = { center_lat: '', center_lng: '', radius_meters: '' };
-
-/** Generate an N-point circle polygon from a center + radius (in metres). */
-function circlePolygon(
-  lat: number, lng: number, radiusM: number, points = 16
-): { lat: number; lng: number }[] {
-  const coords: { lat: number; lng: number }[] = [];
-  const latR   = lat * (Math.PI / 180);
-  const dLat   = radiusM / 111_320;
-  const dLng   = radiusM / (111_320 * Math.cos(latR));
-  for (let i = 0; i < points; i++) {
-    const angle = (2 * Math.PI * i) / points;
-    coords.push({
-      lat: lat + dLat * Math.cos(angle),
-      lng: lng + dLng * Math.sin(angle),
-    });
-  }
-  return coords;
-}
 
 export default function SitesPage() {
   const [sites,        setSites]        = useState<Site[]>([]);
@@ -64,6 +68,8 @@ export default function SitesPage() {
   // geofence modal
   const [geoSite,      setGeoSite]      = useState<Site | null>(null);
   const [geo,          setGeo]          = useState(EMPTY_GEO);
+  const [geoMode,      setGeoMode]      = useState<GeoMode>('radius');
+  const [drawnPolygon, setDrawnPolygon] = useState<LatLng[]>([]);
   const [geoSaving,    setGeoSaving]    = useState(false);
   const [geoError,     setGeoError]     = useState('');
 
@@ -138,12 +144,35 @@ export default function SitesPage() {
   /* ── Set geofence ────────────────────────────────────────────────── */
   function openGeo(site: Site) {
     setGeoSite(site);
+    const existing = site.polygon_coordinates ?? [];
+    const validExisting = existing.length >= 3;
+    // Re-opening an existing fence: a 16-vertex equal-radius ring looks like
+    // the legacy radius synth → default to Radius mode. Anything else → Draw.
+    const defaultMode: GeoMode = validExisting && !looksLikeCircleSynth(existing) ? 'draw' : 'radius';
+    setGeoMode(defaultMode);
+    setDrawnPolygon(validExisting ? existing : []);
     setGeo({
       center_lat:    site.center_lat    != null ? String(site.center_lat)    : '',
       center_lng:    site.center_lng    != null ? String(site.center_lng)    : '',
       radius_meters: site.radius_meters != null ? String(site.radius_meters) : '',
     });
     setGeoError('');
+  }
+
+  // Draw mode: auto-fill centre + radius defaults whenever the polygon
+  // changes. Admin can override the inputs after; a re-draw stomps the
+  // overrides (acceptable per scope — no preservation across re-draws).
+  function handlePolygonChange(poly: LatLng[]) {
+    setDrawnPolygon(poly);
+    if (poly.length >= 3) {
+      const c = centroidOf(poly);
+      const r = boundingRadiusMeters(c, poly);
+      setGeo({
+        center_lat:    c.lat.toFixed(6),
+        center_lng:    c.lng.toFixed(6),
+        radius_meters: String(r),
+      });
+    }
   }
 
   async function saveGeofence() {
@@ -155,13 +184,27 @@ export default function SitesPage() {
     }
     if (lat < -90 || lat > 90)  { setGeoError('Latitude must be between -90 and 90');   return; }
     if (lng < -180 || lng > 180){ setGeoError('Longitude must be between -180 and 180'); return; }
+
+    let polygon: LatLng[];
+    if (geoMode === 'draw') {
+      if (drawnPolygon.length < 3) {
+        setGeoError('Draw a polygon with at least 3 vertices first.'); return;
+      }
+      if (isSelfIntersecting(drawnPolygon)) {
+        setGeoError('Polygon edges cross. Re-draw without self-intersections.'); return;
+      }
+      polygon = drawnPolygon;
+    } else {
+      polygon = circlePolygon(lat, lng, rad);
+    }
+
     setGeoSaving(true); setGeoError('');
     try {
       await adminPatch(`/api/sites/${geoSite!.id}/geofence`, {
         center_lat:          lat,
         center_lng:          lng,
         radius_meters:       rad,
-        polygon_coordinates: circlePolygon(lat, lng, rad),
+        polygon_coordinates: polygon,
       });
       setGeoSite(null);
       await load();
@@ -429,27 +472,96 @@ export default function SitesPage() {
 
       {/* ── Set Geofence Modal ────────────────────────────────────────── */}
       {geoSite && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-lg bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8">
+          <div className="w-full max-w-3xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">SET GEOFENCE</h2>
               <button onClick={() => setGeoSite(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
             </div>
-            <p className="text-gray-500 text-xs mb-5">
+            <p className="text-gray-500 text-xs mb-4">
               Site: <span className="text-gray-300">{geoSite.name}</span>
             </p>
 
-            {/* How to find coordinates */}
-            <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 mb-5 text-xs text-gray-400 space-y-1">
-              <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO GET COORDINATES</p>
-              <p>1. Open <span className="text-white">Google Maps</span> and search for the site address.</p>
-              <p>2. Right-click on the exact centre of the building/property.</p>
-              <p>3. Click the coordinates that appear at the top of the menu — they are copied automatically.</p>
-              <p>4. Paste them below (they look like: <span className="text-white font-mono">37.7749, -122.4194</span>).</p>
-              <p className="pt-1">Set the radius to cover the full property boundary — e.g. <span className="text-white">50m</span> for a small building, <span className="text-white">200m</span> for a large campus.</p>
+            {/* Mode toggle */}
+            <div className="flex gap-2 mb-5" role="radiogroup" aria-label="Geofence mode">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={geoMode === 'radius'}
+                onClick={() => setGeoMode('radius')}
+                className={`flex-1 px-4 py-2 rounded-lg text-xs tracking-widest border transition-colors ${
+                  geoMode === 'radius'
+                    ? 'bg-amber-400 text-gray-900 border-amber-400 font-bold'
+                    : 'bg-[#0B1526] text-gray-400 border-[#1A3050] hover:border-amber-400/50'
+                }`}
+              >
+                RADIUS (CURRENT)
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={geoMode === 'draw'}
+                onClick={() => setGeoMode('draw')}
+                className={`flex-1 px-4 py-2 rounded-lg text-xs tracking-widest border transition-colors ${
+                  geoMode === 'draw'
+                    ? 'bg-amber-400 text-gray-900 border-amber-400 font-bold'
+                    : 'bg-[#0B1526] text-gray-400 border-[#1A3050] hover:border-amber-400/50'
+                }`}
+              >
+                DRAW BOUNDARY
+              </button>
             </div>
 
+            {geoMode === 'radius' && (
+              <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 mb-5 text-xs text-gray-400 space-y-1">
+                <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO GET COORDINATES</p>
+                <p>1. Open <span className="text-white">Google Maps</span> and search for the site address.</p>
+                <p>2. Right-click on the exact centre of the building/property.</p>
+                <p>3. Click the coordinates that appear at the top of the menu — they are copied automatically.</p>
+                <p>4. Paste them below (they look like: <span className="text-white font-mono">37.7749, -122.4194</span>).</p>
+                <p className="pt-1">Set the radius to cover the full property boundary — e.g. <span className="text-white">50m</span> for a small building, <span className="text-white">200m</span> for a large campus.</p>
+              </div>
+            )}
+
+            {geoMode === 'draw' && (
+              <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 mb-4 text-xs text-gray-400 space-y-1">
+                <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO DRAW</p>
+                <p>1. Use the polygon tool in the map (top-right) to click each corner of the property.</p>
+                <p>2. Click the first point again to close the boundary.</p>
+                <p>3. Drag the vertices to adjust. Use the edit/delete tools to revise.</p>
+                <p className="pt-1">Centre and radius below auto-fill from your drawing — you can override them. Radius is the GPS-drift fallback if the polygon ever loads incorrectly on a guard's device.</p>
+              </div>
+            )}
+
             {geoError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{geoError}</div>}
+
+            {geoMode === 'draw' && (
+              <div className="mb-4">
+                <GeofenceMapEditor
+                  initialPolygon={drawnPolygon}
+                  initialCentre={
+                    geoSite.center_lat != null && geoSite.center_lng != null
+                      ? { lat: geoSite.center_lat, lng: geoSite.center_lng }
+                      : null
+                  }
+                  centreOverride={
+                    geo.center_lat && geo.center_lng && !isNaN(parseFloat(geo.center_lat)) && !isNaN(parseFloat(geo.center_lng))
+                      ? { lat: parseFloat(geo.center_lat), lng: parseFloat(geo.center_lng) }
+                      : null
+                  }
+                  onChange={handlePolygonChange}
+                />
+                <p className="text-gray-600 text-xs mt-1">
+                  Vertices: <span className="text-gray-300">{drawnPolygon.length}</span>
+                  {drawnPolygon.length > 0 && drawnPolygon.length < 3 && (
+                    <span className="text-red-400 ml-2">need ≥ 3</span>
+                  )}
+                  {drawnPolygon.length >= 4 && isSelfIntersecting(drawnPolygon) && (
+                    <span className="text-red-400 ml-2">edges cross — re-draw</span>
+                  )}
+                </p>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
@@ -480,8 +592,9 @@ export default function SitesPage() {
                 className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
               />
               <p className="text-gray-600 text-xs mt-1">
-                Guards outside this radius will trigger a geofence violation alert.
-                A 16-point circular boundary is auto-generated from your centre + radius.
+                {geoMode === 'radius'
+                  ? 'Guards outside this radius will trigger a geofence violation alert. A 16-point circular boundary is auto-generated from your centre + radius.'
+                  : 'Radius is the GPS-drift fallback — guards inside the polygon OR within this radius are considered on-post.'}
               </p>
             </div>
 
@@ -497,6 +610,9 @@ export default function SitesPage() {
                     </span>
                   )}
                 </p>
+                {geoMode === 'draw' && (
+                  <p>Polygon: <span className="text-white">{drawnPolygon.length} vertices</span></p>
+                )}
                 <a
                   href={`https://www.google.com/maps?q=${geo.center_lat},${geo.center_lng}`}
                   target="_blank"
