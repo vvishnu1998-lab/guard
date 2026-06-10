@@ -6,6 +6,18 @@ const s3 = new AWS.S3({
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
 });
 
+// Separate S3 client pinned to SigV4 for presignGet. aws-sdk v2 defaults
+// `getSignedUrl*` to SigV2 (deprecated, no region-binding, AWSAccessKeyId
+// leaks the key in the URL). We don't want to change the signing scheme
+// of the existing upload + putObject + getObject calls as a side-effect of
+// this PR, so the SigV4 setting lives on a dedicated instance.
+const s3SigV4 = new AWS.S3({
+  region: process.env.AWS_REGION,
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  signatureVersion: 'v4',
+});
+
 const BUCKET = process.env.S3_BUCKET!;
 
 /**
@@ -123,4 +135,96 @@ export function s3KeyFromPublicUrl(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pre-launch punchlist #1 — S3 bucket lockdown plumbing (PR1)
+//
+// Once the bucket flips private in PR4, every response handler that today
+// returns a stored S3 URL has to instead return a short-lived signed GET
+// URL. These three helpers are the bridge:
+//
+//   presignGet(key, ttl)    — sign a fresh GET URL for `key`, default 15 min
+//   extractS3Key(stored)    — normalise a DB column value (full URL OR bare
+//                             key) into the key form that presignGet expects
+//   urlOrPresign(stored, ttl) — null-safe wrapper that response handlers call
+//
+// Decision Section 4c (deferred storage-shape migration): we accept BOTH
+// formats in `extractS3Key` so PR2 can ship without first migrating every
+// existing row's URL column to bare-key form. The backfill happens in PR5
+// (or later) without blocking the bucket flip.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Default TTL for a presigned GET — 15 min. Long enough to load a page,
+ *  click through a few photos, walk away. Short enough that a screenshot
+ *  of the URL becomes useless quickly. */
+export const PRESIGN_GET_TTL_SECONDS = 60 * 15;
+
+/**
+ * Generate a short-lived signed GET URL for an S3 object.
+ *
+ * Stays on aws-sdk v2 (`getSignedUrlPromise`) to keep PR1 surgical;
+ * the SDK migration to v3 is its own concern and explicitly out of
+ * scope per the agreed PR plan.
+ */
+export function presignGet(
+  key: string,
+  ttlSec: number = PRESIGN_GET_TTL_SECONDS,
+): Promise<string> {
+  if (!key || typeof key !== 'string') {
+    return Promise.reject(new Error(`presignGet: invalid key: ${JSON.stringify(key)}`));
+  }
+  return s3SigV4.getSignedUrlPromise('getObject', {
+    Bucket: BUCKET,
+    Key: key,
+    Expires: ttlSec,
+  });
+}
+
+/**
+ * Extract an S3 key from a value that may be either:
+ *   - a full public URL: `https://<bucket>.s3.<region>.amazonaws.com/<key>`
+ *   - or just the key:   `report/<company_id>/<date>/<uuid>.jpg`
+ *
+ * Behavior:
+ *   - bare key (no scheme)         → passthrough
+ *   - URL matching configured bucket → extract key
+ *   - URL with foreign host        → console.warn + return URL pathname
+ *     (defensive — likely a row written under the old `guard-media-uploads`
+ *     bucket name; signing this against our bucket will 404 visibly, which
+ *     is the right failure mode for a known-stale row)
+ *   - malformed input              → passthrough
+ */
+export function extractS3Key(stored: string): string {
+  if (!/^https?:\/\//.test(stored)) return stored;
+  const key = s3KeyFromPublicUrl(stored);
+  if (key) return key;
+  try {
+    const u = new URL(stored);
+    // eslint-disable-next-line no-console
+    console.warn('[s3.extractS3Key] stored URL host does not match configured bucket', {
+      storedHost: u.hostname,
+      expectedBucket: BUCKET,
+    });
+    return u.pathname.replace(/^\//, '') || stored;
+  } catch {
+    return stored;
+  }
+}
+
+/**
+ * Null-safe response-handler shim: PASS THE STORED URL/KEY,
+ * GET BACK A FRESH SIGNED URL (or null).
+ *
+ * This is the only function PR2 has to import into each response
+ * handler — calling it on every photo column makes the eventual
+ * bucket flip a no-op for end users.
+ */
+export async function urlOrPresign(
+  stored: string | null | undefined,
+  ttlSec: number = PRESIGN_GET_TTL_SECONDS,
+): Promise<string | null> {
+  if (!stored) return null;
+  const key = extractS3Key(stored);
+  return presignGet(key, ttlSec);
 }
