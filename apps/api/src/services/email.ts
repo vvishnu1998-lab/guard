@@ -1002,12 +1002,16 @@ export function renderGeofenceBreachAlert(row: {
     : '';
   const coordsRow = `<tr><td style="padding:6px 0;color:#888;vertical-align:top">Coords</td><td style="padding:6px 0"><code style="background:#f5f5f5;padding:1px 6px;border-radius:3px;font-size:12px">${row.violation_lat.toFixed(6)}, ${row.violation_lng.toFixed(6)}</code></td></tr>`;
 
-  // Photo block — link only when present; no "no photo" filler
-  const photoBlock = row.photo_url
-    ? `<p style="margin:16px 0 0 0;font-size:13px;color:#555"><strong style="color:#333">Photo at breach:</strong> <a href="${row.photo_url}" style="color:#0B1526;text-decoration:underline">View captured photo →</a></p>`
-    : '';
-
+  // Photo block — links to the breach row in the admin dashboard, NOT the
+  // raw S3 URL. (Pre-launch security punchlist #1, PR3: as the bucket
+  // flips private the inbox-resident link would have stopped resolving;
+  // the dashboard deep-link auth-gates the photo + re-mints a signed URL
+  // on view.)
   const deepLink = `${WEB_BASE}/admin/live-map`;
+  const breachDeepLink = `${deepLink}?breach=${encodeURIComponent(row.id)}`;
+  const photoBlock = row.photo_url
+    ? `<p style="margin:16px 0 0 0;font-size:13px;color:#555"><strong style="color:#333">Photo at breach:</strong> <a href="${breachDeepLink}" style="color:#0B1526;text-decoration:underline">View in dashboard →</a></p>`
+    : '';
 
   const html = `<style>${BASE_STYLE}</style>
   <div class="card">
