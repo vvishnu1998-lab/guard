@@ -144,15 +144,49 @@ export default function SitesPage() {
   /* ── Set geofence ────────────────────────────────────────────────── */
   function openGeo(site: Site) {
     setGeoSite(site);
+    // === BUG 2 DIAGNOSTIC — TEMPORARY ============================================
+    // Logging every decision point so we can see why a real prod 4-vertex
+    // polygon defaults to Radius when the local stub defaults to Draw.
+    // Remove this block once BUG 2 is resolved.
+    /* eslint-disable no-console */
+    console.log('[geofence.openGeo] (1) full site object:', JSON.stringify(site));
+    const raw = site.polygon_coordinates;
+    console.log('[geofence.openGeo] (2) raw polygon_coordinates:', {
+      value: raw,
+      typeof: typeof raw,
+      isArray: Array.isArray(raw),
+      length: raw == null ? null : (raw as { length?: number }).length,
+      firstElement: Array.isArray(raw) && raw.length > 0 ? raw[0] : null,
+      firstElementTypeof: Array.isArray(raw) && raw.length > 0 ? typeof raw[0] : null,
+      ctorName: raw && typeof raw === 'object' ? (raw as object).constructor?.name : null,
+    });
+    /* eslint-enable no-console */
+    // === END DIAGNOSTIC ==========================================================
+
     // Defend against the API returning the polygon as a JSON string instead
     // of a parsed array — observed once on a deploy where node-pg's JSONB
     // type parser was overridden. Treat anything non-array as "no polygon".
-    const raw = site.polygon_coordinates;
     const existing: LatLng[] = Array.isArray(raw) ? raw : [];
     const validExisting = existing.length >= 3;
+    /* eslint-disable no-console */
+    console.log('[geofence.openGeo] (3) validExisting computation:', {
+      validExisting,
+      checkedAgainst: 'Array.isArray(raw) AND existing.length >= 3',
+      existingLength: existing.length,
+    });
+    const synthish = validExisting && looksLikeCircleSynth(existing);
+    console.log('[geofence.openGeo] (4) looksLikeCircleSynth:', {
+      result: synthish,
+      vertexCount: existing.length,
+    });
+    /* eslint-enable no-console */
     // Re-opening an existing fence: a 16-vertex equal-radius ring looks like
     // the legacy radius synth → default to Radius mode. Anything else → Draw.
-    const defaultMode: GeoMode = validExisting && !looksLikeCircleSynth(existing) ? 'draw' : 'radius';
+    const defaultMode: GeoMode = validExisting && !synthish ? 'draw' : 'radius';
+    /* eslint-disable no-console */
+    console.log('[geofence.openGeo] (5) final defaultMode:', defaultMode);
+    /* eslint-enable no-console */
+
     if (site.has_geofence && !validExisting) {
       // eslint-disable-next-line no-console
       console.warn('[geofence] site marked has_geofence=true but polygon missing/short — defaulting to Radius mode', {
