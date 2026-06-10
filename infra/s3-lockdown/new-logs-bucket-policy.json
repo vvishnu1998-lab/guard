@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3ServerAccessLogsPolicy",
+      "Effect": "Allow",
+      "Principal": { "Service": "logging.s3.amazonaws.com" },
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::guard-media-prod-logs/guard-media-prod/*",
+      "Condition": {
+        "ArnLike":   { "aws:SourceArn": "arn:aws:s3:::guard-media-prod" },
+        "StringEquals": { "aws:SourceAccount": "458869662780" }
+      }
+    }
+  ]
+}

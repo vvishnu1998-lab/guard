@@ -1,0 +1,15 @@
+{
+  "CORSRules": [
+    {
+      "ID": "uploads-and-reads-from-netraops",
+      "AllowedHeaders": ["*"],
+      "AllowedMethods": ["GET", "POST", "PUT"],
+      "AllowedOrigins": [
+        "https://netraops.com",
+        "https://app.netraops.com"
+      ],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}

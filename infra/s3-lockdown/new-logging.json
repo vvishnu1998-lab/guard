@@ -1,0 +1,6 @@
+{
+  "LoggingEnabled": {
+    "TargetBucket": "guard-media-prod-logs",
+    "TargetPrefix": "guard-media-prod/"
+  }
+}
