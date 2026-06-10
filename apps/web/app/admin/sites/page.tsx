@@ -92,6 +92,23 @@ export default function SitesPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // === BUG 2 DIAGNOSTIC — TEMPORARY ============================================
+  // Log every time geoMode changes after a geoSite is selected, including the
+  // initial transition. If openGeo sets 'draw' but a later render disagrees,
+  // we'll see two log lines and the gap between them.
+  useEffect(() => {
+    if (!geoSite) return;
+    /* eslint-disable no-console */
+    console.log('[geofence.render] post-render observation', {
+      geoSiteId: geoSite.id,
+      geoMode,
+      drawnPolygonLength: drawnPolygon.length,
+      hasGeo: !!(geo.center_lat && geo.center_lng && geo.radius_meters),
+    });
+    /* eslint-enable no-console */
+  }, [geoSite, geoMode, drawnPolygon.length, geo.center_lat, geo.center_lng, geo.radius_meters]);
+  // === END DIAGNOSTIC ==========================================================
+
   /* ── Upload PDF to a site ───────────────────────────────────────── */
   async function uploadPdfToSite(siteId: string, file: File): Promise<void> {
     const fd = new FormData();
@@ -515,15 +532,22 @@ export default function SitesPage() {
       )}
 
       {/* ── Set Geofence Modal ────────────────────────────────────────── */}
+      {geoSite && (() => {
+        // === BUG 2 DIAGNOSTIC — TEMPORARY ====================================
+        /* eslint-disable no-console */
+        console.log('[geofence.render] modal JSX evaluated with geoMode:', geoMode, 'for site:', geoSite.id);
+        /* eslint-enable no-console */
+        return null;
+      })()}
       {geoSite && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8" data-geofence-mode={geoMode} data-geofence-site={geoSite.id}>
           <div className="w-full max-w-3xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">SET GEOFENCE</h2>
               <button onClick={() => setGeoSite(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
             </div>
             <p className="text-gray-500 text-xs mb-4">
-              Site: <span className="text-gray-300">{geoSite.name}</span>
+              Site: <span className="text-gray-300">{geoSite.name}</span> <span className="text-amber-400/50">[debug: mode={geoMode}]</span>
             </p>
 
             {/* Mode toggle */}
