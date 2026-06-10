@@ -1,0 +1,20 @@
+{
+    "CORSRules": [
+        {
+            "AllowedHeaders": [
+                "*"
+            ],
+            "AllowedMethods": [
+                "PUT",
+                "GET"
+            ],
+            "AllowedOrigins": [
+                "https://guard-web-one.vercel.app",
+                "https://guard-web-vvishnu1998-labs-projects.vercel.app",
+                "http://localhost:3000",
+                "http://localhost:8081"
+            ],
+            "MaxAgeSeconds": 3000
+        }
+    ]
+}
