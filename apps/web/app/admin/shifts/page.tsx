@@ -109,10 +109,11 @@ function isoWeek(d: Date) {
 
 /** Mini inline calendar component */
 function MiniCalendar({
-  year, month, selectedDate, highlightDows, onSelectDate, onPrevMonth, onNextMonth,
+  year, month, selectedDate, highlightDows, minDate, onSelectDate, onPrevMonth, onNextMonth,
 }: {
   year: number; month: number;
   selectedDate: Date | null; highlightDows: number[];
+  minDate?: Date;
   onSelectDate: (d: Date) => void;
   onPrevMonth: () => void; onNextMonth: () => void;
 }) {
@@ -121,6 +122,8 @@ function MiniCalendar({
   const cells: (number | null)[] = Array(firstDay).fill(null);
   for (let i = 1; i <= daysInMonth; i++) cells.push(i);
   while (cells.length % 7 !== 0) cells.push(null);
+
+  const minMidnight = minDate ? new Date(minDate.getFullYear(), minDate.getMonth(), minDate.getDate()).getTime() : -Infinity;
 
   return (
     <div className="mt-3 bg-[#070F1E] border border-[#1A3050] rounded-xl p-3">
@@ -140,10 +143,12 @@ function MiniCalendar({
           const isHighlighted = highlightDows.includes(dow);
           const isSelected = selectedDate !== null &&
             selectedDate.getFullYear() === year && selectedDate.getMonth() === month && selectedDate.getDate() === day;
+          const isPast = thisDate.getTime() < minMidnight;
           return (
-            <button key={day} type="button" onClick={() => onSelectDate(thisDate)}
+            <button key={day} type="button" disabled={isPast} onClick={() => onSelectDate(thisDate)}
               className={['text-center text-xs py-1.5 rounded transition-colors',
-                isSelected ? 'ring-2 ring-amber-400 text-amber-400 font-bold bg-amber-400/10'
+                isPast ? 'text-gray-700 cursor-not-allowed opacity-40'
+                : isSelected ? 'ring-2 ring-amber-400 text-amber-400 font-bold bg-amber-400/10'
                 : isHighlighted ? 'bg-amber-400/20 text-amber-300 hover:bg-amber-400/30'
                 : 'text-gray-400 hover:bg-[#1A3050] hover:text-gray-200'].join(' ')}>
               {day}
@@ -184,6 +189,7 @@ export default function ShiftsPage() {
 
   // Week filter
   const today = new Date();
+  const todayInputMin = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   const [weekRef, setWeekRef] = useState<Date>(today);
   const { start: weekStart, end: weekEnd } = useMemo(() => getWeekBounds(weekRef), [weekRef]);
 
@@ -528,7 +534,7 @@ export default function ShiftsPage() {
                 <div>
                   <label className="block text-gray-500 text-xs tracking-widest mb-1">DATE <span className="text-amber-400">*</span></label>
                   <div className="relative">
-                    <input type="date" value={singleDate} onChange={(e) => setSingleDate(e.target.value)}
+                    <input type="date" value={singleDate} min={todayInputMin} onChange={(e) => setSingleDate(e.target.value)}
                       className="w-full bg-[#070F1E] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
                     {singleDate && (
                       <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none">
@@ -555,6 +561,7 @@ export default function ShiftsPage() {
                   <p className="text-gray-600 text-xs mt-2 mb-1">SELECT START DATE — shifts repeat for 28 days from this date.</p>
                   {calStart && <p className="text-amber-400 text-xs mb-1">Start: {fmtDate(calStart)}</p>}
                   <MiniCalendar year={calYear} month={calMonth} selectedDate={calStart} highlightDows={repeatDays}
+                    minDate={today}
                     onSelectDate={(d) => setCalStart(d)} onPrevMonth={prevMonth} onNextMonth={nextMonth} />
                 </div>
               )}

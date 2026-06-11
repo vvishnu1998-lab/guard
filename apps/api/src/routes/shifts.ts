@@ -5,6 +5,7 @@ import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateAtSite } from '../services/geofence';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
+import { isPastPacificDate } from '../services/pacificDate';
 
 const router = Router();
 
@@ -40,32 +41,46 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     const durationMs = baseEnd.getTime() - baseStart.getTime();
 
     // Collect all dates within 4 weeks from base start
-    const created: object[] = [];
     const horizon = new Date(baseStart);
     horizon.setDate(horizon.getDate() + 28); // 4 weeks
 
+    // Expand first into in-memory pairs so we can validate the whole set
+    // BEFORE any INSERT — past-date guard rejects the entire request rather
+    // than silently dropping past dates.
+    const pending: { start: Date; end: Date }[] = [];
     const cur = new Date(baseStart);
-    // Start from the base date and iterate each day for 28 days
     while (cur <= horizon) {
       const dow = cur.getDay(); // 0=Sun..6=Sat
       if (repeat_days.includes(dow)) {
         const shiftStart = new Date(cur);
-        // preserve time-of-day from baseStart
         shiftStart.setHours(baseStart.getHours(), baseStart.getMinutes(), baseStart.getSeconds(), 0);
         const shiftEnd = new Date(shiftStart.getTime() + durationMs);
-        const r = await pool.query(
-          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
-           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-          [guard_id || null, site_id, shiftStart.toISOString(), shiftEnd.toISOString(), status]
-        );
-        created.push(r.rows[0]);
+        pending.push({ start: shiftStart, end: shiftEnd });
       }
       cur.setDate(cur.getDate() + 1);
+    }
+
+    if (pending.some(p => isPastPacificDate(p.start))) {
+      return res.status(422).json({ error: 'Cannot schedule shifts in the past.' });
+    }
+
+    const created: object[] = [];
+    for (const p of pending) {
+      const r = await pool.query(
+        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status]
+      );
+      created.push(r.rows[0]);
     }
     return res.status(201).json(created);
   }
 
   // Single shift
+  if (isPastPacificDate(scheduled_start)) {
+    return res.status(422).json({ error: 'Cannot schedule shifts in the past.' });
+  }
+
   const result = await pool.query(
     `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
      VALUES ($1, $2, $3, $4, $5) RETURNING *`,
