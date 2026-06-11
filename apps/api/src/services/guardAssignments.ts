@@ -17,6 +17,44 @@ import { pool } from '../db/pool';
 type Querier = Pick<PoolClient, 'query'>;
 
 /**
+ * Audit-row writer for guard_site_assignments mutations. Schema_v20 added
+ * the `guard_assignment_audit` table with no FK on `assignment_id`
+ * (intentional — the DELETE path writes the audit row in the same txn as
+ * the parent DELETE, and a real FK would either cascade-wipe the audit or
+ * null-out the back-link the moment the row dies). Pass the same txn
+ * `client` so insert + parent mutation share atomicity.
+ *
+ * The CHECK constraint on `action` only permits the spec-defined trio.
+ */
+export type AssignmentAuditAction =
+  | 'guard_assignment_created'
+  | 'guard_assignment_ended'
+  | 'guard_assignment_removed';
+
+export async function writeAssignmentAudit(
+  client: Querier,
+  args: {
+    assignmentId: string;
+    action: AssignmentAuditAction;
+    changedBy: string;
+    before: unknown | null;
+    after: unknown | null;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO guard_assignment_audit (assignment_id, action, changed_by, before, after)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)`,
+    [
+      args.assignmentId,
+      args.action,
+      args.changedBy,
+      args.before === null ? null : JSON.stringify(args.before),
+      args.after  === null ? null : JSON.stringify(args.after),
+    ],
+  );
+}
+
+/**
  * True iff the guard has an assignment row covering `dateStr` for the
  * given site. An open-ended assignment (assigned_until IS NULL) covers
  * any date on or after assigned_from.

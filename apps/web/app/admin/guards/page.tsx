@@ -4,7 +4,15 @@
  * List guards, add new guard (with temp password), assign to site, deactivate, reactivate.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { adminGet, adminPost, adminPatch, adminFetch } from '../../../lib/adminApi';
+import { adminGet, adminPost, adminPatch, adminFetch, adminDelete } from '../../../lib/adminApi';
+
+interface Assignment {
+  id:             string;
+  site_id:        string;
+  site_name:      string;
+  assigned_from:  string;
+  assigned_until: string | null;
+}
 
 interface Guard {
   id:           string;
@@ -13,10 +21,26 @@ interface Guard {
   badge_number: string;
   is_active:    boolean;
   created_at:   string;
-  assignments:  { site_id: string; site_name: string; assigned_from: string; assigned_until: string | null }[] | null;
+  assignments:  Assignment[] | null;
 }
 
 interface Site { id: string; name: string; }
+
+interface ImpactReport { future_shift_count: number; sample_dates: string[] }
+
+// Pacific calendar date as YYYY-MM-DD. Used for the date-input min and for
+// the End-now button payload so both UI and server agree on "today."
+function pacificTodayStr(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+}
+
+function fmtDateRange(from: string, until: string | null): string {
+  const f = String(from).slice(0, 10);
+  return until ? `From ${f} to ${String(until).slice(0, 10)}` : `From ${f} (open)`;
+}
 
 export default function GuardsPage() {
   const [guards,     setGuards]     = useState<Guard[]>([]);
@@ -30,6 +54,21 @@ export default function GuardsPage() {
   const [saving,     setSaving]     = useState(false);
   const [formError,  setFormError]  = useState('');
   const [showInactive, setShowInactive] = useState(false);
+
+  // ── Phase B modal state ────────────────────────────────────────────────
+  // editAssignment: target row + the guard it belongs to + the in-flight
+  // assigned_until value. removeAssignment + endNowAssignment share the
+  // same shape because both call /impact first then a destructive write.
+  type AssignmentContext = { guard: Guard; assignment: Assignment };
+  const [editAssignment,   setEditAssignment]   = useState<AssignmentContext | null>(null);
+  const [removeAssignment, setRemoveAssignment] = useState<AssignmentContext | null>(null);
+  const [endNowAssignment, setEndNowAssignment] = useState<AssignmentContext | null>(null);
+  const [editUntil, setEditUntil]     = useState<string>(''); // empty string = "open-ended" (null)
+  const [impact,    setImpact]        = useState<ImpactReport | null>(null);
+  const [impactLoading, setImpactLoading] = useState(false);
+  const [editError, setEditError]     = useState('');
+
+  const today = pacificTodayStr();
 
   const load = useCallback(async () => {
     try {
@@ -79,6 +118,70 @@ export default function GuardsPage() {
     finally { setSaving(false); }
   }
 
+  // ── Phase B handlers ───────────────────────────────────────────────────
+  async function fetchImpact(ctx: AssignmentContext): Promise<void> {
+    setImpact(null);
+    setImpactLoading(true);
+    try {
+      const r = await adminGet<ImpactReport>(`/api/guards/${ctx.guard.id}/assignments/${ctx.assignment.id}/impact`);
+      setImpact(r);
+    } catch { setImpact({ future_shift_count: 0, sample_dates: [] }); }
+    finally { setImpactLoading(false); }
+  }
+
+  function openEditModal(g: Guard, a: Assignment) {
+    setEditAssignment({ guard: g, assignment: a });
+    setEditUntil(a.assigned_until ? String(a.assigned_until).slice(0, 10) : '');
+    setEditError('');
+  }
+  function openRemoveModal(g: Guard, a: Assignment) {
+    const ctx = { guard: g, assignment: a };
+    setRemoveAssignment(ctx);
+    fetchImpact(ctx);
+  }
+  function openEndNowModal(g: Guard, a: Assignment) {
+    const ctx = { guard: g, assignment: a };
+    setEndNowAssignment(ctx);
+    fetchImpact(ctx);
+  }
+
+  async function saveEdit() {
+    if (!editAssignment) return;
+    // Empty input means "open-ended" → send null. Otherwise send the
+    // YYYY-MM-DD string and let the server validate it against the
+    // assignment's start + Pacific today.
+    const payload = { assigned_until: editUntil ? editUntil : null };
+    setSaving(true); setEditError('');
+    try {
+      await adminPatch(`/api/guards/${editAssignment.guard.id}/assignments/${editAssignment.assignment.id}`, payload);
+      setEditAssignment(null);
+      await load();
+    } catch (e: any) { setEditError(e.message); }
+    finally { setSaving(false); }
+  }
+
+  async function confirmEndNow() {
+    if (!endNowAssignment) return;
+    setSaving(true); setEditError('');
+    try {
+      await adminPatch(`/api/guards/${endNowAssignment.guard.id}/assignments/${endNowAssignment.assignment.id}`, { assigned_until: today });
+      setEndNowAssignment(null);
+      await load();
+    } catch (e: any) { setEditError(e.message); }
+    finally { setSaving(false); }
+  }
+
+  async function confirmRemove() {
+    if (!removeAssignment) return;
+    setSaving(true); setEditError('');
+    try {
+      await adminDelete(`/api/guards/${removeAssignment.guard.id}/assignments/${removeAssignment.assignment.id}`);
+      setRemoveAssignment(null);
+      await load();
+    } catch (e: any) { setEditError(e.message); }
+    finally { setSaving(false); }
+  }
+
   const visible = guards.filter((g) => showInactive || g.is_active);
 
   return (
@@ -124,13 +227,27 @@ export default function GuardsPage() {
                   <p className="text-gray-500 text-xs">{g.email}</p>
                 </td>
                 <td className="p-4 text-gray-400 font-mono text-xs">{g.badge_number}</td>
-                <td className="p-4">
+                <td className="p-4 align-top">
                   {g.assignments?.length ? (
-                    <div className="flex flex-wrap gap-1">
+                    <div className="space-y-2 max-w-md">
                       {g.assignments.map((a) => (
-                        <span key={a.site_id} className="text-xs bg-[#0B1526] border border-[#1A3050] px-2 py-0.5 rounded text-amber-400">
-                          {a.site_name}
-                        </span>
+                        <div key={a.id} data-testid={`assignment-card-${a.id}`}
+                          className="flex items-center justify-between gap-2 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="text-amber-400 text-sm font-medium truncate">{a.site_name}</p>
+                            <p className="text-gray-500 text-xs font-mono">{fmtDateRange(a.assigned_from, a.assigned_until)}</p>
+                          </div>
+                          {g.is_active && (
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button onClick={() => openEditModal(g, a)} title="Edit until-date"
+                                className="text-gray-400 hover:text-amber-400 transition-colors px-2 py-1">✎</button>
+                              <button onClick={() => openEndNowModal(g, a)} title="End now"
+                                className="text-cyan-400 hover:text-cyan-300 text-xs tracking-widest hover:underline">END NOW</button>
+                              <button onClick={() => openRemoveModal(g, a)} title="Remove assignment"
+                                className="text-red-400 hover:text-red-300 transition-colors px-2 py-1">✕</button>
+                            </div>
+                          )}
+                        </div>
                       ))}
                     </div>
                   ) : <span className="text-gray-600 text-xs">—</span>}
@@ -181,9 +298,23 @@ export default function GuardsPage() {
               )}
             </div>
             {g.assignments?.length ? (
-              <div className="flex flex-wrap gap-1">
+              <div className="space-y-2">
                 {g.assignments.map((a) => (
-                  <span key={a.site_id} className="text-xs bg-[#0B1526] border border-[#1A3050] px-2 py-0.5 rounded text-amber-400">{a.site_name}</span>
+                  <div key={a.id} data-testid={`assignment-card-mobile-${a.id}`}
+                    className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2">
+                    <p className="text-amber-400 text-sm font-medium">{a.site_name}</p>
+                    <p className="text-gray-500 text-xs font-mono mb-2">{fmtDateRange(a.assigned_from, a.assigned_until)}</p>
+                    {g.is_active && (
+                      <div className="flex gap-2">
+                        <button onClick={() => openEditModal(g, a)}
+                          className="flex-1 text-xs text-amber-400 tracking-widest border border-amber-400/30 rounded py-1.5 hover:bg-amber-400/10">EDIT</button>
+                        <button onClick={() => openEndNowModal(g, a)}
+                          className="flex-1 text-xs text-cyan-400 tracking-widest border border-cyan-400/30 rounded py-1.5 hover:bg-cyan-400/10">END NOW</button>
+                        <button onClick={() => openRemoveModal(g, a)}
+                          className="flex-1 text-xs text-red-400 tracking-widest border border-red-400/30 rounded py-1.5 hover:bg-red-400/10">REMOVE</button>
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             ) : null}
@@ -292,6 +423,85 @@ export default function GuardsPage() {
           </div>
         </div>
       )}
+
+      {/* ── Edit-assignment modal (Phase B) ────────────────────────────── */}
+      {editAssignment && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60" data-testid="edit-modal">
+          <div className="w-full sm:max-w-sm bg-[#0F1E35] border border-[#1A3050] rounded-t-2xl sm:rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">EDIT ASSIGNMENT</h2>
+              <button onClick={() => setEditAssignment(null)} className="text-gray-500 hover:text-gray-300 text-xl w-10 h-10 flex items-center justify-center">✕</button>
+            </div>
+            <p className="text-gray-300 text-sm">{editAssignment.guard.name}</p>
+            <p className="text-amber-400 text-sm mb-1">{editAssignment.assignment.site_name}</p>
+            <p className="text-gray-500 text-xs font-mono mb-4">{fmtDateRange(editAssignment.assignment.assigned_from, editAssignment.assignment.assigned_until)}</p>
+            {editError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{editError}</div>}
+            <div className="mb-4">
+              <label className="block text-gray-500 text-xs tracking-widest mb-1">ASSIGNED UNTIL</label>
+              <input type="date" value={editUntil}
+                min={String(editAssignment.assignment.assigned_from).slice(0, 10) > today ? String(editAssignment.assignment.assigned_from).slice(0, 10) : today}
+                onChange={(e) => setEditUntil(e.target.value)}
+                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-3 text-gray-200 text-base focus:outline-none focus:border-amber-400" />
+              <button type="button" onClick={() => setEditUntil('')}
+                className="text-cyan-400 text-xs tracking-widest hover:underline mt-2">CLEAR — KEEP OPEN-ENDED</button>
+              <p className="text-gray-600 text-xs mt-1">Past dates rejected. Cannot precede start date.</p>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setEditAssignment(null)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-3 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={saveEdit} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-3 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
+                {saving ? 'SAVING…' : 'SAVE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Confirm modal shared by End-Now and Remove (Phase B) ───────── */}
+      {(endNowAssignment || removeAssignment) && (() => {
+        const isEnd = !!endNowAssignment;
+        const ctx = (endNowAssignment ?? removeAssignment)!;
+        return (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60"
+            data-testid={isEnd ? 'end-now-modal' : 'remove-modal'}>
+            <div className="w-full sm:max-w-sm bg-[#0F1E35] border border-[#1A3050] rounded-t-2xl sm:rounded-2xl p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-amber-400 font-bold tracking-widest text-lg">{isEnd ? 'END ASSIGNMENT NOW' : 'REMOVE ASSIGNMENT'}</h2>
+                <button onClick={() => { setEndNowAssignment(null); setRemoveAssignment(null); }}
+                  className="text-gray-500 hover:text-gray-300 text-xl w-10 h-10 flex items-center justify-center">✕</button>
+              </div>
+              <p className="text-gray-300 text-sm">{ctx.guard.name}</p>
+              <p className="text-amber-400 text-sm mb-1">{ctx.assignment.site_name}</p>
+              <p className="text-gray-500 text-xs font-mono mb-4">{fmtDateRange(ctx.assignment.assigned_from, ctx.assignment.assigned_until)}</p>
+              {editError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{editError}</div>}
+              {impactLoading && <p className="text-gray-500 text-xs mb-3">Checking future shifts…</p>}
+              {!impactLoading && impact && impact.future_shift_count > 0 && (
+                <div data-testid="impact-warning" className="bg-amber-400/10 border border-amber-400/40 rounded-lg px-3 py-2 mb-4">
+                  <p className="text-amber-300 text-xs">
+                    <strong>{ctx.guard.name}</strong> has <strong>{impact.future_shift_count}</strong> scheduled future shift{impact.future_shift_count === 1 ? '' : 's'} at <strong>{ctx.assignment.site_name}</strong>. {isEnd ? 'Ending this assignment' : 'Removing this assignment'} will not cancel them but you won't be able to schedule new ones. Continue?
+                  </p>
+                  {impact.sample_dates.length > 0 && (
+                    <p className="text-gray-500 text-xs font-mono mt-2">Upcoming: {impact.sample_dates.join(', ')}</p>
+                  )}
+                </div>
+              )}
+              {!impactLoading && impact && impact.future_shift_count === 0 && (
+                <p className="text-gray-500 text-xs mb-4">No future scheduled shifts will be affected.</p>
+              )}
+              {isEnd && (
+                <p className="text-gray-500 text-xs mb-3">This sets <span className="font-mono text-gray-300">assigned_until</span> to today ({today}, Pacific).</p>
+              )}
+              <div className="flex gap-3">
+                <button onClick={() => { setEndNowAssignment(null); setRemoveAssignment(null); }}
+                  className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-3 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+                <button onClick={isEnd ? confirmEndNow : confirmRemove} disabled={saving || impactLoading}
+                  className={`flex-1 font-bold rounded-lg py-3 text-sm tracking-widest disabled:opacity-40 transition-colors ${isEnd ? 'bg-cyan-400 text-gray-900 hover:bg-cyan-300' : 'bg-red-500 text-white hover:bg-red-400'}`}>
+                  {saving ? 'SAVING…' : isEnd ? 'END NOW' : 'REMOVE'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

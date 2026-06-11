@@ -28,6 +28,19 @@
  *        ("clear guard_id" case: both endpoints currently reject a
  *        null guard_id with 400, so there is no clear-path to gate.)
  *
+ * Phase B — assignment edit / remove / impact + audit trail:
+ *   (13) PATCH extend window forward → 200, audit row 'guard_assignment_ended'
+ *   (14) PATCH assigned_until < assigned_from → 422
+ *   (15) PATCH assigned_until in the past → 422
+ *   (16) PATCH null → 200 (window re-opened)
+ *   (17) PATCH cross-tenant → 403
+ *   (18) DELETE success → 204 + audit row 'guard_assignment_removed' with before snapshot
+ *   (19) DELETE cross-tenant → 403
+ *   (20) DELETE nonexistent id → 404
+ *   (21) GET /impact correct future_shift_count + sample_dates (up to 5)
+ *   (22) Regression: PATCH end-now → POST a shift past today via /api/shifts → 422
+ *   (23) Regression: DELETE → POST a shift via /api/shifts → 422
+ *
  * Prereqs:
  *   - apps/api dev server on http://localhost:3001
  *   - DATABASE_URL set (shared with prod via .env in this repo)
@@ -77,12 +90,19 @@ async function post(token: string, path: string, body: any): Promise<{ status: n
 async function patch(token: string, path: string, body: any): Promise<{ status: number; body: any }> {
   return req('PATCH', token, path, body);
 }
-async function req(method: 'POST'|'PATCH', token: string, path: string, body: any): Promise<{ status: number; body: any }> {
-  const r = await fetch(`${API}${path}`, {
+async function del(token: string, path: string): Promise<{ status: number; body: any }> {
+  return req('DELETE', token, path, undefined);
+}
+async function get(token: string, path: string): Promise<{ status: number; body: any }> {
+  return req('GET', token, path, undefined);
+}
+async function req(method: 'POST'|'PATCH'|'DELETE'|'GET', token: string, path: string, body: any): Promise<{ status: number; body: any }> {
+  const init: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify(body),
-  });
+  };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  const r = await fetch(`${API}${path}`, init);
   const text = await r.text();
   let parsed: any;
   try { parsed = JSON.parse(text); } catch { parsed = text; }
@@ -371,6 +391,188 @@ async function cleanup(f: Fixtures) {
       if (r.status === 422 && /is not assigned to this site/i.test(r.body?.error ?? '')) {
         ok('(12) assign-guard to no-assignment guard → 422');
       } else bad(`(12) expected 422, got ${r.status} ${JSON.stringify(r.body)}`);
+    }
+
+    // ── Phase B — edit / remove / impact + audit ──────────────────────
+    // Use a fresh open-ended assignment for guardOk so PATCH tests don't
+    // collide with the existing windows. assignmentId is captured via the
+    // POST response (the route returns the inserted row).
+    const editAsgn = (await post(f.companyA.admin, `/api/guards/${guardOk}/assign`, {
+      site_id: f.companyA.siteB,    // siteB so we don't conflict with siteA's existing rows
+      assigned_from: today,
+      assigned_until: null,
+    })).body.id;
+
+    // ── (13) PATCH extend forward → 200 + audit row ───────────────────
+    {
+      const r = await patch(f.companyA.admin, `/api/guards/${guardOk}/assignments/${editAsgn}`, {
+        assigned_until: todayPlus(45),
+      });
+      const audit = await pool.query(
+        `SELECT action, before, after FROM guard_assignment_audit
+          WHERE assignment_id = $1 AND action = 'guard_assignment_ended'`,
+        [editAsgn],
+      );
+      if (r.status === 200 && audit.rows[0] && audit.rows[0].before?.assigned_until === null
+          && String(audit.rows[0].after?.assigned_until).slice(0,10) === todayPlus(45)) {
+        ok('(13) PATCH extend → 200, audit row captures before=null / after=date');
+      } else bad(`(13) status=${r.status} body=${JSON.stringify(r.body)} audit=${JSON.stringify(audit.rows)}`);
+    }
+
+    // ── (14) PATCH assigned_until < assigned_from → 422 ───────────────
+    {
+      const r = await patch(f.companyA.admin, `/api/guards/${guardOk}/assignments/${editAsgn}`, {
+        assigned_until: todayPlus(-1),
+      });
+      if (r.status === 422 && /past/i.test(r.body?.error ?? '')) {
+        // Past-date check fires first (assigned_until in the past is
+        // structurally a strict subset of "<= assigned_from" when
+        // assigned_from = today). Acceptable per spec — either reason
+        // closes the window.
+        ok('(14) PATCH past assigned_until → 422 (past-date guard fires)');
+      } else if (r.status === 422 && /precede assigned_from/i.test(r.body?.error ?? '')) {
+        ok('(14) PATCH past assigned_until → 422 (inverted-window guard fires)');
+      } else bad(`(14) expected 422, got ${r.status} ${JSON.stringify(r.body)}`);
+    }
+
+    // ── (15) PATCH assigned_until in the past → 422 ───────────────────
+    {
+      // Build an assignment whose assigned_from is in the past so we can
+      // test "past assigned_until" without colliding with the inverted-
+      // window rule.
+      const oldAsgnId = (await pool.query(
+        `INSERT INTO guard_site_assignments (guard_id, site_id, assigned_from, assigned_until)
+         VALUES ($1, $2, $3::date - INTERVAL '60 days', NULL) RETURNING id`,
+        [guardOk, f.companyA.siteA, today],
+      )).rows[0].id;
+      const r = await patch(f.companyA.admin, `/api/guards/${guardOk}/assignments/${oldAsgnId}`, {
+        assigned_until: todayPlus(-5),
+      });
+      if (r.status === 422 && /past/i.test(r.body?.error ?? '')) {
+        ok('(15) PATCH past assigned_until → 422 "cannot be in the past"');
+      } else bad(`(15) expected 422, got ${r.status} ${JSON.stringify(r.body)}`);
+      await pool.query(`DELETE FROM guard_site_assignments WHERE id = $1`, [oldAsgnId]);
+    }
+
+    // ── (16) PATCH null → 200 (re-open) ───────────────────────────────
+    {
+      const r = await patch(f.companyA.admin, `/api/guards/${guardOk}/assignments/${editAsgn}`, {
+        assigned_until: null,
+      });
+      if (r.status === 200 && r.body.assigned_until === null) {
+        ok('(16) PATCH null → 200, window re-opened');
+      } else bad(`(16) status=${r.status} body=${JSON.stringify(r.body)}`);
+    }
+
+    // ── (17) PATCH cross-tenant → 403 ─────────────────────────────────
+    {
+      const r = await patch(f.companyA.admin, `/api/guards/${f.companyB.guard}/assignments/${editAsgn}`, {
+        assigned_until: todayPlus(30),
+      });
+      // Cross-tenant: tenant gate rejects 403 because f.companyB.guard
+      // isn't in companyA's scope, BEFORE the assignment_id lookup.
+      if (r.status === 403) ok('(17) PATCH cross-tenant → 403');
+      else bad(`(17) expected 403, got ${r.status} ${JSON.stringify(r.body)}`);
+    }
+
+    // ── (21) GET /impact returns correct shape ────────────────────────
+    // Seed 6 future shifts at siteB for guardOk so impact is non-trivial.
+    // (Doing this BEFORE delete tests so the regression tests have data.)
+    const impactDates: string[] = [];
+    for (let i = 1; i <= 6; i++) {
+      const d = todayPlus(i + 10);
+      impactDates.push(d);
+      await pool.query(
+        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
+         VALUES ($1, $2,
+                 ($3::date + '14:00'::time) AT TIME ZONE 'America/Los_Angeles',
+                 ($3::date + '15:00'::time) AT TIME ZONE 'America/Los_Angeles',
+                 'scheduled')`,
+        [guardOk, f.companyA.siteB, d]);
+    }
+    {
+      const r = await get(f.companyA.admin, `/api/guards/${guardOk}/assignments/${editAsgn}/impact`);
+      if (r.status === 200 && r.body.future_shift_count === 6
+          && Array.isArray(r.body.sample_dates) && r.body.sample_dates.length === 5
+          && r.body.sample_dates[0] === impactDates[0]) {
+        ok('(21) GET /impact returns count=6 + first 5 sample_dates');
+      } else bad(`(21) expected count=6 + 5 samples, got ${r.status} ${JSON.stringify(r.body)}`);
+    }
+
+    // ── (22) Regression: PATCH end-now then POST shift past today → 422 ─
+    {
+      await patch(f.companyA.admin, `/api/guards/${guardOk}/assignments/${editAsgn}`, {
+        assigned_until: today,
+      });
+      const r = await post(f.companyA.admin, '/api/shifts', {
+        site_id: f.companyA.siteB, guard_id: guardOk,
+        scheduled_start: `${todayPlus(20)}T09:00:00-07:00`,
+        scheduled_end:   `${todayPlus(20)}T10:00:00-07:00`,
+      });
+      if (r.status === 422 && /is not assigned/i.test(r.body?.error ?? '')) {
+        ok('(22) end-now + POST future shift → 422');
+      } else bad(`(22) expected 422 after end-now, got ${r.status} ${JSON.stringify(r.body)}`);
+    }
+
+    // ── (18) DELETE success → 204 + audit row ─────────────────────────
+    {
+      // Use the same editAsgn we've been editing.
+      const beforeAudit = await pool.query(
+        `SELECT * FROM guard_site_assignments WHERE id = $1`, [editAsgn]);
+      const r = await del(f.companyA.admin, `/api/guards/${guardOk}/assignments/${editAsgn}`);
+      const stillThere = await pool.query(
+        `SELECT 1 FROM guard_site_assignments WHERE id = $1`, [editAsgn]);
+      const audit = await pool.query(
+        `SELECT action, before, after FROM guard_assignment_audit
+          WHERE assignment_id = $1 AND action = 'guard_assignment_removed'`,
+        [editAsgn]);
+      if (r.status === 204 && stillThere.rows.length === 0
+          && audit.rows[0]
+          && audit.rows[0].before?.id === editAsgn
+          && audit.rows[0].after === null) {
+        ok('(18) DELETE → 204, row gone, audit row written with before snapshot');
+      } else bad(`(18) status=${r.status} stillThere=${stillThere.rows.length} audit=${JSON.stringify(audit.rows)}`);
+      void beforeAudit;
+    }
+
+    // ── (19) DELETE cross-tenant → 403 ────────────────────────────────
+    {
+      // Re-create a fresh assignment to delete cross-tenant against.
+      const tempAsgn = (await pool.query(
+        `INSERT INTO guard_site_assignments (guard_id, site_id, assigned_from)
+         VALUES ($1, $2, $3) RETURNING id`,
+        [guardOk, f.companyA.siteA, todayPlus(60)],
+      )).rows[0].id;
+      const r = await del(f.companyA.admin, `/api/guards/${f.companyB.guard}/assignments/${tempAsgn}`);
+      if (r.status === 403) ok('(19) DELETE cross-tenant → 403');
+      else bad(`(19) expected 403, got ${r.status} ${JSON.stringify(r.body)}`);
+      await pool.query(`DELETE FROM guard_site_assignments WHERE id = $1`, [tempAsgn]);
+    }
+
+    // ── (20) DELETE nonexistent → 404 ────────────────────────────────
+    {
+      const r = await del(f.companyA.admin, `/api/guards/${guardOk}/assignments/00000000-0000-0000-0000-000000000000`);
+      if (r.status === 404) ok('(20) DELETE nonexistent → 404');
+      else bad(`(20) expected 404, got ${r.status} ${JSON.stringify(r.body)}`);
+    }
+
+    // ── (23) Regression: DELETE then POST future shift → 422 ──────────
+    {
+      // Create a new assignment for siteB so we can DELETE it, then verify
+      // POST is gated. (Case 18's DELETE was already proven; this asserts
+      // the gate is consequent.)
+      const a = (await post(f.companyA.admin, `/api/guards/${guardOk}/assign`, {
+        site_id: f.companyA.siteB, assigned_from: today, assigned_until: null,
+      })).body.id;
+      await del(f.companyA.admin, `/api/guards/${guardOk}/assignments/${a}`);
+      const r = await post(f.companyA.admin, '/api/shifts', {
+        site_id: f.companyA.siteB, guard_id: guardOk,
+        scheduled_start: `${todayPlus(30)}T09:00:00-07:00`,
+        scheduled_end:   `${todayPlus(30)}T10:00:00-07:00`,
+      });
+      if (r.status === 422 && /is not assigned/i.test(r.body?.error ?? '')) {
+        ok('(23) delete + POST future shift → 422');
+      } else bad(`(23) expected 422 after delete, got ${r.status} ${JSON.stringify(r.body)}`);
     }
   } finally {
     await cleanup(f);

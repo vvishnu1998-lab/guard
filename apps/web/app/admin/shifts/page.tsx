@@ -244,8 +244,21 @@ export default function ShiftsPage() {
     setAssignedSitesLoading(true);
     (async () => {
       try {
+        // Filter the dropdown by TOMORROW's Pacific date, not today's.
+        // Rationale: this modal is for *new* shift scheduling, so the
+        // useful filter is "sites the guard can still cover going forward."
+        // An admin who clicks End Now (which sets assigned_until = today,
+        // i.e., today is still covered) intuitively expects the site to
+        // disappear from the scheduling dropdown — querying today would
+        // keep it visible since today is technically still in-window.
+        // Server-side per-date enforcement on POST /api/shifts re-validates
+        // against the actual shift date, so this is purely a UI heuristic.
+        const tomorrow = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/Los_Angeles',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+        }).format(new Date(Date.now() + 24 * 60 * 60 * 1000));
         const r = await adminGet<{ sites: { site_id: string; site_name: string }[] }>(
-          `/api/guards/${guardId}/assigned-sites`
+          `/api/guards/${guardId}/assigned-sites?date=${tomorrow}`
         );
         if (cancelled) return;
         const filtered: Site[] = r.sites.map(s => ({ id: s.site_id, name: s.site_name }));
