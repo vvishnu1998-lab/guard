@@ -68,14 +68,24 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   const guardResult = await pool.query(
     `SELECT g.id, g.company_id, g.password_hash, g.is_active, g.must_change_password,
             c.is_active AS company_active,
-            bool_or(s.is_active) AS any_site_active
+            -- Phase A bycatch: split the assignment gate into three distinct
+            -- conditions so the error message can name the actual cause.
+            (SELECT COUNT(*)::int FROM guard_site_assignments gsa_all
+              WHERE gsa_all.guard_id = g.id) AS total_assignments,
+            (SELECT COUNT(*)::int FROM guard_site_assignments gsa_cur
+              WHERE gsa_cur.guard_id = g.id
+                AND gsa_cur.assigned_from <= CURRENT_DATE
+                AND (gsa_cur.assigned_until IS NULL OR gsa_cur.assigned_until >= CURRENT_DATE)
+            ) AS current_assignments,
+            (SELECT bool_or(s2.is_active) FROM guard_site_assignments gsa_act
+               JOIN sites s2 ON s2.id = gsa_act.site_id
+              WHERE gsa_act.guard_id = g.id
+                AND gsa_act.assigned_from <= CURRENT_DATE
+                AND (gsa_act.assigned_until IS NULL OR gsa_act.assigned_until >= CURRENT_DATE)
+            ) AS any_current_site_active
      FROM guards g
      JOIN companies c ON c.id = g.company_id
-     LEFT JOIN guard_site_assignments gsa ON gsa.guard_id = g.id
-       AND (gsa.assigned_until IS NULL OR gsa.assigned_until >= CURRENT_DATE)
-     LEFT JOIN sites s ON s.id = gsa.site_id
-     WHERE g.email = $1
-     GROUP BY g.id, g.company_id, g.password_hash, g.is_active, g.must_change_password, c.is_active`,
+     WHERE g.email = $1`,
     [email.toLowerCase().trim()]
   );
   const guard = guardResult.rows[0];
@@ -108,7 +118,14 @@ router.post('/guard/login', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your administrator.' });
   }
 
-  if (guard.any_site_active === false) {
+  // Phase A — three distinct assignment-gate failures, ordered most→least specific.
+  if (guard.total_assignments === 0) {
+    return res.status(403).json({ error: 'No site assignments. Contact your administrator.' });
+  }
+  if (guard.current_assignments === 0) {
+    return res.status(403).json({ error: 'Your site assignments have expired. Contact your administrator.' });
+  }
+  if (guard.any_current_site_active === false) {
     return res.status(403).json({ error: 'Your assigned site has been deactivated. Please contact your administrator.' });
   }
 

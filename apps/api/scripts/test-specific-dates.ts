@@ -46,7 +46,7 @@ function todayPlus(days: number): string {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
-async function pickFixtures(): Promise<{ siteId: string; guardId: string; companyId: string }> {
+async function pickFixtures(): Promise<{ siteId: string; guardId: string; companyId: string; seededAssignmentId: string | null }> {
   const r = await pool.query(
     `SELECT s.id AS site_id, s.company_id, g.id AS guard_id
        FROM sites s
@@ -54,7 +54,30 @@ async function pickFixtures(): Promise<{ siteId: string; guardId: string; compan
       LIMIT 1`,
   );
   if (!r.rows[0]) throw new Error('No site/guard available in DB for tests');
-  return { siteId: r.rows[0].site_id, guardId: r.rows[0].guard_id, companyId: r.rows[0].company_id };
+  const fix = { siteId: r.rows[0].site_id, guardId: r.rows[0].guard_id, companyId: r.rows[0].company_id };
+
+  // Phase A: shift creation now enforces guard_site_assignments. Ensure
+  // an open-ended assignment covers our test (guard, site) pair for the
+  // duration of the run. Reuse an existing assignment if one already
+  // covers today; otherwise insert a temporary one and clean it up at
+  // end-of-test.
+  const cover = await pool.query(
+    `SELECT id FROM guard_site_assignments
+      WHERE guard_id = $1 AND site_id = $2
+        AND assigned_from <= CURRENT_DATE
+        AND (assigned_until IS NULL OR assigned_until >= CURRENT_DATE)
+      LIMIT 1`,
+    [fix.guardId, fix.siteId],
+  );
+  if (cover.rows[0]) return { ...fix, seededAssignmentId: null };
+
+  const seeded = await pool.query(
+    `INSERT INTO guard_site_assignments (guard_id, site_id, assigned_from, assigned_until)
+     VALUES ($1, $2, CURRENT_DATE, NULL)
+     RETURNING id`,
+    [fix.guardId, fix.siteId],
+  );
+  return { ...fix, seededAssignmentId: seeded.rows[0].id };
 }
 
 function mintToken(companyId: string): string {
@@ -188,6 +211,9 @@ async function deleteShiftsByIds(ids: string[]): Promise<void> {
 
   // ── cleanup ─────────────────────────────────────────────────────────
   await deleteShiftsByIds(happyIds);
+  if (fixtures.seededAssignmentId) {
+    await pool.query(`DELETE FROM guard_site_assignments WHERE id = $1`, [fixtures.seededAssignmentId]);
+  }
   await pool.end();
 
   console.log(`\n  pass=${pass}  fail=${fail}`);

@@ -5,9 +5,31 @@ import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateAtSite } from '../services/geofence';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
-import { isPastPacificDate, isPastPacificDateString } from '../services/pacificDate';
+import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
+import { isGuardAssignedToSite } from '../services/guardAssignments';
 
 const router = Router();
+
+/**
+ * Phase A enforcement: for a guard + site combo, scan a list of Pacific
+ * calendar dates and return the first date the guard isn't assigned to
+ * that site on. Returns null if all dates are covered. Caller uses the
+ * returned string verbatim in the 422 body, e.g.
+ * "Guard is not assigned to this site on 2026-06-18."
+ *
+ * NB. Same "reject the whole request on first offending date" semantics
+ * as B1's past-date guard — no silent partial inserts.
+ */
+async function firstUnassignedDate(
+  guardId: string,
+  siteId: string,
+  pacificDates: string[],
+): Promise<string | null> {
+  for (const d of pacificDates) {
+    if (!(await isGuardAssignedToSite(guardId, siteId, d))) return d;
+  }
+  return null;
+}
 
 const SPECIFIC_DATES_MAX = 60;
 const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;
@@ -73,6 +95,13 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
         [guard_id, req.user!.company_id]
       );
       if (!guardCheck.rows[0]) return res.status(400).json({ error: 'Guard not found or inactive' });
+
+      // Phase A — guard must have an assignment covering every emitted date.
+      // First offending date wins; rejects the whole request (no partial insert).
+      const offending = await firstUnassignedDate(guard_id, site_id, dateList);
+      if (offending) {
+        return res.status(422).json({ error: `Guard is not assigned to this site on ${offending}.` });
+      }
     }
 
     const status = guard_id ? 'scheduled' : 'unassigned';
@@ -184,6 +213,18 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       return res.status(422).json({ error: 'Cannot schedule shifts in the past.' });
     }
 
+    // Phase A enforcement (repeat_days). Same "first offending date" rule.
+    if (guard_id) {
+      const offending = await firstUnassignedDate(
+        guard_id,
+        site_id,
+        pending.map(p => pacificDateStr(p.start)),
+      );
+      if (offending) {
+        return res.status(422).json({ error: `Guard is not assigned to this site on ${offending}.` });
+      }
+    }
+
     const created: object[] = [];
     for (const p of pending) {
       const r = await pool.query(
@@ -201,6 +242,14 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     return res.status(422).json({ error: 'Cannot schedule shifts in the past.' });
   }
 
+  // Phase A enforcement (single). Bypassed for unassigned shifts.
+  if (guard_id) {
+    const d = pacificDateStr(scheduled_start);
+    if (!(await isGuardAssignedToSite(guard_id, site_id, d))) {
+      return res.status(422).json({ error: `Guard is not assigned to this site on ${d}.` });
+    }
+  }
+
   const result = await pool.query(
     `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
      VALUES ($1, $2, $3, $4, $5) RETURNING *`,
@@ -214,21 +263,33 @@ router.patch('/:id/assign-guard', requireAuth('company_admin'), async (req, res)
   const { guard_id } = req.body;
   if (!guard_id) return res.status(400).json({ error: 'guard_id is required' });
 
-  // Verify guard and shift belong to this company
+  // Verify guard and shift belong to this company. shiftCheck also pulls
+  // scheduled_start + site_id so Phase A can validate the assignment for
+  // the shift's actual date — closing the gap left by the original Phase A,
+  // which only enforced on POST /api/shifts.
   const [guardCheck, shiftCheck] = await Promise.all([
     pool.query(
       'SELECT id FROM guards WHERE id = $1 AND company_id = $2 AND is_active = true',
       [guard_id, req.user!.company_id]
     ),
     pool.query(
-      `SELECT s.id FROM shifts s
-       JOIN sites si ON si.id = s.site_id
-       WHERE s.id = $1 AND si.company_id = $2`,
+      `SELECT s.id, s.site_id, s.scheduled_start
+         FROM shifts s
+         JOIN sites si ON si.id = s.site_id
+        WHERE s.id = $1 AND si.company_id = $2`,
       [req.params.id, req.user!.company_id]
     ),
   ]);
   if (!guardCheck.rows[0]) return res.status(400).json({ error: 'Guard not found or inactive' });
   if (!shiftCheck.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+
+  // Phase A — gate against guard_site_assignments for the shift's Pacific
+  // calendar date. site_id is NOT mutable on this endpoint, so the
+  // effective site is always the shift's current site.
+  const shiftDate = pacificDateStr(shiftCheck.rows[0].scheduled_start);
+  if (!(await isGuardAssignedToSite(guard_id, shiftCheck.rows[0].site_id, shiftDate))) {
+    return res.status(422).json({ error: `Guard is not assigned to this site on ${shiftDate}.` });
+  }
 
   const result = await pool.query(
     `UPDATE shifts SET guard_id = $1, status = 'scheduled'
@@ -300,6 +361,16 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     if (!guardRes.rows[0]) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Guard not found, inactive, or belongs to a different company.' });
+    }
+
+    // Phase A — the new guard must be assigned to the shift's site for the
+    // shift's Pacific date. site_id isn't mutable on this endpoint, so we
+    // gate against the existing site. Sharing the txn client gives this
+    // read-your-own-writes consistency with the same transaction.
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    if (!(await isGuardAssignedToSite(new_guard_id, shift.site_id, shiftDate, client))) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: `Guard is not assigned to this site on ${shiftDate}.` });
     }
 
     // Overlap check: any OTHER scheduled/active shift the new guard holds in

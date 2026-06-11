@@ -3,8 +3,12 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
 import { validatePassword } from './auth';
+import { getAssignedSitesForGuard } from '../services/guardAssignments';
+import { pacificTodayStr } from '../services/pacificDate';
 
 const router = Router();
+
+const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;
 
 // GET /api/guards/me — guard's own profile (used by mobile profile tab)
 router.get('/me', requireAuth('guard'), async (req, res) => {
@@ -89,17 +93,66 @@ router.patch('/:id/reactivate', requireAuth('company_admin'), async (req, res) =
 
 router.post('/:id/assign', requireAuth('company_admin'), async (req, res) => {
   const { site_id, assigned_from, assigned_until } = req.body;
+
+  // Bycatch from Phase A audit: tenant-scope the GUARD too (the prior
+  // version only verified site_id was in caller's company, leaving a
+  // company_admin able to assign their site to a guard owned by a
+  // different company).
+  const guardCheck = await pool.query(
+    'SELECT id FROM guards WHERE id = $1 AND company_id = $2',
+    [req.params.id, req.user!.company_id]
+  );
+  if (!guardCheck.rows[0]) return res.status(403).json({ error: 'Guard not found' });
+
   const siteCheck = await pool.query(
     'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
     [site_id, req.user!.company_id]
   );
   if (!siteCheck.rows[0]) return res.status(403).json({ error: 'Site not found' });
-  const result = await pool.query(
-    `INSERT INTO guard_site_assignments (guard_id, site_id, assigned_from, assigned_until)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [req.params.id, site_id, assigned_from, assigned_until || null]
-  );
-  res.status(201).json(result.rows[0]);
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO guard_site_assignments (guard_id, site_id, assigned_from, assigned_until)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [req.params.id, site_id, assigned_from, assigned_until || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err: any) {
+    // uq_guard_site_active: (guard_id, site_id, assigned_from)
+    if (err?.code === '23505') {
+      return res.status(409).json({ error: 'Assignment with this start date already exists.' });
+    }
+    console.error('[POST /api/guards/:id/assign] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to assign guard' });
+  }
+});
+
+// GET /api/guards/:id/assigned-sites?date=YYYY-MM-DD
+//
+// Powers the /admin/shifts modal: when an admin picks a guard, the SITE
+// dropdown is filtered to that guard's currently-active assignments. The
+// date param defaults to today's Pacific calendar date; the modal sends
+// the current date when fetching, and server-side enforcement in the
+// shift POST handler re-validates per emitted shift date so the dropdown
+// is purely a UI convenience.
+router.get('/:id/assigned-sites', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const dateParam = (req.query.date as string | undefined) ?? pacificTodayStr();
+  if (!YYYY_MM_DD.test(dateParam)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+
+  // Tenant gate. vishnu has no company scope and may read any guard's
+  // assignments; company_admin can only read guards in their own company.
+  if (req.user!.role === 'company_admin') {
+    const guardCheck = await pool.query(
+      'SELECT id FROM guards WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.user!.company_id]
+    );
+    if (!guardCheck.rows[0]) return res.status(404).json({ error: 'Guard not found' });
+  }
+
+  const sites = await getAssignedSitesForGuard(req.params.id, dateParam);
+  res.json({ date: dateParam, sites });
 });
 
 export default router;

@@ -229,6 +229,43 @@ export default function ShiftsPage() {
   const [calStart, setCalStart] = useState<Date | null>(null);
   const [specificDates, setSpecificDates] = useState<Date[]>([]);
 
+  // Phase A — when an admin picks a guard, the SITE dropdown narrows to that
+  // guard's currently-active assignments. Empty list ⇒ submit disabled with
+  // a hint pointing at /admin/guards. No guard ⇒ all company sites (legacy
+  // unassigned-shift flow). The actual per-date check runs server-side; this
+  // dropdown is a UI convenience to keep admins from being able to pick a
+  // site that would 422 on submit.
+  const [assignedSites, setAssignedSites] = useState<Site[] | null>(null); // null = not loaded yet / no guard picked
+  const [assignedSitesLoading, setAssignedSitesLoading] = useState(false);
+
+  useEffect(() => {
+    if (!guardId) { setAssignedSites(null); return; }
+    let cancelled = false;
+    setAssignedSitesLoading(true);
+    (async () => {
+      try {
+        const r = await adminGet<{ sites: { site_id: string; site_name: string }[] }>(
+          `/api/guards/${guardId}/assigned-sites`
+        );
+        if (cancelled) return;
+        const filtered: Site[] = r.sites.map(s => ({ id: s.site_id, name: s.site_name }));
+        setAssignedSites(filtered);
+        // If the currently-picked site is no longer in the filtered list, clear it.
+        setSiteId(prev => (prev && !filtered.some(s => s.id === prev) ? '' : prev));
+      } catch { if (!cancelled) setAssignedSites([]); }
+      finally { if (!cancelled) setAssignedSitesLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [guardId]);
+
+  // Effective site list shown in the dropdown. Empty array (guard with no
+  // assignments) renders an empty <select> + disabled submit; null (no guard
+  // selected) keeps the legacy "all sites" view.
+  const visibleSites: Site[] = guardId
+    ? (assignedSites ?? [])
+    : sites;
+  const noAssignmentsForGuard = !!guardId && assignedSites !== null && assignedSites.length === 0;
+
   const isOvernight = useMemo(() => {
     if (!startTime || !endTime) return false;
     const [sh, sm] = startTime.split(':').map(Number);
@@ -536,11 +573,20 @@ export default function ShiftsPage() {
 
               <div>
                 <label className="block text-gray-500 text-xs tracking-widest mb-1">SITE <span className="text-amber-400">*</span></label>
-                <select value={siteId} onChange={(e) => setSiteId(e.target.value)}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400">
-                  <option value="">Select site…</option>
-                  {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                <select value={siteId} onChange={(e) => setSiteId(e.target.value)} disabled={noAssignmentsForGuard}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400 disabled:opacity-40">
+                  <option value="">
+                    {noAssignmentsForGuard
+                      ? 'No sites assigned — assign guard on the Guards page first'
+                      : (assignedSitesLoading ? 'Loading sites…' : 'Select site…')}
+                  </option>
+                  {visibleSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
+                {noAssignmentsForGuard && (
+                  <p className="text-amber-400/80 text-xs mt-1">
+                    This guard has no active site assignments. Go to <span className="font-mono">/admin/guards</span> and click ASSIGN.
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -639,7 +685,7 @@ export default function ShiftsPage() {
 
             <div className="flex gap-3 mt-6">
               <button onClick={() => setShowModal(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
-              <button onClick={createShift} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
+              <button onClick={createShift} disabled={saving || noAssignmentsForGuard} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'SAVING…' : repeatMode === 'none' ? 'SCHEDULE' : `CREATE ${repeatMode === 'specific' ? specificDates.length || '' : ''} SHIFTS`.replace(/\s+/g, ' ').trim()}
               </button>
             </div>
