@@ -109,11 +109,15 @@ function isoWeek(d: Date) {
 
 /** Mini inline calendar component */
 function MiniCalendar({
-  year, month, selectedDate, highlightDows, minDate, onSelectDate, onPrevMonth, onNextMonth,
+  year, month, selectedDate, selectedDates, highlightDows, minDate, multiSelect,
+  onSelectDate, onPrevMonth, onNextMonth,
 }: {
   year: number; month: number;
-  selectedDate: Date | null; highlightDows: number[];
+  selectedDate: Date | null;
+  selectedDates?: Date[];
+  highlightDows: number[];
   minDate?: Date;
+  multiSelect?: boolean;
   onSelectDate: (d: Date) => void;
   onPrevMonth: () => void; onNextMonth: () => void;
 }) {
@@ -124,6 +128,8 @@ function MiniCalendar({
   while (cells.length % 7 !== 0) cells.push(null);
 
   const minMidnight = minDate ? new Date(minDate.getFullYear(), minDate.getMonth(), minDate.getDate()).getTime() : -Infinity;
+  const selectedKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const selectedSet = new Set((selectedDates ?? []).map(selectedKey));
 
   return (
     <div className="mt-3 bg-[#070F1E] border border-[#1A3050] rounded-xl p-3">
@@ -141,14 +147,16 @@ function MiniCalendar({
           const thisDate = new Date(year, month, day);
           const dow = thisDate.getDay();
           const isHighlighted = highlightDows.includes(dow);
-          const isSelected = selectedDate !== null &&
+          const isSelectedSingle = !multiSelect && selectedDate !== null &&
             selectedDate.getFullYear() === year && selectedDate.getMonth() === month && selectedDate.getDate() === day;
+          const isSelectedMulti = !!multiSelect && selectedSet.has(selectedKey(thisDate));
           const isPast = thisDate.getTime() < minMidnight;
           return (
             <button key={day} type="button" disabled={isPast} onClick={() => onSelectDate(thisDate)}
               className={['text-center text-xs py-1.5 rounded transition-colors',
                 isPast ? 'text-gray-700 cursor-not-allowed opacity-40'
-                : isSelected ? 'ring-2 ring-amber-400 text-amber-400 font-bold bg-amber-400/10'
+                : isSelectedMulti ? 'bg-[#00C8FF] text-[#0B1526] font-bold hover:bg-[#00C8FF]/90'
+                : isSelectedSingle ? 'ring-2 ring-amber-400 text-amber-400 font-bold bg-amber-400/10'
                 : isHighlighted ? 'bg-amber-400/20 text-amber-300 hover:bg-amber-400/30'
                 : 'text-gray-400 hover:bg-[#1A3050] hover:text-gray-200'].join(' ')}>
               {day}
@@ -214,11 +222,12 @@ export default function ShiftsPage() {
   const [startTime,  setStartTime]  = useState('');
   const [endTime,    setEndTime]    = useState('');
   const [singleDate, setSingleDate] = useState('');
-  const [repeatMode, setRepeatMode] = useState<'none' | 'days'>('none');
+  const [repeatMode, setRepeatMode] = useState<'none' | 'days' | 'specific'>('none');
   const [repeatDays, setRepeatDays] = useState<number[]>([]);
   const [calYear,  setCalYear]  = useState(today.getFullYear());
   const [calMonth, setCalMonth] = useState(today.getMonth());
   const [calStart, setCalStart] = useState<Date | null>(null);
+  const [specificDates, setSpecificDates] = useState<Date[]>([]);
 
   const isOvernight = useMemo(() => {
     if (!startTime || !endTime) return false;
@@ -247,8 +256,25 @@ export default function ShiftsPage() {
     setSingleDate('');
     setRepeatMode('none'); setRepeatDays([]);
     setCalStart(null);
+    setSpecificDates([]);
     setCalYear(today.getFullYear()); setCalMonth(today.getMonth());
     setFormError('');
+  }
+
+  function toggleSpecificDate(d: Date) {
+    setSpecificDates((prev) => {
+      const key = (x: Date) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
+      const k = key(d);
+      const exists = prev.some((x) => key(x) === k);
+      if (exists) return prev.filter((x) => key(x) !== k);
+      return [...prev, d].sort((a, b) => a.getTime() - b.getTime());
+    });
+  }
+
+  function fmtSpecificDate(d: Date): string {
+    // YYYY-MM-DD in *local* tz — matches the server's expectation that the
+    // admin's calendar selection is the Pacific calendar date they meant.
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
 
   function openScheduleForGuard(g: Guard) {
@@ -264,9 +290,12 @@ export default function ShiftsPage() {
     if (!endTime)   { setFormError('End time is required'); return; }
     if (repeatMode === 'none') {
       if (!singleDate) { setFormError('Date is required'); return; }
-    } else {
+    } else if (repeatMode === 'days') {
       if (repeatDays.length === 0) { setFormError('Select at least one day'); return; }
       if (!calStart) { setFormError('Select a start date from the calendar'); return; }
+    } else {
+      if (specificDates.length === 0) { setFormError('Pick at least one date'); return; }
+      if (specificDates.length > 60)  { setFormError('Pick at most 60 dates'); return; }
     }
 
     setSaving(true); setFormError('');
@@ -279,11 +308,21 @@ export default function ShiftsPage() {
         const payload: any = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd };
         if (guardId) payload.guard_id = guardId;
         await adminPost('/api/shifts', payload);
-      } else {
+      } else if (repeatMode === 'days') {
         const scheduledStart = buildISO(calStart!, startTime);
         const endBaseDate = isOvernight ? new Date(calStart!.getTime() + 86400000) : calStart!;
         const scheduledEnd = buildISO(endBaseDate, endTime);
         const payload: any = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd, repeat_days: repeatDays };
+        if (guardId) payload.guard_id = guardId;
+        await adminPost('/api/shifts', payload);
+      } else {
+        const payload: any = {
+          mode: 'specific_dates',
+          site_id: siteId,
+          start_time: startTime,
+          end_time: endTime,
+          dates: specificDates.map(fmtSpecificDate),
+        };
         if (guardId) payload.guard_id = guardId;
         await adminPost('/api/shifts', payload);
       }
@@ -523,10 +562,11 @@ export default function ShiftsPage() {
 
               <div>
                 <label className="block text-gray-500 text-xs tracking-widest mb-1">REPEAT</label>
-                <select value={repeatMode} onChange={(e) => { setRepeatMode(e.target.value as 'none' | 'days'); setRepeatDays([]); setCalStart(null); }}
+                <select value={repeatMode} onChange={(e) => { setRepeatMode(e.target.value as 'none' | 'days' | 'specific'); setRepeatDays([]); setCalStart(null); setSpecificDates([]); }}
                   className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400">
                   <option value="none">Does not repeat</option>
                   <option value="days">Repeat on selected days</option>
+                  <option value="specific">Pick specific dates</option>
                 </select>
               </div>
 
@@ -565,12 +605,42 @@ export default function ShiftsPage() {
                     onSelectDate={(d) => setCalStart(d)} onPrevMonth={prevMonth} onNextMonth={nextMonth} />
                 </div>
               )}
+
+              {repeatMode === 'specific' && (
+                <div data-testid="specific-dates-panel">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-gray-500 text-xs tracking-widest">
+                      {specificDates.length} DATE{specificDates.length === 1 ? '' : 'S'} SELECTED
+                    </p>
+                    {specificDates.length > 0 && (
+                      <button type="button" onClick={() => setSpecificDates([])}
+                        className="text-gray-500 hover:text-amber-400 text-xs tracking-widest underline">
+                        CLEAR ALL
+                      </button>
+                    )}
+                  </div>
+                  {specificDates.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {specificDates.map((d) => (
+                        <button key={fmtSpecificDate(d)} type="button" onClick={() => toggleSpecificDate(d)}
+                          className="px-2 py-0.5 rounded bg-[#00C8FF]/15 border border-[#00C8FF]/40 text-[#00C8FF] text-xs font-mono hover:bg-[#00C8FF]/25 transition-colors">
+                          {fmtDate(d)} ×
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-gray-600 text-xs mb-1">Pick up to 60 individual dates. One shift per date, all sharing the same time + site.</p>
+                  <MiniCalendar year={calYear} month={calMonth} selectedDate={null} selectedDates={specificDates}
+                    highlightDows={[]} minDate={today} multiSelect
+                    onSelectDate={toggleSpecificDate} onPrevMonth={prevMonth} onNextMonth={nextMonth} />
+                </div>
+              )}
             </div>
 
             <div className="flex gap-3 mt-6">
               <button onClick={() => setShowModal(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={createShift} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
-                {saving ? 'SAVING…' : repeatMode === 'days' ? 'CREATE SHIFTS' : 'SCHEDULE'}
+                {saving ? 'SAVING…' : repeatMode === 'none' ? 'SCHEDULE' : `CREATE ${repeatMode === 'specific' ? specificDates.length || '' : ''} SHIFTS`.replace(/\s+/g, ' ').trim()}
               </button>
             </div>
           </div>

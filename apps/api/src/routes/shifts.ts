@@ -5,12 +5,132 @@ import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateAtSite } from '../services/geofence';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
-import { isPastPacificDate } from '../services/pacificDate';
+import { isPastPacificDate, isPastPacificDateString } from '../services/pacificDate';
 
 const router = Router();
 
+const SPECIFIC_DATES_MAX = 60;
+const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;
+const HH_MM = /^\d{2}:\d{2}$/;
+
 // POST /api/shifts — admin schedules a new shift (guard_id is optional)
 router.post('/', requireAuth('company_admin'), async (req, res) => {
+  const { mode } = req.body as { mode?: string };
+
+  // ── Mode: pick specific dates ───────────────────────────────────────
+  // Payload shape (snake_case to match the rest of this file):
+  //   { mode: 'specific_dates', site_id, guard_id?,
+  //     start_time: 'HH:MM', end_time: 'HH:MM', dates: ['YYYY-MM-DD', …] }
+  // One shift per date, all sharing site/guard/start_time/end_time. The
+  // batch is inserted in a single transaction — any overlap or insert
+  // failure rolls back the whole request.
+  if (mode === 'specific_dates') {
+    const { site_id, guard_id, start_time, end_time, dates } = req.body as {
+      site_id?: string;
+      guard_id?: string | null;
+      start_time?: string;
+      end_time?: string;
+      dates?: unknown;
+    };
+
+    if (!site_id) return res.status(400).json({ error: 'site_id is required' });
+    if (!start_time || !HH_MM.test(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
+    if (!end_time   || !HH_MM.test(end_time))   return res.status(400).json({ error: 'end_time must be HH:MM' });
+    if (!Array.isArray(dates) || dates.length === 0) {
+      return res.status(422).json({ error: 'dates must be a non-empty array' });
+    }
+    if (dates.length > SPECIFIC_DATES_MAX) {
+      return res.status(422).json({ error: `Too many dates — max ${SPECIFIC_DATES_MAX}` });
+    }
+    const dateList = dates as string[];
+    if (!dateList.every(d => typeof d === 'string' && YYYY_MM_DD.test(d))) {
+      return res.status(422).json({ error: 'dates must be YYYY-MM-DD strings' });
+    }
+    // Each date must be a real calendar date — reject e.g. "2026-02-30".
+    if (!dateList.every(d => {
+      const [y, m, day] = d.split('-').map(Number);
+      const parsed = new Date(Date.UTC(y, m - 1, day));
+      return parsed.getUTCFullYear() === y && parsed.getUTCMonth() === m - 1 && parsed.getUTCDate() === day;
+    })) {
+      return res.status(422).json({ error: 'one or more dates are not valid calendar dates' });
+    }
+    if (new Set(dateList).size !== dateList.length) {
+      return res.status(422).json({ error: 'dates must be unique' });
+    }
+    if (dateList.some(d => isPastPacificDateString(d))) {
+      return res.status(422).json({ error: 'Cannot schedule shifts in the past.' });
+    }
+
+    // Site + guard belong to caller's company.
+    const siteCheck = await pool.query(
+      'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
+      [site_id, req.user!.company_id]
+    );
+    if (!siteCheck.rows[0]) return res.status(400).json({ error: 'Site not found' });
+    if (guard_id) {
+      const guardCheck = await pool.query(
+        'SELECT id FROM guards WHERE id = $1 AND company_id = $2 AND is_active = true',
+        [guard_id, req.user!.company_id]
+      );
+      if (!guardCheck.rows[0]) return res.status(400).json({ error: 'Guard not found or inactive' });
+    }
+
+    const status = guard_id ? 'scheduled' : 'unassigned';
+    const overnightInterval = start_time > end_time ? '1 day' : '0 day'; // end before start → next day
+    // Sort to make rollback messages deterministic and conflict checks predictable.
+    const sortedDates = [...dateList].sort();
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const ids: string[] = [];
+      for (const d of sortedDates) {
+        // Overlap check (assigned shifts only — unassigned can stack).
+        if (guard_id) {
+          const overlap = await client.query(
+            `WITH new_window AS (
+               SELECT
+                 ($1::date + $2::time) AT TIME ZONE 'America/Los_Angeles' AS s,
+                 ($1::date + $4::interval + $3::time) AT TIME ZONE 'America/Los_Angeles' AS e
+             )
+             SELECT 1 FROM shifts, new_window
+              WHERE guard_id = $5
+                AND status IN ('scheduled','active')
+                AND scheduled_start < new_window.e
+                AND scheduled_end   > new_window.s
+              LIMIT 1`,
+            [d, start_time, end_time, overnightInterval, guard_id]
+          );
+          if (overlap.rows[0]) {
+            await client.query('ROLLBACK');
+            return res.status(422).json({ error: `Conflict on date ${d}` });
+          }
+        }
+        const insert = await client.query(
+          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
+           VALUES (
+             $1,
+             $2,
+             ($3::date + $4::time) AT TIME ZONE 'America/Los_Angeles',
+             ($3::date + $6::interval + $5::time) AT TIME ZONE 'America/Los_Angeles',
+             $7
+           ) RETURNING id`,
+          [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status]
+        );
+        ids.push(insert.rows[0].id);
+      }
+      await client.query('COMMIT');
+      return res.status(201).json({ ids });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('[shifts.specific_dates] error:', err);
+      return res.status(500).json({ error: err?.message ?? 'Failed to create shifts' });
+    } finally {
+      client.release();
+    }
+  }
+
+  // ── Mode: single OR repeat-on-days (existing) ───────────────────────
   const { guard_id, site_id, scheduled_start, scheduled_end, repeat_days } = req.body;
   if (!site_id || !scheduled_start || !scheduled_end) {
     return res.status(400).json({ error: 'site_id, scheduled_start, scheduled_end are required' });

@@ -25,3 +25,20 @@ export function pacificDateStr(input: Date | string, now?: Date): string {
 export function isPastPacificDate(input: Date | string, now: Date = new Date()): boolean {
   return pacificDateStr(input) < pacificDateStr(now);
 }
+
+export function pacificTodayStr(now: Date = new Date()): string {
+  return FORMATTER.format(now);
+}
+
+/**
+ * Compare a raw YYYY-MM-DD calendar string against today's Pacific date.
+ *
+ * `isPastPacificDate("2026-06-15")` would parse the string as 2026-06-15
+ * UTC midnight and then format it back into Pacific — which lands on
+ * 2026-06-14 PT (because midnight UTC is 5pm PT the prior day). That
+ * off-by-one is wrong for calendar-string inputs. This helper sidesteps
+ * the round-trip and just compares the two YYYY-MM-DD strings directly.
+ */
+export function isPastPacificDateString(yyyymmdd: string, now: Date = new Date()): boolean {
+  return yyyymmdd < pacificTodayStr(now);
+}
