@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { jwtVerify } from 'jose';
 
 /**
  * Next.js Edge Middleware — route protection for all three portals.
@@ -10,9 +11,10 @@ import { NextRequest, NextResponse } from 'next/server';
  *
  * Public paths (login + reset-password) are always let through without a cookie.
  *
- * Decodes the JWT access token without importing jsonwebtoken
- * (Edge runtime does not support Node.js crypto — we do a lightweight decode only).
- * Full signature verification happens on the API for every data request.
+ * Verifies HS256 signature with JWT_SECRET (must match the API's signing key)
+ * via `jose`, which is Edge-runtime compatible (does not need node:crypto).
+ * On failure — bad signature, tampered payload, expired, or missing secret —
+ * the cookie is cleared and the request is redirected to the portal's login.
  */
 
 const ROUTES = [
@@ -36,17 +38,14 @@ const ROUTES = [
   },
 ];
 
-function decodeJwtExpiry(token: string): number | null {
-  try {
-    const payload = token.split('.')[1];
-    const decoded = JSON.parse(atob(payload));
-    return decoded.exp ?? null;
-  } catch {
-    return null;
-  }
+const encoder = new TextEncoder();
+
+function getSecret(): Uint8Array | null {
+  const s = process.env.JWT_SECRET;
+  return s ? encoder.encode(s) : null;
 }
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   for (const route of ROUTES) {
@@ -67,10 +66,22 @@ export function middleware(req: NextRequest) {
       return NextResponse.redirect(new URL(`${route.loginPath}?from=${pathname}`, req.url));
     }
 
-    const exp = decodeJwtExpiry(token);
-    if (!exp || exp * 1000 < Date.now()) {
-      // Token expired — redirect to login and clear stale cookie
-      const res = NextResponse.redirect(new URL(`${route.loginPath}?expired=1`, req.url));
+    const secret = getSecret();
+    if (!secret) {
+      // Fail-closed: if JWT_SECRET isn't configured we cannot verify,
+      // so we treat every token as invalid rather than fall through.
+      const res = NextResponse.redirect(new URL(`${route.loginPath}?invalid=1`, req.url));
+      res.cookies.delete(route.cookieName);
+      return res;
+    }
+
+    try {
+      await jwtVerify(token, secret, { algorithms: ['HS256'] });
+    } catch (err) {
+      const expired = (err as { code?: string })?.code === 'ERR_JWT_EXPIRED';
+      const res = NextResponse.redirect(
+        new URL(`${route.loginPath}?${expired ? 'expired=1' : 'invalid=1'}`, req.url),
+      );
       res.cookies.delete(route.cookieName);
       return res;
     }
