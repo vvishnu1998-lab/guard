@@ -16,7 +16,7 @@
       "bundleIdentifier": "com.netraops.guard",
       "buildNumber": "1",
       "config": {
-        "googleMapsApiKey": "AIzaSyDnKeFghQFa0q5rAJeDXdW09iwzI9KVcSU",
+        "googleMapsApiKey": "AIzaSyDTHH3yWZVpuxISFd5pHxE2dmZtyU9VN-I",
         "usesNonExemptEncryption": false
       },
       "entitlements": {
