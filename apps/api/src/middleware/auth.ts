@@ -24,6 +24,19 @@ declare global {
   }
 }
 
+/**
+ * Access-token signing/verifying secret keyed by role.
+ *
+ * `vishnu` (super-admin) uses `VISHNU_JWT_SECRET` — a separation-of-privilege
+ * hedge so a compromise of `JWT_SECRET` alone cannot mint a super-admin
+ * token. Every other role uses `JWT_SECRET`. Refresh tokens are unaffected
+ * (still `JWT_REFRESH_SECRET` for every role).
+ */
+export function secretForRole(role: string | undefined): string | undefined {
+  if (role === 'vishnu') return process.env.VISHNU_JWT_SECRET;
+  return process.env.JWT_SECRET;
+}
+
 export function requireAuth(...roles: UserRole[]) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
@@ -31,9 +44,21 @@ export function requireAuth(...roles: UserRole[]) {
       return res.status(401).json({ error: 'Missing authorization token' });
     }
 
+    const token = header.slice(7);
+
+    // Decode without verification to peek at the role, so we can pick the
+    // matching secret. This is safe: a forged role only changes which key
+    // we verify against — signature verification below still gates trust.
+    const unsafe = jwt.decode(token) as (AuthPayload | null);
+    const secret = secretForRole(unsafe?.role);
+    if (!secret) {
+      // VISHNU_JWT_SECRET absent at runtime — fail-closed.
+      return res.status(503).json({ error: 'Auth misconfigured' });
+    }
+
     let payload: AuthPayload;
     try {
-      payload = jwt.verify(header.slice(7), process.env.JWT_SECRET!) as AuthPayload;
+      payload = jwt.verify(token, secret) as AuthPayload;
     } catch (err) {
       const msg = err instanceof jwt.TokenExpiredError ? 'Token expired' : 'Invalid token';
       return res.status(401).json({ error: msg });

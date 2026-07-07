@@ -11,10 +11,15 @@ import { jwtVerify } from 'jose';
  *
  * Public paths (login + reset-password) are always let through without a cookie.
  *
- * Verifies HS256 signature with JWT_SECRET (must match the API's signing key)
- * via `jose`, which is Edge-runtime compatible (does not need node:crypto).
- * On failure — bad signature, tampered payload, expired, or missing secret —
- * the cookie is cleared and the request is redirected to the portal's login.
+ * Verifies HS256 signature with the portal's own signing key (must match the
+ * API's signing key for the corresponding role) via `jose`, which is
+ * Edge-runtime compatible (does not need node:crypto). On failure — bad
+ * signature, tampered payload, expired, or missing secret — the cookie is
+ * cleared and the request is redirected to the portal's login.
+ *
+ * Per-portal key routing mirrors the API (see `secretForRole` in
+ * apps/api/src/middleware/auth.ts): vishnu → VISHNU_JWT_SECRET, all
+ * others → JWT_SECRET.
  */
 
 const ROUTES = [
@@ -23,25 +28,28 @@ const ROUTES = [
     loginPath:          '/admin/login',
     resetPasswordPath:  '/admin/reset-password',
     cookieName:         'guard_admin_access',
+    secretEnvVar:       'JWT_SECRET',
   },
   {
     prefix:             '/client',
     loginPath:          '/client/login',
     resetPasswordPath:  '/client/reset-password',
     cookieName:         'guard_client_access',
+    secretEnvVar:       'JWT_SECRET',
   },
   {
     prefix:             '/vishnu',
     loginPath:          '/vishnu/login',
     resetPasswordPath:  '/vishnu/reset-password',
     cookieName:         'guard_vishnu_access',
+    secretEnvVar:       'VISHNU_JWT_SECRET',
   },
-];
+] as const;
 
 const encoder = new TextEncoder();
 
-function getSecret(): Uint8Array | null {
-  const s = process.env.JWT_SECRET;
+function getSecret(envVar: string): Uint8Array | null {
+  const s = process.env[envVar];
   return s ? encoder.encode(s) : null;
 }
 
@@ -66,10 +74,11 @@ export async function middleware(req: NextRequest) {
       return NextResponse.redirect(new URL(`${route.loginPath}?from=${pathname}`, req.url));
     }
 
-    const secret = getSecret();
+    const secret = getSecret(route.secretEnvVar);
     if (!secret) {
-      // Fail-closed: if JWT_SECRET isn't configured we cannot verify,
-      // so we treat every token as invalid rather than fall through.
+      // Fail-closed: if the portal's signing key isn't configured we
+      // cannot verify, so we treat every token as invalid rather than
+      // fall through.
       const res = NextResponse.redirect(new URL(`${route.loginPath}?invalid=1`, req.url));
       res.cookies.delete(route.cookieName);
       return res;

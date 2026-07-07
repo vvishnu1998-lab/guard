@@ -4,7 +4,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthPayload, requireAuth } from '../middleware/auth';
+import { AuthPayload, requireAuth, secretForRole } from '../middleware/auth';
 import { sendTempPasswordEmail } from '../services/email';
 
 const router = Router();
@@ -41,8 +41,13 @@ function generateTempPassword(): string {
 function signTokens(payload: Omit<AuthPayload, 'iat' | 'exp' | 'jti'>) {
   const accessJti  = uuidv4();
   const refreshJti = uuidv4();
-  const access  = jwt.sign({ ...payload, jti: accessJti },  process.env.JWT_SECRET!,         { expiresIn: ACCESS_TOKEN_TTL  });
-  const refresh = jwt.sign({ ...payload, jti: refreshJti }, process.env.JWT_REFRESH_SECRET!, { expiresIn: REFRESH_TOKEN_TTL });
+  const accessSecret = secretForRole(payload.role);
+  if (!accessSecret) {
+    // VISHNU_JWT_SECRET missing at runtime for a vishnu login.
+    throw new Error(`access-token secret unavailable for role: ${payload.role}`);
+  }
+  const access  = jwt.sign({ ...payload, jti: accessJti },  accessSecret,                        { expiresIn: ACCESS_TOKEN_TTL  });
+  const refresh = jwt.sign({ ...payload, jti: refreshJti }, process.env.JWT_REFRESH_SECRET!,     { expiresIn: REFRESH_TOKEN_TTL });
   return { access, refresh };
 }
 
