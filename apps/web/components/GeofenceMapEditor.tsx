@@ -106,9 +106,18 @@ export default function GeofenceMapEditor({ initialPolygon, initialCentre, centr
         scrollWheelZoom
         style={{ height: '100%', width: '100%' }}
       >
+        {/*
+          CartoDB Voyager basemap — swap 2026-07-08 off OSM public tiles.
+          The OSM Foundation's tile server forbids production/commercial
+          use; CARTO's basemap ToS covers it and needs no API key. `{r}`
+          is the retina modifier: '' on 1x, '@2x' on hi-DPI. Subdomains
+          a–d shard the requests. Attribution keeps both OSM (data) and
+          CARTO (rendering).
+        */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
+          url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+          subdomains="abcd"
           maxZoom={19}
         />
 
