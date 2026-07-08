@@ -107,17 +107,18 @@ export default function GeofenceMapEditor({ initialPolygon, initialCentre, centr
         style={{ height: '100%', width: '100%' }}
       >
         {/*
-          CartoDB Dark Matter (dark_all) basemap — matches the app's dark
-          UI so the polygon-draw affordances read against a low-contrast
-          ground rather than a bright one. Same ToS coverage + no-API-key
-          upside as Voyager (swap history: OSM public → Voyager 2026-07-08
-          → Dark Matter same day). `{r}` retina modifier, subdomains a–d
-          for request sharding, attribution names OSM (data) + CARTO
-          (rendering).
+          CartoDB Positron (light_all) basemap — minimalist light-grey
+          ground with soft roads + labels. The neutral palette keeps the
+          admin's attention on the polygon they're drawing rather than
+          fighting decorative basemap detail. Same ToS coverage + no-API-
+          key upside as the earlier CARTO styles (swap history: OSM
+          public → Voyager → Dark Matter → Positron, all 2026-07-08).
+          `{r}` retina modifier, subdomains a–d for request sharding,
+          attribution names OSM (data) + CARTO (rendering).
         */}
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png"
+          url="https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png"
           subdomains="abcd"
           maxZoom={19}
         />
