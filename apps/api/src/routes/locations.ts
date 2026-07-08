@@ -6,18 +6,20 @@ import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 import { insertNotification } from '../services/notifications';
 import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
+import { sendPushNotification } from '../services/firebase';
 
 /**
  * Fire guard notification row + admin email for a fresh geofence violation.
  * Shared by POST /ping (audit Tier 1-A), POST /violation (background-task
  * self-report), and POST /reports off-post flag (T2-D).
  *
- * Two channels, each with its own error catch so one failure can't block
- * the other:
+ * Three channels, each with its own error catch so one failure can't block
+ * the others:
  *   (1) Guard notification — insertNotification (Notifications tab record)
- *   (2) Admin email        — sendGeofenceBreachAlert (T1-D)
+ *   (2) Guard FCM push     — sendPushNotification (foreground alert)
+ *   (3) Admin email        — sendGeofenceBreachAlert (T1-D)
  *
- * Context switches the text on both channels:
+ * Context switches the text on all channels:
  *   kind='ping'   — guard ping fired off-post (Wave A default)
  *   kind='report' — guard filed a {reportType} report from off-post (T2-D)
  *
@@ -73,7 +75,41 @@ export async function fireBreachAlerts(params: {
     shiftSessionId: params.shiftSessionId,
   });
 
-  // T1-D — durable email channel for admin breach alerts. Best-effort —
+  // Channel (2) — guard FCM push. Same title/body as the in-app record so a
+  // guard whose screen is off still gets the alert. `data` payload matches
+  // the notification row for symmetric deep-linking from either surface.
+  // On a permanently-stale token (unregistered device), null the column so
+  // we stop retrying on every future breach.
+  try {
+    const guardTok = await pool.query<{ fcm_token: string | null }>(
+      'SELECT fcm_token FROM guards WHERE id = $1',
+      [params.guardId],
+    );
+    const token = guardTok.rows[0]?.fcm_token;
+    if (token) {
+      const { staleToken } = await sendPushNotification({
+        token,
+        title: notif.title,
+        body:  notif.body,
+        data:  {
+          type:        'geofence_breach',
+          violationId: params.violationId,
+          siteName:    r.site_name,
+          kind:        ctx.kind,
+        },
+      });
+      if (staleToken) {
+        await pool.query(
+          'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
+          [params.guardId, token],
+        );
+      }
+    }
+  } catch (err) {
+    console.error('[fcm] guard breach push failed:', err);
+  }
+
+  // Channel (3) — durable email channel for admin breach alerts. Best-effort —
   // its own .catch() so an email send failure can't block the guard
   // notification insert (the order here doesn't matter for that anymore,
   // but keep the pattern explicit in case channels are reordered later).

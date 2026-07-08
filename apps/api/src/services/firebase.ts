@@ -56,8 +56,8 @@ export async function sendPushNotification(params: {
   title: string;
   body: string;
   data?: Record<string, string>;
-}) {
-  if (!params.token) return;
+}): Promise<{ staleToken: boolean }> {
+  if (!params.token) return { staleToken: false };
 
   // ── Expo push token → Expo Push API ────────────────────────────────────────
   if (params.token.startsWith('ExponentPushToken[')) {
@@ -80,20 +80,22 @@ export async function sendPushNotification(params: {
       });
       const json = await res.json() as any;
       if (json?.data?.status === 'error') {
+        const staleToken = json.data?.details?.error === 'DeviceNotRegistered';
         console.error('[expo-push] Delivery error:', json.data.message, json.data.details);
-      } else {
-        console.log('[expo-push] Sent:', params.token.slice(0, 50) + '…');
+        return { staleToken };
       }
+      console.log('[expo-push] Sent:', params.token.slice(0, 50) + '…');
+      return { staleToken: false };
     } catch (err) {
       console.error('[expo-push] HTTP fetch error:', err);
+      return { staleToken: false };
     }
-    return;
   }
 
   // ── Raw FCM token → Firebase Admin SDK ─────────────────────────────────────
   if (!admin.apps.length) {
     console.warn('[firebase] Admin SDK not initialized — skipping raw FCM push for token:', params.token.slice(0, 20));
-    return;
+    return { staleToken: false };
   }
   try {
     await admin.messaging().send({
@@ -104,28 +106,16 @@ export async function sendPushNotification(params: {
       apns:    { payload: { aps: { sound: 'default', badge: 1 } } },
     });
     console.log('[firebase] FCM push sent');
+    return { staleToken: false };
   } catch (err) {
-    console.error('[firebase] FCM push failed:', err);
+    const code = (err as { code?: string; errorInfo?: { code?: string } })?.code
+      ?? (err as { errorInfo?: { code?: string } })?.errorInfo?.code;
+    // FCM signals a permanently-unregistered token via these two codes.
+    // The caller is expected to NULL out the DB row so we stop retrying.
+    const staleToken =
+      code === 'messaging/registration-token-not-registered' ||
+      code === 'messaging/invalid-registration-token';
+    console.error('[firebase] FCM push failed:', code ?? err);
+    return { staleToken };
   }
-}
-
-/** Send a geofence violation alert to Star admin devices */
-export async function sendGeofenceViolationAlert(params: {
-  adminFcmTokens: string[];
-  guardName: string;
-  siteName: string;
-  sessionId: string;
-}) {
-  if (!params.adminFcmTokens.length) return;
-
-  await Promise.allSettled(
-    params.adminFcmTokens.map((token) =>
-      sendPushNotification({
-        token,
-        title: `⚠️ Geofence Violation — ${params.siteName}`,
-        body:  `${params.guardName} has left the boundary.`,
-        data:  { type: 'geofence_violation', session_id: params.sessionId },
-      })
-    )
-  );
 }
