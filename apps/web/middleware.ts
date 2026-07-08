@@ -71,7 +71,14 @@ export async function middleware(req: NextRequest) {
 
     const token = req.cookies.get(route.cookieName)?.value;
     if (!token) {
-      return NextResponse.redirect(new URL(`${route.loginPath}?from=${pathname}`, req.url));
+      // Preserve query string too — the incident-email deep-link relies on
+      // ?report=<id> surviving a login redirect. encodeURIComponent flattens
+      // the nested ?/= into %-escapes so URLSearchParams unpacks cleanly on
+      // the login page.
+      const originalPath = pathname + (req.nextUrl.search ?? '');
+      return NextResponse.redirect(
+        new URL(`${route.loginPath}?from=${encodeURIComponent(originalPath)}`, req.url),
+      );
     }
 
     const secret = getSecret(route.secretEnvVar);

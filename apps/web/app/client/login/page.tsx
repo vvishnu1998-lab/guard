@@ -1,6 +1,20 @@
 'use client';
 import Image from 'next/image';
 import { useState, FormEvent } from 'react';
+import { useSearchParams } from 'next/navigation';
+
+/**
+ * Sanitize the ?from=<path> value the middleware sets before redirecting an
+ * unauthed user to /client/login. Accept only same-origin paths that start
+ * with a single '/' so a malicious inbox link like
+ * `/client/login?from=https://evil.example/steal` can't open-redirect us.
+ */
+function safeFromPath(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  if (!raw.startsWith('/')) return null;   // require path form
+  if (raw.startsWith('//')) return null;   // protocol-relative → treated as absolute by browsers
+  return raw;
+}
 
 function EyeIcon() {
   return (
@@ -21,6 +35,9 @@ function EyeOffIcon() {
 }
 
 export default function ClientLoginPage() {
+  const searchParams = useSearchParams();
+  const fromPath     = safeFromPath(searchParams?.get('from'));
+
   const [email, setEmail]           = useState('');
   const [password, setPassword]     = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -48,7 +65,14 @@ export default function ClientLoginPage() {
       if (!res.ok) { setError(data.error ?? 'Login failed'); return; }
       document.cookie = `guard_client_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
       document.cookie = `guard_client_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
-      window.location.href = data.must_change_password ? '/client/change-password' : '/client';
+      // Preserve the deep-link the middleware stashed in ?from= (e.g.
+      // `/client?report=<id>` from an incident-alert email). Skipped when
+      // must_change_password forces the password flow.
+      if (data.must_change_password) {
+        window.location.href = '/client/change-password';
+      } else {
+        window.location.href = fromPath ?? '/client';
+      }
     } catch {
       setError('Network error. Please try again.');
     } finally {

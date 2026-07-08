@@ -7,6 +7,7 @@
  * has its own sidebar tab). Date range only; no guard search.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { clientGet } from '../../lib/clientApi';
 import ActivityLogTable from '../../components/ActivityLogTable';
 import RetentionNotice from '../../components/client/RetentionNotice';
@@ -19,6 +20,12 @@ interface SiteInfo {
 }
 
 export default function ClientPortal() {
+  // Incident-alert email deep-link: /client?report=<id> scrolls the
+  // matching row into view + flashes a highlight ring. Same wiring as
+  // /admin/live-map?breach=<id>.
+  const searchParams      = useSearchParams();
+  const highlightReportId = searchParams?.get('report') ?? null;
+
   const [site,    setSite]    = useState<SiteInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
@@ -67,6 +74,7 @@ export default function ClientPortal() {
           heading="SITE ACTIVITY LOG"
           mode="client"
           detailPathPrefix="/client/reports"
+          highlightReportId={highlightReportId}
         />
       )}
     </div>

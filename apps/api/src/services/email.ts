@@ -184,6 +184,14 @@ export function renderIncidentAlert(data: {
   const sevColor   = INCIDENT_SEVERITY_COLORS[data.severity] ?? '#6B7280';
   const sevLabel   = data.severity.toUpperCase();
 
+  // Per-report deep link — client lands on their portal home with
+  // ?report=<id>, and the ActivityLogTable there scrolls the row into view
+  // and flashes a ring highlight (same pattern as breach → live-map).
+  // Trim a trailing slash defensively so a PORTAL env of ".../client/" +
+  // "?report=…" doesn't produce a "//?…" URL.
+  const portalBase = PORTAL.replace(/\/$/, '');
+  const incidentUrl = `${portalBase}?report=${encodeURIComponent(data.report_id)}`;
+
   const html = `<style>${BASE_STYLE}</style>
   <div class="card">
     <div class="hdr">
@@ -204,7 +212,7 @@ export function renderIncidentAlert(data: {
       <p style="margin:0;color:#333;font-size:14px;line-height:1.6;white-space:pre-wrap">${data.description}</p>
 
       <div style="text-align:center;margin-top:28px">
-        <a class="btn" href="${PORTAL}">View Incident in Portal</a>
+        <a class="btn" href="${incidentUrl}">View Incident in Portal</a>
       </div>
     </div>
     <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">

@@ -16,7 +16,7 @@
  *     /client/reports/<id>/photos). For pings (single photo), the same
  *     link opens the photo directly.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 type StatusKind =
   | 'on_time'
@@ -107,6 +107,13 @@ export interface ActivityLogTableProps {
   mode: 'admin' | 'client';
   /** URL prefix for the photo-detail page, eg "/admin/reports" or "/client/reports". */
   detailPathPrefix: string;
+  /**
+   * When set (incident-email deep-link: /client?report=<id>), scroll the
+   * matching report row into view + flash a ring highlight. Widens the
+   * initial `from` date to 30d ago so an older target isn't hidden by the
+   * default 7d window. Same shape as /admin/live-map?breach=<id>.
+   */
+  highlightReportId?: string | null;
 }
 
 export default function ActivityLogTable({
@@ -115,6 +122,7 @@ export default function ActivityLogTable({
   heading     = 'ACTIVITY LOGS',
   mode,
   detailPathPrefix,
+  highlightReportId = null,
 }: ActivityLogTableProps) {
   const [rows,        setRows]        = useState<ActivityRow[]>([]);
   const [total,       setTotal]       = useState(0);
@@ -131,8 +139,34 @@ export default function ActivityLogTable({
 
   const today    = useMemo(() => new Date(), []);
   const weekAgo  = useMemo(() => new Date(today.getTime() - 7 * 86_400_000), [today]);
-  const [dateFrom, setDateFrom] = useState(isoDateOnly(weekAgo));
+  // 30d widen when a deep-link is present — an incident-alert email might
+  // land in the inbox a week later; the default 7d window would silently
+  // hide the target row. If the user CLEARs, we still snap back to the 7d
+  // default (weekAgo) so the widen is one-shot.
+  const [dateFrom, setDateFrom] = useState(() => {
+    const days = highlightReportId ? 30 : 7;
+    return isoDateOnly(new Date(today.getTime() - days * 86_400_000));
+  });
   const [dateTo,   setDateTo]   = useState(isoDateOnly(today));
+
+  // Row-ref map keyed by report id, populated as report rows render. Used
+  // by the scroll-into-view effect below.
+  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const [flashReportId, setFlashReportId] = useState<string | null>(null);
+
+  // Fires once the current page's rows include the deep-link target: scroll
+  // it into view, then flash a ring for 2 seconds. Depends on `rows` so it
+  // re-checks after any pagination / filter change (in case the user
+  // navigated away and back).
+  useEffect(() => {
+    if (!highlightReportId || loading) return;
+    const el = rowRefs.current.get(highlightReportId);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setFlashReportId(highlightReportId);
+    const t = window.setTimeout(() => setFlashReportId(null), 2000);
+    return () => window.clearTimeout(t);
+  }, [highlightReportId, rows, loading]);
 
   // Load sites once (admin only)
   useEffect(() => {
@@ -315,13 +349,22 @@ export default function ActivityLogTable({
           const visible = photos.slice(0, 3);
           const remaining = photos.length - visible.length;
           const offPost = mode === 'admin' && r.kind === 'ping' && r.is_within_geofence === false;
+          const isReport = r.kind === 'report' && !!r.detail_id;
+          const isFlashing = isReport && r.detail_id === flashReportId;
           return (
             <div
               key={r.id}
+              ref={(el) => {
+                if (!isReport) return;
+                if (el) rowRefs.current.set(r.detail_id!, el);
+                else    rowRefs.current.delete(r.detail_id!);
+              }}
               className={`grid ${mode === 'admin'
                 ? 'grid-cols-[1fr_180px_220px_160px_180px_60px]'
                 : 'grid-cols-[1fr_180px_220px_180px_60px]'
-              } gap-4 px-4 py-3 border-b border-[#1A3050] items-center hover:bg-[#0F1E35] transition-colors`}
+              } gap-4 px-4 py-3 border-b border-[#1A3050] items-center hover:bg-[#0F1E35] transition-colors ${
+                isFlashing ? 'ring-2 ring-inset ring-amber-400 bg-amber-400/5' : ''
+              }`}
             >
               {/* Guard */}
               <div className="flex items-center gap-2 min-w-0">
