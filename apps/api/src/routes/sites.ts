@@ -9,6 +9,20 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 
 const PDF_MAGIC = Buffer.from([0x25, 0x50, 0x44, 0x46]); // %PDF
 
+// Site-supported timezones. Belt+braces on top of the schema CHECK
+// constraint — rejects clearly here instead of letting a garbage
+// value through to the DB error path. Keep in sync with the web
+// admin site form dropdown (apps/web/app/admin/sites/page.tsx).
+const ALLOWED_TIMEZONES = new Set([
+  'America/Los_Angeles',
+  'America/Denver',
+  'America/Phoenix',
+  'America/Chicago',
+  'America/New_York',
+  'Pacific/Honolulu',
+  'UTC',
+]);
+
 // GET /api/sites
 router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const isVishnu = req.user!.role === 'vishnu';
@@ -55,17 +69,25 @@ router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
 
 // POST /api/sites — admin creates a site and its retention record (contract_end is optional)
 router.post('/', requireAuth('company_admin'), async (req, res) => {
-  const { name, address, contract_start, contract_end, instructions_pdf_url } = req.body;
+  const { name, address, contract_start, contract_end, instructions_pdf_url, timezone } = req.body;
   if (!name || !address || !contract_start) {
     return res.status(400).json({ error: 'name, address, contract_start are required' });
+  }
+  if (timezone != null && !ALLOWED_TIMEZONES.has(timezone)) {
+    return res.status(400).json({
+      error: `timezone must be one of: ${[...ALLOWED_TIMEZONES].join(', ')}`,
+    });
   }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // When the client omits `timezone` we bind the same value the schema
+    // DEFAULT would apply. Postgres has no clean way to say "use DEFAULT"
+    // via a bound parameter without dynamic SQL, so we spell it out here.
     const siteResult = await client.query(
-      `INSERT INTO sites (company_id, name, address, contract_start, contract_end, instructions_pdf_url)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, instructions_pdf_url || null]
+      `INSERT INTO sites (company_id, name, address, contract_start, contract_end, instructions_pdf_url, timezone)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, instructions_pdf_url || null, timezone || 'America/Los_Angeles']
     );
     const site = siteResult.rows[0];
     const accessUntil = contract_end ? (() => { const d = new Date(contract_end); d.setDate(d.getDate() + 90); return d; })() : null;
@@ -87,12 +109,17 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
 
 // PUT /api/sites/:id — update site fields including instructions_pdf_url
 router.put('/:id', requireAuth('company_admin'), async (req, res) => {
-  const { name, address, contract_start, contract_end, instructions_pdf_url } = req.body;
+  const { name, address, contract_start, contract_end, instructions_pdf_url, timezone } = req.body;
   const siteCheck = await pool.query(
     'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
     [req.params.id, req.user!.company_id]
   );
   if (!siteCheck.rows[0]) return res.status(403).json({ error: 'Site not found' });
+  if (timezone != null && !ALLOWED_TIMEZONES.has(timezone)) {
+    return res.status(400).json({
+      error: `timezone must be one of: ${[...ALLOWED_TIMEZONES].join(', ')}`,
+    });
+  }
 
   const result = await pool.query(
     `UPDATE sites SET
@@ -100,9 +127,10 @@ router.put('/:id', requireAuth('company_admin'), async (req, res) => {
        address = COALESCE($2, address),
        contract_start = COALESCE($3, contract_start),
        contract_end = COALESCE($4, contract_end),
-       instructions_pdf_url = COALESCE($5, instructions_pdf_url)
+       instructions_pdf_url = COALESCE($5, instructions_pdf_url),
+       timezone = COALESCE($7, timezone)
      WHERE id = $6 RETURNING *`,
-    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, instructions_pdf_url ?? null, req.params.id]
+    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, instructions_pdf_url ?? null, req.params.id, timezone || null]
   );
   res.json(result.rows[0]);
 });

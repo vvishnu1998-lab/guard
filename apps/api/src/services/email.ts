@@ -36,11 +36,13 @@ function fmtDT(dt: Date | string): string {
 // per-site timezone column (logged as a separate follow-up). Output looks
 // like "17 May 2026, 10:01 PM PDT" / "PST" with the abbreviation chosen by
 // the runtime per DST.
-function fmtDTPacific(dt: Date | string): string {
+const PACIFIC = 'America/Los_Angeles';
+
+function fmtDTSite(dt: Date | string, tz: string = PACIFIC): string {
   const parts = new Intl.DateTimeFormat('en-US', {
     day: 'numeric', month: 'short', year: 'numeric',
     hour: 'numeric', minute: '2-digit', hour12: true,
-    timeZone: 'America/Los_Angeles',
+    timeZone: tz,
     timeZoneName: 'short',
   }).formatToParts(new Date(dt));
   const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
@@ -114,6 +116,7 @@ export async function sendIncidentAlert(
   // Reply-To target so client replies route back to the security company.
   const result = await pool.query(
     `SELECT s.name AS site_name,
+            s.timezone AS site_tz,
             c.name AS client_name,
             c.email AS client_email,
             co.name AS company_name,
@@ -129,7 +132,7 @@ export async function sendIncidentAlert(
     console.warn(`[email] sendIncidentAlert: no active client found for site_id=${siteId} — email not sent`);
     return;
   }
-  const { site_name, client_name, client_email, company_name, admin_reply_to } = result.rows[0];
+  const { site_name, site_tz, client_name, client_email, company_name, admin_reply_to } = result.rows[0];
   console.log(`[email] sendIncidentAlert: sending to ${client_email} for site=${site_name} (report=${report.id})`);
 
   const { subject, html } = renderIncidentAlert({
@@ -138,6 +141,7 @@ export async function sendIncidentAlert(
     severity:     report.severity,
     reported_at:  report.reported_at,
     site_name,
+    site_tz,
     client_name,
     company_name,
   });
@@ -169,10 +173,13 @@ export function renderIncidentAlert(data: {
   severity:    string;
   reported_at: Date | string;
   site_name:   string;
+  /** IANA tz string, e.g. 'America/Los_Angeles'. Falls back to Pacific if unset. */
+  site_tz?:    string | null;
   client_name: string | null;
   company_name: string;
 }): { subject: string; html: string } {
-  const dateLabel  = fmtDatePacific(data.reported_at);
+  const tz         = data.site_tz ?? PACIFIC;
+  const dateLabel  = fmtDateSite(data.reported_at, tz);
   const greetName  = firstName(data.client_name);
   const sevColor   = INCIDENT_SEVERITY_COLORS[data.severity] ?? '#6B7280';
   const sevLabel   = data.severity.toUpperCase();
@@ -190,7 +197,7 @@ export function renderIncidentAlert(data: {
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
         <span style="background:${sevColor};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;letter-spacing:1px">${sevLabel}</span>
-        <span style="color:#666;font-size:13px;margin-left:12px">${fmtDTPacific(data.reported_at)}</span>
+        <span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
@@ -201,7 +208,7 @@ export function renderIncidentAlert(data: {
       </div>
     </div>
     <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in Pacific Time.<br/>
+      All times shown in the site's local time zone (${tz}).<br/>
       Provided by <strong style="color:#666">${data.company_name}</strong>.<br/>
       Reply to this email to contact ${data.company_name}.
     </div>
@@ -213,23 +220,24 @@ export function renderIncidentAlert(data: {
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────
 
-// Pacific-locked calendar date for the subject/header ("14 May 2026").
-// en-GB to match fmtDTPacific's "14 May 2026, 10:01 PM PDT" — keeps subject
-// and body day-month-year order consistent.
-function fmtDatePacific(dt: Date | string): string {
+// Site-scoped calendar date for the subject/header ("14 May 2026").
+// en-GB to match fmtDTSite's "14 May 2026, 10:01 PM PDT" — keeps subject
+// and body day-month-year order consistent. Falls back to Pacific when the
+// caller hasn't yet been threaded through with a site tz.
+function fmtDateSite(dt: Date | string, tz: string = PACIFIC): string {
   return new Date(dt).toLocaleDateString('en-GB', {
     day: '2-digit', month: 'short', year: 'numeric',
-    timeZone: 'America/Los_Angeles',
+    timeZone: tz,
   });
 }
 
-// Pacific-locked time-only ("10:01 PM PDT"). Used for the same-day collapse
+// Site-scoped time-only ("10:01 PM PDT"). Used for the same-day collapse
 // on schedule ranges where the date appears once on the start side and only
 // the time is needed on the end side.
-function fmtTimePacific(dt: Date | string): string {
+function fmtTimeSite(dt: Date | string, tz: string = PACIFIC): string {
   const parts = new Intl.DateTimeFormat('en-US', {
     hour: 'numeric', minute: '2-digit', hour12: true,
-    timeZone: 'America/Los_Angeles',
+    timeZone: tz,
     timeZoneName: 'short',
   }).formatToParts(new Date(dt));
   const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
@@ -259,6 +267,7 @@ export async function sendDailyShiftReport(shiftId: string) {
   const shiftResult = await pool.query(
     `SELECT sh.id, sh.scheduled_start,
             si.name     AS site_name,
+            si.timezone AS site_tz,
             g.name      AS guard_name,
             g.badge_number,
             c.name      AS client_name,
@@ -314,6 +323,7 @@ export async function sendDailyShiftReport(shiftId: string) {
 
   const { subject, html } = renderDailyShiftReport({
     site_name:       sh.site_name,
+    site_tz:         sh.site_tz,
     scheduled_start: sh.scheduled_start,
     guard_name:      sh.guard_name,
     badge_number:    sh.badge_number,
@@ -348,12 +358,13 @@ export async function sendDailyShiftReport(shiftId: string) {
  * can render the same template against real shift data without invoking the
  * SendGrid path or writing daily_report_email_sent.
  *
- * All event timestamps render in America/Los_Angeles via fmtDTPacific (PDT in
+ * All event timestamps render in America/Los_Angeles via fmtDTSite (PDT in
  * summer, PST in winter — abbreviation chosen by the runtime). Multi-tenant
  * per-site timezone support is logged as a separate follow-up.
  */
 export function renderDailyShiftReport(data: {
   site_name:       string;
+  site_tz?:        string | null;
   scheduled_start: Date | string;
   guard_name:      string;
   badge_number:    string;
@@ -366,12 +377,13 @@ export function renderDailyShiftReport(data: {
   tasks_completed: number;
   tasks_total:     number;
 }): { subject: string; html: string } {
-  const dateLabel  = fmtDatePacific(data.scheduled_start);
+  const tz         = data.site_tz ?? PACIFIC;
+  const dateLabel  = fmtDateSite(data.scheduled_start, tz);
   const totalHours = data.total_hours != null
     ? `${parseFloat(String(data.total_hours))}h`
     : '—';
-  const clockIn    = data.clocked_in_at  ? fmtDTPacific(data.clocked_in_at)  : '—';
-  const clockOut   = data.clocked_out_at ? fmtDTPacific(data.clocked_out_at) : 'In progress';
+  const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
+  const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
 
   const borderColors: Record<string, string> = {
@@ -380,7 +392,7 @@ export function renderDailyShiftReport(data: {
   const reportRows = data.reports.map((r) => {
     const desc = r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description;
     return `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
-      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTPacific(r.reported_at)}</span></p>
+      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTSite(r.reported_at, tz)}</span></p>
       <p style="margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
     </div>`;
   }).join('');
@@ -426,7 +438,7 @@ export function renderDailyShiftReport(data: {
       </div>
     </div>
     <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in Pacific Time.<br/>
+      All times shown in the site's local time zone (${tz}).<br/>
       Provided by <strong style="color:#666">${data.company_name}</strong>.<br/>
       Reply to this email to contact ${data.company_name}.
     </div>
@@ -507,8 +519,8 @@ export function renderRetentionNotice(data: {
   client_star_access_until: Date | string;
   data_delete_at:           Date | string;
 }): { subject: string; html: string } {
-  const accessUntil = fmtDatePacific(data.client_star_access_until);
-  const deleteDate  = fmtDatePacific(data.data_delete_at);
+  const accessUntil = fmtDateSite(data.client_star_access_until);
+  const deleteDate  = fmtDateSite(data.data_delete_at);
   const isDay89     = data.milestone === 'day89';
   const isDay60     = data.milestone === 'day60';
 
@@ -593,6 +605,7 @@ export async function sendMissedShiftAlert(shiftId: string) {
             sh.scheduled_end,
             sh.guard_id,
             si.name        AS site_name,
+            si.timezone    AS site_tz,
             si.address     AS site_address,
             g.name         AS guard_name,
             g.badge_number,
@@ -649,6 +662,7 @@ export function renderMissedShiftAlert(row: {
   scheduled_start: Date | string;
   scheduled_end:   Date | string;
   site_name:       string;
+  site_tz?:        string | null;
   site_address:    string;
   guard_name:      string;
   badge_number:    string;
@@ -656,6 +670,8 @@ export function renderMissedShiftAlert(row: {
   last_login_at:   Date | string | null;
   upcoming_shifts_count: number | string;
 }): { subject: string; html: string } {
+  const tz = row.site_tz ?? PACIFIC;
+
   // Minutes late computed at render time (cron fires at T+10 min minimum, but
   // actual delay can be 10–15 min depending on the */5 tick alignment).
   const minutesLate = Math.max(0, Math.floor(
@@ -671,15 +687,15 @@ export function renderMissedShiftAlert(row: {
   const guardTitle = titleCase(row.guard_name);
 
   // Same-day collapse: if scheduled_start and scheduled_end fall on the
-  // same Pacific calendar day, drop the redundant end-date prefix.
+  // same site-local calendar day, drop the redundant end-date prefix.
   // "14 May 2026, 6:29 AM PDT → 10:29 AM PDT" vs cross-midnight
   // "14 May 2026, 11:25 PM PDT → 15 May 2026, 8:00 AM PDT".
-  // Comparison is on the Pacific date string so DST and UTC offset don't
+  // Comparison is on the site-local date string so DST and UTC offset don't
   // cause edge-case mis-grouping.
-  const sameDay = fmtDatePacific(row.scheduled_start) === fmtDatePacific(row.scheduled_end);
+  const sameDay = fmtDateSite(row.scheduled_start, tz) === fmtDateSite(row.scheduled_end, tz);
   const scheduledLabel = sameDay
-    ? `${fmtDTPacific(row.scheduled_start)} → ${fmtTimePacific(row.scheduled_end)}`
-    : `${fmtDTPacific(row.scheduled_start)} → ${fmtDTPacific(row.scheduled_end)}`;
+    ? `${fmtDTSite(row.scheduled_start, tz)} → ${fmtTimeSite(row.scheduled_end, tz)}`
+    : `${fmtDTSite(row.scheduled_start, tz)} → ${fmtDTSite(row.scheduled_end, tz)}`;
 
   const upcoming = Number(row.upcoming_shifts_count) || 0;
   const upcomingText = upcoming === 0
@@ -721,7 +737,7 @@ export function renderMissedShiftAlert(row: {
       </div>
     </div>
     <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in Pacific Time.<br/>
+      All times shown in the site's local time zone (${tz}).<br/>
       NetraOps · Automated alert
     </div>
   </div>`;
@@ -848,7 +864,7 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
   );
   if (!result.rows[0]) return;
   const { site_name, company_name, data_delete_at } = result.rows[0];
-  const deleteDate = fmtDatePacific(data_delete_at);
+  const deleteDate = fmtDateSite(data_delete_at);
 
   await sgMail.send({
     to: process.env.VISHNU_EMAIL!,
@@ -909,6 +925,7 @@ export async function sendGeofenceBreachAlert(
     `SELECT v.id, v.violation_lat, v.violation_lng, v.occurred_at, v.photo_url,
             v.shift_session_id,
             si.name      AS site_name,
+            si.timezone  AS site_tz,
             si.address   AS site_address,
             sg.center_lat,
             sg.center_lng,
@@ -950,12 +967,14 @@ export function renderGeofenceBreachAlert(row: {
   violation_lng:    number;
   photo_url:        string | null;
   site_name:        string;
+  site_tz?:         string | null;
   site_address:     string;
   center_lat:       number | null;
   center_lng:       number | null;
   guard_name:       string;
   badge_number:     string;
 }, context: BreachAlertContext = { kind: 'ping' }): { subject: string; html: string } {
+  const tz = row.site_tz ?? PACIFIC;
   const distanceM =
     row.center_lat != null && row.center_lng != null
       ? Math.round(
@@ -1029,7 +1048,7 @@ export function renderGeofenceBreachAlert(row: {
         <tr><td style="padding:6px 0;color:#888;width:140px">Guard</td><td style="padding:6px 0">${guardTitle} <span style="color:#888">(${row.badge_number})</span></td></tr>
         <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
         <tr><td style="padding:6px 0;color:#888">Address</td><td style="padding:6px 0">${row.site_address}</td></tr>
-        <tr><td style="padding:6px 0;color:#888">Time</td><td style="padding:6px 0">${fmtDTPacific(row.occurred_at)}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Time</td><td style="padding:6px 0">${fmtDTSite(row.occurred_at, tz)}</td></tr>
         ${distanceRow}
         ${reportTypeRow}
         ${coordsRow}
@@ -1046,7 +1065,7 @@ export function renderGeofenceBreachAlert(row: {
       </div>
     </div>
     <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in Pacific Time.<br/>
+      All times shown in the site's local time zone (${tz}).<br/>
       NetraOps · Automated alert
     </div>
   </div>`;

@@ -37,6 +37,7 @@ interface Site {
   address:                     string;
   contract_start:              string;
   contract_end:                string;
+  timezone:                    string;
   client_star_access_until:    string | null;
   data_delete_at:              string | null;
   client_star_access_disabled: boolean | null;
@@ -50,7 +51,24 @@ interface Site {
 
 type GeoMode = 'radius' | 'draw';
 
-const EMPTY_FORM = { name: '', address: '', contract_start: '', contract_end: '' as string };
+// Keep in sync with ALLOWED_TIMEZONES in apps/api/src/routes/sites.ts.
+const TIMEZONE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'America/Los_Angeles', label: 'Pacific — Los Angeles (PT)' },
+  { value: 'America/Denver',      label: 'Mountain — Denver (MT)' },
+  { value: 'America/Phoenix',     label: 'Mountain — Phoenix (no DST)' },
+  { value: 'America/Chicago',     label: 'Central — Chicago (CT)' },
+  { value: 'America/New_York',    label: 'Eastern — New York (ET)' },
+  { value: 'Pacific/Honolulu',    label: 'Hawaii — Honolulu (HST)' },
+  { value: 'UTC',                 label: 'UTC' },
+];
+
+const EMPTY_FORM = {
+  name: '',
+  address: '',
+  contract_start: '',
+  contract_end: '' as string,
+  timezone: 'America/Los_Angeles',
+};
 const EMPTY_GEO  = { center_lat: '', center_lng: '', radius_meters: '' };
 
 export default function SitesPage() {
@@ -409,6 +427,21 @@ export default function SitesPage() {
                   onChange={(e) => setForm((f) => ({ ...f, contract_end: e.target.value }))}
                   className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                 />
+              </div>
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                  TIMEZONE <span className="text-amber-400">*</span>
+                </label>
+                <select
+                  value={form.timezone}
+                  onChange={(e) => setForm((f) => ({ ...f, timezone: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                >
+                  {TIMEZONE_OPTIONS.map((tz) => (
+                    <option key={tz.value} value={tz.value}>{tz.label}</option>
+                  ))}
+                </select>
+                <p className="text-gray-500 text-xs mt-1">Used for shift-time display, breach/report/missed-shift emails, and daily reports.</p>
               </div>
             </div>
             <div className="mt-4">

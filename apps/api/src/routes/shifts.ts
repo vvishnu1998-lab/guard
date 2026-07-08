@@ -83,12 +83,15 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       return res.status(422).json({ error: 'Cannot schedule shifts in the past.' });
     }
 
-    // Site + guard belong to caller's company.
+    // Site + guard belong to caller's company. Grab the site's timezone here
+    // so every AT TIME ZONE below binds it as a parameter instead of a
+    // hardcoded America/Los_Angeles literal.
     const siteCheck = await pool.query(
-      'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
+      'SELECT id, timezone FROM sites WHERE id = $1 AND company_id = $2',
       [site_id, req.user!.company_id]
     );
     if (!siteCheck.rows[0]) return res.status(400).json({ error: 'Site not found' });
+    const siteTz = siteCheck.rows[0].timezone as string;
     if (guard_id) {
       const guardCheck = await pool.query(
         'SELECT id FROM guards WHERE id = $1 AND company_id = $2 AND is_active = true',
@@ -119,8 +122,8 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
           const overlap = await client.query(
             `WITH new_window AS (
                SELECT
-                 ($1::date + $2::time) AT TIME ZONE 'America/Los_Angeles' AS s,
-                 ($1::date + $4::interval + $3::time) AT TIME ZONE 'America/Los_Angeles' AS e
+                 ($1::date + $2::time) AT TIME ZONE $6 AS s,
+                 ($1::date + $4::interval + $3::time) AT TIME ZONE $6 AS e
              )
              SELECT 1 FROM shifts, new_window
               WHERE guard_id = $5
@@ -128,7 +131,7 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
                 AND scheduled_start < new_window.e
                 AND scheduled_end   > new_window.s
               LIMIT 1`,
-            [d, start_time, end_time, overnightInterval, guard_id]
+            [d, start_time, end_time, overnightInterval, guard_id, siteTz]
           );
           if (overlap.rows[0]) {
             await client.query('ROLLBACK');
@@ -140,11 +143,11 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
            VALUES (
              $1,
              $2,
-             ($3::date + $4::time) AT TIME ZONE 'America/Los_Angeles',
-             ($3::date + $6::interval + $5::time) AT TIME ZONE 'America/Los_Angeles',
+             ($3::date + $4::time) AT TIME ZONE $8,
+             ($3::date + $6::interval + $5::time) AT TIME ZONE $8,
              $7
            ) RETURNING id`,
-          [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status]
+          [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status, siteTz]
         );
         ids.push(insert.rows[0].id);
       }
@@ -165,12 +168,15 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     return res.status(400).json({ error: 'site_id, scheduled_start, scheduled_end are required' });
   }
 
-  // Verify site belongs to this company
+  // Verify site belongs to this company. Grab timezone up-front for the
+  // repeat_days DOW calc below (server-local getDay() would off-by-one on
+  // shifts scheduled near local midnight).
   const siteCheck = await pool.query(
-    'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
+    'SELECT id, timezone FROM sites WHERE id = $1 AND company_id = $2',
     [site_id, req.user!.company_id]
   );
   if (!siteCheck.rows[0]) return res.status(400).json({ error: 'Site not found' });
+  const siteTz = siteCheck.rows[0].timezone as string;
 
   // If guard_id provided, verify it
   if (guard_id) {
@@ -198,8 +204,18 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     // than silently dropping past dates.
     const pending: { start: Date; end: Date }[] = [];
     const cur = new Date(baseStart);
+    // Compute DOW in the SITE's timezone so a shift-day computed near
+    // midnight isn't off-by-one because the server runs UTC. Same code
+    // as before otherwise.
+    const DOW_BY_NAME: Record<string, number> = {
+      Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3,
+      Thursday: 4, Friday: 5, Saturday: 6,
+    };
+    const dowInSiteTz = (d: Date): number =>
+      DOW_BY_NAME[new Intl.DateTimeFormat('en-US',
+        { timeZone: siteTz, weekday: 'long' }).format(d)] ?? d.getDay();
     while (cur <= horizon) {
-      const dow = cur.getDay(); // 0=Sun..6=Sat
+      const dow = dowInSiteTz(cur);
       if (repeat_days.includes(dow)) {
         const shiftStart = new Date(cur);
         shiftStart.setHours(baseStart.getHours(), baseStart.getMinutes(), baseStart.getSeconds(), 0);
@@ -323,7 +339,7 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     const shiftRes = await client.query(
       `SELECT sh.id, sh.guard_id AS old_guard_id, sh.site_id, sh.status,
               sh.scheduled_start, sh.scheduled_end,
-              si.company_id, si.name AS site_name
+              si.company_id, si.name AS site_name, si.timezone AS site_tz
          FROM shifts sh
          JOIN sites si ON si.id = sh.site_id
         WHERE sh.id = $1
@@ -429,7 +445,8 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 
     const startIso = new Date(shift.scheduled_start).toISOString();
     const dateLabel = new Date(shift.scheduled_start).toLocaleDateString('en-US', {
-      month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles',
+      month: 'short', day: 'numeric',
+      timeZone: (shift.site_tz as string | null) ?? 'America/Los_Angeles',
     });
 
     const newToken = tokenByGuardId[new_guard_id];
