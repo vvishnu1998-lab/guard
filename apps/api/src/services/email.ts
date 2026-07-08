@@ -1034,7 +1034,11 @@ export function renderGeofenceBreachAlert(row: {
   // flips private the inbox-resident link would have stopped resolving;
   // the dashboard deep-link auth-gates the photo + re-mints a signed URL
   // on view.)
-  const deepLink = `${WEB_BASE}/admin/live-map`;
+  // /admin/live-status is the current URL; the page used to live at
+  // /admin/live-map (task #5 route rename, 2026-07-08). Old breach
+  // emails already in inboxes still resolve via the permanent 301 in
+  // apps/web/next.config.js.
+  const deepLink = `${WEB_BASE}/admin/live-status`;
   const breachDeepLink = `${deepLink}?breach=${encodeURIComponent(row.id)}`;
   const photoBlock = row.photo_url
     ? `<p style="margin:16px 0 0 0;font-size:13px;color:#555"><strong style="color:#333">Photo at breach:</strong> <a href="${breachDeepLink}" style="color:#0B1526;text-decoration:underline">View in dashboard →</a></p>`

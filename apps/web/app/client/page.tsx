@@ -22,7 +22,7 @@ interface SiteInfo {
 export default function ClientPortal() {
   // Incident-alert email deep-link: /client?report=<id> scrolls the
   // matching row into view + flashes a highlight ring. Same wiring as
-  // /admin/live-map?breach=<id>.
+  // /admin/live-status?breach=<id>.
   const searchParams      = useSearchParams();
   const highlightReportId = searchParams?.get('report') ?? null;
 

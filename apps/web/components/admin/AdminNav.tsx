@@ -7,12 +7,12 @@ import { adminGet } from '../../lib/adminApi';
 
 const NAV_ITEMS = [
   { href: '/admin',           label: 'DASHBOARD'      },
-  { href: '/admin/live-map',  label: 'LIVE STATUS'    },
-  { href: '/admin/sites',     label: 'SITES'          },
-  { href: '/admin/guards',    label: 'GUARDS'         },
-  { href: '/admin/shifts',    label: 'SHIFTS'         },
-  { href: '/admin/tasks',     label: 'TASKS'          },
-  { href: '/admin/reports',   label: 'REPORTS'        },
+  { href: '/admin/live-status', label: 'LIVE STATUS'    },
+  { href: '/admin/sites',       label: 'SITES'          },
+  { href: '/admin/guards',      label: 'GUARDS'         },
+  { href: '/admin/shifts',      label: 'SHIFTS'         },
+  { href: '/admin/tasks',       label: 'TASKS'          },
+  { href: '/admin/activity',    label: 'REPORTS'        },
   { href: '/admin/analytics', label: 'ANALYTICS'      },
   { href: '/admin/clients',   label: 'CLIENT PORTALS' },
   { href: '/admin/billing',   label: 'BILLING'        },

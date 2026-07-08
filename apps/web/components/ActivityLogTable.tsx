@@ -12,7 +12,7 @@
  *   - Reports may have 4-5 photos; we render the first three as small
  *     thumbnails inline + a "+N more" pill if there are more.
  *   - Clicking any thumbnail opens `<detailPathPrefix>/<reportId>/photos`
- *     in a new tab (admin: /admin/reports/<id>/photos, client:
+ *     in a new tab (admin: /admin/activity/<id>/photos, client:
  *     /client/reports/<id>/photos). For pings (single photo), the same
  *     link opens the photo directly.
  */
@@ -105,13 +105,13 @@ export interface ActivityLogTableProps {
   heading?: string;
   /** 'admin' shows site/shift dropdowns; 'client' shows date range only. */
   mode: 'admin' | 'client';
-  /** URL prefix for the photo-detail page, eg "/admin/reports" or "/client/reports". */
+  /** URL prefix for the photo-detail page, eg "/admin/activity" or "/client/reports". */
   detailPathPrefix: string;
   /**
    * When set (incident-email deep-link: /client?report=<id>), scroll the
    * matching report row into view + flash a ring highlight. Widens the
    * initial `from` date to 30d ago so an older target isn't hidden by the
-   * default 7d window. Same shape as /admin/live-map?breach=<id>.
+   * default 7d window. Same shape as /admin/live-status?breach=<id>.
    */
   highlightReportId?: string | null;
 }
