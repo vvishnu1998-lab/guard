@@ -58,7 +58,7 @@ interface ActivityLogResponse {
   total_pages: number;
 }
 
-interface Site    { id: string; name: string; }
+interface Site    { id: string; name: string; site_is_active?: boolean; }
 interface Session { id: string; clocked_in_at: string; clocked_out_at: string | null; guard_name: string; }
 
 const STATUS_COLOR: Record<StatusKind, string> = {
@@ -259,7 +259,11 @@ export default function ActivityLogTable({
                 className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-300 text-sm focus:outline-none focus:border-amber-400 min-w-[220px]"
               >
                 <option value="">All sites</option>
-                {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {sites.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.site_is_active === false ? `[INACTIVE] ${s.name}` : s.name}
+                  </option>
+                ))}
               </select>
             </div>
 

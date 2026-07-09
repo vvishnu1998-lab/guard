@@ -5,13 +5,15 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { adminGet, adminPost, adminPatch, adminFetch, adminDelete } from '../../../lib/adminApi';
+import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 
 interface Assignment {
-  id:             string;
-  site_id:        string;
-  site_name:      string;
-  assigned_from:  string;
-  assigned_until: string | null;
+  id:              string;
+  site_id:         string;
+  site_name:       string;
+  site_is_active?: boolean;
+  assigned_from:   string;
+  assigned_until:  string | null;
 }
 
 interface Guard {
@@ -234,7 +236,10 @@ export default function GuardsPage() {
                         <div key={a.id} data-testid={`assignment-card-${a.id}`}
                           className="flex items-center justify-between gap-2 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2">
                           <div className="min-w-0">
-                            <p className="text-amber-400 text-sm font-medium truncate">{a.site_name}</p>
+                            <p className="text-amber-400 text-sm font-medium truncate">
+                              {a.site_name}
+                              <InactiveSiteBadge siteIsActive={a.site_is_active} />
+                            </p>
                             <p className="text-gray-500 text-xs font-mono">{fmtDateRange(a.assigned_from, a.assigned_until)}</p>
                           </div>
                           {g.is_active && (
@@ -302,7 +307,10 @@ export default function GuardsPage() {
                 {g.assignments.map((a) => (
                   <div key={a.id} data-testid={`assignment-card-mobile-${a.id}`}
                     className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2">
-                    <p className="text-amber-400 text-sm font-medium">{a.site_name}</p>
+                    <p className="text-amber-400 text-sm font-medium">
+                      {a.site_name}
+                      <InactiveSiteBadge siteIsActive={a.site_is_active} />
+                    </p>
                     <p className="text-gray-500 text-xs font-mono mb-2">{fmtDateRange(a.assigned_from, a.assigned_until)}</p>
                     {g.is_active && (
                       <div className="flex gap-2">
@@ -433,7 +441,7 @@ export default function GuardsPage() {
               <button onClick={() => setEditAssignment(null)} className="text-gray-500 hover:text-gray-300 text-xl w-10 h-10 flex items-center justify-center">✕</button>
             </div>
             <p className="text-gray-300 text-sm">{editAssignment.guard.name}</p>
-            <p className="text-amber-400 text-sm mb-1">{editAssignment.assignment.site_name}</p>
+            <p className="text-amber-400 text-sm mb-1">{editAssignment.assignment.site_name}<InactiveSiteBadge siteIsActive={editAssignment.assignment.site_is_active} /></p>
             <p className="text-gray-500 text-xs font-mono mb-4">{fmtDateRange(editAssignment.assignment.assigned_from, editAssignment.assignment.assigned_until)}</p>
             {editError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{editError}</div>}
             <div className="mb-4">
@@ -470,7 +478,7 @@ export default function GuardsPage() {
                   className="text-gray-500 hover:text-gray-300 text-xl w-10 h-10 flex items-center justify-center">✕</button>
               </div>
               <p className="text-gray-300 text-sm">{ctx.guard.name}</p>
-              <p className="text-amber-400 text-sm mb-1">{ctx.assignment.site_name}</p>
+              <p className="text-amber-400 text-sm mb-1">{ctx.assignment.site_name}<InactiveSiteBadge siteIsActive={ctx.assignment.site_is_active} /></p>
               <p className="text-gray-500 text-xs font-mono mb-4">{fmtDateRange(ctx.assignment.assigned_from, ctx.assignment.assigned_until)}</p>
               {editError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{editError}</div>}
               {impactLoading && <p className="text-gray-500 text-xs mb-3">Checking future shifts…</p>}

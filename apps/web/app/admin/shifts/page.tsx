@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { adminGet, adminPost, adminPatch } from '../../../lib/adminApi';
+import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 
 interface Shift {
   id:               string;
@@ -14,6 +15,7 @@ interface Shift {
   site_id:          string;
   guard_name:       string | null;
   site_name:        string;
+  site_is_active?:  boolean;
   scheduled_start:  string;
   scheduled_end:    string;
   status:           'unassigned' | 'scheduled' | 'active' | 'completed' | 'cancelled' | 'missed';
@@ -543,7 +545,10 @@ export default function ShiftsPage() {
                       className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors cursor-pointer"
                     >
                       <td className="p-4 text-gray-300 text-xs font-mono">{fmtDateShort(s.scheduled_start)}</td>
-                      <td className="p-4 text-gray-400 text-xs">{s.site_name}</td>
+                      <td className="p-4 text-gray-400 text-xs">
+                        {s.site_name}
+                        <InactiveSiteBadge siteIsActive={s.site_is_active} />
+                      </td>
                       <td className="p-4 text-gray-400 text-xs font-mono">
                         {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
                       </td>
@@ -714,7 +719,7 @@ export default function ShiftsPage() {
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">ASSIGN GUARD</h2>
               <button onClick={() => setAssignShift(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
             </div>
-            <p className="text-gray-500 text-xs mb-1">Site: <span className="text-gray-300">{assignShift.site_name}</span></p>
+            <p className="text-gray-500 text-xs mb-1">Site: <span className="text-gray-300">{assignShift.site_name}</span><InactiveSiteBadge siteIsActive={assignShift.site_is_active} /></p>
             <p className="text-gray-500 text-xs mb-4">{fmtDT(assignShift.scheduled_start)} → {fmtDT(assignShift.scheduled_end)}</p>
             {assignError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{assignError}</div>}
             <div className="mb-5">

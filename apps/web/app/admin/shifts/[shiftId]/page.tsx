@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { adminGet, adminPatch } from '../../../../lib/adminApi';
+import InactiveSiteBadge from '../../../../components/InactiveSiteBadge';
 
 interface ReassignmentRow {
   id:                     string;
@@ -38,6 +39,7 @@ interface ShiftDetail {
   missed_alert_sent_at: string | null;
   created_at:           string;
   site_name:            string;
+  site_is_active?:      boolean;
   site_address:         string;
   company_id:           string;
   guard_name:           string | null;
@@ -188,7 +190,10 @@ export default function ShiftDetailPage() {
       {/* Header — site + status pill */}
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-widest text-amber-400">{shift.site_name.toUpperCase()}</h1>
+          <h1 className="text-2xl font-bold tracking-widest text-amber-400">
+            {shift.site_name.toUpperCase()}
+            <InactiveSiteBadge siteIsActive={shift.site_is_active} />
+          </h1>
           <p className="text-gray-500 text-sm mt-1">{shift.site_address}</p>
         </div>
         <span className={`inline-block text-xs tracking-widest font-medium px-3 py-1 rounded ${STATUS_STYLES[shift.status] ?? 'text-gray-500'}`}>

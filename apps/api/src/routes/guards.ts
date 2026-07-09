@@ -31,6 +31,7 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
             array_agg(json_build_object(
               'id', gsa.id,
               'site_id', gsa.site_id, 'site_name', s.name,
+              'site_is_active', s.is_active,
               'assigned_from', gsa.assigned_from, 'assigned_until', gsa.assigned_until))
               FILTER (WHERE gsa.id IS NOT NULL) as assignments
      FROM guards g
