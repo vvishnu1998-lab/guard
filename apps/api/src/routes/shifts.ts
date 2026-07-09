@@ -1747,7 +1747,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
     }
   }
 
-  const [historyResult, swapResult] = await Promise.all([
+  const [historyResult, swapResult, geofenceResult] = await Promise.all([
     pool.query(
       `SELECT sr.id, sr.created_at, sr.reason,
               sr.reassigned_by_admin_id, sr.reassigned_by_role,
@@ -1776,10 +1776,32 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
         ORDER BY ssr.requested_at DESC`,
       [req.params.id],
     ),
+    // Walk-test bug #1: mobile clock-in step 1 used to silently allow
+    // clock-in when pendingShift.geofence was missing. Fix requires the
+    // mobile app to hydrate geofence before entering the wizard; this is
+    // where it comes from. Same shape as validateAtSite in geofence.ts.
+    // Legacy sites without a geofence row → geofence: null (mobile treats
+    // as "no boundary configured" and refuses to advance).
+    pool.query(
+      `SELECT polygon_coordinates, center_lat, center_lng, radius_meters
+         FROM site_geofence WHERE site_id = $1`,
+      [shift.site_id],
+    ),
   ]);
+
+  const fence = geofenceResult.rows[0] ?? null;
+  const geofence = fence
+    ? {
+        polygon_coordinates: fence.polygon_coordinates,
+        center_lat:          fence.center_lat,
+        center_lng:          fence.center_lng,
+        radius_meters:       fence.radius_meters,
+      }
+    : null;
 
   res.json({
     ...shift,
+    geofence,
     reassignment_history: historyResult.rows,
     swap_history:         swapResult.rows,
   });
