@@ -78,11 +78,22 @@ export default function HandoffRequestModal(props: Props) {
         );
         if (!cancelled) {
           setGuards(data.guards);
+          // Field-diagnostic: on the walk-test 2026-07-09 report a guard's
+          // section grouping was mis-read. Capturing the raw is_same_site
+          // breakdown here so any future report has a Sentry trail.
+          const same  = data.guards.filter((g) => g.is_same_site).length;
+          const cross = data.guards.length - same;
           Sentry.addBreadcrumb({
-            category: 'handoff_wizard',
-            message: 'eligible guards fetched',
+            category: 'handoff_modal',
+            message: 'eligible_guards_loaded',
             level: 'info',
-            data: { count: data.guards.length },
+            data: {
+              shift_id:         props.shiftId,
+              total_guards:     data.guards.length,
+              same_site_count:  same,
+              cross_site_count: cross,
+              guard_ids:        data.guards.map((g) => g.guard_id),
+            },
           });
         }
       } catch (err: any) {
@@ -185,7 +196,7 @@ export default function HandoffRequestModal(props: Props) {
             <>
               {sameSite.length > 0 && (
                 <>
-                  <Text style={styles.sectionHead}>SAME SITE</Text>
+                  <Text style={[styles.sectionHead, styles.sameSiteHead]}>SAME SITE</Text>
                   {sameSite.map((g) => (
                     <GuardRow
                       key={g.guard_id}
@@ -210,6 +221,12 @@ export default function HandoffRequestModal(props: Props) {
                     <Text style={[styles.sectionHead, { marginBottom: 0 }]}>OTHER SITES</Text>
                     <Text style={styles.otherSitesHint}>Not familiar with this site</Text>
                   </View>
+                  {sameSite.length === 0 && (
+                    <Text style={styles.noSameSiteNote}>
+                      No guards assigned to this site are available. Cross-site
+                      guards can still cover but will need on-site orientation.
+                    </Text>
+                  )}
                   {otherSite.map((g) => (
                     <GuardRow
                       key={g.guard_id}
@@ -278,7 +295,17 @@ function GuardRow({
       activeOpacity={0.7}
     >
       <View style={{ flex: 1 }}>
-        <Text style={styles.guardName}>{guard.name}</Text>
+        <View style={styles.guardNameRow}>
+          <Text style={styles.guardName}>{guard.name}</Text>
+          {/* Per-row SAME SITE pill — symmetric with RequestSwapModal.
+              Added 2026-07-09 after the walk-test report of section
+              grouping being mis-read. */}
+          {guard.is_same_site && (
+            <View style={styles.sameSitePill}>
+              <Text style={styles.sameSitePillText}>SAME SITE</Text>
+            </View>
+          )}
+        </View>
         {guard.badge_number
           ? <Text style={styles.guardBadge}>Badge #{guard.badge_number}</Text>
           : null}
@@ -331,6 +358,14 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontStyle: 'italic',
   },
+  // Green so the same-site grouping is loud — matches RequestSwapModal.
+  sameSiteHead: { color: Colors.success },
+  noSameSiteNote: {
+    color: Colors.muted,
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginBottom: Spacing.sm,
+  },
 
   guardRow: {
     flexDirection: 'row', alignItems: 'center',
@@ -344,8 +379,21 @@ const styles = StyleSheet.create({
     borderColor: Colors.warning,
     borderWidth: 1.5,
   },
-  guardName:  { color: Colors.textPrimary, fontSize: 15, marginBottom: 2 },
+  guardNameRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginBottom: 2 },
+  guardName:  { color: Colors.textPrimary, fontSize: 15 },
   guardBadge: { color: Colors.muted, fontSize: 12 },
+  sameSitePill: {
+    backgroundColor: Colors.success,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: Radius.xs,
+  },
+  sameSitePillText: {
+    fontFamily: Fonts.heading,
+    color: '#070D1A',
+    fontSize: 9,
+    letterSpacing: 1,
+  },
 
   reasonInput: {
     backgroundColor: Colors.surface,
