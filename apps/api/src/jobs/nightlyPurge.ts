@@ -13,6 +13,7 @@ import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { deleteS3Object } from '../services/s3';
 import { sendVishnu140DayWarning } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 cron.schedule('0 0 * * *', async () => {
   console.log('[nightly-purge] Starting at', new Date().toISOString());
@@ -82,6 +83,10 @@ cron.schedule('0 0 * * *', async () => {
       console.log(`[nightly-purge] Step 3: Sent Vishnu warning for site ${row.site_id} (${daysRemaining}d)`);
     } catch (err) {
       console.error('[nightly-purge] Step 3: Failed to send Vishnu warning for', row.site_id, err);
+      Sentry.captureException(err, {
+        tags: { service: 'sendgrid', flow: 'vishnu_140_day_warning' },
+        extra: { site_id: row.site_id, days_remaining: daysRemaining },
+      });
     }
   }
 

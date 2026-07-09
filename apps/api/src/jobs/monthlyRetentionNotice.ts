@@ -17,6 +17,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendRetentionNotice } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 // Run on days 28-31 so we catch every month end, but guard with lastDayCheck.
 cron.schedule('0 8 28-31 * *', async () => {
@@ -45,6 +46,10 @@ cron.schedule('0 8 28-31 * *', async () => {
       console.log(`[monthly-retention] day60 notice sent for site ${row.site_id}`);
     } catch (err) {
       console.error('[monthly-retention] day60 failed for', row.site_id, err);
+      Sentry.captureException(err, {
+        tags: { service: 'sendgrid', flow: 'retention_notice' },
+        extra: { site_id: row.site_id, milestone: 'day60' },
+      });
     }
   }
 
@@ -70,6 +75,10 @@ cron.schedule('0 8 28-31 * *', async () => {
       console.log(`[monthly-retention] day89 notice sent for site ${row.site_id}`);
     } catch (err) {
       console.error('[monthly-retention] day89 failed for', row.site_id, err);
+      Sentry.captureException(err, {
+        tags: { service: 'sendgrid', flow: 'retention_notice' },
+        extra: { site_id: row.site_id, milestone: 'day89' },
+      });
     }
   }
 
@@ -98,6 +107,10 @@ cron.schedule('0 8 28-31 * *', async () => {
       console.log(`[monthly-retention] monthly notice sent for site ${row.site_id} (${daysRemaining}d)`);
     } catch (err) {
       console.error('[monthly-retention] monthly failed for', row.site_id, err);
+      Sentry.captureException(err, {
+        tags: { service: 'sendgrid', flow: 'retention_notice' },
+        extra: { site_id: row.site_id, milestone: 'monthly' },
+      });
     }
   }
 

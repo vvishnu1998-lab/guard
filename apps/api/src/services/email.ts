@@ -11,6 +11,17 @@
 import sgMail from '@sendgrid/mail';
 import { pool } from '../db/pool';
 import { haversineDistance } from './geofence';
+import { Sentry } from './sentry';
+
+// Central SendGrid error tag helper. Called from every sgMail.send catch
+// site so a Sentry.setTag('service','sendgrid') + flow tag lets us slice
+// the issues list by workflow when triaging delivery failures.
+function reportSendgridFailure(flow: string, err: any, extra?: Record<string, unknown>): void {
+  Sentry.captureException(err, {
+    tags: { service: 'sendgrid', flow },
+    extra: { ...(extra ?? {}), response_body: err?.response?.body },
+  });
+}
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
 
@@ -156,6 +167,7 @@ export async function sendIncidentAlert(
     console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${client_email}`);
   } catch (err: any) {
     console.error(`[email] sendIncidentAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('incident_alert', err, { report_id: report.id, site_id: siteId });
     throw err;
   }
 }
@@ -353,7 +365,13 @@ export async function sendDailyShiftReport(shiftId: string) {
   };
   if (sh.admin_reply_to) sendOpts.replyTo = sh.admin_reply_to;
 
-  await sgMail.send(sendOpts);
+  try {
+    await sgMail.send(sendOpts);
+  } catch (err: any) {
+    console.error(`[email] sendDailyShiftReport: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('daily_shift_report', err, { shift_id: shiftId });
+    throw err;
+  }
 
   await pool.query(
     'UPDATE shifts SET daily_report_email_sent = true, daily_report_email_sent_at = NOW() WHERE id = $1',
@@ -498,12 +516,18 @@ export async function sendRetentionNotice(
   const recipients = [client_email, admin_email].filter(Boolean) as string[];
   if (recipients.length === 0) return;
 
-  await sgMail.sendMultiple({
-    to: recipients,
-    from: FROM,
-    subject,
-    html,
-  });
+  try {
+    await sgMail.sendMultiple({
+      to: recipients,
+      from: FROM,
+      subject,
+      html,
+    });
+  } catch (err: any) {
+    console.error(`[email] sendRetentionNotice: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('retention_notice', err, { site_id: siteId, milestone });
+    throw err;
+  }
 }
 
 export type RetentionMilestone = 'day60' | 'day89' | 'monthly';
@@ -649,7 +673,13 @@ export async function sendMissedShiftAlert(shiftId: string) {
 
   const { subject, html } = renderMissedShiftAlert(result.rows[0]);
 
-  await sgMail.send({ to: admin_email, from: FROM, subject, html });
+  try {
+    await sgMail.send({ to: admin_email, from: FROM, subject, html });
+  } catch (err: any) {
+    console.error(`[email] sendMissedShiftAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('missed_shift_alert', err, { shift_id: shiftId });
+    throw err;
+  }
 
   await pool.query(
     'UPDATE shifts SET missed_alert_sent_at = NOW() WHERE id = $1',
@@ -773,7 +803,8 @@ export async function sendTempPasswordEmail(
   };
   const label = portalLabels[portal] ?? 'Portal';
 
-  await sgMail.send({
+  try {
+    await sgMail.send({
     to: email,
     from: FROM,
     subject: 'NetraOps password reset',
@@ -803,7 +834,12 @@ export async function sendTempPasswordEmail(
       </div>
       <div class="footer">NetraOps — Do not reply to this email</div>
     </div>`,
-  });
+    });
+  } catch (err: any) {
+    console.error(`[email] sendTempPasswordEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('temp_password', err, { portal });
+    throw err;
+  }
 }
 
 // ── Email Type 6 — Password Reset (legacy reset-link flow, kept for back-compat) ─
@@ -826,7 +862,8 @@ export async function sendPasswordResetEmail(
   const label  = portalLabels[portal] ?? 'Portal';
   const accent = accentColors[portal] ?? '#F59E0B';
 
-  await sgMail.send({
+  try {
+    await sgMail.send({
     to: email,
     from: FROM,
     subject: `Reset your Netra ${label} password`,
@@ -856,7 +893,12 @@ export async function sendPasswordResetEmail(
       </div>
       <div class="footer">NetraOps — Do not reply to this email</div>
     </div>`,
-  });
+    });
+  } catch (err: any) {
+    console.error(`[email] sendPasswordResetEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('password_reset', err, { portal });
+    throw err;
+  }
 }
 
 // ── Email Type 4 — Vishnu Day-140 Hard-Delete Warning ────────────────────────
@@ -874,7 +916,8 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
   const { site_name, company_name, data_delete_at } = result.rows[0];
   const deleteDate = fmtDateSite(data_delete_at);
 
-  await sgMail.send({
+  try {
+    await sgMail.send({
     to: process.env.VISHNU_EMAIL!,
     from: FROM,
     subject: `⚠️ Site Data Deletes in ${daysRemaining} Days — ${site_name} (${company_name})`,
@@ -901,7 +944,12 @@ export async function sendVishnu140DayWarning(siteId: string, daysRemaining: num
       </div>
       <div class="footer">NetraOps — Internal Alert</div>
     </div>`,
-  });
+    });
+  } catch (err: any) {
+    console.error(`[email] sendVishnu140DayWarning: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('vishnu_140_day_warning', err, { site_id: siteId, days_remaining: daysRemaining });
+    throw err;
+  }
 }
 
 // ── Email Type 5 — Geofence Breach Alert (T1-D, 2026-05-17 audit) ────────────
@@ -957,7 +1005,13 @@ export async function sendGeofenceBreachAlert(
 
   const { subject, html } = renderGeofenceBreachAlert(row, context);
 
-  await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
+  try {
+    await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
+  } catch (err: any) {
+    console.error(`[email] sendGeofenceBreachAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('geofence_breach_alert', err, { violation_id: violationId, kind: context.kind });
+    throw err;
+  }
 }
 
 /**
@@ -1140,6 +1194,7 @@ export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
     await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
   } catch (err: any) {
     console.error(`[email] sendSwapAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('swap_accepted_fyi', err, { history_id: historyId });
   }
 }
 
@@ -1339,7 +1394,10 @@ export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
   if (!row?.admin_email) return;
   const { subject, html } = renderHandoffFyi(row, 'accepted');
   try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) { console.error(`[email] sendHandoffAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body); }
+  catch (err: any) {
+    console.error(`[email] sendHandoffAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('handoff_accepted_fyi', err, { history_id: historyId });
+  }
 }
 
 export async function sendHandoffCompletedFyi(historyId: string): Promise<void> {
@@ -1347,7 +1405,10 @@ export async function sendHandoffCompletedFyi(historyId: string): Promise<void> 
   if (!row?.admin_email) return;
   const { subject, html } = renderHandoffFyi(row, 'completed');
   try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) { console.error(`[email] sendHandoffCompletedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body); }
+  catch (err: any) {
+    console.error(`[email] sendHandoffCompletedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('handoff_completed_fyi', err, { history_id: historyId });
+  }
 }
 
 export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number): Promise<void> {
@@ -1355,5 +1416,8 @@ export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number
   if (!row?.admin_email) return;
   const { subject, html } = renderHandoffFyi(row, 'nudge', minutesLate);
   try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) { console.error(`[email] sendHandoffNudgeFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body); }
+  catch (err: any) {
+    console.error(`[email] sendHandoffNudgeFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('handoff_nudge', err, { history_id: historyId, minutes_late: minutesLate });
+  }
 }

@@ -19,6 +19,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendMissedShiftAlert } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 cron.schedule('*/5 * * * *', async () => {
   const result = await pool.query(
@@ -38,6 +39,10 @@ cron.schedule('*/5 * * * *', async () => {
       console.log('[missed-shift] Alert sent for shift', shift.id);
     } catch (err) {
       console.error('[missed-shift] Failed for shift', shift.id, err);
+      Sentry.captureException(err, {
+        tags: { service: 'sendgrid', flow: 'missed_shift_alert' },
+        extra: { shift_id: shift.id },
+      });
     }
   }
 });

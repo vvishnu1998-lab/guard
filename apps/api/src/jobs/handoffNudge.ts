@@ -25,6 +25,7 @@ import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { pushHandoffNudge } from '../services/swapPush';
 import { sendHandoffNudgeFyi } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 const NUDGE_CAP = 4;
 
@@ -92,9 +93,13 @@ export async function runHandoffNudgeOnce(): Promise<number> {
       minutesLate: row.minutes_late,
     }).catch((err) => console.error('[handoff-nudge] push B failed:', row.id, err));
 
-    sendHandoffNudgeFyi(row.id, row.minutes_late).catch((err) =>
-      console.error('[handoff-nudge] admin FYI email failed:', row.id, err),
-    );
+    sendHandoffNudgeFyi(row.id, row.minutes_late).catch((err) => {
+      console.error('[handoff-nudge] admin FYI email failed:', row.id, err);
+      Sentry.captureException(err, {
+        tags: { service: 'sendgrid', flow: 'handoff_nudge' },
+        extra: { history_id: row.id, minutes_late: row.minutes_late },
+      });
+    });
   }
   console.log(`[handoff-nudge] nudged ${result.rowCount} stuck handoff(s)`);
   return result.rowCount;

@@ -14,6 +14,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendDailyShiftReport } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 cron.schedule(
   '0 9 * * *',
@@ -36,6 +37,10 @@ cron.schedule(
         sent++;
       } catch (err) {
         console.error('[daily-email] Failed for shift', shift.id, err);
+        Sentry.captureException(err, {
+          tags: { service: 'sendgrid', flow: 'daily_shift_report' },
+          extra: { shift_id: shift.id },
+        });
         failed++;
       }
     }
