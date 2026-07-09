@@ -7,6 +7,7 @@ import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
+import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 
 const router = Router();
 
@@ -120,6 +121,7 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     try {
       await client.query('BEGIN');
       const ids: string[] = [];
+      const createdShifts: CreatedShift[] = [];
       for (const d of sortedDates) {
         // Overlap check (assigned shifts only — unassigned can stack).
         if (guard_id) {
@@ -150,13 +152,20 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
              ($3::date + $4::time) AT TIME ZONE $8,
              ($3::date + $6::interval + $5::time) AT TIME ZONE $8,
              $7
-           ) RETURNING id`,
+           ) RETURNING id, guard_id, site_id, scheduled_start, scheduled_end`,
           [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status, siteTz]
         );
-        ids.push(insert.rows[0].id);
+        const row = insert.rows[0];
+        ids.push(row.id);
+        createdShifts.push(row);
       }
       await client.query('COMMIT');
-      return res.status(201).json({ ids });
+      res.status(201).json({ ids });
+      // Aggregated per-guard push, fire-and-forget after response.
+      pushShiftAssignments(createdShifts).catch((err) =>
+        console.error('[shifts.specific_dates] push failed:', err),
+      );
+      return;
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('[shifts.specific_dates] error:', err);
@@ -245,7 +254,7 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       }
     }
 
-    const created: object[] = [];
+    const created: Array<Record<string, unknown>> = [];
     for (const p of pending) {
       const r = await pool.query(
         `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
@@ -254,7 +263,18 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       );
       created.push(r.rows[0]);
     }
-    return res.status(201).json(created);
+    res.status(201).json(created);
+    // Aggregated per-guard push, fire-and-forget after response.
+    pushShiftAssignments(
+      created.map((r) => ({
+        id:              String(r.id),
+        guard_id:        (r.guard_id as string | null) ?? null,
+        site_id:         String(r.site_id),
+        scheduled_start: r.scheduled_start as string | Date,
+        scheduled_end:   r.scheduled_end as string | Date,
+      })),
+    ).catch((err) => console.error('[shifts.repeat_days] push failed:', err));
+    return;
   }
 
   // Single shift
@@ -277,6 +297,15 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     [guard_id || null, site_id, scheduled_start, scheduled_end, status]
   );
   res.status(201).json(result.rows[0]);
+  // Aggregated per-guard push, fire-and-forget after response.
+  const row = result.rows[0];
+  pushShiftAssignments([{
+    id:              row.id,
+    guard_id:        row.guard_id,
+    site_id:         row.site_id,
+    scheduled_start: row.scheduled_start,
+    scheduled_end:   row.scheduled_end,
+  }]).catch((err) => console.error('[shifts.single] push failed:', err));
 });
 
 // PATCH /api/admin/shifts/:id/assign-guard
