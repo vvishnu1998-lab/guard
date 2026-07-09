@@ -38,5 +38,12 @@ export function navigateForNotification(type: string | undefined, data: Notifica
         router.push(`/violation/${data.violationId}`);
       }
       break;
+    case 'shifts_assigned':
+      // Aggregated push emitted by the API when POST /shifts creates one
+      // or more shifts for this guard. Data payload carries shift_ids,
+      // count, first_date, last_date — mobile just routes to the schedule
+      // tab which will refetch and show the new rows.
+      router.push('/(tabs)/schedule');
+      break;
   }
 }
