@@ -1139,19 +1139,23 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
   });
 });
 
-// GET /api/shifts/:id — admin shift detail with joined site/guard + reassignment history.
-// Used by the admin shift detail page (apps/web/app/admin/shifts/[shiftId]).
-// company_admin sees only their company's shifts; vishnu sees any.
+// GET /api/shifts/:id — shift detail with joined site/guard + reassign/swap history.
+// Serves both the admin shift detail page (apps/web/app/admin/shifts/[shiftId])
+// and the guard mobile shift detail screen (apps/mobile/app/shifts/[id]).
+// Tenancy rules:
+//   - company_admin: only their company's shifts.
+//   - vishnu: any shift.
+//   - guard: only shifts assigned to themselves.
 //
 // Placed AFTER /active-session because Express matches routes in declaration
 // order: a /:id catch-all defined earlier would shadow the literal /active-session.
-router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, res) => {
   const { user } = req;
   const shiftResult = await pool.query(
     `SELECT sh.id, sh.guard_id, sh.site_id, sh.scheduled_start, sh.scheduled_end,
             sh.status, sh.missed_alert_sent_at, sh.created_at,
             si.name AS site_name, si.is_active AS site_is_active,
-            si.address AS site_address, si.company_id,
+            si.address AS site_address, si.timezone AS site_tz, si.company_id,
             g.name AS guard_name, g.badge_number, g.phone_number AS guard_phone
        FROM shifts sh
        JOIN sites  si ON si.id = sh.site_id
@@ -1163,6 +1167,11 @@ router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const shift = shiftResult.rows[0];
 
   if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
+    return res.status(404).json({ error: 'Shift not found' });
+  }
+  // Guard tenancy: can only view a shift currently assigned to them. Deliberately
+  // 404 (not 403) so we don't leak which shift ids exist.
+  if (user!.role === 'guard' && shift.guard_id !== user!.sub) {
     return res.status(404).json({ error: 'Shift not found' });
   }
 
