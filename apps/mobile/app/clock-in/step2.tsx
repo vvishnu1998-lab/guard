@@ -9,6 +9,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert, Image } from 'react-na
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { useClockInStore } from '../../store/clockInStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
@@ -20,6 +21,11 @@ export default function ClockInStep2() {
   const [capturing, setCapturing]        = useState(false);
   // Android: onCameraReady sometimes never fires — force-enable after 3s
   useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'entered step2 (Selfie)',
+      level: 'info',
+    });
     const t = setTimeout(() => setCameraReady(true), 3000);
     return () => clearTimeout(t);
   }, []);
@@ -76,7 +82,19 @@ export default function ClockInStep2() {
         longitude: (loc as any)?.coords?.longitude ?? 0,
         takenAt:   new Date().toISOString(),
       });
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step2: selfie captured',
+        level: 'info',
+      });
     } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step2: capture failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'clockin.step2.capture' } });
       Alert.alert('Capture Failed', err?.message ?? 'Could not take photo. Try again.');
     } finally {
       setCapturing(false);
@@ -87,6 +105,11 @@ export default function ClockInStep2() {
   function usePhoto() {
     if (!preview?.uri) return;
     setSelfie(preview);
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'step2 → step4',
+      level: 'info',
+    });
     router.replace('/clock-in/step4');
   }
 

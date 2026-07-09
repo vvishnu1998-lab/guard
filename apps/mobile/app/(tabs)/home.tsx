@@ -218,6 +218,12 @@ export default function HomeScreen() {
   async function handleClockIn() {
     if (!upcomingShift) return;
     resetClockIn();
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'handleClockIn: hydrating shift',
+      level: 'info',
+      data: { shift_id: upcomingShift.id, site_id: upcomingShift.site_id, from_screen: 'home' },
+    });
     try {
       const detail = await apiClient.get<{
         id: string;
@@ -234,6 +240,12 @@ export default function HomeScreen() {
         } | null;
       }>(`/shifts/${upcomingShift.id}`);
       if (!detail.geofence) {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'handleClockIn: geofence null (server response)',
+          level: 'error',
+          data: { shift_id: upcomingShift.id, site_id: upcomingShift.site_id },
+        });
         Sentry.captureMessage('home.handleClockIn geofence missing', {
           level: 'error',
           extra: { shift_id: upcomingShift.id, site_id: upcomingShift.site_id },
@@ -252,8 +264,19 @@ export default function HomeScreen() {
         geofence: detail.geofence,
       });
       setClockInPendingShift(detail.id);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'handleClockIn: geofence hydrated, → step1',
+        level: 'info',
+      });
       router.push('/clock-in/step1');
     } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'handleClockIn: /shifts/:id fetch failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
       Sentry.captureException(err, { extra: { where: 'home.handleClockIn' } });
       // eslint-disable-next-line no-alert
       alert('Could not load shift details. Check your connection and try again.');

@@ -19,6 +19,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient }       from '../../lib/apiClient';
@@ -51,9 +52,15 @@ export default function PhotoPing() {
   // Android often never fires onCameraReady — force-enable after 3s so the
   // shutter doesn't sit disabled indefinitely.
   useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'ping_wizard',
+      message: 'entered photo capture',
+      level: 'info',
+      data: { session_id: activeSession?.id },
+    });
     const t = setTimeout(() => setCameraReady(true), CAMERA_READY_FALLBACK_MS);
     return () => clearTimeout(t);
-  }, []);
+  }, [activeSession?.id]);
 
   if (!permission) return null;
   if (!permission.granted) {
@@ -98,6 +105,11 @@ export default function PhotoPing() {
       );
       if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
       console.log('[ping] picture taken:', photo.uri);
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: 'photo captured',
+        level: 'info',
+      });
 
       // 2) Compress (best-effort)
       let compressed: { uri: string } = { uri: photo.uri };
@@ -160,6 +172,12 @@ export default function PhotoPing() {
       //    offline-queue fallback is unsafe for ping-with-photo: a queued
       //    payload referencing a no-longer-existing local URI can't sync.
       console.log('[ping] submitting…');
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: 'submit initiated',
+        level: 'info',
+        data: { session_id: activeSession.id, accuracy_m: acc ? Math.round(acc) : null },
+      });
       await apiClient.post('/locations/ping', {
         shift_session_id: activeSession.id,
         latitude:         lat,
@@ -170,6 +188,11 @@ export default function PhotoPing() {
         throttle_reason:  getCurrentThrottleReason() ?? undefined,
       });
       console.log('[ping] submit complete');
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: 'submit succeeded',
+        level: 'info',
+      });
 
       pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
       // Confirmation to the guard (was missing — submit used to silently
@@ -181,6 +204,13 @@ export default function PhotoPing() {
       );
     } catch (err: any) {
       console.error('[ping] capture failed:', err);
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: 'submit / capture failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'ping.photo.capture' } });
       Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
     } finally {
       setCapturing(false);

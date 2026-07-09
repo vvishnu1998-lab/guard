@@ -5,6 +5,7 @@
 import { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
@@ -20,6 +21,12 @@ export default function ClockInStep1() {
   const { setGpsVerified } = useClockInStore();
 
   useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'entered step1 (GPS Verification)',
+      level: 'info',
+      data: { shift_id: pendingShift?.id, site_id: pendingShift?.site_id },
+    });
     checkGeofence();
   }, []);
 
@@ -27,7 +34,16 @@ export default function ClockInStep1() {
     setState('checking');
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') { setState('error'); return; }
+      if (status !== 'granted') {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step1: location permission not granted',
+          level: 'warning',
+          data: { permission_status: status },
+        });
+        setState('error');
+        return;
+      }
 
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
       const point = { lat: loc.coords.latitude, lng: loc.coords.longitude };
@@ -35,6 +51,12 @@ export default function ClockInStep1() {
       // Default to a conservative 30m so the server-side check still has SOME tolerance.
       const accuracy = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
       setCoords(point);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step1: GPS acquired',
+        level: 'info',
+        data: { accuracy_m: Math.round(accuracy) },
+      });
 
       const geofence = pendingShift?.geofence;
       if (!geofence) {
@@ -51,13 +73,31 @@ export default function ClockInStep1() {
       // Fast radius pre-check (Haversine) then precise polygon check (ray casting)
       const approxDistance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
       if (approxDistance > geofence.radius_meters * 1.5) {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step1: boundary check → outside (radius pre-check)',
+          level: 'info',
+          data: { distance_m: Math.round(approxDistance), radius_m: geofence.radius_meters },
+        });
         setState('outside');
         return;
       }
       const inside = isPointInPolygon(point, geofence.polygon_coordinates);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: `step1: boundary check → ${inside ? 'inside' : 'outside'} (polygon)`,
+        level: inside ? 'info' : 'warning',
+        data: { distance_m: Math.round(approxDistance), radius_m: geofence.radius_meters },
+      });
       if (inside) setGpsVerified(point.lat, point.lng, accuracy);
       setState(inside ? 'inside' : 'outside');
-    } catch {
+    } catch (err) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step1: geofence check threw',
+        level: 'error',
+      });
+      Sentry.captureException(err, { extra: { where: 'clockin.step1.checkGeofence' } });
       setState('error');
     }
   }
@@ -96,7 +136,14 @@ export default function ClockInStep1() {
       <TouchableOpacity
         style={[styles.button, state !== 'inside' && styles.buttonDisabled]}
         disabled={state !== 'inside'}
-        onPress={() => router.replace('/clock-in/step2')}
+        onPress={() => {
+          Sentry.addBreadcrumb({
+            category: 'clock_in_wizard',
+            message: 'step1 → step2',
+            level: 'info',
+          });
+          router.replace('/clock-in/step2');
+        }}
       >
         <Text style={styles.buttonText}>NEXT: TAKE SELFIE</Text>
       </TouchableOpacity>

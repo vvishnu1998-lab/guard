@@ -6,8 +6,9 @@
  *   2. POST /api/shifts/:id/clock-in  → creates session + generates task instances
  *   3. POST /api/locations/clock-in-verification  → stores S3 photo proofs
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, Modal, Linking } from 'react-native';
+import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
@@ -31,6 +32,14 @@ export default function ClockInStep4() {
   // a network blip) reuses the same key → server replays the cached
   // response instead of double-creating a session.
   const [clockInIdempotencyKey] = useState(() => uuidv4());
+
+  useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'entered step4 (Submit)',
+      level: 'info',
+    });
+  }, []);
 
   const {
     verifiedLatitude,
@@ -66,14 +75,38 @@ export default function ClockInStep4() {
     const lng = verifiedLongitude!;
     const accuracy = verifiedAccuracy ?? 30; // step1 defaults null → 30; keep parity
     setSubmitting(true);
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'step4: submit initiated',
+      level: 'info',
+      data: { shift_id: pendingShiftId, idempotency_key: clockInIdempotencyKey },
+    });
     try {
       // Step 1 — upload selfie (S3 optional; use placeholder if not configured)
       setStatusStep(0);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: selfie upload started',
+        level: 'info',
+      });
       let selfieUrl = 'pending';
       try {
         const selfieUpload = await uploadToS3(selfie!.uri, 'clock_in');
         selfieUrl = selfieUpload.public_url;
-      } catch { /* S3 not configured — continue without photo URL */ }
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step4: selfie upload complete',
+          level: 'info',
+        });
+      } catch (err) {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step4: selfie upload failed (falling back to "pending")',
+          level: 'warning',
+          data: { error: (err as any)?.message ?? String(err) },
+        });
+        /* S3 not configured — continue without photo URL */
+      }
 
       // Step 2 — clock in (creates shift_session + triggers task instance generation)
       // Server validates lat/lng/accuracy against the site geofence inside the
@@ -82,6 +115,11 @@ export default function ClockInStep4() {
       // the 10-min server window returns the cached response instead of
       // re-running the transaction.
       setStatusStep(1);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: POST /shifts/:id/clock-in',
+        level: 'info',
+      });
       const session = await apiClient.post<{ id: string; site_id: string; clocked_in_at: string }>(
         `/shifts/${pendingShiftId}/clock-in`,
         {
@@ -98,6 +136,12 @@ export default function ClockInStep4() {
       // computes its own truth from verified_lat/lng/accuracy and overrides
       // whatever we claim here.
       setStatusStep(2);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: POST /locations/clock-in-verification',
+        level: 'info',
+        data: { session_id: session.id },
+      });
       await apiClient.post('/locations/clock-in-verification', {
         shift_session_id:   session.id,
         selfie_url:         selfieUrl,
@@ -106,6 +150,11 @@ export default function ClockInStep4() {
         verified_lng:       lng,
         accuracy,
         is_within_geofence: true,
+      });
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: submit complete',
+        level: 'info',
       });
 
       // Use the stored pendingShift object; fall back to a minimal shape
@@ -127,6 +176,13 @@ export default function ClockInStep4() {
         router.replace('/(tabs)/home');
       }
     } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: submit failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'clockin.step4.startShift' } });
       if (err?.message === 'GEOFENCE_FAILED') {
         // Server-side geofence rejected this clock-in. Send the guard back to
         // step 1 so they re-fetch GPS at the post entrance rather than retry

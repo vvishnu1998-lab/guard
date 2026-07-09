@@ -14,12 +14,13 @@
  *    routed to. Activity-report-reminder push notifications now open this
  *    screen with the type pre-selected.
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Modal,
 } from 'react-native';
 import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useOfflineStore } from '../../store/offlineStore';
@@ -63,14 +64,35 @@ export default function CreateReport() {
   const typeMeta = TYPES.find((t) => t.value === reportType)!;
   const photoRequired = reportType === 'incident';
 
+  useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'entered new',
+      level: 'info',
+      data: { initial_type: initialType },
+    });
+  }, [initialType]);
+
   function pickType(t: ReportType) {
     setReportType(t);
     setTypePickerOpen(false);
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'type picked',
+      level: 'info',
+      data: { type: t },
+    });
   }
 
   async function handleEnhance() {
     if (countWords(description) < MIN_ENHANCE_WORDS) return;
     setEnhancing(true);
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'AI enhance triggered',
+      level: 'info',
+      data: { word_count: countWords(description), report_type: reportType },
+    });
     try {
       setOriginalDesc(description);
       const { enhanced: result } = await apiClient.post<{ enhanced: string }>(
@@ -78,7 +100,19 @@ export default function CreateReport() {
         { text: description, report_type: reportType },
       );
       setEnhanced(result);
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'AI enhance succeeded',
+        level: 'info',
+      });
     } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'AI enhance failed',
+        level: 'warning',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'reports.new.handleEnhance' } });
       Alert.alert('Enhancement Failed', err?.message ?? 'Could not enhance description. Try again.');
     } finally {
       setEnhancing(false);
@@ -120,6 +154,16 @@ export default function CreateReport() {
     }
 
     setSubmitting(true);
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'submit initiated',
+      level: 'info',
+      data: {
+        report_type:  reportType,
+        word_count:   countWords(description),
+        photo_count:  photos.attachments.length,
+      },
+    });
     try {
       // C3 (T2-D) — GPS hard-fail on no lock (mirrors T1-C-client photo.tsx
       // pattern). Server's validateAtSite flags off-post (does NOT reject —
@@ -151,6 +195,11 @@ export default function CreateReport() {
         accuracy:         acc ?? 30,
       });
 
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'submit succeeded',
+        level: 'info',
+      });
       if (reportType === 'incident') {
         Alert.alert(
           'Incident Reported',
@@ -161,6 +210,13 @@ export default function CreateReport() {
         router.replace('/(tabs)/reports');
       }
     } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'submit failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'reports.new.submit' } });
       Alert.alert('Report Submission Failed', err?.message ?? 'Could not submit report.');
     } finally {
       setSubmitting(false);
