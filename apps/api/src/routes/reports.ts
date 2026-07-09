@@ -38,8 +38,11 @@ router.get('/', requireAuth('guard', 'company_admin', 'client'), async (req, res
                )`;
     params = [user!.sub];
   } else {
-    // company_admin: scoped to company
-    query = `SELECT r.*, g.name as guard_name, si.name as site_name
+    // company_admin: scoped to company. Includes reports from deactivated
+    // sites — history stays visible; UI renders [INACTIVE] badge via
+    // site_is_active.
+    query = `SELECT r.*, g.name as guard_name, si.name as site_name,
+                    si.is_active AS site_is_active
              FROM reports r
              JOIN sites si ON si.id = r.site_id
              JOIN shift_sessions ss ON ss.id = r.shift_session_id
@@ -79,8 +82,10 @@ router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, 
   const result = await pool.query(
     `SELECT r.id, r.shift_session_id, r.site_id, r.report_type, r.description,
             r.severity, r.reported_at,
-            si.name AS site_name, si.company_id,
-            g.name  AS guard_name,
+            si.name      AS site_name,
+            si.is_active AS site_is_active,
+            si.company_id,
+            g.name       AS guard_name,
             array_agg(rp.storage_url ORDER BY rp.photo_index)
               FILTER (WHERE rp.id IS NOT NULL) AS photos
      FROM reports r
@@ -89,7 +94,7 @@ router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, 
      JOIN guards g          ON g.id  = ss.guard_id
      LEFT JOIN report_photos rp ON rp.report_id = r.id
      WHERE r.id = $1
-     GROUP BY r.id, si.name, si.company_id, g.name`,
+     GROUP BY r.id, si.name, si.is_active, si.company_id, g.name`,
     [id],
   );
   const row = result.rows[0];

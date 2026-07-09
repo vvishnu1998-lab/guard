@@ -87,10 +87,13 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     // so every AT TIME ZONE below binds it as a parameter instead of a
     // hardcoded America/Los_Angeles literal.
     const siteCheck = await pool.query(
-      'SELECT id, timezone FROM sites WHERE id = $1 AND company_id = $2',
+      'SELECT id, timezone, is_active FROM sites WHERE id = $1 AND company_id = $2',
       [site_id, req.user!.company_id]
     );
     if (!siteCheck.rows[0]) return res.status(400).json({ error: 'Site not found' });
+    if (!siteCheck.rows[0].is_active) {
+      return res.status(409).json({ error: 'Site is deactivated. Reactivate it before scheduling shifts.' });
+    }
     const siteTz = siteCheck.rows[0].timezone as string;
     if (guard_id) {
       const guardCheck = await pool.query(
@@ -339,7 +342,8 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     const shiftRes = await client.query(
       `SELECT sh.id, sh.guard_id AS old_guard_id, sh.site_id, sh.status,
               sh.scheduled_start, sh.scheduled_end,
-              si.company_id, si.name AS site_name, si.timezone AS site_tz
+              si.company_id, si.name AS site_name, si.timezone AS site_tz,
+              si.is_active AS site_is_active
          FROM shifts sh
          JOIN sites si ON si.id = sh.site_id
         WHERE sh.id = $1
@@ -357,6 +361,12 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Shift not found' });
+    }
+
+    // Deactivated sites can't accept new work — reassignment is new work.
+    if (!shift.site_is_active) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Site is deactivated. Reactivate it before reassigning shifts.' });
     }
 
     // Past shifts cannot be reassigned (auto-complete cron has already

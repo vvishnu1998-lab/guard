@@ -22,10 +22,17 @@ cron.schedule('0 2 1 * *', async () => {
 
   for (const { id: companyId } of companies.rows) {
     try {
+      // Monthly payroll includes hours at now-deactivated sites —
+      // historical completeness. `[INACTIVE] ` prefix matches the
+      // hours-export streaming route so both surfaces render identically
+      // for a decommissioned site.
       const rows = await pool.query(`
         SELECT
           g.name                                          AS guard_name,
-          s.name                                          AS site_name,
+          CASE WHEN s.is_active
+            THEN s.name
+            ELSE '[INACTIVE] ' || s.name
+          END                                             AS site_name,
           DATE(ss.clocked_in_at)                         AS shift_date,
           ss.clocked_in_at                               AS clock_in_time,
           ss.clocked_out_at                              AS clock_out_time,

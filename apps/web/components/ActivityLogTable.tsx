@@ -168,10 +168,11 @@ export default function ActivityLogTable({
     return () => window.clearTimeout(t);
   }, [highlightReportId, rows, loading]);
 
-  // Load sites once (admin only)
+  // Load sites once (admin only). Include inactive sites so admins can
+  // filter historical activity at a since-deactivated site.
   useEffect(() => {
     if (mode !== 'admin') return;
-    fetcher<Site[]>('/api/sites').then(setSites).catch(() => {/* ignore */});
+    fetcher<Site[]>('/api/sites?include_inactive=1').then(setSites).catch(() => {/* ignore */});
   }, [mode, fetcher]);
 
   // Load sessions when site changes (admin only)

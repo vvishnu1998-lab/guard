@@ -38,15 +38,22 @@ interface Site {
   contract_start:              string;
   contract_end:                string;
   timezone:                    string;
+  is_active:                   boolean;
+  client_access_disabled_at:   string | null;  // Fix A source of truth
   client_star_access_until:    string | null;
   data_delete_at:              string | null;
-  client_star_access_disabled: boolean | null;
   has_geofence:                boolean;
   center_lat:                  number | null;
   center_lng:                  number | null;
   radius_meters:               number | null;
   polygon_coordinates:         LatLng[] | null;
   instructions_pdf_url:        string | null;
+}
+
+interface DeactivatePreview {
+  scheduled_shifts:   number;
+  active_sessions:    number;
+  open_assignments:   number;
 }
 
 type GeoMode = 'radius' | 'draw';
@@ -92,6 +99,14 @@ export default function SitesPage() {
   const [geoError,     setGeoError]     = useState('');
 
   const [toggling,     setToggling]     = useState<string | null>(null);
+  const [includeInactive, setIncludeInactive] = useState(false);
+
+  // deactivate flow — preview counts + confirm modal
+  const [deactivateSite,     setDeactivateSite]     = useState<Site | null>(null);
+  const [deactivatePreview,  setDeactivatePreview]  = useState<DeactivatePreview | null>(null);
+  const [deactivateBusy,     setDeactivateBusy]     = useState(false);
+  const [deactivateError,    setDeactivateError]    = useState('');
+  const [activeToggling,     setActiveToggling]     = useState<string | null>(null);
 
   // PDF modal (edit / replace)
   const [pdfSite,      setPdfSite]      = useState<Site | null>(null);
@@ -102,13 +117,59 @@ export default function SitesPage() {
 
   const load = useCallback(async () => {
     try {
-      setSites(await adminGet<Site[]>('/api/sites'));
+      const url = includeInactive ? '/api/sites?include_inactive=1' : '/api/sites';
+      setSites(await adminGet<Site[]>(url));
       setError('');
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, []);
+  }, [includeInactive]);
 
   useEffect(() => { load(); }, [load]);
+
+  /* ── Open deactivate modal → fetch preview counts ────────────────── */
+  async function openDeactivate(site: Site) {
+    setDeactivateSite(site);
+    setDeactivatePreview(null);
+    setDeactivateError('');
+    try {
+      const preview = await adminGet<DeactivatePreview>(
+        `/api/sites/${site.id}/deactivate-preview`,
+      );
+      setDeactivatePreview(preview);
+    } catch (e: any) {
+      setDeactivateError(e.message);
+    }
+  }
+
+  /* ── Confirm deactivate → run cascade ────────────────────────────── */
+  async function confirmDeactivate() {
+    if (!deactivateSite) return;
+    setDeactivateBusy(true);
+    setDeactivateError('');
+    try {
+      await adminPatch(`/api/sites/${deactivateSite.id}/active`, { active: false });
+      setDeactivateSite(null);
+      setDeactivatePreview(null);
+      await load();
+    } catch (e: any) {
+      setDeactivateError(e.message);
+    } finally {
+      setDeactivateBusy(false);
+    }
+  }
+
+  /* ── Reactivate → single click, no modal ─────────────────────────── */
+  async function reactivateSite(id: string) {
+    setActiveToggling(id);
+    try {
+      await adminPatch(`/api/sites/${id}/active`, { active: true });
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setActiveToggling(null);
+    }
+  }
 
   /* ── Upload PDF to a site ───────────────────────────────────────── */
   async function uploadPdfToSite(siteId: string, file: File): Promise<void> {
@@ -240,7 +301,7 @@ export default function SitesPage() {
     finally { setGeoSaving(false); }
   }
 
-  /* ── Toggle client access ────────────────────────────────────────── */
+  /* ── Toggle client access — Fix A: reads client_access_disabled_at ── */
   async function toggleClientAccess(id: string, enabled: boolean) {
     setToggling(id);
     try { await adminPatch(`/api/sites/${id}/client-access`, { enabled }); await load(); }
@@ -262,12 +323,23 @@ export default function SitesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-widest text-amber-400">SITES</h1>
-        <button
-          onClick={() => { setShowCreate(true); setFormError(''); setForm(EMPTY_FORM); }}
-          className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors"
-        >
-          + NEW SITE
-        </button>
+        <div className="flex items-center gap-4">
+          <label className="text-xs tracking-widest text-gray-500 flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeInactive}
+              onChange={(e) => setIncludeInactive(e.target.checked)}
+              className="accent-amber-400"
+            />
+            SHOW INACTIVE
+          </label>
+          <button
+            onClick={() => { setShowCreate(true); setFormError(''); setForm(EMPTY_FORM); }}
+            className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors"
+          >
+            + NEW SITE
+          </button>
+        </div>
       </div>
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
@@ -295,11 +367,26 @@ export default function SitesPage() {
             {sites.map((site) => {
               const deleteIn    = daysUntil(site.data_delete_at);
               const accessIn    = daysUntil(site.client_star_access_until);
-              const clientEnabled = !site.client_star_access_disabled;
+              // Fix A: label reads sites.client_access_disabled_at, the
+              // column the PATCH /client-access endpoint actually writes.
+              // Previously read drl.client_star_access_disabled (a dead
+              // legacy retention flag) and always showed "ENABLED".
+              const clientEnabled = !site.client_access_disabled_at;
+              const isDeactivated = !site.is_active;
               return (
-                <tr key={site.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
+                <tr key={site.id} className={`border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors ${isDeactivated ? 'opacity-60' : ''}`}>
                   <td className="p-4">
-                    <p className="text-gray-200 font-medium">{site.name}</p>
+                    <p className="text-gray-200 font-medium">
+                      {site.name}
+                      {isDeactivated && (
+                        <span
+                          className="ml-2 inline-flex items-center text-[9px] font-bold tracking-widest text-gray-400 bg-gray-800/60 border border-gray-700 rounded px-1.5 py-0.5"
+                          title="Deactivated. History remains visible; future work is blocked."
+                        >
+                          INACTIVE
+                        </span>
+                      )}
+                    </p>
                     <p className="text-gray-500 text-xs">{site.address}</p>
                   </td>
                   <td className="p-4 text-gray-400 text-xs">
@@ -373,17 +460,37 @@ export default function SitesPage() {
                     )}
                   </td>
                   <td className="p-4 text-right">
-                    <button
-                      onClick={() => toggleClientAccess(site.id, !clientEnabled)}
-                      disabled={toggling === site.id}
-                      className={`text-xs tracking-widest px-3 py-1 rounded transition-colors ${
-                        clientEnabled
-                          ? 'bg-green-900/40 text-green-400 border border-green-700 hover:bg-red-900/40 hover:text-red-400 hover:border-red-700'
-                          : 'bg-[#0B1526] text-gray-500 border border-[#1A3050] hover:border-green-700 hover:text-green-400'
-                      } disabled:opacity-40`}
-                    >
-                      {toggling === site.id ? '…' : clientEnabled ? 'ENABLED' : 'DISABLED'}
-                    </button>
+                    <div className="flex items-center justify-end gap-2">
+                      {isDeactivated ? (
+                        <button
+                          onClick={() => reactivateSite(site.id)}
+                          disabled={activeToggling === site.id}
+                          className="text-xs tracking-widest px-3 py-1 rounded transition-colors bg-[#0B1526] text-gray-400 border border-[#1A3050] hover:border-amber-400 hover:text-amber-400 disabled:opacity-40"
+                        >
+                          {activeToggling === site.id ? '…' : 'REACTIVATE'}
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => toggleClientAccess(site.id, !clientEnabled)}
+                            disabled={toggling === site.id}
+                            className={`text-xs tracking-widest px-3 py-1 rounded transition-colors ${
+                              clientEnabled
+                                ? 'bg-green-900/40 text-green-400 border border-green-700 hover:bg-red-900/40 hover:text-red-400 hover:border-red-700'
+                                : 'bg-[#0B1526] text-gray-500 border border-[#1A3050] hover:border-green-700 hover:text-green-400'
+                            } disabled:opacity-40`}
+                          >
+                            {toggling === site.id ? '…' : clientEnabled ? 'ENABLED' : 'DISABLED'}
+                          </button>
+                          <button
+                            onClick={() => openDeactivate(site)}
+                            className="text-xs tracking-widest px-3 py-1 rounded bg-[#0B1526] text-gray-500 border border-[#1A3050] hover:border-red-700 hover:text-red-400 transition-colors"
+                          >
+                            DEACTIVATE
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );
@@ -673,6 +780,74 @@ export default function SitesPage() {
                 {geoSaving ? 'SAVING…' : 'SAVE GEOFENCE'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Deactivate Site Modal ────────────────────────────────────── */}
+      {deactivateSite && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-red-700/50 rounded-2xl p-6 mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-red-400 font-bold tracking-widest text-lg">DEACTIVATE SITE</h2>
+              <button onClick={() => { setDeactivateSite(null); setDeactivatePreview(null); setDeactivateError(''); }} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            <p className="text-gray-400 text-xs mb-1">Site</p>
+            <p className="text-gray-200 font-medium mb-4">{deactivateSite.name}</p>
+
+            {!deactivatePreview && !deactivateError && (
+              <p className="text-gray-500 text-sm mb-4">Loading preview…</p>
+            )}
+
+            {deactivateError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{deactivateError}</div>
+            )}
+
+            {deactivatePreview && (
+              <>
+                <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 mb-4 space-y-2">
+                  <p className="text-gray-500 text-xs tracking-widest mb-2">WHAT WILL HAPPEN</p>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">Future shifts to cancel</span>
+                    <span className="text-gray-200 font-mono">{deactivatePreview.scheduled_shifts}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">Active guard sessions</span>
+                    <span className="text-gray-200 font-mono">{deactivatePreview.active_sessions}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">Open guard assignments to close</span>
+                    <span className="text-gray-200 font-mono">{deactivatePreview.open_assignments}</span>
+                  </div>
+                </div>
+                <p className="text-gray-500 text-xs mb-4 leading-relaxed">
+                  Client portal access will be disabled. Historical rows (shift
+                  sessions, reports, hours, billing) stay intact and continue to
+                  appear with an <span className="text-gray-400">[INACTIVE]</span> label.
+                  Active guard sessions are not interrupted — they finish
+                  normally.
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => { setDeactivateSite(null); setDeactivatePreview(null); }}
+                    className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+                  >
+                    BACK
+                  </button>
+                  <button
+                    onClick={confirmDeactivate}
+                    disabled={deactivateBusy}
+                    className="flex-1 bg-red-500 text-white font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-red-400 disabled:opacity-40 transition-colors"
+                  >
+                    {deactivateBusy
+                      ? 'DEACTIVATING…'
+                      : deactivatePreview.scheduled_shifts > 0
+                        ? 'CANCEL SHIFTS + DEACTIVATE'
+                        : 'DEACTIVATE'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

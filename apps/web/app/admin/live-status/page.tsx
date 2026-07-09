@@ -1,8 +1,12 @@
 'use client';
 /**
- * Admin — Live Guard Status (/admin/live-map)
+ * Admin — Live Guard Status (/admin/live-status)
  * Real-time table of guards currently on shift with last known location + ping time.
  * Auto-refreshes every 30 seconds.
+ *
+ * Path renamed from /admin/live-map on 2026-07-08 (task #5) — the page
+ * has always been a table, never a Leaflet map. next.config.js keeps a
+ * permanent 301 so breach-alert emails already in inboxes still resolve.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
@@ -94,7 +98,7 @@ export default function LiveMapPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Breach-alert email deep-link: /admin/live-map?breach=<violation_id>
+  // Breach-alert email deep-link: /admin/live-status?breach=<violation_id>
   // Scrolls the matching breach row into view + flashes a highlight ring
   // once the breaches list loads. Filter window is widened to 7d when the
   // deep-link is present so older breaches aren't accidentally hidden.

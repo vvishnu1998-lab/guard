@@ -186,7 +186,7 @@ router.get('/kpis', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
   const [sites, duty, reports, alerts] = await Promise.all([
     pool.query(
-      `SELECT COUNT(*) FROM sites WHERE company_id = $1 AND contract_end >= NOW()`,
+      `SELECT COUNT(*) FROM sites WHERE company_id = $1 AND is_active = true AND contract_end >= NOW()`,
       [cid]
     ),
     pool.query(
@@ -355,7 +355,7 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
      FROM sites s
      LEFT JOIN reports r ON r.site_id = s.id
      LEFT JOIN data_retention_log drl ON drl.site_id = s.id
-     WHERE s.company_id = $1
+     WHERE s.company_id = $1 AND s.is_active = true
      GROUP BY s.id, s.name, s.contract_end, drl.data_delete_at
      ORDER BY s.name`,
     [cid]
@@ -369,12 +369,15 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
   const result = await pool.query(
     `SELECT * FROM (
 
-       -- Geofence violations
+       -- Geofence violations. site_is_active is surfaced so the client
+       -- can render an [INACTIVE] badge next to the site name in the
+       -- alert list — the alert itself is historical and always shows.
        SELECT
          gv.id::text,
          'geofence_violation'          AS type,
          'Guard left designated area'  AS description,
          s.name                        AS site_name,
+         s.is_active                   AS site_is_active,
          g.name                        AS guard_name,
          gv.occurred_at,
          (gv.resolved_at IS NOT NULL)  AS is_resolved
@@ -397,6 +400,7 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
          'missed_shift'                                          AS type,
          'No guard clocked in 15+ minutes after scheduled start' AS description,
          s.name                                                  AS site_name,
+         s.is_active                                             AS site_is_active,
          g.name                                                  AS guard_name,
          sh.scheduled_start                                      AS occurred_at,
          false                                                   AS is_resolved

@@ -159,6 +159,7 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       g.name             AS guard_name,
       ss.site_id,
       si.name            AS site_name,
+      si.is_active       AS site_is_active,
       ss.clocked_in_at,
       ss.clocked_out_at
     FROM shift_sessions ss
@@ -210,7 +211,8 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       ss.guard_id,
       g.name AS guard_name,
       r.site_id,
-      si.name AS site_name,
+      si.name      AS site_name,
+      si.is_active AS site_is_active,
       array_agg(rp.storage_url ORDER BY rp.photo_index) FILTER (WHERE rp.id IS NOT NULL) AS photos
     FROM reports r
     JOIN shift_sessions ss ON ss.id = r.shift_session_id
@@ -234,7 +236,7 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
     reportQuery += ` AND ss.id = $${reportParams.length + 1}`;
     reportParams.push(session_id);
   }
-  reportQuery += ' GROUP BY r.id, ss.guard_id, g.name, si.name';
+  reportQuery += ' GROUP BY r.id, ss.guard_id, g.name, si.name, si.is_active';
   const reportsResult = await pool.query<ReportRow>(reportQuery, reportParams);
 
   // ── Build merged feed ────────────────────────────────────────────────────

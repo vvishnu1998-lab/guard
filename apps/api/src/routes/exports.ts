@@ -42,7 +42,7 @@ async function fetchAnalyticsData(companyId: string, params: {
   const hq = buildArgs('ss.clocked_in_at', 'ss.clocked_in_at');
   const hours = await pool.query(`
     SELECT
-      s.name                           AS site_name,
+      CASE WHEN s.is_active THEN s.name ELSE '[INACTIVE] ' || s.name END AS site_name,
       g.name                           AS guard_name,
       g.badge_number,
       DATE(ss.clocked_in_at)           AS shift_date,
@@ -62,7 +62,7 @@ async function fetchAnalyticsData(companyId: string, params: {
   const rq = buildArgs('r.reported_at', 'r.reported_at');
   const reports = await pool.query(`
     SELECT
-      s.name          AS site_name,
+      CASE WHEN s.is_active THEN s.name ELSE '[INACTIVE] ' || s.name END AS site_name,
       g.name          AS guard_name,
       r.report_type,
       r.severity,
@@ -82,7 +82,7 @@ async function fetchAnalyticsData(companyId: string, params: {
   const vq = buildArgs('gv.occurred_at', 'gv.occurred_at');
   const violations = await pool.query(`
     SELECT
-      s.name               AS site_name,
+      CASE WHEN s.is_active THEN s.name ELSE '[INACTIVE] ' || s.name END AS site_name,
       g.name               AS guard_name,
       gv.occurred_at,
       gv.resolved_at,

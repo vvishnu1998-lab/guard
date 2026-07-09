@@ -31,10 +31,17 @@ async function fetchHoursData(companyId: string, params: {
   if (site_id)    { args.push(site_id);    clauses.push(`AND s.id = $${args.length}`); }
   if (guard_id)   { args.push(guard_id);   clauses.push(`AND g.id = $${args.length}`); }
 
+  // Payroll must include hours worked at now-deactivated sites — historical
+  // completeness. Prefix "[INACTIVE] " on the site name at SELECT time so
+  // the XLSX + streaming exports flag it visibly (there's no client-side
+  // badge component available in Excel).
   const result = await pool.query(`
     SELECT
       g.name                                          AS guard_name,
-      s.name                                          AS site_name,
+      CASE WHEN s.is_active
+        THEN s.name
+        ELSE '[INACTIVE] ' || s.name
+      END                                             AS site_name,
       DATE(ss.clocked_in_at)                          AS shift_date,
       ss.clocked_in_at                                AS clock_in_time,
       ss.clocked_out_at                               AS clock_out_time,
