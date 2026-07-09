@@ -60,7 +60,7 @@ const STATUS_STYLES: Record<string, string> = {
   scheduled:  'bg-blue-500/20 text-blue-400 border border-blue-500/40',
   active:     'bg-green-500/20 text-green-400 border border-green-500/40',
   completed:  'bg-gray-700/40 text-gray-500 border border-gray-600/40',
-  cancelled:  'bg-red-900/30 text-red-400 border border-red-700/40',
+  cancelled:  'bg-gray-700/40 text-gray-400 border border-gray-600/50',
   missed:     'bg-red-900/30 text-red-400 border border-red-700/40',
 };
 
@@ -93,6 +93,13 @@ export default function ShiftDetailPage() {
   const [submitting,  setSubmitting]  = useState(false);
   const [submitErr,   setSubmitErr]   = useState('');
 
+  // Cancel modal (separate state so opening one doesn't disturb the other)
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelReason,    setCancelReason]    = useState('');
+  const [cancelling,      setCancelling]      = useState(false);
+  const [cancelErr,       setCancelErr]       = useState('');
+  const [cancelToast,     setCancelToast]     = useState('');
+
   const load = useCallback(async () => {
     if (!shiftId) return;
     setLoading(true);
@@ -120,6 +127,11 @@ export default function ShiftDetailPage() {
       ? 'Past shifts cannot be reassigned.'
       : '';
 
+  // Cancel is only available for still-scheduled shifts. Active/completed/
+  // missed/already-cancelled all reject at the API layer with a specific
+  // 409, but hiding the button up front avoids the round-trip.
+  const canCancel = !!shift && shift.status === 'scheduled';
+
   const pickableGuards = guards
     .filter((g) => g.is_active !== false)
     .filter((g) => g.id !== shift?.guard_id);
@@ -129,6 +141,35 @@ export default function ShiftDetailPage() {
     setReason('');
     setSubmitErr('');
     setShowModal(true);
+  }
+
+  function openCancelModal() {
+    setCancelReason('');
+    setCancelErr('');
+    setShowCancelModal(true);
+  }
+
+  async function submitCancel() {
+    if (!shift) return;
+    if (cancelReason.length > 200) {
+      setCancelErr('Reason must be 200 characters or fewer.');
+      return;
+    }
+    setCancelling(true);
+    setCancelErr('');
+    try {
+      const body: { reason?: string } = {};
+      if (cancelReason.trim().length > 0) body.reason = cancelReason.trim();
+      await adminPatch(`/api/shifts/${shift.id}/cancel`, body);
+      setShowCancelModal(false);
+      setCancelToast('Shift cancelled');
+      window.setTimeout(() => setCancelToast(''), 3000);
+      await load();
+    } catch (e: any) {
+      setCancelErr(String(e?.message ?? 'Cancel failed. Please try again.'));
+    } finally {
+      setCancelling(false);
+    }
   }
 
   async function submitReassign() {
@@ -243,7 +284,7 @@ export default function ShiftDetailPage() {
         )}
       </div>
 
-      {/* Reassign action */}
+      {/* Reassign + cancel actions */}
       <div className="flex items-center gap-3 flex-wrap">
         <button
           onClick={openModal}
@@ -257,10 +298,25 @@ export default function ShiftDetailPage() {
         >
           REASSIGN GUARD
         </button>
+        {canCancel && (
+          <button
+            onClick={openCancelModal}
+            className="px-4 py-2 rounded-lg text-sm font-bold tracking-widest transition-colors border border-red-500 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+          >
+            CANCEL SHIFT
+          </button>
+        )}
         {!canReassign && disabledReason && (
           <span className="text-gray-500 text-xs">{disabledReason}</span>
         )}
       </div>
+
+      {/* Cancel-success toast — auto-dismisses after 3s */}
+      {cancelToast && (
+        <div className="fixed bottom-6 right-6 z-40 bg-[#0F1E35] border border-red-500/40 text-red-300 rounded-lg px-4 py-3 shadow-lg">
+          {cancelToast}
+        </div>
+      )}
 
       {/* Reassignment history — always visible */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-5">
@@ -353,6 +409,76 @@ export default function ShiftDetailPage() {
                   {submitting ? 'REASSIGNING…' : 'CONFIRM'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel confirmation modal */}
+      {showCancelModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => !cancelling && setShowCancelModal(false)}
+        >
+          <div
+            className="w-full max-w-md bg-[#0F1E35] border border-red-500/40 rounded-2xl p-6 mx-4 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-red-400 font-bold tracking-widest text-lg">CANCEL THIS SHIFT?</h2>
+              <button
+                onClick={() => !cancelling && setShowCancelModal(false)}
+                className="text-gray-500 hover:text-gray-300 text-xl"
+                disabled={cancelling}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-gray-300 text-sm mb-4 leading-relaxed">
+              {shift.guard_id && shift.guard_name
+                ? <>This will cancel <strong>{shift.guard_name}</strong>&apos;s shift at <strong>{shift.site_name}</strong> on {fmtDTPacific(shift.scheduled_start)}. The guard will be notified.</>
+                : <>This will cancel the unassigned shift at <strong>{shift.site_name}</strong> on {fmtDTPacific(shift.scheduled_start)}.</>}
+              {' '}
+              <span className="text-red-400">This action cannot be undone.</span>
+            </p>
+
+            {cancelErr && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">
+                {cancelErr}
+              </div>
+            )}
+
+            <div className="mb-4">
+              <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                REASON <span className="text-gray-600 normal-case">(optional, max 200)</span>
+              </label>
+              <textarea
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value.slice(0, 200))}
+                rows={2}
+                disabled={cancelling}
+                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-red-500 disabled:opacity-50 resize-none"
+                placeholder="e.g. scheduled to wrong site"
+              />
+              <p className="text-gray-600 text-xs mt-1 text-right">{cancelReason.length}/200</p>
+            </div>
+
+            <div className="flex gap-3 pt-2">
+              <button
+                onClick={() => !cancelling && setShowCancelModal(false)}
+                disabled={cancelling}
+                className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-[#0B1526] border border-[#1A3050] text-gray-300 hover:text-gray-200 disabled:opacity-50"
+              >
+                KEEP SHIFT
+              </button>
+              <button
+                onClick={submitCancel}
+                disabled={cancelling}
+                className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-red-500 text-white hover:bg-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {cancelling ? 'CANCELLING…' : 'CANCEL SHIFT'}
+              </button>
             </div>
           </div>
         </div>

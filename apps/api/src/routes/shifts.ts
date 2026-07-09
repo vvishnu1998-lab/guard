@@ -522,6 +522,148 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
   }
 });
 
+// PATCH /api/shifts/:id/cancel — admin cancels an accidentally-scheduled shift.
+//
+// Gate: only status='scheduled' is cancellable. Everything else 409s with
+// a specific reason so the operator understands why. Unassigned scheduled
+// shifts are cancellable too (no guard to notify, push is skipped).
+//
+// Writes (single txn):
+//   shifts.status              = 'cancelled'
+//   shifts.cancellation_reason = 'admin_cancelled' (or a body-supplied
+//                                reason string, capped at 200 chars)
+//
+// Post-commit best-effort push to the assigned guard (skipped for
+// unassigned). Historical tables (shift_sessions, reports,
+// task_completions, geofence_violations, clock_in_verifications) are
+// never referenced.
+router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { user } = req;
+  const { id }   = req.params;
+  const rawReason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (rawReason.length > 200) {
+    return res.status(400).json({ error: 'reason must be at most 200 characters' });
+  }
+  const reason = rawReason || 'admin_cancelled';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const shiftRes = await client.query(
+      `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
+              sh.scheduled_start, sh.scheduled_end,
+              si.company_id,
+              si.name     AS site_name,
+              si.timezone AS site_tz,
+              g.name      AS guard_name
+         FROM shifts sh
+         JOIN sites  si ON si.id = sh.site_id
+         LEFT JOIN guards g ON g.id = sh.guard_id
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    // Tenant scope. Mirror reassign's shape (404 on cross-tenant to hide
+    // existence rather than 403).
+    if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+
+    // Status gate — only 'scheduled' cancellable, everything else gets a
+    // specific 409 so the admin knows why.
+    switch (shift.status) {
+      case 'scheduled':
+        break;
+      case 'active':
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This shift is in progress (guard clocked in). Cancel is not allowed.',
+        });
+      case 'completed':
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This shift has already completed and cannot be cancelled.',
+        });
+      case 'missed':
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This shift was already marked missed.',
+        });
+      case 'cancelled':
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This shift is already cancelled.',
+        });
+      default:
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `Shift status '${shift.status}' cannot be cancelled.`,
+        });
+    }
+
+    const updated = await client.query(
+      `UPDATE shifts
+          SET status              = 'cancelled',
+              cancellation_reason = $1
+        WHERE id = $2
+        RETURNING *`,
+      [reason, id],
+    );
+
+    await client.query('COMMIT');
+
+    res.json(updated.rows[0]);
+
+    // ── Best-effort FCM push to the assigned guard — skipped if unassigned.
+    // Fire-and-forget after the response is written so a push hiccup can't
+    // roll back a committed cancellation.
+    if (shift.guard_id) {
+      (async () => {
+        try {
+          const tokRow = await pool.query<{ fcm_token: string | null }>(
+            'SELECT fcm_token FROM guards WHERE id = $1',
+            [shift.guard_id],
+          );
+          const token = tokRow.rows[0]?.fcm_token;
+          if (!token) return;
+          const tz = (shift.site_tz as string | null) ?? 'America/Los_Angeles';
+          const dayLabel = new Intl.DateTimeFormat('en-US', {
+            weekday: 'short', month: 'short', day: 'numeric', timeZone: tz,
+          }).format(new Date(shift.scheduled_start));
+          const { staleToken } = await sendPushNotification({
+            token,
+            title: 'Shift cancelled',
+            body:  `${dayLabel} at ${shift.site_name}`,
+            data:  { type: 'shift_cancelled', shift_id: id },
+          });
+          if (staleToken) {
+            await pool.query(
+              'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
+              [shift.guard_id, token],
+            );
+          }
+        } catch (err) {
+          console.error('[shifts.cancel] push failed:', err);
+        }
+      })();
+    }
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[shifts.cancel] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to cancel shift' });
+  } finally {
+    client.release();
+  }
+});
+
 // GET /api/shifts  — guard sees their shifts; admin sees all for company
 router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
   const { user } = req;

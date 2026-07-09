@@ -29,7 +29,7 @@ const STATUS_STYLES: Record<string, string> = {
   scheduled:  'bg-blue-500/20 text-blue-400 border border-blue-500/40',
   active:     'bg-green-500/20 text-green-400 border border-green-500/40',
   completed:  'bg-gray-700/40 text-gray-500 border border-gray-600/40',
-  cancelled:  'bg-red-900/30 text-red-400 border border-red-700/40',
+  cancelled:  'bg-gray-700/40 text-gray-400 border border-gray-600/50',
   missed:     'bg-red-900/30 text-red-400 border border-red-700/40',
 };
 
