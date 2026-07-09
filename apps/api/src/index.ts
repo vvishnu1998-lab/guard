@@ -38,6 +38,7 @@ import './jobs/chatRetention';
 import './jobs/pingReminder';
 import './jobs/preShiftReminder';
 import './jobs/shiftStartReminder';
+import './jobs/expireSwapRequests';
 
 const app = express();
 app.set('trust proxy', 1);

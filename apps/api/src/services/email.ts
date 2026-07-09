@@ -1084,3 +1084,125 @@ export function renderGeofenceBreachAlert(row: {
 
   return { subject, html };
 }
+
+// ── Email Type 8 — Coverage swap FYI (admin) ────────────────────────────────
+//
+// Fires from POST /api/shifts/:id/swap-response when a guard-initiated
+// swap is accepted. Recipient policy: primary company admin only,
+// matching sendMissedShiftAlert. No client-facing email — this is an
+// internal FYI so admins can audit "did I know Deepak's shift got
+// covered by James".
+
+/**
+ * Send the accepted-swap FYI email. Called from the swap-response
+ * endpoint after the txn commits. Best-effort — callers should
+ * `.catch()` on the returned promise; email failure must not roll back
+ * the committed swap.
+ */
+export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
+  const result = await pool.query(
+    `SELECT ssr.id,
+            ssr.shift_id,
+            ssr.reason,
+            sh.scheduled_start,
+            sh.scheduled_end,
+            si.name              AS site_name,
+            si.timezone          AS site_tz,
+            fg.name              AS from_guard_name,
+            fg.badge_number      AS from_badge,
+            tg.name              AS to_guard_name,
+            tg.badge_number      AS to_badge,
+            ca.email             AS admin_email,
+            EXISTS (
+              SELECT 1 FROM guard_site_assignments gsa
+              WHERE gsa.guard_id = ssr.to_guard_id
+                AND gsa.site_id  = sh.site_id
+                AND gsa.assigned_from <= (sh.scheduled_start AT TIME ZONE si.timezone)::date
+                AND (gsa.assigned_until IS NULL
+                     OR gsa.assigned_until >= (sh.scheduled_start AT TIME ZONE si.timezone)::date)
+            ) AS is_same_site
+       FROM shift_swap_requests ssr
+       JOIN shifts sh ON sh.id = ssr.shift_id
+       JOIN sites  si ON si.id = sh.site_id
+       JOIN guards fg ON fg.id = ssr.from_guard_id
+       JOIN guards tg ON tg.id = ssr.to_guard_id
+       JOIN companies      co ON co.id = si.company_id
+       JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
+      WHERE ssr.id = $1`,
+    [historyId],
+  );
+  if (!result.rows[0]) return;
+  const row = result.rows[0];
+  if (!row.admin_email) return;
+
+  const { subject, html } = renderSwapAcceptedFyi(row);
+  try {
+    await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
+  } catch (err: any) {
+    console.error(`[email] sendSwapAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+  }
+}
+
+export function renderSwapAcceptedFyi(row: {
+  shift_id:         string;
+  scheduled_start:  Date | string;
+  scheduled_end:    Date | string;
+  site_name:        string;
+  site_tz:          string | null;
+  from_guard_name:  string;
+  from_badge:       string;
+  to_guard_name:    string;
+  to_badge:         string;
+  is_same_site:     boolean;
+  reason:           string | null;
+}): { subject: string; html: string } {
+  const tz = row.site_tz ?? PACIFIC;
+  const fromName = titleCase(row.from_guard_name);
+  const toName   = titleCase(row.to_guard_name);
+  const dayLabel = fmtDateSite(row.scheduled_start, tz);
+  const timeRange = `${fmtTimeSite(row.scheduled_start, tz)} → ${fmtTimeSite(row.scheduled_end, tz)}`;
+  const sameSiteBadge = row.is_same_site
+    ? '<span style="background:#DCFCE7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">SAME SITE</span>'
+    : '<span style="background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">CROSS SITE</span>';
+  const reasonBlock = row.reason
+    ? `<div style="background:#F3F4F6;border-left:3px solid #9CA3AF;padding:10px 14px;margin-top:16px"><p style="margin:0;color:#374151;font-size:13px;font-style:italic">Reason: &ldquo;${row.reason}&rdquo;</p></div>`
+    : '';
+
+  const dashboardUrl = `${WEB_BASE}/admin/shifts/${row.shift_id}`;
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    <div class="hdr">
+      <div class="brand">NETRAOPS</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Coverage Swap</h1>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${row.site_name} · ${dayLabel}</p>
+    </div>
+    <div class="body">
+      <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
+      <p style="color:#555;font-size:14px;margin:0 0 18px 0">
+        A guard-initiated shift swap was accepted. No action required.
+      </p>
+
+      <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:6px">
+        <tr><td style="padding:6px 0;color:#888;width:130px">From</td><td style="padding:6px 0">${fromName} <span style="color:#888">(${row.from_badge})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">To</td><td style="padding:6px 0">${toName} <span style="color:#888">(${row.to_badge})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">When</td><td style="padding:6px 0">${dayLabel} · ${timeRange}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Coverage</td><td style="padding:6px 0">${sameSiteBadge}</td></tr>
+      </table>
+
+      ${reasonBlock}
+
+      <div style="text-align:center;margin-top:24px">
+        <a class="btn" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
+      </div>
+    </div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in the site's local time zone (${tz}).<br/>
+      NetraOps · Automated alert
+    </div>
+  </div>`;
+
+  const subject = `Coverage swap: ${fromName} → ${toName}`;
+  return { subject, html };
+}

@@ -8,6 +8,13 @@ import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
+import {
+  pushSwapRequestToRecipient,
+  pushSwapRequestSentToRequester,
+  pushSwapAcceptedToRequester,
+  pushSwapDeclinedToRequester,
+} from '../services/swapPush';
+import { sendSwapAcceptedFyi } from '../services/email';
 
 const router = Router();
 
@@ -659,6 +666,351 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
     await client.query('ROLLBACK').catch(() => {});
     console.error('[shifts.cancel] error:', err);
     res.status(500).json({ error: err?.message ?? 'Failed to cancel shift' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── Guard-to-guard shift swap (Phase 1a: pre-shift) ─────────────────────────
+//
+// GET /api/shifts/:id/swap-eligible-guards
+//   Returns the pool of guards who can accept a swap invitation for this
+//   shift. Sorted same-site first. Excludes: the requester, inactive
+//   guards, guards with any overlapping active/scheduled shift.
+//
+// POST /api/shifts/:id/swap-request
+//   Body: { to_guard_id, reason? } (reason 200 char cap)
+//   Creates a pending shift_swap_requests row. Fire-and-forget pushes:
+//   B (invitation) + A (confirmation).
+//
+// POST /api/shifts/:id/swap-response
+//   Body: { history_id, accept: boolean }
+//   Auth: guard = the row's to_guard_id. Txn-wrapped with FOR UPDATE on
+//   both the shift and the history row. On accept: UPDATE shifts.guard_id
+//   + mark history 'accepted', fire admin FYI email + push A. On decline:
+//   mark 'declined', push A.
+
+router.get('/:id/swap-eligible-guards', requireAuth('guard'), async (req, res) => {
+  const { user } = req;
+  const shiftRes = await pool.query<{
+    id: string; guard_id: string | null; site_id: string; status: string;
+    scheduled_start: string; scheduled_end: string; company_id: string;
+  }>(
+    `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
+            sh.scheduled_start, sh.scheduled_end,
+            si.company_id
+       FROM shifts sh
+       JOIN sites  si ON si.id = sh.site_id
+      WHERE sh.id = $1`,
+    [req.params.id],
+  );
+  if (!shiftRes.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+  const shift = shiftRes.rows[0];
+
+  // Caller must be the shift's currently-assigned guard.
+  if (shift.guard_id !== user!.sub) {
+    return res.status(403).json({ error: 'You are not assigned to this shift.' });
+  }
+  if (shift.status !== 'scheduled') {
+    return res.status(409).json({ error: `Swap is only available for scheduled shifts (current: ${shift.status}).` });
+  }
+
+  const shiftDatePacific = pacificDateStr(shift.scheduled_start);
+  const eligible = await pool.query(
+    `SELECT g.id AS guard_id, g.name, g.badge_number,
+       EXISTS (
+         SELECT 1 FROM guard_site_assignments gsa
+         WHERE gsa.guard_id = g.id
+           AND gsa.site_id  = $1
+           AND gsa.assigned_from <= $2::date
+           AND (gsa.assigned_until IS NULL OR gsa.assigned_until >= $2::date)
+       ) AS is_same_site
+     FROM guards g
+     WHERE g.is_active   = true
+       AND g.company_id  = $3
+       AND g.id         != $4
+       AND NOT EXISTS (
+         SELECT 1 FROM shifts osh
+         WHERE osh.guard_id = g.id
+           AND osh.status IN ('scheduled','active')
+           AND osh.id != $5
+           AND osh.scheduled_start < $6::timestamptz
+           AND osh.scheduled_end   > $7::timestamptz
+       )
+     ORDER BY is_same_site DESC, g.name ASC`,
+    [
+      shift.site_id, shiftDatePacific,
+      shift.company_id, shift.guard_id,
+      shift.id,
+      shift.scheduled_end, shift.scheduled_start,
+    ],
+  );
+  res.json({ guards: eligible.rows });
+});
+
+router.post('/:id/swap-request', requireAuth('guard'), async (req, res) => {
+  const { user } = req;
+  const to_guard_id = typeof req.body?.to_guard_id === 'string' ? req.body.to_guard_id : '';
+  const rawReason   = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (!to_guard_id) return res.status(400).json({ error: 'to_guard_id is required' });
+  if (rawReason.length > 200) {
+    return res.status(400).json({ error: 'reason must be at most 200 characters' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const shiftRes = await client.query<{
+      id: string; guard_id: string | null; site_id: string; status: string;
+      scheduled_start: string; scheduled_end: string;
+      company_id: string; site_name: string; site_tz: string;
+      from_guard_name: string;
+    }>(
+      `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
+              sh.scheduled_start, sh.scheduled_end,
+              si.company_id,
+              si.name     AS site_name,
+              si.timezone AS site_tz,
+              g.name      AS from_guard_name
+         FROM shifts sh
+         JOIN sites  si ON si.id = sh.site_id
+         JOIN guards g  ON g.id  = sh.guard_id
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [req.params.id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    if (shift.guard_id !== user!.sub) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You are not assigned to this shift.' });
+    }
+    if (shift.status !== 'scheduled') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Swap is only available for scheduled shifts (current: ${shift.status}).` });
+    }
+    if (to_guard_id === shift.guard_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Cannot request a swap with yourself.' });
+    }
+
+    // Verify B is eligible: same company, active, no overlap.
+    const overlapRes = await client.query<{
+      to_guard_id: string; name: string;
+    }>(
+      `SELECT g.id AS to_guard_id, g.name
+         FROM guards g
+        WHERE g.id = $1
+          AND g.company_id = $2
+          AND g.is_active = true
+          AND NOT EXISTS (
+            SELECT 1 FROM shifts osh
+            WHERE osh.guard_id = g.id
+              AND osh.status IN ('scheduled','active')
+              AND osh.id != $3
+              AND osh.scheduled_start < $4::timestamptz
+              AND osh.scheduled_end   > $5::timestamptz
+          )`,
+      [to_guard_id, shift.company_id, shift.id, shift.scheduled_end, shift.scheduled_start],
+    );
+    if (!overlapRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Selected guard is not eligible (overlapping shift, inactive, or wrong company).' });
+    }
+    const toGuardName = overlapRes.rows[0].name;
+
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO shift_swap_requests
+         (shift_id, from_guard_id, to_guard_id, initiated_by, reason)
+       VALUES ($1, $2, $3, 'guard_pre_shift', $4)
+       RETURNING id`,
+      [shift.id, shift.guard_id, to_guard_id, rawReason || null],
+    );
+    const historyId = inserted.rows[0].id;
+
+    await client.query('COMMIT');
+
+    res.status(201).json({ history_id: historyId, status: 'pending' });
+
+    // Fire-and-forget pushes after response.
+    pushSwapRequestToRecipient({
+      toGuardId:      to_guard_id,
+      fromGuardName:  shift.from_guard_name,
+      siteName:       shift.site_name,
+      siteTz:         shift.site_tz,
+      scheduledStart: shift.scheduled_start,
+      shiftId:        shift.id,
+      historyId,
+    }).catch((err) => console.error('[swap-request] push to recipient failed:', err));
+
+    pushSwapRequestSentToRequester({
+      fromGuardId: shift.guard_id!,
+      toGuardName,
+      siteName:    shift.site_name,
+      shiftId:     shift.id,
+      historyId,
+    }).catch((err) => console.error('[swap-request] confirm push failed:', err));
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[swap-request] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to create swap request' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
+  const { user } = req;
+  const history_id = typeof req.body?.history_id === 'string' ? req.body.history_id : '';
+  const accept     = typeof req.body?.accept === 'boolean' ? req.body.accept : null;
+  if (!history_id) return res.status(400).json({ error: 'history_id is required' });
+  if (accept === null) return res.status(400).json({ error: 'accept (boolean) is required' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock the history row + parent shift together to serialise concurrent
+    // responses and any admin reassign in flight.
+    const histRes = await client.query<{
+      id: string; shift_id: string;
+      from_guard_id: string; to_guard_id: string;
+      status: string;
+    }>(
+      `SELECT ssr.id, ssr.shift_id, ssr.from_guard_id, ssr.to_guard_id, ssr.status
+         FROM shift_swap_requests ssr
+        WHERE ssr.id = $1 AND ssr.shift_id = $2
+        FOR UPDATE OF ssr`,
+      [history_id, req.params.id],
+    );
+    if (!histRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Swap request not found' });
+    }
+    const hist = histRes.rows[0];
+
+    if (hist.to_guard_id !== user!.sub) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'This swap request is not addressed to you.' });
+    }
+    if (hist.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Swap request is already ${hist.status}.` });
+    }
+
+    const shiftRes = await client.query<{
+      id: string; guard_id: string | null; site_id: string; status: string;
+      scheduled_start: string; scheduled_end: string;
+      site_name: string; site_tz: string;
+      from_guard_name: string; to_guard_name: string;
+    }>(
+      `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
+              sh.scheduled_start, sh.scheduled_end,
+              si.name     AS site_name,
+              si.timezone AS site_tz,
+              fg.name     AS from_guard_name,
+              tg.name     AS to_guard_name
+         FROM shifts sh
+         JOIN sites  si ON si.id = sh.site_id
+         JOIN guards fg ON fg.id = $2
+         JOIN guards tg ON tg.id = $3
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [hist.shift_id, hist.from_guard_id, hist.to_guard_id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    // Decline path — no side effects on the shift itself.
+    if (!accept) {
+      await client.query(
+        `UPDATE shift_swap_requests
+            SET status = 'declined', declined_at = NOW()
+          WHERE id = $1`,
+        [hist.id],
+      );
+      await client.query('COMMIT');
+      res.json({ history_id: hist.id, status: 'declined' });
+
+      pushSwapDeclinedToRequester({
+        fromGuardId: hist.from_guard_id,
+        toGuardName: shift.to_guard_name,
+        shiftId:     shift.id,
+        historyId:   hist.id,
+      }).catch((err) => console.error('[swap-response] decline push failed:', err));
+      return;
+    }
+
+    // Accept path — re-verify preconditions inside the txn.
+    if (shift.status !== 'scheduled') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Shift is no longer scheduled (current: ${shift.status}).` });
+    }
+    if (shift.guard_id !== hist.from_guard_id) {
+      // Someone else (admin reassign) moved the shift underneath us.
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Shift has been reassigned by an admin; swap is stale.' });
+    }
+    // Re-check overlap for B — a shift may have landed on them since the
+    // invitation was sent.
+    const overlap = await client.query(
+      `SELECT 1 FROM shifts osh
+        WHERE osh.guard_id = $1
+          AND osh.status IN ('scheduled','active')
+          AND osh.id != $2
+          AND osh.scheduled_start < $3::timestamptz
+          AND osh.scheduled_end   > $4::timestamptz
+        LIMIT 1`,
+      [hist.to_guard_id, shift.id, shift.scheduled_end, shift.scheduled_start],
+    );
+    if (overlap.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'You now have an overlapping shift; swap is no longer possible.' });
+    }
+
+    await client.query(
+      `UPDATE shifts
+          SET guard_id = $1
+        WHERE id = $2`,
+      [hist.to_guard_id, shift.id],
+    );
+    await client.query(
+      `UPDATE shift_swap_requests
+          SET status = 'accepted',
+              accepted_at = NOW(),
+              admin_notified_at = NOW()
+        WHERE id = $1`,
+      [hist.id],
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ history_id: hist.id, status: 'accepted' });
+
+    // Fire-and-forget: admin FYI email + push to requester A.
+    // Admin FCM push is intentionally skipped this session — company_admins
+    // has no fcm_token column (audit surface memory). Email is the only
+    // admin channel we can commit to today.
+    sendSwapAcceptedFyi(hist.id).catch((err) =>
+      console.error('[swap-response] admin FYI email failed:', err),
+    );
+    pushSwapAcceptedToRequester({
+      fromGuardId: hist.from_guard_id,
+      toGuardName: shift.to_guard_name,
+      shiftId:     shift.id,
+      historyId:   hist.id,
+    }).catch((err) => console.error('[swap-response] accept push failed:', err));
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[swap-response] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to respond to swap request' });
   } finally {
     client.release();
   }
