@@ -710,10 +710,13 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
 // a shift id and returns a 404 from swap-eligible-guards' shift-lookup.
 router.get('/inbound-swap-requests', requireAuth('guard'), async (req, res) => {
   const result = await pool.query(
+    // Phase 2b: mobile alerts.tsx branches card copy + the accept
+    // confirmation dialog on initiated_by, so it comes back in the list.
     `SELECT ssr.id           AS history_id,
             ssr.shift_id,
             ssr.requested_at,
             ssr.reason,
+            ssr.initiated_by,
             ssr.from_guard_id,
             fg.name          AS from_guard_name,
             sh.scheduled_start,
