@@ -39,6 +39,7 @@ import './jobs/pingReminder';
 import './jobs/preShiftReminder';
 import './jobs/shiftStartReminder';
 import './jobs/expireSwapRequests';
+import './jobs/handoffNudge';
 
 const app = express();
 app.set('trust proxy', 1);

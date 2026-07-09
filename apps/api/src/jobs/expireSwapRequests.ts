@@ -15,14 +15,18 @@
  */
 import cron from 'node-cron';
 import { pool } from '../db/pool';
-import { pushSwapExpiredToRequester } from '../services/swapPush';
+import { pushSwapExpiredToRequester, pushHandoffExpiredToRequester } from '../services/swapPush';
 
 export async function runExpireSwapRequestsOnce(): Promise<number> {
+  // Phase 2 additive: RETURNING now includes initiated_by so we can route
+  // to the correct push helper. Handoff invites and pre-shift swaps share
+  // the 15-min window and this cron; only the outbound push copy differs.
   const result = await pool.query<{
     id:            string;
     shift_id:      string;
     from_guard_id: string;
     site_name:     string;
+    initiated_by:  string;
   }>(
     `UPDATE shift_swap_requests ssr
         SET status = 'expired'
@@ -31,19 +35,27 @@ export async function runExpireSwapRequestsOnce(): Promise<number> {
       WHERE ssr.status = 'pending'
         AND ssr.requested_at < NOW() - INTERVAL '15 minutes'
         AND sh.id = ssr.shift_id
-      RETURNING ssr.id, ssr.shift_id, ssr.from_guard_id, si.name AS site_name`,
+      RETURNING ssr.id, ssr.shift_id, ssr.from_guard_id, si.name AS site_name, ssr.initiated_by`,
   );
   if (!result.rowCount) return 0;
 
   // Fire-and-forget pushes; loop awaits so we don't return before the
   // batch dispatches, but individual failures don't block the batch.
   for (const row of result.rows) {
-    pushSwapExpiredToRequester({
-      fromGuardId: row.from_guard_id,
-      siteName:    row.site_name,
-      shiftId:     row.shift_id,
-      historyId:   row.id,
-    }).catch((err) => console.error('[expire-swap] push failed for history', row.id, err));
+    const p = row.initiated_by === 'guard_handoff'
+      ? pushHandoffExpiredToRequester({
+          fromGuardId: row.from_guard_id,
+          siteName:    row.site_name,
+          shiftId:     row.shift_id,
+          historyId:   row.id,
+        })
+      : pushSwapExpiredToRequester({
+          fromGuardId: row.from_guard_id,
+          siteName:    row.site_name,
+          shiftId:     row.shift_id,
+          historyId:   row.id,
+        });
+    p.catch((err) => console.error('[expire-swap] push failed for history', row.id, err));
   }
   console.log(`[expire-swap] marked ${result.rowCount} row(s) expired`);
   return result.rowCount;

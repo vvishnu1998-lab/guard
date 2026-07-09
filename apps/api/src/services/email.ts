@@ -1206,3 +1206,154 @@ export function renderSwapAcceptedFyi(row: {
   const subject = `Coverage swap: ${fromName} → ${toName}`;
   return { subject, html };
 }
+
+// ── Phase 2: mid-shift handoff FYI emails ────────────────────────────────
+// Three moments the admin gets notified for a handoff:
+//   accepted  — B agreed; travel in progress; A still on shift.
+//   completed — B physically clocked in; A auto-clocked out.
+//   nudge     — accepted >= 30 min ago, still not clocked in.
+//
+// One helper per moment; all three re-use loadHandoffFyiRow and
+// renderHandoffFyi. Best-effort — the caller `.catch()`es on the returned
+// promise so email failure never rolls back the committed handoff.
+
+interface HandoffFyiRow {
+  history_id:       string;
+  shift_id:         string;
+  reason:           string | null;
+  accepted_at:      Date | string | null;
+  handoff_at:       Date | string | null;
+  duration_hours:   number | null;
+  from_guard_name:  string;
+  from_badge:       string;
+  to_guard_name:    string;
+  to_badge:         string;
+  site_name:        string;
+  site_tz:          string | null;
+  admin_email:      string | null;
+}
+
+async function loadHandoffFyiRow(historyId: string): Promise<HandoffFyiRow | null> {
+  const result = await pool.query<HandoffFyiRow>(
+    `SELECT ssr.id           AS history_id,
+            ssr.shift_id,
+            ssr.reason,
+            ssr.accepted_at,
+            ts.clocked_in_at   AS handoff_at,
+            fs.total_hours     AS duration_hours,
+            fg.name            AS from_guard_name,
+            fg.badge_number    AS from_badge,
+            tg.name            AS to_guard_name,
+            tg.badge_number    AS to_badge,
+            si.name            AS site_name,
+            si.timezone        AS site_tz,
+            ca.email           AS admin_email
+       FROM shift_swap_requests ssr
+       JOIN shifts sh ON sh.id = ssr.shift_id
+       JOIN sites  si ON si.id = sh.site_id
+       JOIN guards fg ON fg.id = ssr.from_guard_id
+       JOIN guards tg ON tg.id = ssr.to_guard_id
+       JOIN companies      co ON co.id = si.company_id
+       JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
+       LEFT JOIN shift_sessions fs ON fs.id = ssr.from_session_id
+       LEFT JOIN shift_sessions ts ON ts.id = ssr.to_session_id
+      WHERE ssr.id = $1`,
+    [historyId],
+  );
+  return result.rows[0] ?? null;
+}
+
+function renderHandoffFyi(
+  row: HandoffFyiRow,
+  kind: 'accepted' | 'completed' | 'nudge',
+  nudgeMinutes = 0,
+): { subject: string; html: string } {
+  const tz = row.site_tz ?? PACIFIC;
+  const fromName = titleCase(row.from_guard_name);
+  const toName   = titleCase(row.to_guard_name);
+  const reasonBlock = row.reason
+    ? `<div style="background:#F3F4F6;border-left:3px solid #9CA3AF;padding:10px 14px;margin-top:16px"><p style="margin:0;color:#374151;font-size:13px;font-style:italic">Reason: &ldquo;${row.reason}&rdquo;</p></div>`
+    : '';
+  const dashboardUrl = `${WEB_BASE}/admin/shifts/${row.shift_id}`;
+
+  let headline: string, pill: string, primaryLine: string, extraRow: string;
+  if (kind === 'accepted') {
+    headline    = 'Handoff accepted';
+    pill        = '<span style="background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">WAITING FOR ARRIVAL</span>';
+    primaryLine = `${toName} accepted the mid-shift handoff. ${fromName} remains on shift until ${toName} arrives and clocks in on-site.`;
+    extraRow    = row.accepted_at ? `<tr><td style="padding:6px 0;color:#888">Accepted at</td><td style="padding:6px 0">${fmtTimeSite(row.accepted_at, tz)} ${tz}</td></tr>` : '';
+  } else if (kind === 'completed') {
+    const worked = row.duration_hours != null ? `${Number(row.duration_hours).toFixed(2)}h` : '—';
+    headline    = 'Handoff complete';
+    pill        = '<span style="background:#DCFCE7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">GUARD SWAPPED</span>';
+    primaryLine = `${toName} clocked in on-site. ${fromName} is now clocked out (worked ${worked} on this shift).`;
+    extraRow    = row.handoff_at ? `<tr><td style="padding:6px 0;color:#888">Handoff at</td><td style="padding:6px 0">${fmtTimeSite(row.handoff_at, tz)} ${tz}</td></tr>` : '';
+  } else {
+    headline    = 'Handoff still pending arrival';
+    pill        = `<span style="background:#FEE2E2;color:#991B1B;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">${nudgeMinutes} MIN LATE</span>`;
+    primaryLine = `${toName} accepted a handoff for ${row.site_name} ${nudgeMinutes} minutes ago but has not clocked in yet. ${fromName} remains on shift.`;
+    extraRow    = row.accepted_at ? `<tr><td style="padding:6px 0;color:#888">Accepted at</td><td style="padding:6px 0">${fmtTimeSite(row.accepted_at, tz)} ${tz}</td></tr>` : '';
+  }
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    <div class="hdr">
+      <div class="brand">NETRAOPS</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headline}</h1>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${row.site_name}</p>
+    </div>
+    <div class="body">
+      <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
+      <p style="color:#555;font-size:14px;margin:0 0 18px 0">${primaryLine}</p>
+
+      <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:6px">
+        <tr><td style="padding:6px 0;color:#888;width:130px">From</td><td style="padding:6px 0">${fromName} <span style="color:#888">(${row.from_badge})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">To</td><td style="padding:6px 0">${toName} <span style="color:#888">(${row.to_badge})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Status</td><td style="padding:6px 0">${pill}</td></tr>
+        ${extraRow}
+      </table>
+
+      ${reasonBlock}
+
+      <div style="text-align:center;margin-top:24px">
+        <a class="btn" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
+      </div>
+    </div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in the site's local time zone (${tz}).<br/>
+      NetraOps · Automated alert
+    </div>
+  </div>`;
+
+  const subject = kind === 'accepted'
+    ? `Handoff accepted: ${fromName} → ${toName}`
+    : kind === 'completed'
+      ? `Handoff complete: ${fromName} → ${toName}`
+      : `Handoff ${nudgeMinutes} min late: ${fromName} → ${toName}`;
+  return { subject, html };
+}
+
+export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
+  const row = await loadHandoffFyiRow(historyId);
+  if (!row?.admin_email) return;
+  const { subject, html } = renderHandoffFyi(row, 'accepted');
+  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
+  catch (err: any) { console.error(`[email] sendHandoffAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body); }
+}
+
+export async function sendHandoffCompletedFyi(historyId: string): Promise<void> {
+  const row = await loadHandoffFyiRow(historyId);
+  if (!row?.admin_email) return;
+  const { subject, html } = renderHandoffFyi(row, 'completed');
+  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
+  catch (err: any) { console.error(`[email] sendHandoffCompletedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body); }
+}
+
+export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number): Promise<void> {
+  const row = await loadHandoffFyiRow(historyId);
+  if (!row?.admin_email) return;
+  const { subject, html } = renderHandoffFyi(row, 'nudge', minutesLate);
+  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
+  catch (err: any) { console.error(`[email] sendHandoffNudgeFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body); }
+}

@@ -13,8 +13,18 @@ import {
   pushSwapRequestSentToRequester,
   pushSwapAcceptedToRequester,
   pushSwapDeclinedToRequester,
+  pushHandoffRequestToRecipient,
+  pushHandoffRequestSentToRequester,
+  pushHandoffAcceptedToRequester,
+  pushHandoffDeclinedToRequester,
+  pushHandoffCancelled,
+  pushHandoffCompleteToRequester,
 } from '../services/swapPush';
-import { sendSwapAcceptedFyi } from '../services/email';
+import {
+  sendSwapAcceptedFyi,
+  sendHandoffAcceptedFyi,
+  sendHandoffCompletedFyi,
+} from '../services/email';
 
 const router = Router();
 
@@ -1049,6 +1059,554 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
   }
 });
 
+// ── Phase 2: mid-shift handoff ─────────────────────────────────────────────
+//
+// Four endpoints, one lifecycle:
+//
+//   handoff-request   A is clocked in and wants B to take over.
+//   handoff-response  B accepts (A stays on-post) or declines.
+//   handoff-clock-in  B arrives physically — rotates the session + the
+//                     shift's guard_id atomically. A becomes clocked out
+//                     with clock_out_reason='handed_off_to_<b_id>'.
+//   handoff-cancel    Either party bails after accept but before B arrives.
+//
+// Payroll safety: monthlyHoursReport and exports read
+// FROM shift_sessions ss JOIN guards g ON g.id = ss.guard_id — so A's
+// closed session (his guard_id) and B's open session (her guard_id) sum
+// independently. No adjustment needed downstream.
+
+router.post('/:id/handoff-request', requireAuth('guard'), async (req, res) => {
+  const { user } = req;
+  const to_guard_id = typeof req.body?.to_guard_id === 'string' ? req.body.to_guard_id : '';
+  const rawReason   = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (!to_guard_id) return res.status(400).json({ error: 'to_guard_id is required' });
+  if (rawReason.length > 200) {
+    return res.status(400).json({ error: 'reason must be at most 200 characters' });
+  }
+  if (to_guard_id === user!.sub) {
+    return res.status(400).json({ error: 'Cannot hand off to yourself.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const shiftRes = await client.query<{
+      id: string; guard_id: string | null; site_id: string; status: string;
+      scheduled_start: string; scheduled_end: string;
+      company_id: string; site_name: string; site_tz: string;
+      from_guard_name: string;
+      from_session_id: string | null;
+    }>(
+      `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
+              sh.scheduled_start, sh.scheduled_end,
+              si.company_id,
+              si.name     AS site_name,
+              si.timezone AS site_tz,
+              g.name      AS from_guard_name,
+              (SELECT ss.id FROM shift_sessions ss
+                 WHERE ss.shift_id = sh.id
+                   AND ss.guard_id = sh.guard_id
+                   AND ss.clocked_out_at IS NULL
+                 LIMIT 1) AS from_session_id
+         FROM shifts sh
+         JOIN sites  si ON si.id = sh.site_id
+         JOIN guards g  ON g.id  = sh.guard_id
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [req.params.id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    if (shift.guard_id !== user!.sub) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You are not assigned to this shift.' });
+    }
+    if (shift.status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Handoff is only available for active shifts (current: ${shift.status}).` });
+    }
+    if (!shift.from_session_id) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'No open session for this shift — cannot hand off.' });
+    }
+
+    // Reject if there's already a pending handoff for this shift — no
+    // second-request until the first resolves. Prevents A from spamming
+    // the whole company.
+    const pending = await client.query(
+      `SELECT 1 FROM shift_swap_requests
+        WHERE shift_id = $1
+          AND initiated_by = 'guard_handoff'
+          AND status IN ('pending','accepted')
+          AND to_session_id IS NULL
+        LIMIT 1`,
+      [shift.id],
+    );
+    if (pending.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'A handoff for this shift is already in progress.' });
+    }
+
+    // B eligibility: same company, active, no open session, no overlap with
+    // the remaining shift window. Overlap is checked from NOW forward so
+    // B's just-finished morning shift doesn't disqualify them.
+    const overlapRes = await client.query<{ to_guard_id: string; name: string }>(
+      `SELECT g.id AS to_guard_id, g.name
+         FROM guards g
+        WHERE g.id = $1
+          AND g.company_id = $2
+          AND g.is_active = true
+          AND NOT EXISTS (
+            SELECT 1 FROM shift_sessions ss
+             WHERE ss.guard_id = g.id
+               AND ss.clocked_out_at IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM shifts osh
+             WHERE osh.guard_id = g.id
+               AND osh.status IN ('scheduled','active')
+               AND osh.id != $3
+               AND osh.scheduled_start < $4::timestamptz
+               AND osh.scheduled_end   > NOW()
+          )`,
+      [to_guard_id, shift.company_id, shift.id, shift.scheduled_end],
+    );
+    if (!overlapRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Selected guard is not eligible (already clocked in, has an overlapping shift, inactive, or wrong company).' });
+    }
+    const toGuardName = overlapRes.rows[0].name;
+
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO shift_swap_requests
+         (shift_id, from_guard_id, to_guard_id, initiated_by, reason, from_session_id)
+       VALUES ($1, $2, $3, 'guard_handoff', $4, $5)
+       RETURNING id`,
+      [shift.id, shift.guard_id, to_guard_id, rawReason || null, shift.from_session_id],
+    );
+    const historyId = inserted.rows[0].id;
+
+    await client.query('COMMIT');
+
+    res.status(201).json({ history_id: historyId, status: 'pending' });
+
+    pushHandoffRequestToRecipient({
+      toGuardId:      to_guard_id,
+      fromGuardName:  shift.from_guard_name,
+      siteName:       shift.site_name,
+      siteTz:         shift.site_tz,
+      scheduledEnd:   shift.scheduled_end,
+      shiftId:        shift.id,
+      historyId,
+    }).catch((err) => console.error('[handoff-request] push to recipient failed:', err));
+
+    pushHandoffRequestSentToRequester({
+      fromGuardId: shift.guard_id!,
+      toGuardName,
+      siteName:    shift.site_name,
+      shiftId:     shift.id,
+      historyId,
+    }).catch((err) => console.error('[handoff-request] confirm push failed:', err));
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[handoff-request] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to create handoff request' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:id/handoff-response', requireAuth('guard'), async (req, res) => {
+  const { user } = req;
+  const history_id = typeof req.body?.history_id === 'string' ? req.body.history_id : '';
+  const accept     = typeof req.body?.accept === 'boolean' ? req.body.accept : null;
+  if (!history_id) return res.status(400).json({ error: 'history_id is required' });
+  if (accept === null) return res.status(400).json({ error: 'accept (boolean) is required' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const histRes = await client.query<{
+      id: string; shift_id: string;
+      from_guard_id: string; to_guard_id: string;
+      status: string; initiated_by: string;
+    }>(
+      `SELECT ssr.id, ssr.shift_id, ssr.from_guard_id, ssr.to_guard_id,
+              ssr.status, ssr.initiated_by
+         FROM shift_swap_requests ssr
+        WHERE ssr.id = $1 AND ssr.shift_id = $2
+        FOR UPDATE OF ssr`,
+      [history_id, req.params.id],
+    );
+    if (!histRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Handoff request not found' });
+    }
+    const hist = histRes.rows[0];
+
+    if (hist.initiated_by !== 'guard_handoff') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This is not a handoff request — use /swap-response.' });
+    }
+    if (hist.to_guard_id !== user!.sub) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'This handoff is not addressed to you.' });
+    }
+    if (hist.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Handoff is already ${hist.status}.` });
+    }
+
+    const shiftRes = await client.query<{
+      id: string; guard_id: string | null; status: string;
+      scheduled_end: string;
+      to_guard_name: string;
+    }>(
+      `SELECT sh.id, sh.guard_id, sh.status, sh.scheduled_end,
+              tg.name AS to_guard_name
+         FROM shifts sh
+         JOIN guards tg ON tg.id = $2
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [hist.shift_id, hist.to_guard_id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    // Decline path first — no side effects on the shift.
+    if (!accept) {
+      await client.query(
+        `UPDATE shift_swap_requests
+            SET status = 'declined', declined_at = NOW()
+          WHERE id = $1`,
+        [hist.id],
+      );
+      await client.query('COMMIT');
+      res.json({ history_id: hist.id, status: 'declined' });
+      pushHandoffDeclinedToRequester({
+        fromGuardId: hist.from_guard_id,
+        toGuardName: shift.to_guard_name,
+        shiftId:     shift.id,
+        historyId:   hist.id,
+      }).catch((err) => console.error('[handoff-response] decline push failed:', err));
+      return;
+    }
+
+    // Accept path — re-verify preconditions.
+    if (shift.status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Shift is no longer active (current: ${shift.status}).` });
+    }
+    if (shift.guard_id !== hist.from_guard_id) {
+      // Admin reassign got there first.
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Shift has been reassigned by an admin; handoff is stale.' });
+    }
+    // Re-check B: still not clocked in elsewhere.
+    const busy = await client.query(
+      `SELECT 1 FROM shift_sessions
+        WHERE guard_id = $1 AND clocked_out_at IS NULL LIMIT 1`,
+      [hist.to_guard_id],
+    );
+    if (busy.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'You are already clocked in to another shift.' });
+    }
+
+    await client.query(
+      `UPDATE shift_swap_requests
+          SET status = 'accepted',
+              accepted_at = NOW(),
+              admin_notified_at = NOW()
+        WHERE id = $1`,
+      [hist.id],
+    );
+
+    await client.query('COMMIT');
+
+    res.json({ history_id: hist.id, status: 'accepted' });
+
+    sendHandoffAcceptedFyi(hist.id).catch((err) =>
+      console.error('[handoff-response] admin FYI email failed:', err),
+    );
+    pushHandoffAcceptedToRequester({
+      fromGuardId: hist.from_guard_id,
+      toGuardName: shift.to_guard_name,
+      shiftId:     shift.id,
+      historyId:   hist.id,
+    }).catch((err) => console.error('[handoff-response] accept push failed:', err));
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[handoff-response] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to respond to handoff' });
+  } finally {
+    client.release();
+  }
+});
+
+// Mirror of /clock-in but for the accepted-handoff recipient. Preconditions:
+//   * caller has an accepted-but-not-arrived handoff for this shift
+//   * caller isn't already clocked in elsewhere
+//   * caller is inside the site geofence
+// Txn:
+//   1. Close A's open session (clock_out_reason='handed_off_to_<b>')
+//   2. Insert new session for B
+//   3. UPDATE shifts.guard_id = B
+//   4. UPDATE shift_swap_requests.to_session_id = new session id
+router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-clock-in'), async (req, res) => {
+  const { user } = req;
+  const { id } = req.params;
+  const { clock_in_coords, lat, lng, accuracy } = req.body as {
+    clock_in_coords?: string;
+    lat?: number;
+    lng?: number;
+    accuracy?: number;
+  };
+  if (typeof lat !== 'number' || typeof lng !== 'number' || typeof accuracy !== 'number') {
+    return res.status(400).json({ error: 'Missing lat/lng/accuracy. Update the app to the latest version.' });
+  }
+  const coords = clock_in_coords ?? `(${lat},${lng})`;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Load + lock the shift and the caller's accepted handoff row together.
+    const histRes = await client.query<{
+      history_id: string; from_guard_id: string;
+      shift_id: string; site_id: string; site_name: string;
+      guard_id: string | null; shift_status: string;
+      from_session_id: string | null;
+    }>(
+      `SELECT ssr.id           AS history_id,
+              ssr.from_guard_id,
+              ssr.from_session_id,
+              sh.id             AS shift_id,
+              sh.site_id,
+              sh.guard_id,
+              sh.status         AS shift_status,
+              si.name           AS site_name
+         FROM shift_swap_requests ssr
+         JOIN shifts sh ON sh.id = ssr.shift_id
+         JOIN sites  si ON si.id = sh.site_id
+        WHERE ssr.shift_id      = $1
+          AND ssr.to_guard_id   = $2
+          AND ssr.initiated_by  = 'guard_handoff'
+          AND ssr.status        = 'accepted'
+          AND ssr.to_session_id IS NULL
+        FOR UPDATE OF ssr, sh`,
+      [id, user!.sub],
+    );
+    if (!histRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'No accepted handoff pending clock-in for this shift.' });
+    }
+    const hist = histRes.rows[0];
+
+    if (hist.shift_status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Shift is no longer active (current: ${hist.shift_status}).` });
+    }
+    if (hist.guard_id !== hist.from_guard_id) {
+      // Admin reassign in-between.
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Shift has been reassigned by an admin; handoff is stale.' });
+    }
+
+    // Geofence — same helper as regular clock-in.
+    const fence = await validateAtSite(
+      { lat, lng, accuracy_m: accuracy },
+      hist.site_id,
+      client,
+    );
+    if (!fence.allowed) {
+      await client.query('ROLLBACK');
+      console.log(
+        `handoff-clock-in.geofence.reject site=${hist.site_id} guard=${user!.sub} shift=${id} ` +
+        `distance=${fence.distance_m?.toFixed(1) ?? 'null'} accuracy=${accuracy} reason=${fence.reason}`,
+      );
+      return res.status(422).json({
+        error: 'GEOFENCE_FAILED',
+        message: 'You appear to be outside the site post. Move to the post entrance and try again.',
+        distance_m: fence.distance_m,
+        accuracy_m: accuracy,
+        reason: fence.reason,
+      });
+    }
+
+    // Close A's session with total_hours = (NOW − MAX(clocked_in_at, scheduled_start))
+    //                                       − sum(break_sessions.duration_minutes).
+    // Matches the manual clock-out math in this file (option C: early
+    // arrivals not paid, late stays paid).
+    if (!hist.from_session_id) {
+      await client.query('ROLLBACK');
+      return res.status(500).json({ error: 'Original session id missing — cannot close.' });
+    }
+    // Close any open break on A's session so break-minutes math is consistent.
+    await client.query(
+      `UPDATE break_sessions
+          SET break_end = NOW(),
+              duration_minutes = GREATEST(0, ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT)
+        WHERE break_end IS NULL
+          AND shift_session_id = $1`,
+      [hist.from_session_id],
+    );
+    const closed = await client.query<{ id: string; total_hours: number | null }>(
+      `UPDATE shift_sessions ss
+          SET clocked_out_at = NOW(),
+              clock_out_reason = $2,
+              total_hours = ROUND((
+                EXTRACT(EPOCH FROM (NOW() - GREATEST(ss.clocked_in_at, (
+                  SELECT sh.scheduled_start FROM shifts sh WHERE sh.id = ss.shift_id
+                )))) / 3600.0
+                - COALESCE((
+                    SELECT SUM(bs.duration_minutes) / 60.0
+                      FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+                  ), 0)
+              )::NUMERIC, 2)
+        WHERE ss.id = $1
+        RETURNING ss.id, ss.total_hours`,
+      [hist.from_session_id, `handed_off_to_${user!.sub}`],
+    );
+    if (!closed.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(500).json({ error: 'Failed to close prior session.' });
+    }
+
+    // Insert B's session.
+    let newSession;
+    try {
+      const inserted = await client.query(
+        `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords)
+         VALUES ($1, $2, $3, NOW(), $4) RETURNING *`,
+        [id, user!.sub, hist.site_id, coords],
+      );
+      newSession = inserted.rows[0];
+    } catch (err: any) {
+      if (err?.code === '23505' && err?.constraint === 'idx_shift_sessions_one_open_per_guard') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Already clocked in on another device. Clock out first.' });
+      }
+      throw err;
+    }
+
+    // Rotate the shift's guard_id + fill the swap row's to_session_id.
+    await client.query('UPDATE shifts SET guard_id = $1 WHERE id = $2', [user!.sub, id]);
+    await client.query(
+      `UPDATE shift_swap_requests SET to_session_id = $1 WHERE id = $2`,
+      [newSession.id, hist.history_id],
+    );
+
+    await client.query('COMMIT');
+
+    res.status(201).json(newSession);
+
+    // Fire-and-forget after commit.
+    sendHandoffCompletedFyi(hist.history_id).catch((err) =>
+      console.error('[handoff-clock-in] admin FYI email failed:', err),
+    );
+    pushHandoffCompleteToRequester({
+      fromGuardId: hist.from_guard_id,
+      toGuardName: '', // From guard's perspective; blank keeps copy generic
+      shiftId:     id,
+      historyId:   hist.history_id,
+    }).catch((err) => console.error('[handoff-clock-in] complete push failed:', err));
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[handoff-clock-in] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to complete handoff clock-in' });
+  } finally {
+    client.release();
+  }
+});
+
+// Either party can cancel an accepted-but-not-arrived handoff. After
+// cancel: A stays on shift, no session changes.
+router.post('/:id/handoff-cancel', requireAuth('guard'), async (req, res) => {
+  const { user } = req;
+  const history_id = typeof req.body?.history_id === 'string' ? req.body.history_id : '';
+  if (!history_id) return res.status(400).json({ error: 'history_id is required' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const histRes = await client.query<{
+      id: string; shift_id: string;
+      from_guard_id: string; to_guard_id: string;
+      status: string; initiated_by: string;
+      to_session_id: string | null;
+      site_name: string; from_guard_name: string; to_guard_name: string;
+    }>(
+      `SELECT ssr.id, ssr.shift_id, ssr.from_guard_id, ssr.to_guard_id,
+              ssr.status, ssr.initiated_by, ssr.to_session_id,
+              si.name    AS site_name,
+              fg.name    AS from_guard_name,
+              tg.name    AS to_guard_name
+         FROM shift_swap_requests ssr
+         JOIN shifts sh ON sh.id = ssr.shift_id
+         JOIN sites  si ON si.id = sh.site_id
+         JOIN guards fg ON fg.id = ssr.from_guard_id
+         JOIN guards tg ON tg.id = ssr.to_guard_id
+        WHERE ssr.id = $1 AND ssr.shift_id = $2
+        FOR UPDATE OF ssr`,
+      [history_id, req.params.id],
+    );
+    if (!histRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Handoff request not found' });
+    }
+    const hist = histRes.rows[0];
+
+    if (hist.initiated_by !== 'guard_handoff') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This is not a handoff request.' });
+    }
+    if (user!.sub !== hist.from_guard_id && user!.sub !== hist.to_guard_id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You are not part of this handoff.' });
+    }
+    if (hist.status !== 'accepted' || hist.to_session_id !== null) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Only pre-arrival accepted handoffs can be cancelled (current: ${hist.status}${hist.to_session_id ? ', arrived' : ''}).` });
+    }
+
+    await client.query(
+      `UPDATE shift_swap_requests
+          SET status = 'cancelled', declined_at = NOW()
+        WHERE id = $1`,
+      [hist.id],
+    );
+
+    await client.query('COMMIT');
+    res.json({ history_id: hist.id, status: 'cancelled' });
+
+    const cancellerIsFrom = user!.sub === hist.from_guard_id;
+    const otherPartyId    = cancellerIsFrom ? hist.to_guard_id : hist.from_guard_id;
+    const cancellerName   = cancellerIsFrom ? hist.from_guard_name : hist.to_guard_name;
+
+    pushHandoffCancelled({
+      toGuardId:     otherPartyId,
+      cancellerName,
+      siteName:      hist.site_name,
+      shiftId:       hist.shift_id,
+      historyId:     hist.id,
+    }).catch((err) => console.error('[handoff-cancel] push failed:', err));
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[handoff-cancel] error:', err);
+    res.status(500).json({ error: err?.message ?? 'Failed to cancel handoff' });
+  } finally {
+    client.release();
+  }
+});
+
 // GET /api/shifts  — guard sees their shifts; admin sees all for company
 router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
   const { user } = req;
@@ -1169,10 +1727,24 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
   if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
     return res.status(404).json({ error: 'Shift not found' });
   }
-  // Guard tenancy: can only view a shift currently assigned to them. Deliberately
-  // 404 (not 403) so we don't leak which shift ids exist.
+  // Guard tenancy: can view either their own shift OR a shift they've
+  // accepted a handoff for but haven't clocked in on yet — so the mobile
+  // "pending handoff" screen can hydrate before the clock-in txn. 404 on
+  // cross-guard so we don't leak which shift ids exist.
   if (user!.role === 'guard' && shift.guard_id !== user!.sub) {
-    return res.status(404).json({ error: 'Shift not found' });
+    const pendingArrival = await pool.query(
+      `SELECT 1 FROM shift_swap_requests
+        WHERE shift_id      = $1
+          AND to_guard_id   = $2
+          AND initiated_by  = 'guard_handoff'
+          AND status        = 'accepted'
+          AND to_session_id IS NULL
+        LIMIT 1`,
+      [req.params.id, user!.sub],
+    );
+    if (!pendingArrival.rows[0]) {
+      return res.status(404).json({ error: 'Shift not found' });
+    }
   }
 
   const [historyResult, swapResult] = await Promise.all([
