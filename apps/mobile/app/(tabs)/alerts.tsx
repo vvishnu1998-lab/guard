@@ -1,14 +1,19 @@
 /**
- * Alerts Tab — guard's geofence violation history.
- * Fetches GET /api/locations/violations (guard-scoped).
- * Shows open violations (no resolved_at) in red, resolved in muted.
+ * Alerts Tab — guard's geofence violations + inbound swap requests.
+ *
+ * Two data sources, one screen:
+ *   - GET /api/locations/violations      → open/resolved violations
+ *   - GET /api/shifts/inbound-swap-requests → pending swap requests
+ *
+ * Swap cards render at the top (actionable, most-recent thing). Violations
+ * follow below.
  */
 import { useCallback, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, ActivityIndicator,
+  RefreshControl, ActivityIndicator, Alert,
 } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, router } from 'expo-router';
 import { apiClient } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -23,16 +28,47 @@ interface Violation {
   site_name:          string;
 }
 
+interface InboundSwap {
+  history_id:       string;
+  shift_id:         string;
+  requested_at:     string;
+  reason:           string | null;
+  from_guard_id:    string;
+  from_guard_name:  string | null;
+  scheduled_start:  string;
+  scheduled_end:    string;
+  site_name:        string;
+  site_tz:          string | null;
+}
+
+function fmtDateTime(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+    + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtInTz(iso: string, tz: string | null, opts: Intl.DateTimeFormatOptions): string {
+  return new Intl.DateTimeFormat('en-GB', { ...opts, timeZone: tz ?? undefined }).format(new Date(iso));
+}
+
 export default function AlertsScreen() {
   const [violations, setViolations] = useState<Violation[]>([]);
+  const [swaps,      setSwaps]      = useState<InboundSwap[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState<string | null>(null);
+  // Per-row action-in-flight so tapping ACCEPT on one card doesn't grey out
+  // every other card.
+  const [busyId,     setBusyId]     = useState<string | null>(null);
 
-  async function fetchViolations() {
+  async function fetchAll() {
     try {
-      const data = await apiClient.get<Violation[]>('/locations/violations');
-      setViolations(data);
+      const [v, s] = await Promise.all([
+        apiClient.get<Violation[]>('/locations/violations'),
+        apiClient.get<InboundSwap[]>('/shifts/inbound-swap-requests').catch(() => [] as InboundSwap[]),
+      ]);
+      setViolations(v);
+      setSwaps(s);
       setError(null);
     } catch (err: any) {
       setError(err?.message ?? 'Could not load alerts');
@@ -42,23 +78,42 @@ export default function AlertsScreen() {
   useFocusEffect(
     useCallback(() => {
       setLoading(true);
-      fetchViolations().finally(() => setLoading(false));
+      fetchAll().finally(() => setLoading(false));
     }, [])
   );
 
   async function onRefresh() {
     setRefreshing(true);
-    await fetchViolations();
+    await fetchAll();
     setRefreshing(false);
   }
 
-  function fmtDateTime(iso: string) {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
-      + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  async function respond(swap: InboundSwap, accept: boolean) {
+    if (busyId) return;
+    setBusyId(swap.history_id);
+    try {
+      await apiClient.post(`/shifts/${swap.shift_id}/swap-response`, {
+        history_id: swap.history_id,
+        accept,
+      });
+      // Optimistic: remove from list.
+      setSwaps((prev) => prev.filter((s) => s.history_id !== swap.history_id));
+      if (accept) {
+        // Give the guard a visible confirmation and drop them on the shift
+        // page where the new assignment is now visible.
+        setTimeout(() => router.push(`/shifts/${swap.shift_id}`), 100);
+      }
+    } catch (err: any) {
+      Alert.alert(
+        accept ? 'Could not accept swap' : 'Could not decline swap',
+        err?.message ?? 'Please try again.',
+      );
+    } finally {
+      setBusyId(null);
+    }
   }
 
-  function renderItem({ item }: { item: Violation }) {
+  function renderViolation({ item }: { item: Violation }) {
     const isOpen     = !item.resolved_at;
     const isExcused  = item.supervisor_override;
     const borderColor = isExcused ? Colors.muted : isOpen ? '#EF4444' : Colors.border;
@@ -95,15 +150,89 @@ export default function AlertsScreen() {
     );
   }
 
+  function renderSwap(swap: InboundSwap) {
+    const busy = busyId === swap.history_id;
+    return (
+      <View key={swap.history_id} style={styles.swapCard}>
+        <View style={styles.swapHeaderRow}>
+          <View style={styles.swapBadge}><Text style={styles.swapBadgeText}>SWAP REQUEST</Text></View>
+          <Text style={styles.swapTs}>{fmtDateTime(swap.requested_at)}</Text>
+        </View>
+        <Text style={styles.swapFrom}>
+          <Text style={{ color: Colors.action, fontFamily: Fonts.heading }}>
+            {swap.from_guard_name ?? 'A guard'}
+          </Text>{' '}
+          wants you to cover this shift
+        </Text>
+        <View style={styles.swapShiftBox}>
+          <Text style={styles.swapSiteName}>{swap.site_name.toUpperCase()}</Text>
+          <Text style={styles.swapShiftTime}>
+            {fmtInTz(swap.scheduled_start, swap.site_tz, {
+              weekday: 'short', day: 'numeric', month: 'short',
+              hour: '2-digit', minute: '2-digit',
+            })}
+            {' — '}
+            {fmtInTz(swap.scheduled_end, swap.site_tz, { hour: '2-digit', minute: '2-digit' })}
+          </Text>
+        </View>
+        {swap.reason ? (
+          <Text style={styles.swapReason} numberOfLines={3}>“{swap.reason}”</Text>
+        ) : null}
+        <View style={styles.swapActions}>
+          <TouchableOpacity
+            style={[styles.swapBtn, styles.swapBtnDecline, busy && styles.swapBtnDisabled]}
+            onPress={() => respond(swap, false)}
+            disabled={busy}
+          >
+            {busy ? <ActivityIndicator color={Colors.danger} /> : <Text style={styles.swapBtnDeclineText}>DECLINE</Text>}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.swapBtn, styles.swapBtnAccept, busy && styles.swapBtnDisabled]}
+            onPress={() => respond(swap, true)}
+            disabled={busy}
+          >
+            {busy ? <ActivityIndicator color="#070D1A" /> : <Text style={styles.swapBtnAcceptText}>ACCEPT</Text>}
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   const openCount = violations.filter((v) => !v.resolved_at && !v.supervisor_override).length;
+
+  const listHeader = (
+    <>
+      {openCount > 0 && (
+        <View style={styles.warningBanner}>
+          <Text style={styles.warningText}>
+            ⚠  You have {openCount} open violation{openCount > 1 ? 's' : ''}.
+            Return inside the site boundary immediately.
+          </Text>
+        </View>
+      )}
+      {swaps.length > 0 && (
+        <>
+          <Text style={styles.sectionHead}>PENDING SWAP REQUESTS</Text>
+          {swaps.map(renderSwap)}
+          <Text style={[styles.sectionHead, { marginTop: Spacing.md }]}>GEOFENCE HISTORY</Text>
+        </>
+      )}
+    </>
+  );
+
+  const hasContent = swaps.length > 0 || violations.length > 0;
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>ALERTS</Text>
-        {openCount > 0 && (
+        {(openCount > 0 || swaps.length > 0) && (
           <View style={styles.openBadge}>
-            <Text style={styles.openBadgeText}>{openCount} OPEN</Text>
+            <Text style={styles.openBadgeText}>
+              {swaps.length > 0
+                ? `${swaps.length} SWAP${swaps.length > 1 ? 'S' : ''}`
+                : `${openCount} OPEN`}
+            </Text>
           </View>
         )}
       </View>
@@ -119,30 +248,28 @@ export default function AlertsScreen() {
             <Text style={styles.retryText}>RETRY</Text>
           </TouchableOpacity>
         </View>
-      ) : violations.length === 0 ? (
+      ) : !hasContent ? (
         <View style={styles.center}>
           <Text style={styles.emptyIcon}>✅</Text>
-          <Text style={styles.emptyText}>No geofence violations</Text>
-          <Text style={styles.emptySub}>You've stayed within all site boundaries</Text>
+          <Text style={styles.emptyText}>No alerts right now</Text>
+          <Text style={styles.emptySub}>You'll see swap requests and geofence issues here</Text>
         </View>
       ) : (
         <FlatList
           data={violations}
           keyExtractor={(item) => item.id}
-          renderItem={renderItem}
+          renderItem={renderViolation}
           contentContainerStyle={styles.listContent}
           ItemSeparatorComponent={() => <View style={{ height: Spacing.sm }} />}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.action} />
           }
-          ListHeaderComponent={
-            openCount > 0 ? (
-              <View style={styles.warningBanner}>
-                <Text style={styles.warningText}>
-                  ⚠  You have {openCount} open violation{openCount > 1 ? 's' : ''}.
-                  Return inside the site boundary immediately.
-                </Text>
-              </View>
+          ListHeaderComponent={listHeader}
+          ListEmptyComponent={
+            violations.length === 0 && swaps.length > 0 ? (
+              <Text style={[styles.emptySub, { textAlign: 'left', paddingLeft: 2 }]}>
+                No geofence violations.
+              </Text>
             ) : null
           }
         />
@@ -161,8 +288,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: Colors.border,
   },
   title:          { fontFamily: Fonts.heading, color: Colors.base, fontSize: 24, letterSpacing: 4 },
-  openBadge:      { backgroundColor: '#EF4444', borderRadius: Radius.sm, paddingHorizontal: Spacing.sm, paddingVertical: 3 },
-  openBadgeText:  { fontFamily: Fonts.heading, color: '#fff', fontSize: 11, letterSpacing: 1 },
+  openBadge:      { backgroundColor: Colors.action, borderRadius: Radius.sm, paddingHorizontal: Spacing.sm, paddingVertical: 3 },
+  openBadgeText:  { fontFamily: Fonts.heading, color: '#070D1A', fontSize: 11, letterSpacing: 1 },
 
   warningBanner: {
     backgroundColor: '#7F1D1D', borderRadius: Radius.md,
@@ -170,6 +297,11 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#EF4444',
   },
   warningText: { color: '#FCA5A5', fontSize: 13, lineHeight: 20 },
+
+  sectionHead: {
+    color: Colors.muted, fontFamily: Fonts.heading,
+    fontSize: 11, letterSpacing: 2, marginBottom: Spacing.sm, marginTop: 2,
+  },
 
   listContent: { padding: Spacing.md },
 
@@ -187,6 +319,41 @@ const styles = StyleSheet.create({
   statusText:  { fontSize: 10, letterSpacing: 1, fontFamily: Fonts.heading },
   cardBottom:  { marginTop: 4 },
   resolvedText:{ color: Colors.muted, fontSize: 12 },
+
+  // Swap card
+  swapCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.action,
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  swapHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.sm },
+  swapBadge: { backgroundColor: Colors.action, borderRadius: Radius.xs, paddingHorizontal: Spacing.sm, paddingVertical: 2 },
+  swapBadgeText: { color: '#070D1A', fontFamily: Fonts.heading, fontSize: 10, letterSpacing: 1 },
+  swapTs: { color: Colors.muted, fontSize: 11 },
+  swapFrom: { color: Colors.textPrimary, fontSize: 14, marginBottom: Spacing.sm },
+  swapShiftBox: {
+    backgroundColor: Colors.surface2,
+    borderRadius: Radius.md,
+    padding: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  swapSiteName: { fontFamily: Fonts.heading, color: Colors.textPrimary, fontSize: 14, letterSpacing: 2, marginBottom: 2 },
+  swapShiftTime: { color: Colors.muted, fontSize: 12 },
+  swapReason: { color: Colors.muted, fontSize: 12, fontStyle: 'italic', marginBottom: Spacing.sm },
+  swapActions: { flexDirection: 'row', gap: Spacing.sm },
+  swapBtn: {
+    flex: 1, borderRadius: Radius.md,
+    paddingVertical: Spacing.sm + 2,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1,
+  },
+  swapBtnDecline: { borderColor: Colors.danger, backgroundColor: 'transparent' },
+  swapBtnAccept:  { borderColor: Colors.success, backgroundColor: Colors.success },
+  swapBtnDeclineText: { fontFamily: Fonts.heading, color: Colors.danger, fontSize: 13, letterSpacing: 2 },
+  swapBtnAcceptText:  { fontFamily: Fonts.heading, color: '#070D1A', fontSize: 13, letterSpacing: 2 },
+  swapBtnDisabled: { opacity: 0.45 },
 
   center:    { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.xl },
   emptyIcon: { fontSize: 48, marginBottom: Spacing.md },

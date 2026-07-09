@@ -51,5 +51,28 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       // refetch and show the row with its new CANCELLED status.
       router.push('/(tabs)/schedule');
       break;
+    case 'swap_request_received':
+      // Guard B was invited to take over a shift. The alerts tab renders
+      // an inline ACCEPT/DECLINE card, so route there rather than deep
+      // linking into the shift (which they haven't accepted yet).
+      router.push('/(tabs)/alerts');
+      break;
+    case 'swap_accepted':
+    case 'swap_declined':
+      // A's tap: outcome push for a swap A initiated. Land on the shift
+      // detail (their shift, either now reassigned or still theirs).
+      // Data payload from swapPush carries shift_id — fall back to
+      // schedule if it's missing.
+      if (typeof data?.shift_id === 'string' && data.shift_id.length > 0) {
+        router.push(`/shifts/${data.shift_id}`);
+      } else {
+        router.push('/(tabs)/schedule');
+      }
+      break;
+    case 'swap_expired':
+      // Fired by the expiry cron when a pending request lapses. Bounce
+      // to schedule; the shift is still theirs.
+      router.push('/(tabs)/schedule');
+      break;
   }
 }
