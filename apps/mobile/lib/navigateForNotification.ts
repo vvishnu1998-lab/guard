@@ -45,5 +45,11 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       // tab which will refetch and show the new rows.
       router.push('/(tabs)/schedule');
       break;
+    case 'shift_cancelled':
+      // Emitted by PATCH /api/shifts/:id/cancel. Data payload carries
+      // shift_id — mobile just routes to the schedule tab which will
+      // refetch and show the row with its new CANCELLED status.
+      router.push('/(tabs)/schedule');
+      break;
   }
 }
