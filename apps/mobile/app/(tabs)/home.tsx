@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useShiftStore } from '../../store/shiftStore';
@@ -98,14 +99,76 @@ export default function HomeScreen() {
     return () => clearInterval(id);
   }, [activeSession?.clocked_in_at, activeShift?.scheduled_start]);
 
-  useEffect(() => {
-    Location.getLastKnownPositionAsync()
-      .then((pos) => { if (pos) setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }); })
+  // ── Live Map location acquisition ─────────────────────────────────────────
+  // Walk-test bug #4 remediation. Previously this effect fired watchPosition
+  // *without* requesting foreground permission first, so on cold starts it
+  // silently didn't emit until the root layout's permission-request effect
+  // won a race. With no initialRegion on the MapView either, the placeholder
+  // ("Acquiring location…") could sit for minutes.
+  //
+  // Fix:
+  //   1. Request foreground permission explicitly and surface failure state.
+  //   2. Kick a Low-accuracy first-fix in parallel with the Balanced watcher
+  //      so the map gets *some* dot fast, then refines.
+  //   3. 15-second first-fix timeout → Sentry breadcrumb + user-visible retry.
+  //   4. Sentry.captureMessage on permission-denied so we can distinguish
+  //      "user tapped Deny" from cold-start latency in production traces.
+  const [locError, setLocError] = useState<'denied' | 'timeout' | null>(null);
+  const watcherRef  = useRef<Location.LocationSubscription | null>(null);
+  const timeoutRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  async function acquireLocation() {
+    setLocError(null);
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    watcherRef.current?.remove();
+    watcherRef.current = null;
+
+    const perm = await Location.requestForegroundPermissionsAsync();
+    if (perm.status !== 'granted') {
+      setLocError('denied');
+      Sentry.captureMessage('home.map location permission denied', {
+        level: 'warning',
+        extra: { status: perm.status, canAskAgain: perm.canAskAgain },
+      });
+      return;
+    }
+
+    // Fire-and-forget: first fix at Low accuracy — usually < 2s. If getCurrent
+    // errors (rare, e.g. Location Services disabled at OS level), silently
+    // fall through to the watcher.
+    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low })
+      .then((pos) => setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }))
       .catch(() => {});
-    Location.watchPositionAsync(
+
+    // 15-sec timeout — if the watcher hasn't emitted by then, show retry.
+    // Cleared by the watcher's first emit below.
+    timeoutRef.current = setTimeout(() => {
+      // If we already have a fix from getCurrentPositionAsync above, skip.
+      if (userLocation) return;
+      setLocError('timeout');
+      Sentry.captureMessage('home.map first fix timed out (15s)', {
+        level: 'warning',
+      });
+    }, 15_000);
+
+    watcherRef.current = await Location.watchPositionAsync(
       { accuracy: Location.Accuracy.Balanced, timeInterval: 30000, distanceInterval: 10 },
-      (pos) => setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude })
+      (pos) => {
+        setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+        if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+        setLocError(null);
+      },
     );
+  }
+
+  useEffect(() => {
+    acquireLocation();
+    return () => {
+      watcherRef.current?.remove();
+      watcherRef.current = null;
+      if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -146,19 +209,55 @@ export default function HomeScreen() {
     }
   }
 
-  function handleClockIn() {
+  // Walk-test bug #1 — hydrate the site geofence into pendingShift BEFORE
+  // entering the wizard. The list endpoint (/shifts) doesn't return
+  // geofence, so we hit /shifts/:id (Phase 2a — guard-callable for own
+  // shift) which now includes it. Step1 hard-fails when geofence is null,
+  // so we surface the fetch failure here (alert + no route push) instead
+  // of letting the guard walk into a broken screen.
+  async function handleClockIn() {
     if (!upcomingShift) return;
     resetClockIn();
-    setPendingShift({
-      id: upcomingShift.id,
-      site_id: upcomingShift.site_id,
-      site_name: upcomingShift.site_name,
-      scheduled_start: upcomingShift.scheduled_start,
-      scheduled_end: upcomingShift.scheduled_end,
-      instructions_pdf_url: upcomingShift.instructions_pdf_url ?? null,
-    });
-    setClockInPendingShift(upcomingShift.id);
-    router.push('/clock-in/step1');
+    try {
+      const detail = await apiClient.get<{
+        id: string;
+        site_id: string;
+        site_name: string;
+        scheduled_start: string;
+        scheduled_end: string;
+        instructions_pdf_url?: string | null;
+        geofence: {
+          polygon_coordinates: { lat: number; lng: number }[];
+          center_lat:     number;
+          center_lng:     number;
+          radius_meters:  number;
+        } | null;
+      }>(`/shifts/${upcomingShift.id}`);
+      if (!detail.geofence) {
+        Sentry.captureMessage('home.handleClockIn geofence missing', {
+          level: 'error',
+          extra: { shift_id: upcomingShift.id, site_id: upcomingShift.site_id },
+        });
+        // eslint-disable-next-line no-alert
+        alert('Site boundary not configured. Please contact your supervisor.');
+        return;
+      }
+      setPendingShift({
+        id: detail.id,
+        site_id: detail.site_id,
+        site_name: detail.site_name,
+        scheduled_start: detail.scheduled_start,
+        scheduled_end: detail.scheduled_end,
+        instructions_pdf_url: detail.instructions_pdf_url ?? null,
+        geofence: detail.geofence,
+      });
+      setClockInPendingShift(detail.id);
+      router.push('/clock-in/step1');
+    } catch (err: any) {
+      Sentry.captureException(err, { extra: { where: 'home.handleClockIn' } });
+      // eslint-disable-next-line no-alert
+      alert('Could not load shift details. Check your connection and try again.');
+    }
   }
 
   const initials = guardId ? guardId.slice(0, 1).toUpperCase() : 'G';
@@ -184,32 +283,59 @@ export default function HomeScreen() {
       </View>
 
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-        {/* Map */}
-        {userLocation ? (
-          <MapView
-            style={styles.map}
-            region={{
-              latitude: userLocation.latitude,
-              longitude: userLocation.longitude,
-              latitudeDelta: 0.005,
-              longitudeDelta: 0.005,
-            }}
-            showsUserLocation
-            showsMyLocationButton={false}
-          >
-            <Marker coordinate={userLocation} title="You are here" pinColor={Colors.warning} />
-            <Circle
-              center={userLocation}
-              radius={100}
-              strokeColor="rgba(245,158,11,0.6)"
-              fillColor="rgba(245,158,11,0.1)"
-            />
-          </MapView>
-        ) : (
-          <View style={styles.mapPlaceholder}>
-            <Ionicons name="location-outline" size={32} color={Colors.muted} />
-            <Text style={styles.mapText}>LIVE MAP</Text>
-            <Text style={styles.mapSub}>Acquiring location…</Text>
+        {/* Map — MapView always mounts with a default initialRegion
+            (SF Bay Area) so tiles render immediately. Once we have a real
+            fix it re-centers via `region`. This is walk-test bug #4:
+            previously the placeholder blocked the tab for minutes. */}
+        <MapView
+          style={styles.map}
+          initialRegion={{
+            latitude: 37.7749, longitude: -122.4194,   // SF fallback
+            latitudeDelta: 0.05, longitudeDelta: 0.05, // wider so a real fix noticeably zooms in
+          }}
+          region={userLocation ? {
+            latitude:  userLocation.latitude,
+            longitude: userLocation.longitude,
+            latitudeDelta:  0.005,
+            longitudeDelta: 0.005,
+          } : undefined}
+          showsUserLocation
+          showsMyLocationButton={false}
+        >
+          {userLocation && (
+            <>
+              <Marker coordinate={userLocation} title="You are here" pinColor={Colors.warning} />
+              <Circle
+                center={userLocation}
+                radius={100}
+                strokeColor="rgba(245,158,11,0.6)"
+                fillColor="rgba(245,158,11,0.1)"
+              />
+            </>
+          )}
+        </MapView>
+        {/* Overlays sit above the map. Only one shows at a time — no location
+            fix yet: acquiring / timeout / denied. */}
+        {!userLocation && locError === null && (
+          <View style={styles.mapOverlay}>
+            <ActivityIndicator color={Colors.action} />
+            <Text style={styles.mapOverlaySub}>Acquiring location…</Text>
+          </View>
+        )}
+        {!userLocation && locError === 'timeout' && (
+          <View style={styles.mapOverlay}>
+            <Text style={styles.mapOverlayText}>Location is taking longer than usual</Text>
+            <TouchableOpacity style={styles.mapRetryBtn} onPress={acquireLocation}>
+              <Text style={styles.mapRetryText}>RETRY</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {locError === 'denied' && (
+          <View style={styles.mapOverlay}>
+            <Text style={styles.mapOverlayText}>Location permission is required for shift tracking</Text>
+            <TouchableOpacity style={styles.mapRetryBtn} onPress={() => Linking.openSettings()}>
+              <Text style={styles.mapRetryText}>OPEN SETTINGS</Text>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -409,6 +535,40 @@ const styles = StyleSheet.create({
   },
   mapText: { fontFamily: Fonts.heading, color: Colors.muted, fontSize: 20, letterSpacing: 4 },
   mapSub: { color: Colors.muted, fontSize: 13 },
+  // Overlays sit on top of the map — semi-transparent scrim + centered
+  // content — used when location isn't available yet or user has denied.
+  mapOverlay: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
+    height: 220,
+    backgroundColor: 'rgba(15, 25, 41, 0.88)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+  },
+  mapOverlayText: {
+    color: Colors.textPrimary,
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  mapOverlaySub: {
+    color: Colors.muted,
+    fontSize: 13,
+  },
+  mapRetryBtn: {
+    marginTop: Spacing.sm,
+    backgroundColor: Colors.action,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    borderRadius: Radius.md,
+  },
+  mapRetryText: {
+    fontFamily: Fonts.heading,
+    color: '#070D1A',
+    fontSize: 13,
+    letterSpacing: 2,
+  },
 
   // Stat bar
   statBar: {

@@ -87,7 +87,7 @@ export default function ClockInStep3() {
   function usePhoto() {
     if (!preview?.uri) return;
     setSitePhoto(preview);
-    router.push('/clock-in/step4');
+    router.replace('/clock-in/step4');
   }
 
   // ── Preview screen ───────────────────────────────────────────────────────────

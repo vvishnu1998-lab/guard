@@ -38,10 +38,15 @@ export default function ClockInStep1() {
 
       const geofence = pendingShift?.geofence;
       if (!geofence) {
-        setGpsVerified(point.lat, point.lng, accuracy);
-        setState('inside');
+        // Walk-test bug #1: previously we silently allowed clock-in when
+        // pendingShift.geofence was missing (which was always, because the
+        // /shifts list endpoint didn't return geofence). Home.tsx now
+        // fetches /shifts/:id and hydrates geofence before entering the
+        // wizard, so a missing geofence here means either the site has no
+        // geofence configured or something is very wrong. Hard-fail.
+        setState('error');
         return;
-      } // no geofence = always allow
+      }
 
       // Fast radius pre-check (Haversine) then precise polygon check (ray casting)
       const approxDistance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
@@ -91,7 +96,7 @@ export default function ClockInStep1() {
       <TouchableOpacity
         style={[styles.button, state !== 'inside' && styles.buttonDisabled]}
         disabled={state !== 'inside'}
-        onPress={() => router.push('/clock-in/step2')}
+        onPress={() => router.replace('/clock-in/step2')}
       >
         <Text style={styles.buttonText}>NEXT: TAKE SELFIE</Text>
       </TouchableOpacity>
