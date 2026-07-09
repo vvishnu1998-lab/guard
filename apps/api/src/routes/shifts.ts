@@ -6,7 +6,7 @@ import { validateAtSite } from '../services/geofence';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
-import { isGuardAssignedToSite } from '../services/guardAssignments';
+import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 
 const router = Router();
 
@@ -20,13 +20,14 @@ const router = Router();
  * NB. Same "reject the whole request on first offending date" semantics
  * as B1's past-date guard — no silent partial inserts.
  */
-async function firstUnassignedDate(
+async function firstIneligibleDate(
   guardId: string,
   siteId: string,
   pacificDates: string[],
-): Promise<string | null> {
+): Promise<{ date: string; message: string } | null> {
   for (const d of pacificDates) {
-    if (!(await isGuardAssignedToSite(guardId, siteId, d))) return d;
+    const elig = await checkShiftEligibility(guardId, siteId, d);
+    if (!elig.ok) return { date: d, message: eligibilityError(elig, d) };
   }
   return null;
 }
@@ -104,9 +105,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
 
       // Phase A — guard must have an assignment covering every emitted date.
       // First offending date wins; rejects the whole request (no partial insert).
-      const offending = await firstUnassignedDate(guard_id, site_id, dateList);
+      const offending = await firstIneligibleDate(guard_id, site_id, dateList);
       if (offending) {
-        return res.status(422).json({ error: `Guard is not assigned to this site on ${offending}.` });
+        return res.status(422).json({ error: offending.message });
       }
     }
 
@@ -234,13 +235,13 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
 
     // Phase A enforcement (repeat_days). Same "first offending date" rule.
     if (guard_id) {
-      const offending = await firstUnassignedDate(
+      const offending = await firstIneligibleDate(
         guard_id,
         site_id,
         pending.map(p => pacificDateStr(p.start)),
       );
       if (offending) {
-        return res.status(422).json({ error: `Guard is not assigned to this site on ${offending}.` });
+        return res.status(422).json({ error: offending.message });
       }
     }
 
@@ -264,8 +265,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   // Phase A enforcement (single). Bypassed for unassigned shifts.
   if (guard_id) {
     const d = pacificDateStr(scheduled_start);
-    if (!(await isGuardAssignedToSite(guard_id, site_id, d))) {
-      return res.status(422).json({ error: `Guard is not assigned to this site on ${d}.` });
+    const elig = await checkShiftEligibility(guard_id, site_id, d);
+    if (!elig.ok) {
+      return res.status(422).json({ error: eligibilityError(elig, d) });
     }
   }
 
@@ -306,8 +308,9 @@ router.patch('/:id/assign-guard', requireAuth('company_admin'), async (req, res)
   // calendar date. site_id is NOT mutable on this endpoint, so the
   // effective site is always the shift's current site.
   const shiftDate = pacificDateStr(shiftCheck.rows[0].scheduled_start);
-  if (!(await isGuardAssignedToSite(guard_id, shiftCheck.rows[0].site_id, shiftDate))) {
-    return res.status(422).json({ error: `Guard is not assigned to this site on ${shiftDate}.` });
+  const eligAssign = await checkShiftEligibility(guard_id, shiftCheck.rows[0].site_id, shiftDate);
+  if (!eligAssign.ok) {
+    return res.status(422).json({ error: eligibilityError(eligAssign, shiftDate) });
   }
 
   const result = await pool.query(
@@ -394,9 +397,10 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     // gate against the existing site. Sharing the txn client gives this
     // read-your-own-writes consistency with the same transaction.
     const shiftDate = pacificDateStr(shift.scheduled_start);
-    if (!(await isGuardAssignedToSite(new_guard_id, shift.site_id, shiftDate, client))) {
+    const eligReassign = await checkShiftEligibility(new_guard_id, shift.site_id, shiftDate, client);
+    if (!eligReassign.ok) {
       await client.query('ROLLBACK');
-      return res.status(422).json({ error: `Guard is not assigned to this site on ${shiftDate}.` });
+      return res.status(422).json({ error: eligibilityError(eligReassign, shiftDate) });
     }
 
     // Overlap check: any OTHER scheduled/active shift the new guard holds in

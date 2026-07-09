@@ -83,14 +83,22 @@ export async function isGuardAssignedToSite(
 }
 
 /**
- * Lists the sites a guard is currently assigned to as of `dateStr`.
- * The /admin/shifts modal calls this when an admin picks a guard so it
- * can narrow the site dropdown to that guard's permission surface.
+ * Lists the sites a guard has an open assignment for. The /admin/shifts
+ * modal calls this when an admin picks a guard so it can narrow the site
+ * dropdown to that guard's permission surface.
  *
- * The query joins to `sites` so we can return human-readable names in a
- * single round-trip. Inactive sites are filtered out — an admin
- * shouldn't be invited to schedule a shift at a deactivated site even
- * if the assignment row still exists.
+ * "Open assignment" = still-valid end (assigned_until IS NULL, or in the
+ * future). Note there is NO lower bound on assigned_from — future-dated
+ * assignments are included so an admin can schedule a shift at a site
+ * whose assignment starts next Monday even though today is Friday.
+ * Belt-and-braces: the shift POST + reassign endpoints re-validate that
+ * each emitted shift's date falls inside the assignment window
+ * (see `checkShiftEligibility` below), so widening the dropdown doesn't
+ * let an admin actually create a shift outside the window.
+ *
+ * Inactive sites are filtered out — an admin shouldn't be invited to
+ * schedule a shift at a deactivated site even if the assignment row
+ * still exists.
  */
 export async function getAssignedSitesForGuard(
   guardId: string,
@@ -101,12 +109,96 @@ export async function getAssignedSitesForGuard(
     `SELECT s.id AS site_id, s.name AS site_name
        FROM guard_site_assignments gsa
        JOIN sites s ON s.id = gsa.site_id
-      WHERE gsa.guard_id    = $1
-        AND gsa.assigned_from <= $2::date
+      WHERE gsa.guard_id = $1
         AND (gsa.assigned_until IS NULL OR gsa.assigned_until >= $2::date)
         AND s.is_active = true
       ORDER BY s.name`,
     [guardId, dateStr],
   );
   return r.rows;
+}
+
+/**
+ * Belt-and-braces gate for the shift POST + reassign paths. Returns
+ * why a shift on `dateStr` isn't allowed for this guard/site combo so
+ * the caller can craft a specific 422 message.
+ *
+ * Kept separate from isGuardAssignedToSite (which returns just a
+ * boolean) because the modal shifted to letting admins pick sites for
+ * future-dated assignments — so we now need to distinguish "no
+ * assignment at all" from "assignment starts later" for a useful error.
+ *
+ * `dateStr` and the returned assigned_from/until are YYYY-MM-DD strings
+ * so they compare lexicographically — no Date-object timezone hazards.
+ */
+export type ShiftEligibility =
+  | { ok: true }
+  | { ok: false; reason: 'not_assigned';  siteName: string }
+  | { ok: false; reason: 'before_start';  siteName: string; assignedFrom:  string }
+  | { ok: false; reason: 'after_end';     siteName: string; assignedUntil: string };
+
+export async function checkShiftEligibility(
+  guardId: string,
+  siteId: string,
+  dateStr: string,
+  db: Querier = pool,
+): Promise<ShiftEligibility> {
+  const siteRow = await db.query<{ name: string }>(
+    'SELECT name FROM sites WHERE id = $1',
+    [siteId],
+  );
+  const siteName = siteRow.rows[0]?.name ?? 'the site';
+
+  // Force string form on both dates so comparisons stay lexicographic
+  // regardless of node-pg's DATE parser (which otherwise yields JS Date
+  // objects at UTC midnight — a well-known off-by-one hazard for us).
+  const rows = await db.query<{ assigned_from: string; assigned_until: string | null }>(
+    `SELECT to_char(assigned_from,  'YYYY-MM-DD') AS assigned_from,
+            to_char(assigned_until, 'YYYY-MM-DD') AS assigned_until
+       FROM guard_site_assignments
+      WHERE guard_id = $1 AND site_id = $2
+      ORDER BY assigned_from DESC`,
+    [guardId, siteId],
+  );
+
+  if (rows.rowCount === 0) {
+    return { ok: false, reason: 'not_assigned', siteName };
+  }
+
+  for (const r of rows.rows) {
+    if (r.assigned_from <= dateStr &&
+        (r.assigned_until === null || r.assigned_until >= dateStr)) {
+      return { ok: true };
+    }
+  }
+
+  // No covering assignment. Prefer the "starts later" message when an
+  // upcoming assignment exists (that's the case this task is fixing),
+  // otherwise fall back to the most recent past window's end date.
+  const upcoming = rows.rows.find((r) => r.assigned_from > dateStr);
+  if (upcoming) {
+    return { ok: false, reason: 'before_start', siteName, assignedFrom: upcoming.assigned_from };
+  }
+  const past = rows.rows[0];
+  return {
+    ok: false,
+    reason: 'after_end',
+    siteName,
+    assignedUntil: past.assigned_until ?? past.assigned_from,
+  };
+}
+
+/**
+ * Render a ShiftEligibility failure into a user-facing 422 error string.
+ * Kept in the service so every caller emits identical text.
+ */
+export function eligibilityError(e: Exclude<ShiftEligibility, { ok: true }>, dateStr: string): string {
+  switch (e.reason) {
+    case 'not_assigned':
+      return `Guard is not assigned to ${e.siteName}.`;
+    case 'before_start':
+      return `Cannot schedule shift on ${dateStr} — guard's assignment for ${e.siteName} starts ${e.assignedFrom}.`;
+    case 'after_end':
+      return `Cannot schedule shift on ${dateStr} — guard's assignment for ${e.siteName} ended ${e.assignedUntil}.`;
+  }
 }
