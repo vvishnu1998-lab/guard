@@ -678,6 +678,11 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
 //   shift. Sorted same-site first. Excludes: the requester, inactive
 //   guards, guards with any overlapping active/scheduled shift.
 //
+// GET /api/shifts/inbound-swap-requests
+//   Pending swap requests addressed to the calling guard, so the mobile
+//   alerts tab can render inline ACCEPT/DECLINE cards without waiting for
+//   a push. Newest first.
+//
 // POST /api/shifts/:id/swap-request
 //   Body: { to_guard_id, reason? } (reason 200 char cap)
 //   Creates a pending shift_swap_requests row. Fire-and-forget pushes:
@@ -689,6 +694,34 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
 //   both the shift and the history row. On accept: UPDATE shifts.guard_id
 //   + mark history 'accepted', fire admin FYI email + push A. On decline:
 //   mark 'declined', push A.
+
+// Path-conflict note: this literal route MUST be declared before any of the
+// `/:id/…` swap routes below or Express matches "inbound-swap-requests" as
+// a shift id and returns a 404 from swap-eligible-guards' shift-lookup.
+router.get('/inbound-swap-requests', requireAuth('guard'), async (req, res) => {
+  const result = await pool.query(
+    `SELECT ssr.id           AS history_id,
+            ssr.shift_id,
+            ssr.requested_at,
+            ssr.reason,
+            ssr.from_guard_id,
+            fg.name          AS from_guard_name,
+            sh.scheduled_start,
+            sh.scheduled_end,
+            si.name          AS site_name,
+            si.timezone      AS site_tz
+       FROM shift_swap_requests ssr
+       JOIN shifts sh ON sh.id = ssr.shift_id
+       JOIN sites  si ON si.id = sh.site_id
+       LEFT JOIN guards fg ON fg.id = ssr.from_guard_id
+      WHERE ssr.to_guard_id = $1
+        AND ssr.status      = 'pending'
+      ORDER BY ssr.requested_at DESC
+      LIMIT 50`,
+    [req.user!.sub],
+  );
+  res.json(result.rows);
+});
 
 router.get('/:id/swap-eligible-guards', requireAuth('guard'), async (req, res) => {
   const { user } = req;
