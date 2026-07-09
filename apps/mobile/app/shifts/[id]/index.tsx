@@ -14,13 +14,16 @@
 import { useCallback, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl, Linking,
+  ActivityIndicator, RefreshControl, Linking, Alert,
 } from 'react-native';
+import * as Sentry from '@sentry/react-native';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { apiClient } from '../../lib/apiClient';
-import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-import RequestSwapModal from '../../components/RequestSwapModal';
+import { apiClient } from '../../../lib/apiClient';
+import { useAuthStore } from '../../../store/authStore';
+import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
+import RequestSwapModal from '../../../components/RequestSwapModal';
+import HandoffRequestModal from '../../../components/HandoffRequestModal';
 
 type ShiftStatus = 'scheduled' | 'active' | 'completed' | 'missed' | 'cancelled';
 
@@ -29,9 +32,11 @@ interface SwapHistoryRow {
   requested_at:     string;
   accepted_at:      string | null;
   declined_at:      string | null;
-  status:           'pending' | 'accepted' | 'declined' | 'expired';
+  status:           'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled';
   initiated_by:     'admin' | 'guard_pre_shift' | 'guard_handoff';
   reason:           string | null;
+  from_guard_id:    string | null;
+  to_guard_id:      string | null;
   from_guard_name:  string | null;
   to_guard_name:    string | null;
 }
@@ -61,6 +66,21 @@ interface ShiftDetail {
   swap_history:         SwapHistoryRow[];
 }
 
+// Precondition for the "PENDING HANDOFF — clock in when you arrive" banner:
+// this shift is currently owned by someone else, and me has an accepted
+// handoff for it that hasn't been physically completed yet (once the
+// handoff clock-in txn runs, shift.guard_id flips to me and this returns
+// undefined, hiding the banner).
+function findPendingHandoffFor(shift: ShiftDetail, meId: string | null): SwapHistoryRow | undefined {
+  if (!meId) return undefined;
+  if (shift.guard_id === meId) return undefined;
+  return shift.swap_history.find((r) =>
+    r.initiated_by === 'guard_handoff' &&
+    r.status === 'accepted' &&
+    r.to_guard_id === meId,
+  );
+}
+
 const STATUS_COLOR: Record<ShiftStatus, string> = {
   scheduled: Colors.action,
   active:    Colors.success,
@@ -82,11 +102,14 @@ function duration(start: string, end: string): string {
 
 export default function ShiftDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const [shift,      setShift]      = useState<ShiftDetail | null>(null);
-  const [loading,    setLoading]    = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error,      setError]      = useState<string | null>(null);
-  const [swapOpen,   setSwapOpen]   = useState(false);
+  const meId = useAuthStore((s) => s.guardId);
+  const [shift,       setShift]       = useState<ShiftDetail | null>(null);
+  const [loading,     setLoading]     = useState(true);
+  const [refreshing,  setRefreshing]  = useState(false);
+  const [error,       setError]       = useState<string | null>(null);
+  const [swapOpen,    setSwapOpen]    = useState(false);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const [cancelling,  setCancelling]  = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -210,8 +233,72 @@ export default function ShiftDetailScreen() {
           ) : null}
         </View>
 
+        {/* Pending-handoff banner — recipient view before physical clock-in.
+            findPendingHandoffFor returns undefined if I own the shift (post
+            clock-in) so the banner naturally vanishes once the handoff
+            completes. */}
+        {(() => {
+          const pending = findPendingHandoffFor(shift, meId);
+          if (!pending) return null;
+          async function doCancel() {
+            if (cancelling) return;
+            Sentry.addBreadcrumb({
+              category: 'handoff_wizard',
+              message: 'shift-detail: recipient cancelled pending handoff',
+              level: 'info',
+              data: { shift_id: shift.id, history_id: pending.id },
+            });
+            setCancelling(true);
+            try {
+              await apiClient.post(`/shifts/${shift.id}/handoff-cancel`, { history_id: pending.id });
+              await load();
+            } catch (err: any) {
+              Sentry.captureException(err, { extra: { where: 'shift-detail.handoff-cancel' } });
+              Alert.alert('Could not cancel', err?.message ?? 'Please try again.');
+            } finally {
+              setCancelling(false);
+            }
+          }
+          return (
+            <View style={styles.pendingHandoffCard}>
+              <View style={styles.pendingHandoffHeaderRow}>
+                <Ionicons name="hand-right-outline" size={20} color={Colors.warning} />
+                <Text style={styles.pendingHandoffTitle}>PENDING HANDOFF</Text>
+              </View>
+              <Text style={styles.pendingHandoffBody}>
+                You accepted {pending.from_guard_name ?? 'their'} handoff request.
+                Travel to {shift.site_name} and clock in when you arrive.
+              </Text>
+              <TouchableOpacity
+                style={styles.pendingHandoffPrimary}
+                onPress={() => {
+                  Sentry.addBreadcrumb({
+                    category: 'handoff_clock_in',
+                    message: 'entry: shift-detail → handoff-clock-in',
+                    level: 'info',
+                    data: { shift_id: shift.id },
+                  });
+                  router.push(`/shifts/${shift.id}/handoff-clock-in`);
+                }}
+              >
+                <Ionicons name="log-in-outline" size={18} color="#070D1A" />
+                <Text style={styles.pendingHandoffPrimaryText}>CLOCK IN FOR HANDOFF</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.pendingHandoffSecondary}
+                onPress={doCancel}
+                disabled={cancelling}
+              >
+                <Text style={styles.pendingHandoffSecondaryText}>
+                  {cancelling ? 'Cancelling…' : 'Cancel handoff'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          );
+        })()}
+
         {/* Actions by status */}
-        {shift.status === 'scheduled' && (
+        {shift.status === 'scheduled' && shift.guard_id === meId && (
           <TouchableOpacity
             style={styles.actionBtn}
             onPress={() => setSwapOpen(true)}
@@ -220,14 +307,25 @@ export default function ShiftDetailScreen() {
             <Text style={styles.actionText}>REQUEST SWAP</Text>
           </TouchableOpacity>
         )}
-        {shift.status === 'active' && (
-          <TouchableOpacity
-            style={[styles.actionBtn, { backgroundColor: Colors.success }]}
-            onPress={() => router.push('/(tabs)/home')}
-          >
-            <Ionicons name="log-out-outline" size={18} color="#070D1A" />
-            <Text style={styles.actionText}>GO TO CLOCK OUT</Text>
-          </TouchableOpacity>
+        {shift.status === 'active' && shift.guard_id === meId && (
+          <>
+            <TouchableOpacity
+              style={[styles.actionBtn, { backgroundColor: Colors.success }]}
+              onPress={() => router.push('/(tabs)/home')}
+            >
+              <Ionicons name="log-out-outline" size={18} color="#070D1A" />
+              <Text style={styles.actionText}>GO TO CLOCK OUT</Text>
+            </TouchableOpacity>
+            {/* HAND OFF SHIFT — mid-shift handoff. Distinct yellow accent
+                so guards don't confuse it with the scheduled REQUEST SWAP. */}
+            <TouchableOpacity
+              style={[styles.actionBtn, { backgroundColor: Colors.warning }]}
+              onPress={() => setHandoffOpen(true)}
+            >
+              <Ionicons name="hand-right-outline" size={18} color="#070D1A" />
+              <Text style={styles.actionText}>HAND OFF SHIFT</Text>
+            </TouchableOpacity>
+          </>
         )}
         {(shift.status === 'completed' || shift.status === 'missed' || shift.status === 'cancelled') && (
           <View style={styles.readOnlyBanner}>
@@ -312,16 +410,27 @@ export default function ShiftDetailScreen() {
           onSubmitted={() => { setSwapOpen(false); onRefresh(); }}
         />
       )}
+      {handoffOpen && (
+        <HandoffRequestModal
+          shiftId={shift.id}
+          siteName={shift.site_name}
+          scheduledEnd={shift.scheduled_end}
+          siteTz={shift.site_tz}
+          onClose={() => setHandoffOpen(false)}
+          onSubmitted={() => { setHandoffOpen(false); onRefresh(); }}
+        />
+      )}
     </View>
   );
 }
 
 function swapStatusColor(s: SwapHistoryRow['status']): string {
   switch (s) {
-    case 'accepted': return Colors.success;
-    case 'declined': return Colors.danger;
-    case 'expired':  return Colors.muted;
-    case 'pending':  return Colors.warning;
+    case 'accepted':  return Colors.success;
+    case 'declined':  return Colors.danger;
+    case 'expired':   return Colors.muted;
+    case 'cancelled': return Colors.muted;
+    case 'pending':   return Colors.warning;
   }
 }
 
@@ -412,4 +521,40 @@ const styles = StyleSheet.create({
   errorText: { color: Colors.textPrimary, fontSize: 15, textAlign: 'center', marginBottom: Spacing.lg },
   retryBtn:  { backgroundColor: Colors.action, borderRadius: Radius.md, padding: Spacing.md },
   retryText: { fontFamily: Fonts.heading, color: '#070D1A', fontSize: 14, letterSpacing: 2 },
+
+  // Pending handoff banner — recipient side, before physical clock-in
+  pendingHandoffCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1.5, borderColor: Colors.warning,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  pendingHandoffHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  pendingHandoffTitle: {
+    color: Colors.warning,
+    fontFamily: Fonts.heading,
+    fontSize: 12, letterSpacing: 2,
+  },
+  pendingHandoffBody: {
+    color: Colors.textPrimary,
+    fontSize: 13,
+    marginBottom: Spacing.md,
+  },
+  pendingHandoffPrimary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.warning,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  pendingHandoffPrimaryText: { fontFamily: Fonts.heading, color: '#070D1A', fontSize: 13, letterSpacing: 2 },
+  pendingHandoffSecondary: { alignSelf: 'center', paddingVertical: Spacing.sm },
+  pendingHandoffSecondaryText: { color: Colors.muted, fontSize: 12, textDecorationLine: 'underline' },
 });

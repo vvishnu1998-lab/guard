@@ -74,5 +74,52 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       // to schedule; the shift is still theirs.
       router.push('/(tabs)/schedule');
       break;
+
+    // ── Phase 2b: mid-shift handoff ─────────────────────────────────────
+    // Distinct from swap_* variants so mobile can steer handoff recipients
+    // into the travel-and-clock-in flow instead of a passive accept card.
+    case 'handoff_request_received':
+      // B: A wants me to take over an active shift. Alerts renders inline
+      // accept/decline — decline is one-tap, accept opens a confirmation
+      // dialog since accepting commits me to travel + clock-in.
+      router.push('/(tabs)/alerts');
+      break;
+    case 'handoff_request_sent':
+      // A: confirmation that the invite went out. Shift detail shows the
+      // pending row in HISTORY. Fallback to schedule if id missing.
+      if (typeof data?.shift_id === 'string' && data.shift_id.length > 0) {
+        router.push(`/shifts/${data.shift_id}`);
+      } else {
+        router.push('/(tabs)/schedule');
+      }
+      break;
+    case 'handoff_accepted':
+    case 'handoff_declined':
+    case 'handoff_cancelled':
+      // A's tap: outcome. Shift is still theirs until B physically clocks
+      // in (handoff_complete flips ownership). Land on the shift detail
+      // so they can see updated HISTORY and — if accepted — track pending
+      // arrival.
+      if (typeof data?.shift_id === 'string' && data.shift_id.length > 0) {
+        router.push(`/shifts/${data.shift_id}`);
+      } else {
+        router.push('/(tabs)/schedule');
+      }
+      break;
+    case 'handoff_complete':
+      // A's tap: B clocked in. A is now clocked out. Schedule tab shows
+      // the transferred shift under B (from A's view: gone from active).
+      router.push('/(tabs)/schedule');
+      break;
+    case 'handoff_nudge':
+      // Fired by handoffNudge cron to both parties when the accepted-
+      // but-not-arrived window drags past 30 min. Shift detail is where
+      // both A and B can act (A can wait; B can either clock in or bail).
+      if (typeof data?.shift_id === 'string' && data.shift_id.length > 0) {
+        router.push(`/shifts/${data.shift_id}`);
+      } else {
+        router.push('/(tabs)/alerts');
+      }
+      break;
   }
 }
