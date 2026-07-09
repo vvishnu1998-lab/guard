@@ -735,6 +735,16 @@ router.get('/inbound-swap-requests', requireAuth('guard'), async (req, res) => {
 
 router.get('/:id/swap-eligible-guards', requireAuth('guard'), async (req, res) => {
   const { user } = req;
+  // Phase 2b: `?context=handoff` applies the stricter eligibility filter
+  // used by POST /:id/handoff-request — B must not have an open
+  // shift_sessions row (i.e. not currently clocked in anywhere) and any
+  // overlap check is against the *remaining* shift window (NOW → end),
+  // not the full window (start → end). Default `context=swap` preserves
+  // the Phase 1a pre-shift-swap behavior. Invalid values fall through to
+  // the default rather than 400 so a mobile with an unknown context can't
+  // break itself.
+  const context: 'swap' | 'handoff' = req.query.context === 'handoff' ? 'handoff' : 'swap';
+
   const shiftRes = await pool.query<{
     id: string; guard_id: string | null; site_id: string; status: string;
     scheduled_start: string; scheduled_end: string; company_id: string;
@@ -754,11 +764,22 @@ router.get('/:id/swap-eligible-guards', requireAuth('guard'), async (req, res) =
   if (shift.guard_id !== user!.sub) {
     return res.status(403).json({ error: 'You are not assigned to this shift.' });
   }
-  if (shift.status !== 'scheduled') {
-    return res.status(409).json({ error: `Swap is only available for scheduled shifts (current: ${shift.status}).` });
+  // Handoff needs the shift to be active (guard already clocked in); swap
+  // needs it scheduled (guard hasn't started). Enforce the right status.
+  const requiredStatus = context === 'handoff' ? 'active' : 'scheduled';
+  if (shift.status !== requiredStatus) {
+    return res.status(409).json({
+      error: context === 'handoff'
+        ? `Handoff is only available for active shifts (current: ${shift.status}).`
+        : `Swap is only available for scheduled shifts (current: ${shift.status}).`,
+    });
   }
 
   const shiftDatePacific = pacificDateStr(shift.scheduled_start);
+  // Overlap check varies by context:
+  //   swap    — full shift window (start < shift.end AND end > shift.start)
+  //   handoff — remaining window only (start < shift.end AND end > NOW),
+  //             plus B must not have any open shift_session (already clocked in).
   const eligible = await pool.query(
     `SELECT g.id AS guard_id, g.name, g.badge_number,
        EXISTS (
@@ -772,13 +793,18 @@ router.get('/:id/swap-eligible-guards', requireAuth('guard'), async (req, res) =
      WHERE g.is_active   = true
        AND g.company_id  = $3
        AND g.id         != $4
+       AND ($8::text = 'swap' OR NOT EXISTS (
+         SELECT 1 FROM shift_sessions ss
+         WHERE ss.guard_id = g.id
+           AND ss.clocked_out_at IS NULL
+       ))
        AND NOT EXISTS (
          SELECT 1 FROM shifts osh
          WHERE osh.guard_id = g.id
            AND osh.status IN ('scheduled','active')
            AND osh.id != $5
            AND osh.scheduled_start < $6::timestamptz
-           AND osh.scheduled_end   > $7::timestamptz
+           AND osh.scheduled_end   > CASE WHEN $8::text = 'handoff' THEN NOW() ELSE $7::timestamptz END
        )
      ORDER BY is_same_site DESC, g.name ASC`,
     [
@@ -786,6 +812,7 @@ router.get('/:id/swap-eligible-guards', requireAuth('guard'), async (req, res) =
       shift.company_id, shift.guard_id,
       shift.id,
       shift.scheduled_end, shift.scheduled_start,
+      context,
     ],
   );
   res.json({ guards: eligible.rows });
