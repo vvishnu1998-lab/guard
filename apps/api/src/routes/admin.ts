@@ -421,6 +421,46 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
   res.json(result.rows);
 });
 
+// GET /api/admin/recent-swaps?hours=24 — accepted guard-initiated swaps
+// in the last N hours (default 24). Powers the dashboard FYI card.
+// Tenant-scoped; empty array is a valid response (no card shown).
+router.get('/recent-swaps', requireAuth('company_admin'), async (req, res) => {
+  const rawHours = typeof req.query.hours === 'string' ? parseInt(req.query.hours, 10) : 24;
+  const hours = Number.isFinite(rawHours) && rawHours > 0 && rawHours <= 168 ? rawHours : 24;
+
+  const result = await pool.query(
+    `SELECT ssr.id                   AS history_id,
+            ssr.shift_id,
+            ssr.accepted_at,
+            ssr.reason,
+            fg.name                  AS from_guard_name,
+            tg.name                  AS to_guard_name,
+            si.name                  AS site_name,
+            sh.scheduled_start,
+            si.timezone              AS site_tz,
+            EXISTS (
+              SELECT 1 FROM guard_site_assignments gsa
+              WHERE gsa.guard_id = ssr.to_guard_id
+                AND gsa.site_id  = sh.site_id
+                AND gsa.assigned_from <= (sh.scheduled_start AT TIME ZONE si.timezone)::date
+                AND (gsa.assigned_until IS NULL
+                     OR gsa.assigned_until >= (sh.scheduled_start AT TIME ZONE si.timezone)::date)
+            ) AS is_same_site
+       FROM shift_swap_requests ssr
+       JOIN shifts sh ON sh.id = ssr.shift_id
+       JOIN sites  si ON si.id = sh.site_id
+       LEFT JOIN guards fg ON fg.id = ssr.from_guard_id
+       LEFT JOIN guards tg ON tg.id = ssr.to_guard_id
+      WHERE si.company_id = $1
+        AND ssr.status = 'accepted'
+        AND ssr.accepted_at >= NOW() - ($2 * INTERVAL '1 hour')
+      ORDER BY ssr.accepted_at DESC
+      LIMIT 20`,
+    [req.user!.company_id, hours],
+  );
+  res.json(result.rows);
+});
+
 // Star primary admin: add company admin
 router.post('/company-admins', requireAuth('company_admin'), async (req, res) => {
   const { name, email, password } = req.body;

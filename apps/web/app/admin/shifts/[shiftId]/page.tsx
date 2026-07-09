@@ -29,6 +29,24 @@ interface ReassignmentRow {
   new_guard_name:         string | null;
 }
 
+interface SwapHistoryRow {
+  id:               string;
+  requested_at:     string;
+  accepted_at:      string | null;
+  declined_at:      string | null;
+  status:           'pending' | 'accepted' | 'declined' | 'expired';
+  initiated_by:     'admin' | 'guard_pre_shift' | 'guard_handoff';
+  reason:           string | null;
+  from_guard_id:    string | null;
+  from_guard_name:  string | null;
+  to_guard_id:      string | null;
+  to_guard_name:    string | null;
+}
+
+type HistoryEntry =
+  | { source: 'admin_reassign'; ts: string; row: ReassignmentRow }
+  | { source: 'guard_swap';     ts: string; row: SwapHistoryRow };
+
 interface ShiftDetail {
   id:                   string;
   guard_id:             string | null;
@@ -46,6 +64,7 @@ interface ShiftDetail {
   badge_number:         string | null;
   guard_phone:          string | null;
   reassignment_history: ReassignmentRow[];
+  swap_history:         SwapHistoryRow[];
 }
 
 interface Guard {
@@ -222,6 +241,20 @@ export default function ShiftDetailPage() {
       ? 'NetraOps support'
       : (row.reassigned_by_name ?? 'Admin');
 
+  function SwapStatusPill({ status }: { status: SwapHistoryRow['status'] }) {
+    const styles: Record<SwapHistoryRow['status'], string> = {
+      pending:  'bg-amber-400/10 text-amber-400 border-amber-400/40',
+      accepted: 'bg-green-500/10 text-green-400 border-green-500/40',
+      declined: 'bg-red-500/10   text-red-400   border-red-500/40',
+      expired:  'bg-gray-700/40  text-gray-400  border-gray-600/50',
+    };
+    return (
+      <span className={`inline-block text-[9px] font-bold tracking-widest px-1.5 py-0.5 rounded border ${styles[status]}`}>
+        {status.toUpperCase()}
+      </span>
+    );
+  }
+
   return (
     <div className="p-6 space-y-6 max-w-4xl">
 
@@ -318,31 +351,65 @@ export default function ShiftDetailPage() {
         </div>
       )}
 
-      {/* Reassignment history — always visible */}
+      {/* Combined history — admin reassigns + guard-to-guard swaps.
+          Guard swaps carry a status pill (pending/accepted/declined/
+          expired); admin reassigns are always accepted (they represent a
+          committed action). Sort desc by timestamp so most recent first. */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-5">
-        <h2 className="text-gray-500 text-xs tracking-widest mb-4">REASSIGNMENT HISTORY</h2>
-        {shift.reassignment_history.length === 0 ? (
-          <p className="text-gray-500 text-sm">No reassignments yet.</p>
-        ) : (
-          <ul className="space-y-3">
-            {shift.reassignment_history.map((r) => (
-              <li key={r.id} className="border-l-2 border-amber-400/40 pl-4 py-1">
-                <p className="text-gray-300 text-sm">
-                  <span className="font-mono text-xs text-gray-500">{fmtDTPacific(r.created_at)}</span>
-                  {' — '}
-                  <span className="text-gray-200">{reassignedByLabel(r)}</span>
-                  {' reassigned from '}
-                  <span className="text-amber-400">{r.old_guard_name ?? '(unassigned)'}</span>
-                  {' → '}
-                  <span className="text-amber-400">{r.new_guard_name ?? '(unknown)'}</span>
-                </p>
-                {r.reason && (
-                  <p className="text-gray-500 text-xs mt-1 italic">&ldquo;{r.reason}&rdquo;</p>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+        <h2 className="text-gray-500 text-xs tracking-widest mb-4">REASSIGNMENT &amp; SWAP HISTORY</h2>
+        {(() => {
+          const combined: HistoryEntry[] = [
+            ...shift.reassignment_history.map((r): HistoryEntry => ({ source: 'admin_reassign', ts: r.created_at,   row: r })),
+            ...shift.swap_history        .map((r): HistoryEntry => ({ source: 'guard_swap',     ts: r.requested_at, row: r })),
+          ].sort((a, b) => (a.ts < b.ts ? 1 : -1));
+          if (combined.length === 0) {
+            return <p className="text-gray-500 text-sm">No history yet.</p>;
+          }
+          return (
+            <ul className="space-y-3">
+              {combined.map((entry) => (
+                <li
+                  key={`${entry.source}-${entry.row.id}`}
+                  className={`border-l-2 pl-4 py-1 ${entry.source === 'admin_reassign' ? 'border-amber-400/40' : 'border-cyan-400/40'}`}
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-mono text-xs text-gray-500">{fmtDTPacific(entry.ts)}</span>
+                    <span
+                      className={`inline-block text-[9px] font-bold tracking-widest px-1.5 py-0.5 rounded border ${
+                        entry.source === 'admin_reassign'
+                          ? 'bg-amber-400/10 text-amber-400 border-amber-400/40'
+                          : 'bg-cyan-400/10 text-cyan-400 border-cyan-400/40'
+                      }`}
+                    >
+                      {entry.source === 'admin_reassign' ? 'ADMIN REASSIGN' : 'GUARD SWAP'}
+                    </span>
+                    {entry.source === 'guard_swap' && <SwapStatusPill status={entry.row.status} />}
+                  </div>
+
+                  {entry.source === 'admin_reassign' ? (
+                    <p className="text-gray-300 text-sm mt-1">
+                      <span className="text-gray-200">{reassignedByLabel(entry.row)}</span>
+                      {' reassigned from '}
+                      <span className="text-amber-400">{entry.row.old_guard_name ?? '(unassigned)'}</span>
+                      {' → '}
+                      <span className="text-amber-400">{entry.row.new_guard_name ?? '(unknown)'}</span>
+                    </p>
+                  ) : (
+                    <p className="text-gray-300 text-sm mt-1">
+                      <span className="text-cyan-400">{entry.row.from_guard_name ?? '(unknown)'}</span>
+                      {' requested swap to '}
+                      <span className="text-cyan-400">{entry.row.to_guard_name ?? '(unknown)'}</span>
+                    </p>
+                  )}
+
+                  {entry.row.reason && (
+                    <p className="text-gray-500 text-xs mt-1 italic">&ldquo;{entry.row.reason}&rdquo;</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          );
+        })()}
       </div>
 
       {/* Reassign modal */}

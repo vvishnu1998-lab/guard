@@ -1133,22 +1133,42 @@ router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
     return res.status(404).json({ error: 'Shift not found' });
   }
 
-  const historyResult = await pool.query(
-    `SELECT sr.id, sr.created_at, sr.reason,
-            sr.reassigned_by_admin_id, sr.reassigned_by_role,
-            sr.old_guard_id, og.name AS old_guard_name,
-            sr.new_guard_id, ng.name AS new_guard_name,
-            ca.name AS reassigned_by_name
-       FROM shift_reassignments sr
-       LEFT JOIN guards og         ON og.id = sr.old_guard_id
-       LEFT JOIN guards ng         ON ng.id = sr.new_guard_id
-       LEFT JOIN company_admins ca ON ca.id = sr.reassigned_by_admin_id
-      WHERE sr.shift_id = $1
-      ORDER BY sr.created_at DESC`,
-    [req.params.id],
-  );
+  const [historyResult, swapResult] = await Promise.all([
+    pool.query(
+      `SELECT sr.id, sr.created_at, sr.reason,
+              sr.reassigned_by_admin_id, sr.reassigned_by_role,
+              sr.old_guard_id, og.name AS old_guard_name,
+              sr.new_guard_id, ng.name AS new_guard_name,
+              ca.name AS reassigned_by_name
+         FROM shift_reassignments sr
+         LEFT JOIN guards og         ON og.id = sr.old_guard_id
+         LEFT JOIN guards ng         ON ng.id = sr.new_guard_id
+         LEFT JOIN company_admins ca ON ca.id = sr.reassigned_by_admin_id
+        WHERE sr.shift_id = $1
+        ORDER BY sr.created_at DESC`,
+      [req.params.id],
+    ),
+    // Phase 1c — guard-initiated swap history alongside admin-reassign
+    // history. Web renders both merged with a source badge.
+    pool.query(
+      `SELECT ssr.id, ssr.requested_at, ssr.accepted_at, ssr.declined_at,
+              ssr.status, ssr.initiated_by, ssr.reason,
+              ssr.from_guard_id, fg.name AS from_guard_name,
+              ssr.to_guard_id,   tg.name AS to_guard_name
+         FROM shift_swap_requests ssr
+         LEFT JOIN guards fg ON fg.id = ssr.from_guard_id
+         LEFT JOIN guards tg ON tg.id = ssr.to_guard_id
+        WHERE ssr.shift_id = $1
+        ORDER BY ssr.requested_at DESC`,
+      [req.params.id],
+    ),
+  ]);
 
-  res.json({ ...shift, reassignment_history: historyResult.rows });
+  res.json({
+    ...shift,
+    reassignment_history: historyResult.rows,
+    swap_history:         swapResult.rows,
+  });
 });
 
 // POST /api/shifts/break-start — guard starts a break
