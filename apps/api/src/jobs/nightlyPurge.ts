@@ -50,9 +50,14 @@ cron.schedule('0 0 * * *', async () => {
 
   for (const row of expiredAccess.rows) {
     await Promise.all([
-      // Deactivate the client portal account
-      pool.query('UPDATE clients SET is_active = false WHERE site_id = $1', [row.site_id]),
-      // Record the exact timestamp of disablement on the sites table
+      // Deactivate the client portal account + kick any live sessions.
+      // tokens_not_before mirrors the guards pattern; auth middleware
+      // rejects any client JWT whose iat predates this stamp.
+      pool.query(
+        'UPDATE clients SET is_active = false, tokens_not_before = NOW() WHERE site_id = $1',
+        [row.site_id],
+      ),
+      // Record the exact timestamp of disablement on the sites table.
       pool.query(
         'UPDATE sites SET client_access_disabled_at = NOW() WHERE id = $1',
         [row.site_id],

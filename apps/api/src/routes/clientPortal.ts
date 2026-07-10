@@ -96,6 +96,85 @@ router.get('/reports', requireAuth('client'), async (req: Request, res: Response
   res.json(result.rows);
 });
 
+// ── Geofence violations feed (Session B / Option B) ──────────────────────────
+//
+// Client-facing analogue of GET /api/admin/violations, scoped strictly to the
+// client's site_id from the JWT. No coords + no photo URL in the response —
+// keeps the "location details not shared with the client portal for privacy
+// compliance" contract already documented in apps/web/app/client/schedule/page.tsx.
+//
+// Query params:
+//   since     — '24h' | '7d' | '30d' (default '30d')
+//   date_from — ISO date; overrides `since` when present
+//   date_to   — ISO date; overrides `since` when present
+//   status    — 'OPEN' | 'RESOLVED' | 'ALL' (default 'ALL')
+//   limit     — default 50, capped at 200
+//   offset    — default 0
+//
+// Returns: { rows, total, limit, offset }
+router.get('/violations', requireAuth('client'), async (req: Request, res: Response) => {
+  const sinceQ  = (req.query.since    as string | undefined) ?? '30d';
+  const statusQ = (req.query.status   as string | undefined) ?? 'ALL';
+  const fromQ   = (req.query.date_from as string | undefined)?.trim();
+  const toQ     = (req.query.date_to   as string | undefined)?.trim();
+  const limitQ  =  req.query.limit    as string | undefined;
+  const offsetQ =  req.query.offset   as string | undefined;
+
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}(T[\d:.+Z-]+)?$/;
+  if (fromQ && !ISO_RE.test(fromQ)) return res.status(400).json({ error: 'invalid date_from' });
+  if (toQ   && !ISO_RE.test(toQ))   return res.status(400).json({ error: 'invalid date_to'   });
+
+  const SINCE_INTERVALS: Record<string, string> = { '24h': '24 hours', '7d': '7 days', '30d': '30 days' };
+  const sinceInterval = SINCE_INTERVALS[sinceQ] ?? SINCE_INTERVALS['30d'];
+
+  const statusUpper = statusQ.toUpperCase();
+  const statusClause =
+    statusUpper === 'OPEN'     ? 'AND gv.resolved_at IS NULL'
+  : statusUpper === 'RESOLVED' ? 'AND gv.resolved_at IS NOT NULL'
+  :                              '';
+
+  const limit  = Math.min(200, Math.max(1, parseInt(limitQ  ?? '50', 10) || 50));
+  const offset = Math.max(0, parseInt(offsetQ ?? '0', 10) || 0);
+
+  // Params: site_id, [date_from], [date_to], limit, offset.
+  const args: unknown[] = [req.user!.site_id];
+  let dateClause: string;
+  if (fromQ || toQ) {
+    const parts: string[] = [];
+    if (fromQ) { args.push(fromQ); parts.push(`AND gv.occurred_at >= $${args.length}`); }
+    if (toQ)   { args.push(toQ);   parts.push(`AND gv.occurred_at <= $${args.length}`); }
+    dateClause = parts.join(' ');
+  } else {
+    // sinceInterval is a whitelist lookup — safe to interpolate.
+    dateClause = `AND gv.occurred_at >= NOW() - INTERVAL '${sinceInterval}'`;
+  }
+
+  args.push(limit);   const limitPos  = args.length;
+  args.push(offset);  const offsetPos = args.length;
+
+  const result = await pool.query(
+    `SELECT gv.id,
+            gv.occurred_at,
+            gv.resolved_at,
+            gv.duration_minutes,
+            (gv.resolved_at IS NOT NULL) AS is_resolved,
+            g.name AS guard_name,
+            COUNT(*) OVER() AS total_count
+       FROM geofence_violations gv
+       JOIN guards g ON g.id = gv.guard_id
+      WHERE gv.site_id = $1
+        ${dateClause}
+        ${statusClause}
+      ORDER BY gv.occurred_at DESC
+      LIMIT $${limitPos} OFFSET $${offsetPos}`,
+    args,
+  );
+
+  const total = result.rows[0]?.total_count != null ? Number(result.rows[0].total_count) : 0;
+  const rows  = result.rows.map(({ total_count: _t, ...r }) => r);
+  res.json({ rows, total, limit, offset });
+});
+
 // ── PDF download handoff (CB5 — audit/WEEK1.md C4) ────────────────────────────
 // Browser downloads can't carry Authorization headers (window.open/anchor
 // navigation can only set query params).  Putting the long-lived access JWT

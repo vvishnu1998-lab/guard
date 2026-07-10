@@ -454,6 +454,21 @@ export default function SitesPage() {
     finally { setToggling(null); }
   }
 
+  // Session B — mint a 30-min read-only preview token and open /client
+  // in a new tab. clientApi.getToken() reads ?preview=<jwt>, sets the
+  // cookie, and PreviewBootstrap scrubs the URL after mount.
+  async function previewAsClient(siteId: string) {
+    try {
+      const r = await adminPost<{ access_token: string; expires_in: number }>(
+        `/api/admin/sites/${siteId}/preview-client-token`,
+        {},
+      );
+      window.open(`/client?preview=${encodeURIComponent(r.access_token)}`, '_blank', 'noopener');
+    } catch (e: any) {
+      setError(e.message ?? 'Preview failed');
+    }
+  }
+
   function fmtDate(iso: string | null) {
     if (!iso) return '—';
     return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -680,6 +695,13 @@ export default function SitesPage() {
                             }`}
                           >
                             {toggling === site.id ? '…' : clientEnabled ? 'DISABLE PORTAL' : 'ENABLE PORTAL'}
+                          </button>
+                          <button
+                            onClick={() => previewAsClient(site.id)}
+                            title="Opens the client portal in a new tab as read-only for 30 minutes."
+                            className="text-xs tracking-widest px-3 py-1 rounded bg-[#0B1526] text-cyan-400 border border-cyan-500/40 hover:bg-cyan-500/10 hover:border-cyan-500 transition-colors"
+                          >
+                            PREVIEW AS CLIENT ↗
                           </button>
                         </>
                       )}

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import jwt from 'jsonwebtoken';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
@@ -6,6 +7,47 @@ import { validatePassword } from './auth';
 import { urlOrPresign } from '../services/s3';
 
 const router = Router();
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// ── Admin "Preview as client" (Session B / Part C) ───────────────────────────
+//
+// Mints a short-lived (30-minute) read-only client-role JWT that lets the
+// admin open the client portal in a new tab and see exactly what the
+// end-client sees. The auth middleware treats scope='preview' tokens as
+// read-only: any non-GET is rejected. Every mint is audited in
+// admin_client_previews (schema_v29).
+//
+// Auth:
+//   * company_admin  — must own the site (company_id gate below)
+//   * vishnu         — allowed across all companies
+router.post('/sites/:siteId/preview-client-token', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { siteId } = req.params;
+  if (!UUID_RE.test(siteId)) return res.status(400).json({ error: 'invalid site_id' });
+
+  const isVishnu = req.user!.role === 'vishnu';
+
+  const siteCheck = isVishnu
+    ? await pool.query('SELECT 1 FROM sites WHERE id = $1', [siteId])
+    : await pool.query('SELECT 1 FROM sites WHERE id = $1 AND company_id = $2', [siteId, req.user!.company_id]);
+  if (!siteCheck.rows[0]) return res.status(404).json({ error: 'Site not found' });
+
+  const ttlSeconds = 30 * 60;
+  const expiresAt  = new Date(Date.now() + ttlSeconds * 1000);
+
+  const accessToken = jwt.sign(
+    { sub: 'admin-preview', role: 'client', site_id: siteId, scope: 'preview' },
+    process.env.JWT_SECRET!,
+    { expiresIn: ttlSeconds },
+  );
+
+  await pool.query(
+    `INSERT INTO admin_client_previews (admin_id, site_id, expires_at) VALUES ($1, $2, $3)`,
+    [req.user!.sub, siteId, expiresAt],
+  );
+
+  res.json({ access_token: accessToken, expires_in: ttlSeconds });
+});
 
 // ── Vishnu Super Admin routes ────────────────────────────────────────────────
 

@@ -7,7 +7,22 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
 function getToken(): string {
   if (typeof document === 'undefined') return '';
-  return document.cookie.match(/guard_client_access=([^;]+)/)?.[1] ?? '';
+  // Session B — admin "Preview as client" flow. window.open drops a
+  // ?preview=<token> query param on the target URL. When there is no
+  // real client cookie yet, adopt the preview token AND persist it as
+  // the client cookie so subsequent navigations Just Work. The URL is
+  // scrubbed by <PreviewBootstrap /> after mount.
+  const cookieToken = document.cookie.match(/guard_client_access=([^;]+)/)?.[1];
+  if (cookieToken) return cookieToken;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const preview = params.get('preview');
+    if (preview) {
+      document.cookie = `guard_client_access=${preview}; path=/; SameSite=Strict`;
+      return preview;
+    }
+  } catch { /* SSR or non-browser env */ }
+  return '';
 }
 
 export async function clientFetch(path: string, options?: RequestInit): Promise<Response> {

@@ -232,28 +232,44 @@ router.patch('/:id/geofence', requireAuth('company_admin'), async (req, res) => 
   res.json(result.rows[0]);
 });
 
-// PATCH /api/sites/:id/client-access — Star enables/disables client portal
+// PATCH /api/sites/:id/client-access — admin enables/disables client portal.
+//
+// Session B (Option A): both branches now bump clients.tokens_not_before so
+// any live client session is kicked immediately by the auth middleware. Both
+// branches also clear data_retention_log.client_star_access_disabled so the
+// admin flag becomes the source of truth (was: the retention flag would
+// silently gate login even after admin re-enable).
 router.patch('/:id/client-access', requireAuth('company_admin'), async (req, res) => {
   const { enabled } = req.body;
   const gate = await assertSiteActive(req.params.id, req.user!.company_id!);
   if (!gate.ok) return res.status(gate.status).json(gate.body);
 
-  await pool.query(
-    'UPDATE clients SET is_active = $1 WHERE site_id = $2',
-    [enabled, req.params.id]
-  );
-  if (!enabled) {
-    await pool.query(
-      'UPDATE sites SET client_access_disabled_at = NOW() WHERE id = $1',
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'UPDATE clients SET is_active = $1, tokens_not_before = NOW() WHERE site_id = $2',
+      [enabled, req.params.id]
+    );
+    await client.query(
+      `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
       [req.params.id]
     );
-  } else {
-    await pool.query(
-      'UPDATE sites SET client_access_disabled_at = NULL WHERE id = $1',
+    // Clear the retention-purge flag so admin's toggle owns the state.
+    // No-op if the DRL row doesn't exist yet or the flag was already false.
+    await client.query(
+      `UPDATE data_retention_log SET client_star_access_disabled = false
+       WHERE site_id = $1 AND client_star_access_disabled = true`,
       [req.params.id]
     );
+    await client.query('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
-  res.json({ success: true });
 });
 
 // GET /api/sites/:id/deactivate-preview
@@ -349,8 +365,9 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
       'UPDATE sites SET is_active = false, client_access_disabled_at = NOW() WHERE id = $1',
       [req.params.id],
     );
+    // Session B — kick any active client session when the site is deactivated.
     await client.query(
-      'UPDATE clients SET is_active = false WHERE site_id = $1',
+      'UPDATE clients SET is_active = false, tokens_not_before = NOW() WHERE site_id = $1',
       [req.params.id],
     );
     const cancelled = await client.query<{ id: string; guard_id: string | null }>(

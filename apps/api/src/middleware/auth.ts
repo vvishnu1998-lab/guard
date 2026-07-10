@@ -12,6 +12,14 @@ export interface AuthPayload {
   site_id?: string;    // client portal only
   is_primary?: boolean; // company_admin only
   jti?: string;        // refresh tokens only
+  /**
+   * Session B — 'preview' identifies an admin-generated preview token
+   * (POST /api/admin/sites/:siteId/preview-client-token). Middleware
+   * treats these tokens as read-only client tokens: they bypass the
+   * clients table lookup (sub is the string 'admin-preview', not a
+   * real UUID) but any non-GET method is rejected.
+   */
+  scope?: 'preview';
   iat: number;
   exp: number;
 }
@@ -105,6 +113,35 @@ export function requireAuth(...roles: UserRole[]) {
         const notBeforeMs = new Date(guardRow.tokens_not_before).getTime();
         if (payload.iat * 1000 < notBeforeMs) {
           return res.status(401).json({ error: 'Session revoked by administrator' });
+        }
+      }
+    }
+
+    // Client-specific: mirror the guard pattern so admin's DISABLE PORTAL /
+    // site deactivation / nightly retention purge can revoke live client
+    // sessions (Session B / Option A). Admin-generated preview tokens
+    // (scope='preview') skip the clients table lookup (no real row) but are
+    // hard-restricted to GET.
+    if (payload.role === 'client') {
+      if (payload.scope === 'preview') {
+        if (req.method !== 'GET') {
+          return res.status(403).json({ error: 'Preview tokens are read-only' });
+        }
+      } else {
+        const clientResult = await pool.query(
+          'SELECT is_active, tokens_not_before FROM clients WHERE id = $1',
+          [payload.sub]
+        ).catch(() => ({ rows: [] as { is_active: boolean; tokens_not_before: Date | null }[] }));
+
+        const clientRow = clientResult.rows[0];
+        if (!clientRow?.is_active) {
+          return res.status(403).json({ error: 'Account deactivated' });
+        }
+        if (clientRow.tokens_not_before) {
+          const notBeforeMs = new Date(clientRow.tokens_not_before).getTime();
+          if (payload.iat * 1000 < notBeforeMs) {
+            return res.status(401).json({ error: 'Session revoked by administrator' });
+          }
         }
       }
     }

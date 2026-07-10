@@ -5,9 +5,10 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
 
 const NAV_ITEMS = [
-  { href: '/client',          label: 'REPORTS'        },
-  { href: '/client/schedule', label: 'GUARD SCHEDULE' },
-  { href: '/client/download', label: 'DOWNLOADS'      },
+  { href: '/client',                 label: 'REPORTS'          },
+  { href: '/client/schedule',        label: 'GUARD SCHEDULE'   },
+  { href: '/client/security-events', label: 'SECURITY EVENTS'  },
+  { href: '/client/download',        label: 'DOWNLOADS'        },
 ];
 
 export default function ClientNav() {
