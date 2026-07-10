@@ -37,12 +37,16 @@ export default function ClientPortalsPage() {
     try {
       const s = await adminGet<Site[]>('/api/sites');
       setSites(s);
-      // Fetch client account for each site in parallel
+      // Session C — /api/clients/:site_id now returns Client[] (multiple
+      // clients per site allowed). This legacy page still shows one row
+      // per site; pick the first-active client (or the first row if
+      // everyone's inactive). Full management lives at /admin/sites.
       const entries = await Promise.all(
         s.map(async (site) => {
           try {
-            const c = await adminGet<Client | null>(`/api/clients/${site.id}`);
-            return [site.id, c] as const;
+            const list = await adminGet<Client[]>(`/api/clients/${site.id}`);
+            const active = list.find((c) => c.is_active);
+            return [site.id, active ?? list[0] ?? null] as const;
           } catch {
             return [site.id, null] as const;
           }

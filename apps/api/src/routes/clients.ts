@@ -2,46 +2,184 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
-import { validatePassword } from './auth';
+import { generateTempPassword } from '../utils/tempPassword';
 
+/**
+ * Session C — Client account CRUD for the admin sites page.
+ *
+ * Endpoints:
+ *   GET  /api/clients/:site_id            list all clients for a site (array)
+ *   POST /api/clients                     create a new client (auto-gen password
+ *                                         if `password` is omitted; returns
+ *                                         temp_password so the admin can share)
+ *   PATCH /api/clients/:id                update name/email/is_active
+ *                                         (is_active change also bumps
+ *                                         tokens_not_before, kicking sessions)
+ *   POST /api/clients/:id/reset-password  mint a fresh temp password + kick
+ *                                         sessions + require change on login
+ *
+ * Auth:
+ *   company_admin — scoped to sites under their company
+ *   vishnu        — full access across all companies
+ */
 const router = Router();
 
-// GET /api/clients/:site_id — admin views client portal account for a site
-router.get('/:site_id', requireAuth('company_admin'), async (req, res) => {
-  const siteCheck = await pool.query(
+// Verify caller has scope to a given site. Returns the site row or null.
+async function siteInScope(siteId: string, callerCompanyId: string | undefined, isVishnu: boolean) {
+  if (isVishnu) {
+    const r = await pool.query('SELECT id FROM sites WHERE id = $1', [siteId]);
+    return r.rows[0] ?? null;
+  }
+  const r = await pool.query(
     'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
-    [req.params.site_id, req.user!.company_id]
+    [siteId, callerCompanyId],
   );
-  if (!siteCheck.rows[0]) return res.status(403).json({ error: 'Site not found' });
+  return r.rows[0] ?? null;
+}
+
+// Verify caller has scope to a given client (via its site's company).
+// Returns { id, site_id, email } or null.
+async function clientInScope(clientId: string, callerCompanyId: string | undefined, isVishnu: boolean) {
+  if (isVishnu) {
+    const r = await pool.query(
+      'SELECT id, site_id, email FROM clients WHERE id = $1',
+      [clientId],
+    );
+    return r.rows[0] ?? null;
+  }
+  const r = await pool.query(
+    `SELECT c.id, c.site_id, c.email FROM clients c
+       JOIN sites s ON s.id = c.site_id
+      WHERE c.id = $1 AND s.company_id = $2`,
+    [clientId, callerCompanyId],
+  );
+  return r.rows[0] ?? null;
+}
+
+// GET /api/clients/:site_id — list all clients for a site.
+// Response shape changed in v31: was Client|null, now Client[]. The
+// /admin/clients page has been adapted to pick the first row for
+// backwards compatibility.
+router.get('/:site_id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const isVishnu = req.user!.role === 'vishnu';
+  const scope = await siteInScope(req.params.site_id, req.user!.company_id, isVishnu);
+  if (!scope) return res.status(isVishnu ? 404 : 403).json({ error: 'Site not found' });
 
   const result = await pool.query(
-    'SELECT id, name, email, is_active, created_at FROM clients WHERE site_id = $1',
-    [req.params.site_id]
+    `SELECT id, site_id, name, email, is_active, must_change_password,
+            created_at, last_login_at
+       FROM clients
+      WHERE site_id = $1
+      ORDER BY is_active DESC, LOWER(email) ASC`,
+    [req.params.site_id],
   );
-  res.json(result.rows[0] || null);
+  res.json(result.rows);
 });
 
-// POST /api/clients — create client portal account for a site
-router.post('/', requireAuth('company_admin'), async (req, res) => {
-  const { site_id, name, email, password } = req.body;
-  // B1: server-side password policy enforcement
-  const policyErr = validatePassword(password);
-  if (policyErr) return res.status(400).json({ error: policyErr });
+// POST /api/clients — create a client account.
+// Body: { site_id, name, email, password? }
+// If password is omitted the server generates a 12-char temp password.
+// Response: { client, temp_password? }  (temp_password only when auto-gen)
+router.post('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { site_id, name, email, password: providedPassword } = req.body ?? {};
+  if (!site_id || typeof site_id !== 'string')                            return res.status(400).json({ error: 'site_id is required' });
+  if (typeof name !== 'string' || name.trim().length < 2)                 return res.status(400).json({ error: 'name is required (min 2 chars)' });
+  if (typeof email !== 'string' || !email.includes('@'))                  return res.status(400).json({ error: 'valid email is required' });
 
-  const siteCheck = await pool.query(
-    'SELECT id FROM sites WHERE id = $1 AND company_id = $2',
-    [site_id, req.user!.company_id]
-  );
-  if (!siteCheck.rows[0]) return res.status(403).json({ error: 'Site not found' });
+  const isVishnu = req.user!.role === 'vishnu';
+  const scope = await siteInScope(site_id, req.user!.company_id, isVishnu);
+  if (!scope) return res.status(isVishnu ? 404 : 403).json({ error: 'Site not found' });
 
-  const password_hash = await bcrypt.hash(password, 12);
-  const result = await pool.query(
-    `INSERT INTO clients (site_id, name, email, password_hash)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, site_id, name, email, is_active, created_at`,
-    [site_id, name, email, password_hash]
+  const autoGenerated = !providedPassword;
+  const tempPassword  = autoGenerated ? generateTempPassword(12) : String(providedPassword);
+  const password_hash = await bcrypt.hash(tempPassword, 12);
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO clients (site_id, name, email, password_hash, must_change_password)
+       VALUES ($1, $2, $3, $4, true)
+       RETURNING id, site_id, name, email, is_active, must_change_password,
+                 created_at, last_login_at`,
+      [site_id, name.trim(), email.trim().toLowerCase(), password_hash],
+    );
+    res.status(201).json({
+      client: result.rows[0],
+      // Only echo the temp password when we generated it — otherwise the
+      // admin already knows the password they sent in.
+      ...(autoGenerated ? { temp_password: tempPassword } : {}),
+    });
+  } catch (err: any) {
+    if (err.code === '23505' && err.constraint === 'clients_email_key') {
+      return res.status(409).json({ error: 'A client with this email already exists' });
+    }
+    throw err;
+  }
+});
+
+// PATCH /api/clients/:id — update name / email / is_active.
+// Changing is_active also bumps tokens_not_before to kick any active
+// session (Session B pattern). Bumping on reactivate is intentional too:
+// if the client had a stale token from before the deactivate, it stays dead.
+router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const isVishnu = req.user!.role === 'vishnu';
+  const scope = await clientInScope(req.params.id, req.user!.company_id, isVishnu);
+  if (!scope) return res.status(404).json({ error: 'Client not found' });
+
+  const { name, email, is_active } = req.body ?? {};
+  const sets: string[]  = [];
+  const params: unknown[] = [];
+  if (name      !== undefined) {
+    if (typeof name !== 'string' || name.trim().length < 2) return res.status(400).json({ error: 'name must be at least 2 characters' });
+    params.push(name.trim());                          sets.push(`name = $${params.length}`);
+  }
+  if (email     !== undefined) {
+    if (typeof email !== 'string' || !email.includes('@')) return res.status(400).json({ error: 'valid email is required' });
+    params.push(email.trim().toLowerCase());           sets.push(`email = $${params.length}`);
+  }
+  if (is_active !== undefined) {
+    if (typeof is_active !== 'boolean') return res.status(400).json({ error: 'is_active must be boolean' });
+    params.push(is_active);                            sets.push(`is_active = $${params.length}`);
+    sets.push('tokens_not_before = NOW()');
+  }
+  if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+  params.push(req.params.id);
+  try {
+    const result = await pool.query(
+      `UPDATE clients SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, site_id, name, email, is_active, must_change_password,
+                 created_at, last_login_at`,
+      params,
+    );
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    if (err.code === '23505' && err.constraint === 'clients_email_key') {
+      return res.status(409).json({ error: 'A client with this email already exists' });
+    }
+    throw err;
+  }
+});
+
+// POST /api/clients/:id/reset-password — mint fresh temp password.
+// Also bumps tokens_not_before (login-required) and forces must_change_password.
+router.post('/:id/reset-password', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const isVishnu = req.user!.role === 'vishnu';
+  const scope = await clientInScope(req.params.id, req.user!.company_id, isVishnu);
+  if (!scope) return res.status(404).json({ error: 'Client not found' });
+
+  const tempPassword  = generateTempPassword(12);
+  const password_hash = await bcrypt.hash(tempPassword, 12);
+
+  await pool.query(
+    `UPDATE clients
+        SET password_hash        = $1,
+            must_change_password = true,
+            tokens_not_before    = NOW()
+      WHERE id = $2`,
+    [password_hash, req.params.id],
   );
-  res.status(201).json(result.rows[0]);
+
+  res.json({ temp_password: tempPassword, email: scope.email });
 });
 
 export default router;

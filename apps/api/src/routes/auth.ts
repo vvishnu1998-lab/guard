@@ -25,16 +25,10 @@ export function validatePassword(p: unknown): string | null {
   return null;
 }
 
-// Generate a random 8-char alphanumeric temporary password.
-const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
-function generateTempPassword(): string {
-  let out = '';
-  const bytes = crypto.randomBytes(8);
-  for (let i = 0; i < 8; i++) {
-    out += TEMP_PASSWORD_ALPHABET[bytes[i] % TEMP_PASSWORD_ALPHABET.length];
-  }
-  return out;
-}
+// Session C — shared temp-password generator lives in utils; call with 8
+// here to preserve the existing guard/admin email-template format.
+import { generateTempPassword as _generateTempPassword } from '../utils/tempPassword';
+function generateTempPassword(): string { return _generateTempPassword(8); }
 
 // ── Token helpers ────────────────────────────────────────────────────────────
 
@@ -306,6 +300,11 @@ router.post('/client/login', async (req: Request, res: Response) => {
   }
 
   const tokens = signTokens({ sub: client.id, role: 'client', site_id: client.site_id });
+  // Session C — stamp last_login_at so admins can see "last login: 3 days ago"
+  // on the CLIENTS AT THIS SITE list. Fire-and-forget: a DB hiccup here
+  // shouldn't fail the login itself.
+  pool.query('UPDATE clients SET last_login_at = NOW() WHERE id = $1', [client.id])
+    .catch((err) => console.error('[client/login] last_login_at update failed:', err));
   await logEvent(client.id, 'client', 'login_success', req);
   res.json({ ...tokens, must_change_password: client.must_change_password });
 });

@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { adminGet, adminPost, adminPatch } from '../../../lib/adminApi';
+import { adminGet, adminPatch, adminPost } from '../../../lib/adminApi';
 import {
   centroidOf,
   boundingRadiusMeters,
@@ -62,6 +62,56 @@ interface DeactivatePreview {
   scheduled_shifts:   number;
   active_sessions:    number;
   open_assignments:   number;
+}
+
+// Session C — client account management inside expanded site row.
+interface Client {
+  id:                   string;
+  site_id:              string;
+  name:                 string;
+  email:                string;
+  is_active:            boolean;
+  must_change_password: boolean;
+  created_at:           string;
+  last_login_at:        string | null;
+}
+
+interface CredentialsBanner {
+  email:         string;
+  temp_password: string;
+  mode:          'created' | 'reset';
+}
+
+// Cryptographically secure temp password for the ADD CLIENT modal. Same
+// alphabet as apps/api/src/utils/tempPassword.ts (no 0/O/I/l/1 confusion).
+const TEMP_PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+function generateTempPasswordClient(length = 12): string {
+  const bytes = new Uint8Array(length);
+  if (typeof window === 'undefined' || !window.crypto?.getRandomValues) {
+    // Node/SSR fallback — Math.random is acceptable here because this path
+    // is only ever hit during server rendering of the initial form; the
+    // real value is regenerated in a useEffect once we're client-side.
+    for (let i = 0; i < length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  } else {
+    window.crypto.getRandomValues(bytes);
+  }
+  let out = '';
+  for (let i = 0; i < length; i++) out += TEMP_PW_ALPHABET[bytes[i] % TEMP_PW_ALPHABET.length];
+  return out;
+}
+
+// "3 days ago" / "Never logged in" for the client row's last-login line.
+function relativeTime(iso: string | null): string {
+  if (!iso) return 'Never logged in';
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60_000)                return 'just now';
+  if (diff < 3_600_000)             return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000)            return `${Math.floor(diff / 3_600_000)}h ago`;
+  const days = Math.floor(diff / 86_400_000);
+  if (days < 30)                    return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12)                  return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
 }
 
 type GeoMode = 'radius' | 'draw';
@@ -158,6 +208,21 @@ export default function SitesPage() {
   const [pdfError,     setPdfError]     = useState('');
   const pdfInputRef                     = useRef<HTMLInputElement>(null);
 
+  // Session C — client management state.
+  //   clientsPerSite: lazy-fetched on first expand of a site row.
+  //   clientBanner: green banner shown after CREATE or RESET-PASSWORD;
+  //     dismissable, never auto-hides (admin must copy the temp password).
+  //   clientModalMode: 'add' | 'edit' | null; drives which modal renders.
+  const [clientsPerSite, setClientsPerSite] = useState<Record<string, Client[] | undefined>>({});
+  const [clientBanner,   setClientBanner]   = useState<CredentialsBanner | null>(null);
+  const [clientModalMode, setClientModalMode] = useState<'add' | 'edit' | null>(null);
+  const [clientModalSite, setClientModalSite] = useState<string | null>(null);
+  const [editingClient,   setEditingClient]   = useState<Client | null>(null);
+  const [clientForm,     setClientForm]     = useState({ name: '', email: '', password: '' });
+  const [clientSaving,   setClientSaving]   = useState(false);
+  const [clientFormError, setClientFormError] = useState('');
+  const [clientToggling, setClientToggling] = useState<string | null>(null);
+
   // Always fetch with include_inactive=1 so the chip toggle is a client-side
   // filter with no round-trip. Search across ALL sites regardless of chip.
   const load = useCallback(async () => {
@@ -197,9 +262,132 @@ export default function SitesPage() {
   function toggleExpand(id: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) next.delete(id);
+      else {
+        next.add(id);
+        // Session C — lazy-fetch clients on first expand.
+        if (clientsPerSite[id] === undefined) fetchClientsForSite(id);
+      }
       return next;
     });
+  }
+
+  // ── Session C — client management handlers ─────────────────────────────
+  async function fetchClientsForSite(siteId: string) {
+    try {
+      const list = await adminGet<Client[]>(`/api/clients/${siteId}`);
+      setClientsPerSite((prev) => ({ ...prev, [siteId]: list }));
+    } catch (e: any) {
+      // Set to empty so we don't retry infinitely; surface inline error.
+      setClientsPerSite((prev) => ({ ...prev, [siteId]: [] }));
+      setError(e?.message ?? 'Failed to load clients');
+    }
+  }
+
+  function openAddClientModal(siteId: string) {
+    setClientModalMode('add');
+    setClientModalSite(siteId);
+    setEditingClient(null);
+    setClientForm({ name: '', email: '', password: generateTempPasswordClient(12) });
+    setClientFormError('');
+  }
+
+  function openEditClientModal(siteId: string, client: Client) {
+    setClientModalMode('edit');
+    setClientModalSite(siteId);
+    setEditingClient(client);
+    setClientForm({ name: client.name, email: client.email, password: '' });
+    setClientFormError('');
+  }
+
+  function closeClientModal() {
+    setClientModalMode(null);
+    setClientModalSite(null);
+    setEditingClient(null);
+    setClientForm({ name: '', email: '', password: '' });
+    setClientFormError('');
+  }
+
+  function regenerateTempPassword() {
+    setClientForm((f) => ({ ...f, password: generateTempPasswordClient(12) }));
+  }
+
+  async function saveNewClient() {
+    if (!clientModalSite) return;
+    const name  = clientForm.name.trim();
+    const email = clientForm.email.trim().toLowerCase();
+    if (name.length < 2) { setClientFormError('Full name must be at least 2 characters'); return; }
+    if (!email.includes('@')) { setClientFormError('Enter a valid email address'); return; }
+    setClientSaving(true); setClientFormError('');
+    try {
+      const r = await adminPost<{ client: Client; temp_password?: string }>('/api/clients', {
+        site_id: clientModalSite,
+        name,
+        email,
+        password: clientForm.password,
+      });
+      // Client generated the password locally, so surface it in the banner
+      // rather than r.temp_password (which the server only echoes back on
+      // auto-generate).
+      setClientBanner({ email: r.client.email, temp_password: clientForm.password, mode: 'created' });
+      const targetSite = clientModalSite;
+      closeClientModal();
+      if (targetSite) fetchClientsForSite(targetSite);
+    } catch (e: any) { setClientFormError(e?.message ?? 'Failed to create client'); }
+    finally { setClientSaving(false); }
+  }
+
+  async function saveEditedClient() {
+    if (!editingClient) return;
+    const name  = clientForm.name.trim();
+    const email = clientForm.email.trim().toLowerCase();
+    const changes: Record<string, unknown> = {};
+    if (name  !== editingClient.name)  changes.name  = name;
+    if (email !== editingClient.email) changes.email = email;
+    if (Object.keys(changes).length === 0) { closeClientModal(); return; }
+    setClientSaving(true); setClientFormError('');
+    try {
+      await adminPatch(`/api/clients/${editingClient.id}`, changes);
+      const targetSite = clientModalSite;
+      closeClientModal();
+      if (targetSite) fetchClientsForSite(targetSite);
+    } catch (e: any) { setClientFormError(e?.message ?? 'Failed to save client'); }
+    finally { setClientSaving(false); }
+  }
+
+  async function resetClientPassword() {
+    if (!editingClient) return;
+    if (!confirm(`Reset password for ${editingClient.email}? Their current session ends immediately.`)) return;
+    setClientSaving(true); setClientFormError('');
+    try {
+      const r = await adminPost<{ temp_password: string; email: string }>(
+        `/api/clients/${editingClient.id}/reset-password`, {},
+      );
+      setClientBanner({ email: r.email, temp_password: r.temp_password, mode: 'reset' });
+      const targetSite = clientModalSite;
+      closeClientModal();
+      if (targetSite) fetchClientsForSite(targetSite);
+    } catch (e: any) { setClientFormError(e?.message ?? 'Failed to reset password'); }
+    finally { setClientSaving(false); }
+  }
+
+  async function toggleClientActive(client: Client, siteId: string) {
+    const msg = client.is_active
+      ? `Deactivate ${client.email}? Their session will end immediately.`
+      : `Reactivate ${client.email}? They'll need to log in again.`;
+    if (!confirm(msg)) return;
+    setClientToggling(client.id);
+    try {
+      await adminPatch(`/api/clients/${client.id}`, { is_active: !client.is_active });
+      await fetchClientsForSite(siteId);
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to update client');
+    } finally { setClientToggling(null); }
+  }
+
+  function copyCredentialsToClipboard(b: CredentialsBanner) {
+    const text = `Portal: https://netraops.com/portal\nEmail: ${b.email}\nPassword: ${b.temp_password}`;
+    navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
   }
 
   /* ── Modal handlers (unchanged from previous version) ────────────── */
@@ -515,6 +703,40 @@ export default function SitesPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
+      {/* Session C — credentials banner after CREATE or RESET-PASSWORD.
+          Doesn't auto-hide: admin must copy the temp password before
+          navigating away. */}
+      {clientBanner && (
+        <div className="bg-green-900/40 border border-green-500 text-green-300 text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-green-200 font-medium mb-1">
+              {clientBanner.mode === 'created' ? 'Client created.' : 'New temp password ready.'} Share these credentials:
+            </p>
+            <p className="text-sm leading-6">
+              Portal: <span className="font-mono text-green-100">https://netraops.com/portal</span><br />
+              Email: <span className="font-mono text-green-100">{clientBanner.email}</span><br />
+              Password: <span className="font-mono text-green-100 font-bold">{clientBanner.temp_password}</span>
+            </p>
+            <p className="text-green-400 text-xs mt-2">Client will be prompted to change the password on first login.</p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => copyCredentialsToClipboard(clientBanner)}
+              className="text-xs text-green-300 hover:text-green-100 tracking-widest border border-green-500/40 rounded px-3 py-1 hover:bg-green-500/10"
+            >
+              COPY
+            </button>
+            <button
+              onClick={() => setClientBanner(null)}
+              aria-label="Dismiss"
+              className="text-green-400 hover:text-green-200 text-lg leading-none"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Compact list */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         {loading && <p className="p-8 text-center text-gray-500">Loading…</p>}
@@ -706,6 +928,83 @@ export default function SitesPage() {
                         </>
                       )}
                     </div>
+                  </div>
+
+                  {/* Session C — CLIENTS AT THIS SITE. Lazy-fetched on
+                      expand. Empty state shows a single ADD button.
+                      Active clients render first, then inactive; within
+                      each group sort is alphabetical by email. */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-2">CLIENTS AT THIS SITE</p>
+                    {(() => {
+                      const list = clientsPerSite[site.id];
+                      if (list === undefined) {
+                        return <p className="text-gray-600 text-xs">Loading…</p>;
+                      }
+                      if (list.length === 0) {
+                        return (
+                          <div className="space-y-2">
+                            <p className="text-gray-600 text-xs">No clients configured for this site yet.</p>
+                            <button
+                              onClick={() => openAddClientModal(site.id)}
+                              disabled={isDeactivated}
+                              className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              + ADD CLIENT
+                            </button>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="space-y-2">
+                          {list.map((c) => (
+                            <div key={c.id}
+                              className={`bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 flex items-center gap-3 flex-wrap ${!c.is_active ? 'opacity-60' : ''}`}>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-gray-200 font-medium text-sm truncate">{c.email}</span>
+                                  {c.is_active ? (
+                                    <span className="text-[10px] tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-1.5 py-0.5 rounded">ACTIVE</span>
+                                  ) : (
+                                    <span className="text-[10px] tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-1.5 py-0.5 rounded">INACTIVE</span>
+                                  )}
+                                </div>
+                                <p className="text-gray-500 text-xs mt-0.5 truncate">
+                                  {c.name} <span className="text-gray-600">·</span> Last login: {relativeTime(c.last_login_at)}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                  onClick={() => openEditClientModal(site.id, c)}
+                                  disabled={isDeactivated}
+                                  className="text-xs text-gray-400 hover:text-amber-400 tracking-widest disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  EDIT
+                                </button>
+                                <button
+                                  onClick={() => toggleClientActive(c, site.id)}
+                                  disabled={clientToggling === c.id || isDeactivated}
+                                  className={`text-xs tracking-widest disabled:opacity-40 disabled:cursor-not-allowed ${
+                                    c.is_active
+                                      ? 'text-red-400 hover:text-red-300'
+                                      : 'text-green-400 hover:text-green-300'
+                                  }`}
+                                >
+                                  {clientToggling === c.id ? '…' : c.is_active ? 'DEACTIVATE' : 'REACTIVATE'}
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => openAddClientModal(site.id)}
+                            disabled={isDeactivated}
+                            className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            + ADD CLIENT
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* FIX 1: DEACTIVATE SITE — its own section, destructive red,
@@ -1262,6 +1561,110 @@ export default function SitesPage() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Session C — Add / Edit Client Modal ─────────────────────────── */}
+      {clientModalMode !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">
+                {clientModalMode === 'add' ? 'ADD CLIENT' : 'EDIT CLIENT'}
+              </h2>
+              <button onClick={closeClientModal} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            {clientFormError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{clientFormError}</div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">FULL NAME <span className="text-amber-400">*</span></label>
+                <input
+                  type="text" placeholder="e.g. Property Manager"
+                  value={clientForm.name}
+                  onChange={(e) => setClientForm((f) => ({ ...f, name: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">EMAIL <span className="text-amber-400">*</span></label>
+                <input
+                  type="email" placeholder="e.g. owner@property.com"
+                  value={clientForm.email}
+                  onChange={(e) => setClientForm((f) => ({ ...f, email: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+                {clientModalMode === 'edit' && editingClient && clientForm.email.trim().toLowerCase() !== editingClient.email && (
+                  <p className="text-amber-400/80 text-xs mt-1">
+                    Changing email will require the client to log in with the new address.
+                  </p>
+                )}
+              </div>
+
+              {clientModalMode === 'add' && (
+                <div>
+                  <label className="block text-gray-500 text-xs tracking-widest mb-1">TEMPORARY PASSWORD <span className="text-amber-400">*</span></label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={clientForm.password}
+                      className="flex-1 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm font-mono focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={regenerateTempPassword}
+                      title="Regenerate"
+                      aria-label="Regenerate password"
+                      className="bg-[#0B1526] border border-[#1A3050] text-gray-400 hover:border-amber-400 hover:text-amber-400 rounded-lg px-3 py-2 text-sm transition-colors"
+                    >
+                      🔄
+                    </button>
+                  </div>
+                  <p className="text-gray-500 text-xs mt-1">Client will be prompted to change on first login.</p>
+                </div>
+              )}
+
+              {clientModalMode === 'edit' && (
+                <div>
+                  <label className="block text-gray-500 text-xs tracking-widest mb-1">PASSWORD</label>
+                  <button
+                    type="button"
+                    onClick={resetClientPassword}
+                    disabled={clientSaving}
+                    className="text-xs text-cyan-400 tracking-widest border border-cyan-500/40 rounded px-3 py-1.5 hover:bg-cyan-500/10 hover:border-cyan-500 transition-colors disabled:opacity-40"
+                  >
+                    RESET PASSWORD
+                  </button>
+                  <p className="text-gray-500 text-xs mt-1">Generates a new temp password and ends the client's current session.</p>
+                </div>
+              )}
+            </div>
+
+            <p className="text-gray-500 text-xs mt-4 mb-5 leading-relaxed">
+              Portal URL: <span className="font-mono text-gray-300">https://netraops.com/portal</span><br />
+              Client uses their email address to log in.
+            </p>
+
+            <div className="flex gap-3">
+              <button
+                onClick={closeClientModal}
+                className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={clientModalMode === 'add' ? saveNewClient : saveEditedClient}
+                disabled={clientSaving}
+                className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors"
+              >
+                {clientSaving ? 'SAVING…' : clientModalMode === 'add' ? 'ADD CLIENT' : 'SAVE'}
+              </button>
+            </div>
           </div>
         </div>
       )}
