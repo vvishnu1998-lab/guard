@@ -151,9 +151,17 @@ export default function HomeScreen() {
   // stays fresh without the user needing to pull-to-refresh. Push
   // handler in _layout.tsx bumps the unread badge; here we refresh the
   // visible card independently.
+  //
+  // Walk-test 2026-07-10 BUG H tail — same trigger also runs the shift-
+  // store's server reconciliation so the intra-app "user was on alerts
+  // tab when the handoff completed and switched to home" path picks up
+  // the drift without needing a background trip. The _layout.tsx
+  // AppState listener covers the background-then-icon-open case; this
+  // covers the tab-switch case.
   useFocusEffect(
     useCallback(() => {
       fetchOutboundHandoff();
+      useShiftStore.getState().refreshFromServer();
       const id = setInterval(fetchOutboundHandoff, 30_000);
       return () => clearInterval(id);
     }, []),

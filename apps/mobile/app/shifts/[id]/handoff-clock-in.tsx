@@ -27,7 +27,7 @@
  * On any precondition failure we bail with a clear error and the guard
  * returns to the shift-detail page.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
   ScrollView,
@@ -157,9 +157,68 @@ export default function HandoffClockInWizard() {
     return () => { cancelled = true; };
   }, [shiftId, guardId]);
 
-  // ── Step 1: GPS check ────────────────────────────────────────────────────
-  const checkGeofence = useCallback(async () => {
+  // ── Step 1: GPS check (live watcher) ────────────────────────────────────
+  // Walk-test 2026-07-10 BUG J — same fix applied symmetrically to
+  // clock-in/step1.tsx. iOS's Balanced accuracy returns whatever
+  // CoreLocation last cached; a one-shot getCurrentPositionAsync after
+  // the guard walked onto site returned the same OFFSITE coords from
+  // when they first opened the wizard. Force-quit was the only workaround.
+  // A running watcher keeps CLLocationManager warm so the boundary
+  // crossing auto-flips gpsState to 'inside' without a RETRY tap.
+  const watcherRef      = useRef<Location.LocationSubscription | null>(null);
+  const lastInsideRef   = useRef<boolean | null>(null);
+
+  async function stopWatcher() {
+    watcherRef.current?.remove();
+    watcherRef.current = null;
+  }
+
+  const evaluatePoint = useCallback(
+    (point: { lat: number; lng: number }, accuracy: number) => {
+      const geofence = shift?.geofence;
+      if (!geofence) return;
+      setGpsCoords(point);
+      const distance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
+      if (distance > geofence.radius_meters * 1.5) {
+        if (lastInsideRef.current !== false) {
+          Sentry.addBreadcrumb({
+            category: 'handoff_clock_in',
+            message: 'step gps: watcher emitted → outside (radius pre-check)',
+            level: 'info',
+            data: { distance_m: Math.round(distance), radius_m: geofence.radius_meters },
+          });
+        }
+        lastInsideRef.current = false;
+        setGpsState('outside');
+        return;
+      }
+      const inside = isPointInPolygon(point, geofence.polygon_coordinates);
+      if (inside && lastInsideRef.current !== true) {
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'step gps: watcher emitted → inside',
+          level: 'info',
+          data: { distance_m: Math.round(distance), accuracy_m: Math.round(accuracy) },
+        });
+        setVerifiedCoords({ lat: point.lat, lng: point.lng, accuracy });
+      } else if (!inside && lastInsideRef.current !== false) {
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'step gps: watcher emitted → outside (polygon)',
+          level: 'info',
+          data: { distance_m: Math.round(distance) },
+        });
+      }
+      lastInsideRef.current = inside;
+      setGpsState(inside ? 'inside' : 'outside');
+    },
+    [shift?.geofence],
+  );
+
+  const startWatcher = useCallback(async () => {
     if (!shift?.geofence) return;
+    await stopWatcher();
+    lastInsideRef.current = null;
     setGpsState('checking');
     try {
       const perm = await Location.requestForegroundPermissionsAsync();
@@ -172,50 +231,48 @@ export default function HandoffClockInWizard() {
         });
         return;
       }
-      // Walk-test 2026-07-09 BUG F — same fix as regular clock-in step1:
-      // Balanced accuracy lands 1-3s instead of 5-15s and is adequate for
-      // the geofence check.
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const point    = { lat: loc.coords.latitude, lng: loc.coords.longitude };
-      const accuracy = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
-      setGpsCoords(point);
 
-      // Radius pre-check (Haversine) then polygon check (ray casting).
-      // Same policy as regular clock-in — allow if inside polygon OR
-      // within radius+accuracy budget.
-      const distance = haversineDistance(point.lat, point.lng, shift.geofence.center_lat, shift.geofence.center_lng);
-      if (distance > shift.geofence.radius_meters * 1.5) {
-        setGpsState('outside');
-        Sentry.addBreadcrumb({
-          category: 'handoff_clock_in',
-          message: 'step gps: outside (radius pre-check)',
-          level: 'warning',
-          data: { distance_m: Math.round(distance), radius_m: shift.geofence.radius_meters },
-        });
-        return;
-      }
-      const inside = isPointInPolygon(point, shift.geofence.polygon_coordinates);
-      Sentry.addBreadcrumb({
-        category: 'handoff_clock_in',
-        message: `step gps: boundary check → ${inside ? 'inside' : 'outside'}`,
-        level: inside ? 'info' : 'warning',
-        data: { accuracy_m: Math.round(accuracy) },
-      });
-      if (inside) {
-        setVerifiedCoords({ lat: point.lat, lng: point.lng, accuracy });
-        setGpsState('inside');
-      } else {
-        setGpsState('outside');
-      }
+      // Fast first fix — unblocks the UI while the watcher warms up.
+      // Silent failure fall-through; watcher is source of truth.
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+        .then((loc) => {
+          const acc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
+          Sentry.addBreadcrumb({
+            category: 'handoff_clock_in',
+            message: 'step gps: first fix acquired',
+            level: 'info',
+            data: { accuracy_m: Math.round(acc) },
+          });
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+        })
+        .catch(() => {});
+
+      // Continuous watcher — 5m or 3s Balanced, same knobs as regular
+      // clock-in step1 so both flows behave identically when the guard
+      // walks onto site mid-wizard.
+      watcherRef.current = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.Balanced, distanceInterval: 5, timeInterval: 3000 },
+        (loc) => {
+          const acc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+        },
+      );
     } catch (err) {
-      Sentry.captureException(err, { extra: { where: 'handoff-clock-in.checkGeofence' } });
+      Sentry.captureException(err, { extra: { where: 'handoff-clock-in.startWatcher' } });
       setGpsState('error');
     }
-  }, [shift?.geofence]);
+  }, [shift?.geofence, evaluatePoint]);
 
+  // Start the watcher when the guard reaches the GPS step; teardown on
+  // step transition (selfie/submit/error) AND on component unmount. If a
+  // submit-time 422 bounces the guard back to gps, this same effect
+  // re-starts the watcher.
   useEffect(() => {
-    if (step === 'gps') checkGeofence();
-  }, [step, checkGeofence]);
+    if (step === 'gps') {
+      startWatcher();
+      return () => { stopWatcher(); };
+    }
+  }, [step, startWatcher]);
 
   // ── Step 2: Selfie capture (delegated to SelfieCapture) ───────────────
   // The camera + preview flow is provided by components/SelfieCapture
@@ -412,9 +469,15 @@ export default function HandoffClockInWizard() {
             style={[styles.primaryBtn, gpsState !== 'inside' && styles.disabled]}
             disabled={gpsState !== 'inside'}
             onPress={() => {
+              // Explicit watcher stop before advancing the wizard. The
+              // step-driven useEffect cleanup will also fire when step
+              // transitions off 'gps', but stopping here guarantees no
+              // stray callback lands between setStep('selfie') and the
+              // next render's teardown.
+              stopWatcher();
               Sentry.addBreadcrumb({
                 category: 'handoff_clock_in',
-                message: 'gps → selfie',
+                message: 'gps → selfie (watcher stopped)',
                 level: 'info',
               });
               setStep('selfie');
@@ -423,7 +486,7 @@ export default function HandoffClockInWizard() {
             <Text style={styles.primaryBtnText}>NEXT: TAKE SELFIE</Text>
           </TouchableOpacity>
           {(gpsState === 'outside' || gpsState === 'error' || gpsState === 'perm_denied') && (
-            <TouchableOpacity style={styles.retryLink} onPress={checkGeofence}>
+            <TouchableOpacity style={styles.retryLink} onPress={startWatcher}>
               <Text style={styles.retryText}>Retry GPS check</Text>
             </TouchableOpacity>
           )}

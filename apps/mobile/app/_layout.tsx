@@ -11,7 +11,8 @@
  *
  * Guards stay logged in until they explicitly log out (no auto-lock).
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { AppState, AppStateStatus } from 'react-native';
 import { Stack, router, useSegments } from 'expo-router';
 import { useFonts, BarlowCondensed_500Medium, BarlowCondensed_700Bold } from '@expo-google-fonts/barlow-condensed';
 import * as Notifications from 'expo-notifications';
@@ -177,6 +178,53 @@ export default function RootLayout() {
     });
     return () => sub.remove();
   }, [bumpChat, bumpNotifications, refreshUnread]);
+
+  // Walk-test 2026-07-10 BUG H tail — foreground reconciliation on
+  // AppState 'active' transition. Covers the drift path the Build-30 fix
+  // missed: handoff_complete push arrived while backgrounded → banner
+  // dismissed or ignored → user opens app via icon → neither the receive
+  // listener nor the tap listener fires → cached activeSession stays true
+  // → home shows SHIFT ACTIVE + CLOCK OUT for a session that no longer
+  // exists.
+  //
+  // useRef instead of state so mutating the last-fire timestamp doesn't
+  // trigger a re-render. AppState.currentState starts as 'active' on
+  // cold start; the first transition into 'active' is guarded on
+  // prevAppState !== 'active' so we don't false-fire during initial
+  // launch (loadSession + home's mount effect already fetch state at
+  // T=0). 2s throttle absorbs iOS Control Center swipes / Notification
+  // Center swipes that fire background↔active transitions on every pane
+  // change — without it we'd hammer /shifts/active-session and
+  // /shifts/inbound-swap-requests on trivial gestures.
+  const prevAppState = useRef<AppStateStatus>(AppState.currentState);
+  const lastRefreshAt = useRef<number>(0);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      const from = prevAppState.current;
+      prevAppState.current = next;
+      if (next !== 'active' || from === 'active') return;
+      if (useAuthStore.getState().status !== 'authenticated') return;
+      const now = Date.now();
+      if (now - lastRefreshAt.current < 2000) {
+        Sentry.addBreadcrumb({
+          category: 'session_refresh',
+          message: 'AppState active — throttled (<2s since last)',
+          level: 'info',
+          data: { from, gap_ms: now - lastRefreshAt.current },
+        });
+        return;
+      }
+      lastRefreshAt.current = now;
+      Sentry.addBreadcrumb({
+        category: 'session_refresh',
+        message: 'AppState active — refetching',
+        level: 'info',
+        data: { from },
+      });
+      useShiftStore.getState().refreshFromServer();
+    });
+    return () => sub.remove();
+  }, []);
 
   // Background geofence monitoring — start when a shift goes active with a
   // known geofence, stop on clock-out. The background task reads the
