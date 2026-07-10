@@ -5,10 +5,19 @@
  *   - In-app tap inside the Notifications tab list
  */
 import { router } from 'expo-router';
+import { useShiftStore } from '../store/shiftStore';
 
 type NotificationData = Record<string, any> | undefined;
 
 export function navigateForNotification(type: string | undefined, data: NotificationData): void {
+  // Walk-test 2026-07-09 BUG H — tap-from-background handoff_complete
+  // needs to clear the cached activeSession too. The foreground handler
+  // in _layout.tsx already does this on receive; this covers the case
+  // where the guard's device delivered the push in the background and
+  // they tapped the notification.
+  if (type === 'handoff_complete') {
+    useShiftStore.getState().clearSession();
+  }
   switch (type) {
     case 'ping_reminder':
       router.push('/ping');                  // always photo+GPS capture

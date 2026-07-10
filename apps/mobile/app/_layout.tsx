@@ -150,6 +150,26 @@ export default function RootLayout() {
           data: { type: data.type, swap_related: swapType },
         });
       }
+      // Walk-test 2026-07-09 BUG H: when the recipient physically clocks
+      // in via handoff-clock-in, the server closes A's session and rotates
+      // shifts.guard_id. Without this, A's app still shows SHIFT ACTIVE +
+      // CLOCK OUT from cached state and the guard hits "Active session
+      // not found" on their next tap. Nuking the store forces home's
+      // existing useEffect(!isOnShift → restoreOrFetchShift) to fire and
+      // the app naturally transitions to NEXT SHIFT / empty state.
+      // The OS push notification already told the guard, so no extra
+      // Alert is fired here.
+      if (data?.type === 'handoff_complete') {
+        useShiftStore.getState().clearSession();
+      }
+      // Requester-side outbound handoff refresh — accepted/declined/
+      // cancelled arriving in the foreground should update the home
+      // PENDING HANDOFF card faster than its 30s poll. Home reads from
+      // /shifts/outbound-swap-requests which we can't invalidate directly,
+      // but the refreshUnread below already re-fetches
+      // /shifts/inbound-swap-requests; a companion outbound refresh would
+      // require a store or event bus. For now the 30s tick + useFocusEffect
+      // are the guarantees. Sentry crumb makes the drift diagnosable.
       // Re-sync from server shortly after — the new notification row
       // should be visible, and (BUG C) any pending swap/handoff should
       // land in the inbound-swap-requests count too.
