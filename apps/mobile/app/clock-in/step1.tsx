@@ -45,7 +45,12 @@ export default function ClockInStep1() {
         return;
       }
 
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      // Walk-test 2026-07-09 BUG F: High accuracy took 5-15s (sometimes
+      // 30s+ on cold start), making GPS Verification feel sluggish.
+      // Balanced usually lands in 1-3s and is still well within the meter
+      // budget for a 30m geofence with the server's radius+accuracy+50m
+      // safety expansion.
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       const point = { lat: loc.coords.latitude, lng: loc.coords.longitude };
       // expo-location may return null accuracy on iOS simulator / coarse-grant devices.
       // Default to a conservative 30m so the server-side check still has SOME tolerance.

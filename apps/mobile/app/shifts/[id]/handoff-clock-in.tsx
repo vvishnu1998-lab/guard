@@ -184,7 +184,10 @@ export default function HandoffClockInWizard() {
         });
         return;
       }
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      // Walk-test 2026-07-09 BUG F — same fix as regular clock-in step1:
+      // Balanced accuracy lands 1-3s instead of 5-15s and is adequate for
+      // the geofence check.
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       const point    = { lat: loc.coords.latitude, lng: loc.coords.longitude };
       const accuracy = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
       setGpsCoords(point);
@@ -539,10 +542,16 @@ export default function HandoffClockInWizard() {
           <Text style={styles.stepLabel}>PHOTO PREVIEW</Text>
           <Image source={{ uri: selfie.uri }} style={styles.previewImage} resizeMode="cover" />
           <View style={styles.previewActions}>
-            <TouchableOpacity style={styles.secondaryBtn} onPress={() => { setSelfie(null); setStep('selfie'); }}>
+            {/* BUG G: base primaryBtn/secondaryBtn use alignSelf:'stretch'
+                (column-friendly); inline flex:1 gives them 50/50 in this
+                horizontal row. */}
+            <TouchableOpacity
+              style={[styles.secondaryBtn, { flex: 1 }]}
+              onPress={() => { setSelfie(null); setStep('selfie'); }}
+            >
               <Text style={styles.secondaryBtnText}>RETAKE</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.primaryBtn} onPress={startSubmit}>
+            <TouchableOpacity style={[styles.primaryBtn, { flex: 1 }]} onPress={startSubmit}>
               <Text style={styles.primaryBtnText}>COMPLETE HANDOFF</Text>
             </TouchableOpacity>
           </View>
@@ -657,12 +666,20 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.md,
   },
 
+  // Walk-test 2026-07-09 BUG G: primaryBtn used to carry `flex: 1` for the
+  // preview row's 50/50 layout, but the same style was applied on the step
+  // 1 confirm, camera-permission gate, and submit-error screens (all
+  // column layouts). `flex: 1` in a column stretches the button vertically
+  // — combined with a sibling <View flex:1 /> spacer on step 1, the button
+  // ate ~50% of the screen. Fix: base style stretches horizontally only
+  // (alignSelf: 'stretch'); the preview row applies `flex: 1` inline so
+  // its two buttons split 50/50.
   primaryBtn: {
     backgroundColor: Colors.warning,
     borderRadius: Radius.md,
     paddingVertical: Spacing.md,
     alignItems: 'center',
-    flex: 1,
+    alignSelf: 'stretch',
   },
   primaryBtnText: { fontFamily: Fonts.heading, color: '#070D1A', fontSize: 14, letterSpacing: 2 },
   secondaryBtn: {
@@ -670,7 +687,7 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: Colors.muted,
     paddingVertical: Spacing.md,
     alignItems: 'center',
-    flex: 1,
+    alignSelf: 'stretch',
   },
   secondaryBtnText: { fontFamily: Fonts.heading, color: Colors.textPrimary, fontSize: 14, letterSpacing: 2 },
   retryLink: { alignSelf: 'center', paddingVertical: Spacing.sm },

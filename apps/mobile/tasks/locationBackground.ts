@@ -91,8 +91,13 @@ export async function startBackgroundLocation() {
 
   await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
     accuracy: Location.Accuracy.Balanced,
-    timeInterval: 150_000,                       // 2.5 minutes
-    distanceInterval: 50,                        // or every 50m
+    // Walk-test 2026-07-09 BUG E: guards walked off-post at 10 Miller Place
+    // and the breach push arrived ~13 min later. Server side is instant on
+    // /locations/violation; the delay was entirely this cadence. 60s + 20m
+    // roughly halves the worst-case detection latency at ~2× the battery
+    // cost, which is acceptable for a safety-critical push.
+    timeInterval: 60_000,                        // 60 seconds
+    distanceInterval: 20,                        // or every 20m
     foregroundService: {
       notificationTitle: 'NetraOps — Shift active',
       notificationBody:  'Monitoring location for geofence compliance.',
