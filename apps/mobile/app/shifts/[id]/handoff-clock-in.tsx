@@ -11,9 +11,8 @@
  * Wizard shape mirrors regular clock-in but is shorter:
  *   step 1 — GPS Verification (same isPointInPolygon + haversine logic
  *            as clock-in step1, feeds off Bug 1's hydrated geofence)
- *   step 2 — Selfie capture (inline copy of step2.tsx's CameraView
- *            pattern; a follow-up hygiene commit will extract a shared
- *            SelfieCapture component and thin both files)
+ *   step 2 — Selfie capture via components/SelfieCapture (extracted
+ *            2026-07-10; regular clock-in step2 uses the same component)
  *   step 3 — Submit: uploadToS3 → POST /handoff-clock-in → POST
  *            /locations/clock-in-verification. Idempotency key generated
  *            once per mount so a network-blip retry replays the same
@@ -28,25 +27,24 @@
  * On any precondition failure we bail with a clear error and the guard
  * returns to the shift-detail page.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
-  Image, ScrollView,
+  ScrollView,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import * as ImageManipulator from 'expo-image-manipulator';
 import * as Sentry from '@sentry/react-native';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { apiClient } from '../../../lib/apiClient';
 import { uploadToS3 } from '../../../lib/uploadToS3';
 import { uuidv4 } from '../../../lib/uuid';
 import { useAuthStore } from '../../../store/authStore';
 import { isPointInPolygon, haversineDistance } from '../../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
+import SelfieCapture, { SelfieProof } from '../../../components/SelfieCapture';
 
-type Step = 'loading' | 'gps' | 'selfie' | 'preview' | 'submit' | 'error';
+type Step = 'loading' | 'gps' | 'selfie' | 'submit' | 'error';
 
 interface Geofence {
   polygon_coordinates: { lat: number; lng: number }[];
@@ -74,13 +72,6 @@ interface ShiftDetail {
   swap_history:    SwapHistoryRow[];
 }
 
-interface Selfie {
-  uri:       string;
-  latitude:  number;
-  longitude: number;
-  takenAt:   string;
-}
-
 const SUBMIT_STAGES = ['Uploading selfie…', 'Handing off…', 'Saving verification…'];
 
 export default function HandoffClockInWizard() {
@@ -97,12 +88,9 @@ export default function HandoffClockInWizard() {
   const [gpsCoords,      setGpsCoords]      = useState<{ lat: number; lng: number } | null>(null);
   const [gpsState,       setGpsState]       = useState<'checking' | 'inside' | 'outside' | 'perm_denied' | 'error'>('checking');
 
-  // Selfie state
-  const [selfie,      setSelfie]      = useState<Selfie | null>(null);
-  const [cameraReady, setCameraReady] = useState(false);
-  const [capturing,   setCapturing]   = useState(false);
-  const cameraRef = useRef<CameraView>(null);
-  const [cameraPerm, requestCameraPerm] = useCameraPermissions();
+  // Selfie state — SelfieCapture manages the camera + preview internally;
+  // this holds the confirmed proof for the submit step.
+  const [selfie, setSelfie] = useState<SelfieProof | null>(null);
 
   // Submit state
   const [submitStage, setSubmitStage] = useState(0);
@@ -229,63 +217,21 @@ export default function HandoffClockInWizard() {
     if (step === 'gps') checkGeofence();
   }, [step, checkGeofence]);
 
-  // ── Step 2: Selfie capture ───────────────────────────────────────────────
-  // Android sometimes never fires onCameraReady — force-enable after 3s.
-  useEffect(() => {
-    if (step !== 'selfie') return;
-    Sentry.addBreadcrumb({
-      category: 'handoff_clock_in',
-      message: 'entered step selfie',
-      level: 'info',
-    });
-    const t = setTimeout(() => setCameraReady(true), 3000);
-    return () => clearTimeout(t);
-  }, [step]);
-
-  async function capture() {
-    if (!cameraRef.current || !cameraReady || capturing) return;
-    setCapturing(true);
-    try {
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
-      if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
-      let compressed: { uri: string } = { uri: photo.uri };
-      try {
-        const r = await ImageManipulator.manipulateAsync(
-          photo.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
-        );
-        if (r?.uri) compressed = r;
-      } catch { /* fall back to raw photo */ }
-
-      // GPS tag: cached last-known first, then live with a 3s cap.
-      const loc = await Location.getLastKnownPositionAsync() ?? await Promise.race([
-        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-        new Promise<null>((r) => setTimeout(() => r(null), 3000)),
-      ]);
-      setSelfie({
-        uri:       compressed.uri,
-        latitude:  (loc as any)?.coords?.latitude  ?? 0,
-        longitude: (loc as any)?.coords?.longitude ?? 0,
-        takenAt:   new Date().toISOString(),
-      });
-      setStep('preview');
-      Sentry.addBreadcrumb({
-        category: 'handoff_clock_in',
-        message: 'step selfie: captured → preview',
-        level: 'info',
-      });
-    } catch (err: any) {
-      Sentry.captureException(err, { extra: { where: 'handoff-clock-in.capture' } });
-      Alert.alert('Capture Failed', err?.message ?? 'Could not take photo. Try again.');
-    } finally {
-      setCapturing(false);
-    }
+  // ── Step 2: Selfie capture (delegated to SelfieCapture) ───────────────
+  // The camera + preview flow is provided by components/SelfieCapture
+  // (shared with regular clock-in step2). When it fires onSelfieCaptured
+  // we record the proof and jump straight into the submit txn.
+  function handleSelfieCaptured(proof: SelfieProof) {
+    setSelfie(proof);
+    // setSelfie hasn't landed on state by the time we call startSubmit,
+    // so pass the proof through directly rather than reading it back.
+    startSubmit(proof);
   }
 
   // ── Step 3: Submit ───────────────────────────────────────────────────────
-  async function startSubmit() {
-    if (!verifiedCoords || !selfie || !shift) return;
+  async function startSubmit(proofOverride?: SelfieProof) {
+    const proof = proofOverride ?? selfie;
+    if (!verifiedCoords || !proof || !shift) return;
     setStep('submit');
     setSubmitError(null);
     setSubmitStage(0);
@@ -299,7 +245,7 @@ export default function HandoffClockInWizard() {
       // 1) Upload selfie
       let selfieUrl = 'pending';
       try {
-        const up = await uploadToS3(selfie.uri, 'clock_in');
+        const up = await uploadToS3(proof.uri, 'clock_in');
         selfieUrl = up.public_url;
         Sentry.addBreadcrumb({
           category: 'handoff_clock_in',
@@ -487,75 +433,21 @@ export default function HandoffClockInWizard() {
   }
 
   if (step === 'selfie') {
-    if (!cameraPerm) return null;
-    if (!cameraPerm.granted) {
-      return (
-        <View style={styles.container}>
-          {header}
-          <View style={styles.center}>
-            <Text style={styles.errorText}>Camera access required</Text>
-            <TouchableOpacity style={styles.primaryBtn} onPress={requestCameraPerm}>
-              <Text style={styles.primaryBtnText}>GRANT CAMERA ACCESS</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      );
-    }
+    // SelfieCapture is a full-screen component; the wizard header renders
+    // above it. Preview + retake handled internally by the component;
+    // primary button "COMPLETE HANDOFF" advances directly into submit via
+    // handleSelfieCaptured (skipping the separate 'preview' step the
+    // wizard used to own).
     return (
       <View style={styles.container}>
         {header}
-        <View style={styles.body}>
-          <Text style={styles.stepLabel}>STEP 2 OF 3 · SELFIE</Text>
-          <Text style={styles.stepTitle}>Take a clear photo of yourself</Text>
-
-          <View style={styles.cameraBox}>
-            <CameraView
-              ref={cameraRef}
-              style={styles.camera}
-              facing={'front' as CameraType}
-              onCameraReady={() => setCameraReady(true)}
-            />
-            {!cameraReady && (
-              <View style={styles.loadingOverlay}>
-                <Text style={styles.loadingText}>Initialising camera…</Text>
-              </View>
-            )}
-          </View>
-
-          <TouchableOpacity
-            style={[styles.shutter, (!cameraReady || capturing) && styles.disabled]}
-            onPress={capture}
-            disabled={!cameraReady || capturing}
-          >
-            <View style={[styles.shutterInner, capturing && styles.shutterCapturing]} />
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
-  if (step === 'preview' && selfie) {
-    return (
-      <View style={styles.container}>
-        {header}
-        <View style={styles.body}>
-          <Text style={styles.stepLabel}>PHOTO PREVIEW</Text>
-          <Image source={{ uri: selfie.uri }} style={styles.previewImage} resizeMode="cover" />
-          <View style={styles.previewActions}>
-            {/* BUG G: base primaryBtn/secondaryBtn use alignSelf:'stretch'
-                (column-friendly); inline flex:1 gives them 50/50 in this
-                horizontal row. */}
-            <TouchableOpacity
-              style={[styles.secondaryBtn, { flex: 1 }]}
-              onPress={() => { setSelfie(null); setStep('selfie'); }}
-            >
-              <Text style={styles.secondaryBtnText}>RETAKE</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.primaryBtn, { flex: 1 }]} onPress={startSubmit}>
-              <Text style={styles.primaryBtnText}>COMPLETE HANDOFF</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        <SelfieCapture
+          uploadContext="handoff_clock_in"
+          stepLabel="STEP 2 OF 3 · SELFIE"
+          instruction="Take a clear photo of yourself"
+          primaryButtonLabel="COMPLETE HANDOFF"
+          onSelfieCaptured={handleSelfieCaptured}
+        />
       </View>
     );
   }
@@ -569,7 +461,7 @@ export default function HandoffClockInWizard() {
         {submitError ? (
           <ScrollView contentContainerStyle={styles.center}>
             <Text style={styles.errorText}>{submitError}</Text>
-            <TouchableOpacity style={styles.primaryBtn} onPress={startSubmit}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => startSubmit()}>
               <Text style={styles.primaryBtnText}>RETRY</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.secondaryBtn} onPress={goBack}>
@@ -638,33 +530,7 @@ const styles = StyleSheet.create({
   infoValue: { color: Colors.textPrimary, fontSize: 13, fontFamily: 'monospace' },
   hint: { color: Colors.muted, fontSize: 13, textAlign: 'center', marginBottom: Spacing.sm },
 
-  cameraBox: { flex: 1, width: '100%', overflow: 'hidden', borderRadius: Radius.md, marginBottom: Spacing.md },
-  camera: { flex: 1 },
-  loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: Colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingText: { color: Colors.muted, fontSize: 14 },
-
-  shutter: {
-    width: 72, height: 72, borderRadius: 36,
-    borderWidth: 4, borderColor: Colors.warning,
-    alignItems: 'center', justifyContent: 'center',
-    alignSelf: 'center',
-    marginBottom: Spacing.lg,
-  },
-  shutterInner:     { width: 56, height: 56, borderRadius: 28, backgroundColor: Colors.warning },
-  shutterCapturing: { backgroundColor: Colors.action },
-  disabled:         { opacity: 0.35 },
-
-  previewImage: { width: '100%', flex: 1, borderRadius: Radius.md, marginBottom: Spacing.md },
-  previewActions: {
-    flexDirection: 'row',
-    gap: Spacing.md,
-    marginBottom: Spacing.md,
-  },
+  disabled: { opacity: 0.35 },
 
   // Walk-test 2026-07-09 BUG G: primaryBtn used to carry `flex: 1` for the
   // preview row's 50/50 layout, but the same style was applied on the step
