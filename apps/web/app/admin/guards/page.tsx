@@ -1,9 +1,12 @@
 'use client';
 /**
  * Admin — Guards Management (/admin/guards)
- * List guards, add new guard (with temp password), assign to site, deactivate, reactivate.
+ * Alphabetical list of compact guard rows with search + status chips.
+ * Rows are uniform-height; site assignments hide behind an "N sites ▾"
+ * pill that expands inline. Add / assign / deactivate / per-assignment
+ * edit-end-remove flows preserved from the previous table layout.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { adminGet, adminPost, adminPatch, adminFetch, adminDelete } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 
@@ -17,18 +20,21 @@ interface Assignment {
 }
 
 interface Guard {
-  id:           string;
-  name:         string;
-  email:        string;
-  badge_number: string;
-  is_active:    boolean;
-  created_at:   string;
-  assignments:  Assignment[] | null;
+  id:            string;
+  name:          string;
+  email:         string;
+  badge_number:  string;
+  is_active:     boolean;
+  created_at:    string;
+  company_name?: string;               // present when Vishnu view spans multiple companies
+  assignments:   Assignment[] | null;
 }
 
 interface Site { id: string; name: string; }
 
 interface ImpactReport { future_shift_count: number; sample_dates: string[] }
+
+type StatusFilter = 'active' | 'inactive' | 'all';
 
 // Pacific calendar date as YYYY-MM-DD. Used for the date-input min and for
 // the End-now button payload so both UI and server agree on "today."
@@ -44,6 +50,34 @@ function fmtDateRange(from: string, until: string | null): string {
   return until ? `From ${f} to ${String(until).slice(0, 10)}` : `From ${f} (open)`;
 }
 
+// Avatar: deterministic color from a stable string hash, so a given guard
+// keeps the same swatch across reloads.
+const AVATAR_COLORS = [
+  'bg-amber-500', 'bg-cyan-500', 'bg-emerald-500', 'bg-fuchsia-500',
+  'bg-indigo-500', 'bg-rose-500', 'bg-teal-500', 'bg-violet-500',
+];
+function avatarColor(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) hash = ((hash * 31) + seed.charCodeAt(i)) | 0;
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  const first = parts[0]?.[0] ?? '';
+  const last  = parts.length > 1 ? parts[parts.length - 1][0] : '';
+  return ((first + last) || '?').toUpperCase();
+}
+
+// Case-insensitive match across name / email / badge / any assigned site name.
+function matches(g: Guard, q: string): boolean {
+  if (!q) return true;
+  const s = q.toLowerCase();
+  if (g.name.toLowerCase().includes(s)) return true;
+  if (g.email.toLowerCase().includes(s)) return true;
+  if (g.badge_number.toLowerCase().includes(s)) return true;
+  return !!g.assignments?.some((a) => a.site_name.toLowerCase().includes(s));
+}
+
 export default function GuardsPage() {
   const [guards,     setGuards]     = useState<Guard[]>([]);
   const [sites,      setSites]      = useState<Site[]>([]);
@@ -55,7 +89,11 @@ export default function GuardsPage() {
   const [assignForm, setAssignForm] = useState({ site_id: '', assigned_from: '', assigned_until: '' });
   const [saving,     setSaving]     = useState(false);
   const [formError,  setFormError]  = useState('');
-  const [showInactive, setShowInactive] = useState(false);
+
+  // ── Redesign state (Session 2) ─────────────────────────────────────────
+  const [search,       setSearch]       = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
+  const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
 
   // ── Phase B modal state ────────────────────────────────────────────────
   // editAssignment: target row + the guard it belongs to + the in-flight
@@ -149,9 +187,6 @@ export default function GuardsPage() {
 
   async function saveEdit() {
     if (!editAssignment) return;
-    // Empty input means "open-ended" → send null. Otherwise send the
-    // YYYY-MM-DD string and let the server validate it against the
-    // assignment's start + Pacific today.
     const payload = { assigned_until: editUntil ? editUntil : null };
     setSaving(true); setEditError('');
     try {
@@ -184,7 +219,33 @@ export default function GuardsPage() {
     finally { setSaving(false); }
   }
 
-  const visible = guards.filter((g) => showInactive || g.is_active);
+  // ── Derived: cross-company detection + filter/sort pipeline ────────────
+  // showCompanyLabel: true when the response spans >1 company (Vishnu view).
+  // In that case each row shows the company name inline under email. In
+  // single-tenant view the field is constant and there's nothing to say.
+  const showCompanyLabel = useMemo(() => {
+    const set = new Set<string>();
+    for (const g of guards) if (g.company_name) set.add(g.company_name);
+    return set.size > 1;
+  }, [guards]);
+
+  const visible = useMemo(() => {
+    const q = search.trim();
+    return guards
+      .filter((g) => statusFilter === 'all' ? true : statusFilter === 'active' ? g.is_active : !g.is_active)
+      .filter((g) => matches(g, q))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  }, [guards, search, statusFilter]);
+
+  function toggleExpand(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  const STATUS_CHIPS: StatusFilter[] = ['active', 'inactive', 'all'];
 
   return (
     <div className="space-y-6">
@@ -192,13 +253,29 @@ export default function GuardsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl md:text-3xl font-bold tracking-widest text-amber-400">GUARDS</h1>
         <div className="flex flex-wrap gap-3 items-center">
-          <label className="flex items-center gap-2 text-gray-400 text-xs tracking-widest cursor-pointer select-none min-h-[44px] px-2">
-            <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} className="accent-amber-400 w-4 h-4" />
-            SHOW INACTIVE
-          </label>
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search guards or sites…"
+            className="bg-[#0F1E35] border border-[#1A3050] text-gray-200 text-sm rounded-lg px-3 py-2 min-w-[220px] focus:outline-none focus:border-amber-400"
+          />
+          <div className="flex items-center gap-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-1">
+            {STATUS_CHIPS.map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s)}
+                className={`px-3 py-1.5 rounded text-xs tracking-widest transition-colors ${
+                  statusFilter === s ? 'bg-amber-500 text-black font-bold' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {s.toUpperCase()}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() => { setShowAdd(true); setFormError(''); }}
-            className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-3 rounded-lg hover:bg-amber-300 transition-colors min-h-[44px]"
+            className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors min-h-[40px]"
           >
             + ADD GUARD
           </button>
@@ -207,146 +284,195 @@ export default function GuardsPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      {/* Desktop table */}
+      {/* Desktop list */}
       <div className="hidden md:block bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
-              <th className="text-left p-4">GUARD</th>
-              <th className="text-left p-4">BADGE</th>
-              <th className="text-left p-4">ASSIGNED SITES</th>
-              <th className="text-center p-4">STATUS</th>
-              <th className="text-right p-4">ACTIONS</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && <tr><td colSpan={5} className="text-center text-gray-500 py-10">Loading…</td></tr>}
-            {!loading && visible.length === 0 && <tr><td colSpan={5} className="text-center text-gray-500 py-10">No guards {showInactive ? '' : '— toggle "Show Inactive" to see deactivated guards'}</td></tr>}
-            {visible.map((g) => (
-              <tr key={g.id} className={`border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors ${!g.is_active ? 'opacity-60' : ''}`}>
-                <td className="p-4">
-                  <p className="text-gray-200 font-medium">{g.name}</p>
-                  <p className="text-gray-500 text-xs">{g.email}</p>
-                </td>
-                <td className="p-4 text-gray-400 font-mono text-xs">{g.badge_number}</td>
-                <td className="p-4 align-top">
-                  {g.assignments?.length ? (
-                    <div className="space-y-2 max-w-md">
-                      {g.assignments.map((a) => (
-                        <div key={a.id} data-testid={`assignment-card-${a.id}`}
-                          className="flex items-center justify-between gap-2 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2">
-                          <div className="min-w-0">
-                            <p className="text-amber-400 text-sm font-medium truncate">
-                              {a.site_name}
-                              <InactiveSiteBadge siteIsActive={a.site_is_active} />
-                            </p>
-                            <p className="text-gray-500 text-xs font-mono">{fmtDateRange(a.assigned_from, a.assigned_until)}</p>
-                          </div>
-                          {g.is_active && (
-                            <div className="flex items-center gap-2 shrink-0">
-                              <button onClick={() => openEditModal(g, a)} title="Edit until-date"
-                                className="text-gray-400 hover:text-amber-400 transition-colors px-2 py-1">✎</button>
-                              <button onClick={() => openEndNowModal(g, a)} title="End now"
-                                className="text-cyan-400 hover:text-cyan-300 text-xs tracking-widest hover:underline">END NOW</button>
-                              <button onClick={() => openRemoveModal(g, a)} title="Remove assignment"
-                                className="text-red-400 hover:text-red-300 transition-colors px-2 py-1">✕</button>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : <span className="text-gray-600 text-xs">—</span>}
-                </td>
-                <td className="p-4 text-center">
-                  {g.is_active ? (
-                    <span className="text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">ACTIVE</span>
-                  ) : (
-                    <span className="text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded">INACTIVE</span>
+        {loading && <p className="p-8 text-center text-gray-500">Loading…</p>}
+        {!loading && visible.length === 0 && (
+          <p className="p-8 text-center text-gray-500">No guards match your criteria.</p>
+        )}
+        {!loading && visible.map((g) => {
+          const isExpanded = expanded.has(g.id);
+          const sitesCount = g.assignments?.length ?? 0;
+          const first3    = g.assignments?.slice(0, 3).map((a) => a.site_name).join(', ') ?? '';
+          const tooltip   = sitesCount === 0
+            ? 'No sites assigned'
+            : sitesCount > 3
+              ? `${first3}, +${sitesCount - 3} more`
+              : first3;
+          return (
+            <div key={g.id} className={`border-b border-[#1A3050] last:border-b-0 ${!g.is_active ? 'opacity-60' : ''}`}>
+              {/* Collapsed row — uniform height regardless of assignment count */}
+              <div className="grid grid-cols-[auto_minmax(0,1fr)_120px_140px_100px_auto] items-center gap-4 px-4 py-3 hover:bg-[#0B1526] transition-colors">
+                {/* Avatar */}
+                <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0 ${avatarColor(g.id)}`}>
+                  {initials(g.name)}
+                </div>
+                {/* Name + email + optional company */}
+                <div className="min-w-0">
+                  <p className="text-gray-200 font-medium truncate">{g.name}</p>
+                  <p className="text-gray-500 text-xs truncate">
+                    {g.email}
+                    {showCompanyLabel && g.company_name && (
+                      <span className="text-gray-600 ml-2">· {g.company_name}</span>
+                    )}
+                  </p>
+                </div>
+                {/* Badge */}
+                <span className="text-gray-400 font-mono text-xs">{g.badge_number}</span>
+                {/* Sites pill */}
+                <button
+                  onClick={() => sitesCount > 0 && toggleExpand(g.id)}
+                  disabled={sitesCount === 0}
+                  title={tooltip}
+                  className={`justify-self-start px-2.5 py-1 rounded-full text-[11px] font-bold tracking-widest transition-colors ${
+                    sitesCount === 0
+                      ? 'bg-[#0B1526] border border-[#1A3050] text-gray-600 cursor-default'
+                      : 'bg-blue-500/20 border border-blue-500/40 text-blue-300 hover:bg-blue-500/30'
+                  }`}
+                >
+                  {sitesCount} {sitesCount === 1 ? 'SITE' : 'SITES'}{sitesCount > 0 && (isExpanded ? ' ▲' : ' ▾')}
+                </button>
+                {/* Status */}
+                {g.is_active ? (
+                  <span className="justify-self-center text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">ACTIVE</span>
+                ) : (
+                  <span className="justify-self-center text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded">INACTIVE</span>
+                )}
+                {/* Actions */}
+                <div className="flex gap-3 justify-end">
+                  {g.is_active && (
+                    <button onClick={() => { setShowAssign(g); setFormError(''); }} className="text-xs text-amber-400 tracking-widest hover:underline">ASSIGN</button>
                   )}
-                </td>
-                <td className="p-4 text-right">
-                  <div className="flex gap-3 justify-end">
-                    {g.is_active && (
-                      <button onClick={() => { setShowAssign(g); setFormError(''); }} className="text-xs text-amber-400 tracking-widest hover:underline min-h-[32px]">ASSIGN</button>
-                    )}
-                    {g.is_active ? (
-                      <button onClick={() => deactivate(g.id)} className="text-xs text-red-400 tracking-widest hover:underline min-h-[32px]">DEACTIVATE</button>
-                    ) : (
-                      <button onClick={() => reactivate(g.id)} className="text-xs text-green-400 tracking-widest hover:underline min-h-[32px]">REACTIVATE</button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                  {g.is_active ? (
+                    <button onClick={() => deactivate(g.id)} className="text-xs text-red-400 tracking-widest hover:underline">DEACTIVATE</button>
+                  ) : (
+                    <button onClick={() => reactivate(g.id)} className="text-xs text-green-400 tracking-widest hover:underline">REACTIVATE</button>
+                  )}
+                </div>
+              </div>
+
+              {/* Expanded assignments — same content as before, laid out below the compact row */}
+              {isExpanded && sitesCount > 0 && (
+                <div className="bg-[#0B1526] px-4 py-3 border-t border-[#1A3050] space-y-1.5">
+                  {g.assignments!.map((a) => (
+                    <div key={a.id} data-testid={`assignment-card-${a.id}`}
+                      className="flex items-center justify-between gap-3 py-1.5">
+                      <div className="flex items-baseline gap-3 min-w-0">
+                        <span className="text-gray-600">▪</span>
+                        <span className="text-amber-400 text-sm font-medium truncate">
+                          {a.site_name}
+                          <InactiveSiteBadge siteIsActive={a.site_is_active} />
+                        </span>
+                        <span className="text-gray-500 text-xs font-mono">{fmtDateRange(a.assigned_from, a.assigned_until)}</span>
+                      </div>
+                      {g.is_active && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button onClick={() => openEditModal(g, a)} title="Edit until-date"
+                            className="text-gray-400 hover:text-amber-400 transition-colors px-2 py-0.5">✎</button>
+                          <button onClick={() => openEndNowModal(g, a)} title="End now"
+                            className="text-cyan-400 hover:text-cyan-300 text-xs tracking-widest hover:underline">END NOW ×</button>
+                          <button onClick={() => openRemoveModal(g, a)} title="Remove assignment"
+                            className="text-red-400 hover:text-red-300 transition-colors px-2 py-0.5">✕</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
-      {/* Mobile card list */}
-      <div className="md:hidden space-y-3">
+      {/* Mobile list */}
+      <div className="md:hidden space-y-2">
         {loading && <p className="text-center text-gray-500 py-10">Loading…</p>}
         {!loading && visible.length === 0 && (
-          <p className="text-center text-gray-500 py-10">No guards {showInactive ? '' : '— toggle "Show Inactive" above'}</p>
+          <p className="text-center text-gray-500 py-10">No guards match your criteria.</p>
         )}
-        {visible.map((g) => (
-          <div key={g.id} className={`bg-[#0F1E35] border border-[#1A3050] rounded-xl p-4 space-y-3 ${!g.is_active ? 'opacity-60' : ''}`}>
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <p className="text-gray-100 font-semibold text-base">{g.name}</p>
-                <p className="text-gray-500 text-sm">{g.email}</p>
-                <p className="text-gray-500 text-xs font-mono mt-0.5">{g.badge_number}</p>
-              </div>
-              {g.is_active ? (
-                <span className="text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded shrink-0">ACTIVE</span>
-              ) : (
-                <span className="text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded shrink-0">INACTIVE</span>
-              )}
-            </div>
-            {g.assignments?.length ? (
-              <div className="space-y-2">
-                {g.assignments.map((a) => (
-                  <div key={a.id} data-testid={`assignment-card-mobile-${a.id}`}
-                    className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2">
-                    <p className="text-amber-400 text-sm font-medium">
-                      {a.site_name}
-                      <InactiveSiteBadge siteIsActive={a.site_is_active} />
-                    </p>
-                    <p className="text-gray-500 text-xs font-mono mb-2">{fmtDateRange(a.assigned_from, a.assigned_until)}</p>
-                    {g.is_active && (
-                      <div className="flex gap-2">
-                        <button onClick={() => openEditModal(g, a)}
-                          className="flex-1 text-xs text-amber-400 tracking-widest border border-amber-400/30 rounded py-1.5 hover:bg-amber-400/10">EDIT</button>
-                        <button onClick={() => openEndNowModal(g, a)}
-                          className="flex-1 text-xs text-cyan-400 tracking-widest border border-cyan-400/30 rounded py-1.5 hover:bg-cyan-400/10">END NOW</button>
-                        <button onClick={() => openRemoveModal(g, a)}
-                          className="flex-1 text-xs text-red-400 tracking-widest border border-red-400/30 rounded py-1.5 hover:bg-red-400/10">REMOVE</button>
-                      </div>
+        {!loading && visible.map((g) => {
+          const isExpanded = expanded.has(g.id);
+          const sitesCount = g.assignments?.length ?? 0;
+          return (
+            <div key={g.id} className={`bg-[#0F1E35] border border-[#1A3050] rounded-xl ${!g.is_active ? 'opacity-60' : ''}`}>
+              <div className="flex items-center gap-3 p-3">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0 ${avatarColor(g.id)}`}>
+                  {initials(g.name)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-gray-100 font-semibold text-sm truncate">{g.name}</p>
+                  <p className="text-gray-500 text-xs truncate">
+                    {g.email}
+                    {showCompanyLabel && g.company_name && (
+                      <span className="text-gray-600"> · {g.company_name}</span>
                     )}
+                  </p>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <span className="text-gray-600 text-[11px] font-mono">{g.badge_number}</span>
+                    <button
+                      onClick={() => sitesCount > 0 && toggleExpand(g.id)}
+                      disabled={sitesCount === 0}
+                      className={`text-[10px] font-bold tracking-widest px-2 py-0.5 rounded-full ${
+                        sitesCount === 0
+                          ? 'bg-[#0B1526] border border-[#1A3050] text-gray-600'
+                          : 'bg-blue-500/20 border border-blue-500/40 text-blue-300'
+                      }`}
+                    >
+                      {sitesCount} {sitesCount === 1 ? 'SITE' : 'SITES'}{sitesCount > 0 && (isExpanded ? ' ▲' : ' ▾')}
+                    </button>
                   </div>
-                ))}
+                </div>
+                {g.is_active ? (
+                  <span className="text-[9px] tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded shrink-0">ACTIVE</span>
+                ) : (
+                  <span className="text-[9px] tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded shrink-0">INACTIVE</span>
+                )}
               </div>
-            ) : null}
-            <div className="flex gap-2 pt-1">
-              {g.is_active && (
-                <button onClick={() => { setShowAssign(g); setFormError(''); }}
-                  className="flex-1 text-sm text-amber-400 tracking-widest border border-amber-400/30 rounded-lg py-2.5 hover:bg-amber-400/10 transition-colors">
-                  ASSIGN
-                </button>
+              {isExpanded && sitesCount > 0 && (
+                <div className="bg-[#0B1526] px-3 py-2 border-t border-[#1A3050] space-y-2">
+                  {g.assignments!.map((a) => (
+                    <div key={a.id} data-testid={`assignment-card-mobile-${a.id}`}
+                      className="bg-[#0F1E35] border border-[#1A3050] rounded px-2 py-1.5">
+                      <p className="text-amber-400 text-xs font-medium truncate">
+                        {a.site_name}<InactiveSiteBadge siteIsActive={a.site_is_active} />
+                      </p>
+                      <p className="text-gray-500 text-[10px] font-mono mb-1">{fmtDateRange(a.assigned_from, a.assigned_until)}</p>
+                      {g.is_active && (
+                        <div className="flex gap-2">
+                          <button onClick={() => openEditModal(g, a)}
+                            className="flex-1 text-[10px] text-amber-400 tracking-widest border border-amber-400/30 rounded py-1 hover:bg-amber-400/10">EDIT</button>
+                          <button onClick={() => openEndNowModal(g, a)}
+                            className="flex-1 text-[10px] text-cyan-400 tracking-widest border border-cyan-400/30 rounded py-1 hover:bg-cyan-400/10">END NOW</button>
+                          <button onClick={() => openRemoveModal(g, a)}
+                            className="flex-1 text-[10px] text-red-400 tracking-widest border border-red-400/30 rounded py-1 hover:bg-red-400/10">REMOVE</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
-              {g.is_active ? (
-                <button onClick={() => deactivate(g.id)}
-                  className="flex-1 text-sm text-red-400 tracking-widest border border-red-400/30 rounded-lg py-2.5 hover:bg-red-400/10 transition-colors">
-                  DEACTIVATE
-                </button>
-              ) : (
-                <button onClick={() => reactivate(g.id)}
-                  className="flex-1 text-sm text-green-400 tracking-widest border border-green-400/30 rounded-lg py-2.5 hover:bg-green-400/10 transition-colors">
-                  REACTIVATE
-                </button>
-              )}
+              <div className="flex gap-2 p-3 pt-0">
+                {g.is_active && (
+                  <button onClick={() => { setShowAssign(g); setFormError(''); }}
+                    className="flex-1 text-xs text-amber-400 tracking-widest border border-amber-400/30 rounded-lg py-2 hover:bg-amber-400/10 transition-colors">
+                    ASSIGN
+                  </button>
+                )}
+                {g.is_active ? (
+                  <button onClick={() => deactivate(g.id)}
+                    className="flex-1 text-xs text-red-400 tracking-widest border border-red-400/30 rounded-lg py-2 hover:bg-red-400/10 transition-colors">
+                    DEACTIVATE
+                  </button>
+                ) : (
+                  <button onClick={() => reactivate(g.id)}
+                    className="flex-1 text-xs text-green-400 tracking-widest border border-green-400/30 rounded-lg py-2 hover:bg-green-400/10 transition-colors">
+                    REACTIVATE
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Add Guard Modal */}

@@ -26,8 +26,13 @@ router.get('/me', requireAuth('guard'), async (req, res) => {
 
 router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const isVishnu = req.user!.role === 'vishnu';
+  // company_name is included on every row so the admin UI can disambiguate
+  // when the result set spans multiple companies (Vishnu view). The frontend
+  // only surfaces the label when Set<company_name>.size > 1, so single-tenant
+  // (company_admin) views stay visually unchanged.
   const result = await pool.query(
     `SELECT g.id, g.name, g.email, g.badge_number, g.is_active, g.created_at,
+            co.name AS company_name,
             array_agg(json_build_object(
               'id', gsa.id,
               'site_id', gsa.site_id, 'site_name', s.name,
@@ -35,10 +40,11 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
               'assigned_from', gsa.assigned_from, 'assigned_until', gsa.assigned_until))
               FILTER (WHERE gsa.id IS NOT NULL) as assignments
      FROM guards g
+     JOIN companies co ON co.id = g.company_id
      LEFT JOIN guard_site_assignments gsa ON gsa.guard_id = g.id
      LEFT JOIN sites s ON s.id = gsa.site_id
      ${isVishnu ? '' : 'WHERE g.company_id = $1'}
-     GROUP BY g.id ORDER BY g.name`,
+     GROUP BY g.id, co.name ORDER BY g.name`,
     isVishnu ? [] : [req.user!.company_id]
   );
   res.json(result.rows);
