@@ -27,6 +27,13 @@ interface Props {
   initialPolygon: LatLng[];
   initialCentre: LatLng | null;
   centreOverride: LatLng | null;
+  /**
+   * Imperatively fly the map viewport to this point. Referential equality
+   * on the prop matters — pass a fresh object literal each time you want
+   * the map to move (identical lat/lng but a new reference re-triggers).
+   * centreOverride only moves the marker pin; this prop moves the view.
+   */
+  focusPoint?: LatLng | null;
   onChange: (polygon: LatLng[]) => void;
 }
 
@@ -45,7 +52,19 @@ function FitToPolygon({ polygon }: { polygon: LatLng[] }) {
   return null;
 }
 
-export default function GeofenceMapEditor({ initialPolygon, initialCentre, centreOverride, onChange }: Props) {
+// Fly the viewport to `point` whenever its reference changes. Used by the
+// address-search bar and the "Recenter map" button on the SET GEOFENCE
+// modal — callers pass a fresh object literal per fly request so the
+// effect re-runs even when the same address is searched twice.
+function FlyTo({ point }: { point: LatLng | null }) {
+  const map = useMap();
+  useEffect(() => {
+    if (point) map.flyTo([point.lat, point.lng], 18);
+  }, [point, map]);
+  return null;
+}
+
+export default function GeofenceMapEditor({ initialPolygon, initialCentre, centreOverride, focusPoint, onChange }: Props) {
   const featureGroupRef = useRef<L.FeatureGroup | null>(null);
   // Pre-seed exactly once. Using a ref guards against React Strict Mode
   // running the ref callback twice or re-renders re-invoking it.
@@ -124,6 +143,7 @@ export default function GeofenceMapEditor({ initialPolygon, initialCentre, centr
         />
 
         <FitToPolygon polygon={initialPolygon} />
+        <FlyTo point={focusPoint ?? null} />
 
         <FeatureGroup ref={handleFeatureGroupRef as never}>
           <EditControl

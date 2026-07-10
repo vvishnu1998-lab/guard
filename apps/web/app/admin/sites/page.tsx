@@ -127,6 +127,21 @@ export default function SitesPage() {
   const [geoSaving,    setGeoSaving]    = useState(false);
   const [geoError,     setGeoError]     = useState('');
 
+  // Session A2 — address-search-inside-geofence-modal state.
+  //   geoSearch{Input,Status,Result,Error}: driven by the search bar in the
+  //     modal's left column. `result` is retained after success so the
+  //     "Recenter map" button has something to fly to.
+  //   focusPoint: passed to GeofenceMapEditor. New object literal per fly
+  //     request — the map's useEffect keys on referential equality.
+  //   polygonOffsetWarnDismissed: once dismissed for the current modal open,
+  //     stays dismissed until modal reopen (openGeo resets it).
+  const [geoSearchInput,  setGeoSearchInput]  = useState('');
+  const [geoSearchStatus, setGeoSearchStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [geoSearchResult, setGeoSearchResult] = useState<{ lat: number; lng: number; formatted_address: string } | null>(null);
+  const [geoSearchError,  setGeoSearchError]  = useState('');
+  const [focusPoint,      setFocusPoint]      = useState<LatLng | null>(null);
+  const [polygonOffsetWarnDismissed, setPolygonOffsetWarnDismissed] = useState(false);
+
   const [toggling,     setToggling]     = useState<string | null>(null);
 
   // deactivate flow
@@ -324,6 +339,62 @@ export default function SitesPage() {
       radius_meters: site.radius_meters != null ? String(site.radius_meters) : '',
     });
     setGeoError('');
+    // Session A2 — reset all search-bar state on each modal open.
+    setGeoSearchInput('');
+    setGeoSearchStatus('idle');
+    setGeoSearchResult(null);
+    setGeoSearchError('');
+    setFocusPoint(null);
+    setPolygonOffsetWarnDismissed(false);
+  }
+
+  // Session A2 — search handler for the geofence modal's inline address bar.
+  // On success: fills LATITUDE + LONGITUDE inputs, flies the map to the
+  // result (via a new focusPoint reference), and keeps the result handy for
+  // the "Recenter map" button.
+  async function searchGeofenceAddress() {
+    const q = geoSearchInput.trim();
+    if (q.length < 3) return;
+    setGeoSearchStatus('loading');
+    setGeoSearchError('');
+    try {
+      const r = await adminPost<{ lat: number; lng: number; formatted_address: string }>(
+        '/api/geocode',
+        { address: q },
+      );
+      setGeoSearchStatus('ok');
+      setGeoSearchResult(r);
+      setGeo((g) => ({ ...g, center_lat: String(r.lat), center_lng: String(r.lng) }));
+      setFocusPoint({ lat: r.lat, lng: r.lng });
+      setPolygonOffsetWarnDismissed(false);
+    } catch (e: any) {
+      setGeoSearchStatus('error');
+      setGeoSearchError(e?.message ?? 'Search failed');
+    }
+  }
+
+  function recenterMapOnSearch() {
+    if (!geoSearchResult) return;
+    setGeo((g) => ({
+      ...g,
+      center_lat: String(geoSearchResult.lat),
+      center_lng: String(geoSearchResult.lng),
+    }));
+    // Fresh object literal — GeofenceMapEditor's FlyTo useEffect keys on
+    // referential equality, so this fires flyTo even when lat/lng haven't
+    // changed since the last fly.
+    setFocusPoint({ lat: geoSearchResult.lat, lng: geoSearchResult.lng });
+  }
+
+  // Map server-side error strings to concise UI copy per spec.
+  function mapGeoSearchError(msg: string): string {
+    const lower = msg.toLowerCase();
+    if (lower.includes('not configured')) return 'Address search not configured — enter coordinates manually.';
+    if (lower.includes('not found') || lower.includes('zero_results')) return 'Address not found — try a more specific query.';
+    if (lower.includes('upstream') || lower.includes('request failed') || lower.includes('temporarily')) {
+      return 'Search temporarily unavailable — try again in a moment.';
+    }
+    return msg;
   }
 
   function handlePolygonChange(poly: LatLng[]) {
@@ -833,6 +904,39 @@ export default function SitesPage() {
             {geoMode === 'radius' ? (
               // Single-column layout for RADIUS mode — no map to place.
               <div className="space-y-4">
+                {/* Session A2 — address search bar. Auto-fills LATITUDE +
+                    LONGITUDE inputs on success. RECENTER button is
+                    map-specific → not shown here (RADIUS has no map). */}
+                <div>
+                  <label className="block text-gray-500 text-xs tracking-widest mb-1">SEARCH ADDRESS</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={geoSearchInput}
+                      placeholder="Type address, landmark, or place…"
+                      onChange={(e) => setGeoSearchInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); searchGeofenceAddress(); } }}
+                      className="flex-1 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={searchGeofenceAddress}
+                      disabled={geoSearchStatus === 'loading' || geoSearchInput.trim().length < 3}
+                      aria-label="Search address"
+                      className="bg-[#0B1526] border border-[#1A3050] text-gray-400 hover:border-amber-400 hover:text-amber-400 rounded-lg px-3 py-2 text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      🔍
+                    </button>
+                  </div>
+                  {geoSearchStatus === 'loading' && <p className="text-gray-500 text-xs mt-1">Searching…</p>}
+                  {geoSearchStatus === 'ok' && geoSearchResult && (
+                    <p className="text-green-400 text-xs mt-1">✓ Found: <span className="text-gray-300">{geoSearchResult.formatted_address}</span></p>
+                  )}
+                  {geoSearchStatus === 'error' && (
+                    <p className="text-amber-400/80 text-xs mt-1">{mapGeoSearchError(geoSearchError)}</p>
+                  )}
+                </div>
+
                 <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 text-xs text-gray-400 space-y-1">
                   <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO GET COORDINATES</p>
                   <p>1. Open <span className="text-white">Google Maps</span> and search for the site address.</p>
@@ -905,6 +1009,65 @@ export default function SitesPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* LEFT half — instructions + inputs + preview */}
                 <div className="space-y-4">
+                  {/* Session A2 — address search bar. Auto-fills LATITUDE +
+                      LONGITUDE inputs AND flies the map to the result. Once
+                      a result is captured, a "RECENTER MAP" button lets the
+                      admin jump the viewport back to the searched address
+                      after they've panned around. */}
+                  <div>
+                    <label className="block text-gray-500 text-xs tracking-widest mb-1">SEARCH ADDRESS</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={geoSearchInput}
+                        placeholder="Type address, landmark, or place…"
+                        onChange={(e) => setGeoSearchInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); searchGeofenceAddress(); } }}
+                        className="flex-1 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                      />
+                      <button
+                        type="button"
+                        onClick={searchGeofenceAddress}
+                        disabled={geoSearchStatus === 'loading' || geoSearchInput.trim().length < 3}
+                        aria-label="Search address"
+                        className="bg-[#0B1526] border border-[#1A3050] text-gray-400 hover:border-amber-400 hover:text-amber-400 rounded-lg px-3 py-2 text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        🔍
+                      </button>
+                    </div>
+                    {geoSearchStatus === 'loading' && <p className="text-gray-500 text-xs mt-1">Searching…</p>}
+                    {geoSearchStatus === 'ok' && geoSearchResult && (
+                      <p className="text-green-400 text-xs mt-1">✓ Found: <span className="text-gray-300">{geoSearchResult.formatted_address}</span></p>
+                    )}
+                    {geoSearchStatus === 'error' && (
+                      <p className="text-amber-400/80 text-xs mt-1">{mapGeoSearchError(geoSearchError)}</p>
+                    )}
+                    {geoSearchStatus === 'ok' && geoSearchResult && (
+                      <button
+                        type="button"
+                        onClick={recenterMapOnSearch}
+                        className="mt-2 text-xs text-amber-400 tracking-widest hover:text-amber-300 underline"
+                      >
+                        RECENTER MAP ON THIS ADDRESS
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Dismissable warning when a search fires after a polygon
+                      is already drawn — the drawing may now be off-centre. */}
+                  {geoSearchStatus === 'ok' && drawnPolygon.length >= 3 && !polygonOffsetWarnDismissed && (
+                    <div className="bg-amber-400/10 border border-amber-400/40 rounded-lg px-3 py-2 flex items-start gap-2">
+                      <span className="text-amber-400 text-sm leading-tight">⚠</span>
+                      <span className="text-amber-300 text-xs flex-1 leading-tight">Polygon is no longer centered on the new address — redraw if needed.</span>
+                      <button
+                        type="button"
+                        onClick={() => setPolygonOffsetWarnDismissed(true)}
+                        aria-label="Dismiss warning"
+                        className="text-amber-400 hover:text-amber-200 text-sm leading-tight"
+                      >✕</button>
+                    </div>
+                  )}
+
                   <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 text-xs text-gray-400 space-y-1">
                     <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO DRAW</p>
                     <p>1. Use the polygon tool in the map to click each corner of the property.</p>
@@ -987,6 +1150,7 @@ export default function SitesPage() {
                         ? { lat: parseFloat(geo.center_lat), lng: parseFloat(geo.center_lng) }
                         : null
                     }
+                    focusPoint={focusPoint}
                     onChange={handlePolygonChange}
                   />
                   <p className="text-gray-600 text-xs mt-1">
