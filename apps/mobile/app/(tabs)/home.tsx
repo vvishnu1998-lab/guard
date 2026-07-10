@@ -16,6 +16,7 @@ import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
 import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import HandoffRequestModal from '../../components/HandoffRequestModal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -96,6 +97,11 @@ export default function HomeScreen() {
   const [outboundHandoff, setOutboundHandoff] = useState<OutboundHandoff | null>(null);
   const [cancellingHandoff, setCancellingHandoff] = useState(false);
   const outboundFetchRef = useRef<AbortController | null>(null);
+
+  // P2 UX bundle 2026-07-10 — HAND OFF SHIFT is available on the shift-
+  // detail screen; adding it here saves a tap for guards on the primary
+  // "clocked-in" surface. Same modal, same submission path.
+  const [handoffModalOpen, setHandoffModalOpen] = useState(false);
 
   async function fetchOutboundHandoff() {
     outboundFetchRef.current?.abort();
@@ -519,7 +525,7 @@ export default function HomeScreen() {
                 onPress={() => router.push('/reports/new')}
               >
                 <Text style={styles.actionIcon}>📋</Text>
-                <Text style={styles.actionLabel}>ADD REPORT</Text>
+                <Text style={styles.actionLabel}>REPORTS</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.actionBtn}
@@ -563,6 +569,24 @@ export default function HomeScreen() {
               <PingCountdownBanner clockedInAt={activeSession?.clocked_in_at} />
             </TouchableOpacity>
 
+            {/* P2 UX bundle 2026-07-10 — HAND OFF SHIFT reachability.
+                Placed ABOVE the CLOCK OUT button so it sits in the same
+                thumb-reach zone as the primary action but doesn't compete
+                for the red destructive slot. Amber/warning styling
+                mirrors the version on the shift-detail screen so guards
+                who learned the affordance there recognize it here. Only
+                rendered when there IS an active shift (isOnShift branch)
+                — guard-id-match is implicit because the active session is
+                populated from /shifts/active-session, which is scoped to
+                req.user.sub server-side. */}
+            <TouchableOpacity
+              style={styles.handoffBtn}
+              onPress={() => setHandoffModalOpen(true)}
+            >
+              <Ionicons name="hand-right-outline" size={18} color="#070D1A" />
+              <Text style={styles.handoffBtnText}>HAND OFF SHIFT</Text>
+            </TouchableOpacity>
+
             {/* Clock out button */}
             <TouchableOpacity
               style={styles.clockOutBtn}
@@ -603,6 +627,22 @@ export default function HomeScreen() {
 
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      {/* P2 UX bundle — HAND OFF SHIFT modal, twin of the shift-detail
+          invocation. siteTz is null because the store doesn't hydrate
+          site timezone into activeShift; the modal falls back to local
+          time formatting via fmtInTz which is what home guards see
+          elsewhere on this screen. */}
+      {handoffModalOpen && activeShift && (
+        <HandoffRequestModal
+          shiftId={activeShift.id}
+          siteName={activeShift.site_name}
+          scheduledEnd={activeShift.scheduled_end}
+          siteTz={null}
+          onClose={() => setHandoffModalOpen(false)}
+          onSubmitted={() => { setHandoffModalOpen(false); fetchOutboundHandoff(); }}
+        />
+      )}
     </View>
   );
 }
@@ -874,6 +914,27 @@ const styles = StyleSheet.create({
     borderLeftColor: Colors.action,
   },
   pingText: { color: Colors.action, fontSize: 13, letterSpacing: 0.5 },
+
+  // P2 UX bundle — HAND OFF SHIFT twin of the shift-detail button. Amber
+  // to match the warning color the alerts + shift-detail buttons use,
+  // and horizontal padding matches CLOCK OUT so the two stack cleanly.
+  handoffBtn: {
+    marginHorizontal: Spacing.md,
+    marginBottom: Spacing.sm,
+    backgroundColor: Colors.warning,
+    borderRadius: Radius.md,
+    height: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+  },
+  handoffBtnText: {
+    fontFamily: Fonts.heading,
+    color: '#070D1A',
+    fontSize: 18,
+    letterSpacing: 3,
+  },
 
   // Clock out
   clockOutBtn: {
