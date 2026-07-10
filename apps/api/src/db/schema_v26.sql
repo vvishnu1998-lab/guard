@@ -29,5 +29,15 @@
 
 ALTER TABLE guards DROP CONSTRAINT IF EXISTS guards_badge_number_key;
 
-ALTER TABLE guards
-  ADD CONSTRAINT uq_guard_badge_per_company UNIQUE (company_id, badge_number);
+-- ADD CONSTRAINT has no IF NOT EXISTS in Postgres; guard it manually so
+-- migrate.ts can re-run the full schema set idempotently.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'uq_guard_badge_per_company'
+  ) THEN
+    ALTER TABLE guards
+      ADD CONSTRAINT uq_guard_badge_per_company UNIQUE (company_id, badge_number);
+  END IF;
+END
+$$;

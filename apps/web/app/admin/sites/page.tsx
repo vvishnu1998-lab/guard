@@ -41,7 +41,7 @@ interface Site {
   name:                        string;
   address:                     string;
   contract_start:              string;
-  contract_end:                string;
+  contract_end:                string | null;      // FIX 2: nullable, grandfathered for existing rows
   timezone:                    string;
   is_active:                   boolean;
   client_access_disabled_at:   string | null;
@@ -54,6 +54,8 @@ interface Site {
   polygon_coordinates:         LatLng[] | null;
   instructions_pdf_url:        string | null;
   company_name?:               string;
+  geocoded_lat?:               number | null;      // FIX 4: geocoded on NEW SITE address blur
+  geocoded_lng?:               number | null;
 }
 
 interface DeactivatePreview {
@@ -76,13 +78,25 @@ const TIMEZONE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'UTC',                 label: 'UTC' },
 ];
 
+// FIX 2: contract_end removed from the create form entirely. Existing DB
+// rows with a value stay untouched (grandfathered — display still shows
+// "start → end" when a value is present).
 const EMPTY_FORM = {
   name: '',
   address: '',
   contract_start: '',
-  contract_end: '' as string,
   timezone: 'America/Los_Angeles',
 };
+
+// FIX 4: address-geocode lookup state. `ok` means we have lat/lng ready to
+// send to POST /api/sites; `error` shows an inline message; `idle` renders
+// nothing. Reset to idle whenever the modal opens or the admin edits the
+// address again.
+type GeoLookup =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ok';    lat: number; lng: number; formatted_address: string }
+  | { status: 'error'; message: string };
 const EMPTY_GEO  = { center_lat: '', center_lng: '', radius_meters: '' };
 
 const STATUS_CHIPS: StatusFilter[] = ['enabled', 'disabled', 'all'];
@@ -103,6 +117,7 @@ export default function SitesPage() {
   const [saving,       setSaving]       = useState(false);
   const [formError,    setFormError]    = useState('');
   const [pdfFile,      setPdfFile]      = useState<File | null>(null);
+  const [geoLookup,    setGeoLookup]    = useState<GeoLookup>({ status: 'idle' });
 
   // geofence modal
   const [geoSite,      setGeoSite]      = useState<Site | null>(null);
@@ -233,20 +248,42 @@ export default function SitesPage() {
     if (!form.name || !form.address || !form.contract_start) {
       setFormError('Site name, address, and contract start are required'); return;
     }
-    if (form.contract_end && new Date(form.contract_end) < new Date(form.contract_start)) {
-      setFormError('Contract end must be after contract start'); return;
-    }
     setSaving(true); setFormError('');
     try {
-      const site = await adminPost<{ id: string }>('/api/sites', form);
+      // FIX 4: if the address geocoded successfully, ship those coords with
+      // the create call so they land in sites.geocoded_lat/lng and can
+      // pre-fill the geofence editor later.
+      const body: Record<string, unknown> = { ...form };
+      if (geoLookup.status === 'ok') {
+        body.geocoded_lat = geoLookup.lat;
+        body.geocoded_lng = geoLookup.lng;
+      }
+      const site = await adminPost<{ id: string }>('/api/sites', body);
       if (pdfFile) {
         try { await uploadPdfToSite(site.id, pdfFile); }
         catch (e: any) { setFormError(`Site created but PDF upload failed: ${e.message}`); }
       }
-      setShowCreate(false); setForm(EMPTY_FORM); setPdfFile(null);
+      setShowCreate(false); setForm(EMPTY_FORM); setPdfFile(null); setGeoLookup({ status: 'idle' });
       await load();
     } catch (e: any) { setFormError(e.message); }
     finally { setSaving(false); }
+  }
+
+  // FIX 4: called on address-field blur in the NEW SITE modal. Returns
+  // silently if the address is too short to be worth a lookup.
+  async function lookupAddress() {
+    const addr = form.address.trim();
+    if (addr.length < 5) { setGeoLookup({ status: 'idle' }); return; }
+    setGeoLookup({ status: 'loading' });
+    try {
+      const r = await adminPost<{ lat: number; lng: number; formatted_address: string }>(
+        '/api/geocode',
+        { address: addr },
+      );
+      setGeoLookup({ status: 'ok', lat: r.lat, lng: r.lng, formatted_address: r.formatted_address });
+    } catch (e: any) {
+      setGeoLookup({ status: 'error', message: e?.message ?? 'Coordinates not found for this address.' });
+    }
   }
 
   async function savePdf() {
@@ -274,9 +311,16 @@ export default function SitesPage() {
     }
     setGeoMode(defaultMode);
     setDrawnPolygon(validExisting ? existing : []);
+    // FIX 4: pre-populate with the actual fence centre if one exists;
+    // otherwise fall back to the geocoded coords captured on site creation.
+    // Radius has no analogous fallback — admin picks that.
     setGeo({
-      center_lat:    site.center_lat    != null ? String(site.center_lat)    : '',
-      center_lng:    site.center_lng    != null ? String(site.center_lng)    : '',
+      center_lat:    site.center_lat    != null ? String(site.center_lat)
+                   : site.geocoded_lat  != null ? String(site.geocoded_lat)
+                   : '',
+      center_lng:    site.center_lng    != null ? String(site.center_lng)
+                   : site.geocoded_lng  != null ? String(site.geocoded_lng)
+                   : '',
       radius_meters: site.radius_meters != null ? String(site.radius_meters) : '',
     });
     setGeoError('');
@@ -408,10 +452,16 @@ export default function SitesPage() {
                     <p className="text-gray-600 text-[10px] tracking-widest mt-0.5">{site.company_name.toUpperCase()}</p>
                   )}
                 </div>
+                {/* FIX 2: no "no end date" filler. When contract_end is null,
+                    show just the start date; when present, show start → end. */}
                 <div className="text-gray-400 text-xs text-right whitespace-nowrap hidden md:block">
                   {fmtDate(site.contract_start)}
-                  <span className="text-gray-600"> → </span>
-                  {site.contract_end ? fmtDate(site.contract_end) : <span className="text-gray-600 italic">no end date</span>}
+                  {site.contract_end && (
+                    <>
+                      <span className="text-gray-600"> → </span>
+                      {fmtDate(site.contract_end)}
+                    </>
+                  )}
                 </div>
                 {site.is_active ? (
                   <span className="text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">ENABLED</span>
@@ -433,8 +483,13 @@ export default function SitesPage() {
                   <div className="md:hidden">
                     <p className="text-gray-500 text-xs tracking-widest mb-1">CONTRACT</p>
                     <p className="text-gray-300 text-sm">
-                      {fmtDate(site.contract_start)} <span className="text-gray-600">→</span>{' '}
-                      {site.contract_end ? fmtDate(site.contract_end) : <span className="text-gray-600 italic">no end date</span>}
+                      {fmtDate(site.contract_start)}
+                      {site.contract_end && (
+                        <>
+                          <span className="text-gray-600"> → </span>
+                          {fmtDate(site.contract_end)}
+                        </>
+                      )}
                     </p>
                   </div>
 
@@ -516,10 +571,13 @@ export default function SitesPage() {
                     )}
                   </div>
 
-                  {/* CLIENT PORTAL — action controls; reactivate shown when deactivated */}
+                  {/* CLIENT PORTAL — status pill + verb-form action button.
+                      FIX 1: pill shows ENABLED/DISABLED at a glance; the
+                      button label is a verb ("DISABLE PORTAL" / "ENABLE PORTAL")
+                      so the admin can't mistake it for the whole-site toggle. */}
                   <div>
                     <p className="text-gray-500 text-xs tracking-widest mb-1">CLIENT PORTAL</p>
-                    <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-3 flex-wrap">
                       {isDeactivated ? (
                         <button
                           onClick={() => reactivateSite(site.id)}
@@ -530,27 +588,48 @@ export default function SitesPage() {
                         </button>
                       ) : (
                         <>
+                          {clientEnabled ? (
+                            <span className="inline-flex items-center gap-1.5 text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">
+                              <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" />
+                              ENABLED
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded">
+                              <span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />
+                              DISABLED
+                            </span>
+                          )}
                           <button
                             onClick={() => toggleClientAccess(site.id, !clientEnabled)}
                             disabled={toggling === site.id}
-                            className={`text-xs tracking-widest px-3 py-1 rounded transition-colors ${
+                            className={`text-xs tracking-widest px-3 py-1 rounded transition-colors bg-[#0B1526] text-gray-400 border border-[#1A3050] disabled:opacity-40 ${
                               clientEnabled
-                                ? 'bg-green-900/40 text-green-400 border border-green-700 hover:bg-red-900/40 hover:text-red-400 hover:border-red-700'
-                                : 'bg-[#0B1526] text-gray-500 border border-[#1A3050] hover:border-green-700 hover:text-green-400'
-                            } disabled:opacity-40`}
+                                ? 'hover:border-red-500 hover:text-red-400'
+                                : 'hover:border-green-500 hover:text-green-400'
+                            }`}
                           >
-                            {toggling === site.id ? '…' : clientEnabled ? 'ENABLED' : 'DISABLED'}
-                          </button>
-                          <button
-                            onClick={() => openDeactivate(site)}
-                            className="text-xs tracking-widest px-3 py-1 rounded bg-[#0B1526] text-gray-500 border border-[#1A3050] hover:border-red-700 hover:text-red-400 transition-colors"
-                          >
-                            DEACTIVATE
+                            {toggling === site.id ? '…' : clientEnabled ? 'DISABLE PORTAL' : 'ENABLE PORTAL'}
                           </button>
                         </>
                       )}
                     </div>
                   </div>
+
+                  {/* FIX 1: DEACTIVATE SITE — its own section, destructive red,
+                      only shown for active sites. Reactivate is handled inside
+                      CLIENT PORTAL above. */}
+                  {!isDeactivated && (
+                    <div className="pt-3 border-t border-[#1A3050]">
+                      <p className="text-gray-500 text-xs tracking-widest mb-2">SITE STATUS</p>
+                      <button
+                        onClick={() => openDeactivate(site)}
+                        className="text-xs tracking-widest px-3 py-1.5 rounded bg-red-500/10 text-red-400 border border-red-500/40 hover:bg-red-500/20 hover:border-red-500 transition-colors"
+                      >
+                        ⚠ DEACTIVATE SITE
+                      </button>
+                      <p className="text-gray-600 text-[10px] mt-1">Cancels future shifts, closes client portal, marks the site inactive. History stays visible.</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -564,36 +643,63 @@ export default function SitesPage() {
           <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">NEW SITE</h2>
-              <button onClick={() => setShowCreate(false)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+              <button onClick={() => { setShowCreate(false); setGeoLookup({ status: 'idle' }); }} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
             </div>
             {formError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{formError}</div>}
             <div className="space-y-4">
-              {[
-                { key: 'name',           label: 'SITE NAME',       type: 'text', placeholder: 'e.g. Westfield Shopping Centre' },
-                { key: 'address',        label: 'ADDRESS',         type: 'text', placeholder: 'Full address' },
-                { key: 'contract_start', label: 'CONTRACT START',  type: 'date', placeholder: '' },
-              ].map(({ key, label, type, placeholder }) => (
-                <div key={key}>
-                  <label className="block text-gray-500 text-xs tracking-widest mb-1">{label} <span className="text-amber-400">*</span></label>
-                  <input
-                    type={type} placeholder={placeholder}
-                    value={(form as any)[key]}
-                    onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-                  />
-                </div>
-              ))}
+              {/* NAME */}
               <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">
-                  CONTRACT END <span className="text-gray-600 text-xs normal-case">(optional)</span>
-                </label>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">SITE NAME <span className="text-amber-400">*</span></label>
                 <input
-                  type="date"
-                  value={form.contract_end}
-                  onChange={(e) => setForm((f) => ({ ...f, contract_end: e.target.value }))}
+                  type="text" placeholder="e.g. Westfield Shopping Centre"
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                   className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
                 />
               </div>
+
+              {/* ADDRESS — FIX 4: geocode on blur; status shown inline below */}
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">ADDRESS <span className="text-amber-400">*</span></label>
+                <input
+                  type="text" placeholder="Full address"
+                  value={form.address}
+                  onChange={(e) => {
+                    setForm((f) => ({ ...f, address: e.target.value }));
+                    // Any edit invalidates the last lookup — force a re-geocode on next blur.
+                    setGeoLookup({ status: 'idle' });
+                  }}
+                  onBlur={lookupAddress}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+                {geoLookup.status === 'loading' && (
+                  <p className="text-gray-500 text-xs mt-1">Looking up coordinates…</p>
+                )}
+                {geoLookup.status === 'ok' && (
+                  <p className="text-green-400 text-xs mt-1">
+                    ✓ Coordinates found: {geoLookup.lat.toFixed(5)}, {geoLookup.lng.toFixed(5)}
+                    <span className="text-gray-500"> — {geoLookup.formatted_address}</span>
+                  </p>
+                )}
+                {geoLookup.status === 'error' && (
+                  <p className="text-amber-400/80 text-xs mt-1">
+                    {geoLookup.message} You can still create the site and set the geofence manually.
+                  </p>
+                )}
+              </div>
+
+              {/* CONTRACT START */}
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">CONTRACT START <span className="text-amber-400">*</span></label>
+                <input
+                  type="date"
+                  value={form.contract_start}
+                  onChange={(e) => setForm((f) => ({ ...f, contract_start: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              {/* TIMEZONE — CONTRACT END field removed per FIX 2 */}
               <div>
                 <label className="block text-gray-500 text-xs tracking-widest mb-1">
                   TIMEZONE <span className="text-amber-400">*</span>
@@ -622,12 +728,10 @@ export default function SitesPage() {
               {pdfFile && <p className="text-gray-400 text-xs mt-1">Selected: {pdfFile.name}</p>}
             </div>
             <p className="text-gray-500 text-xs mt-3 mb-5">
-              When a contract end date is set, client access runs to contract end + 90 days and data is hard-deleted at contract end + 150 days.
-              <br />
               <span className="text-amber-400/70">You can set the geofence boundary after creating the site.</span>
             </p>
             <div className="flex gap-3">
-              <button onClick={() => setShowCreate(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => { setShowCreate(false); setGeoLookup({ status: 'idle' }); }} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={createSite} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {saving ? 'CREATING…' : 'CREATE SITE'}
               </button>
@@ -679,10 +783,16 @@ export default function SitesPage() {
         </div>
       )}
 
-      {/* ── Set Geofence Modal ────────────────────────────────────────── */}
+      {/* ── Set Geofence Modal ──────────────────────────────────────────
+          FIX 3: DRAW mode uses a two-column layout on md+ — left column
+          holds instructions + inputs + preview, right column holds the
+          map and its vertex counter. RADIUS mode has no map, so it stays
+          single-column. Mobile falls back to a single-column stack for
+          both modes. Modal width jumps from max-w-3xl → max-w-6xl to
+          accommodate the split. */}
       {geoSite && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8">
-          <div className="w-full max-w-3xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
+          <div className="w-full max-w-6xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">SET GEOFENCE</h2>
               <button onClick={() => setGeoSite(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
@@ -720,118 +830,179 @@ export default function SitesPage() {
               </button>
             </div>
 
-            {geoMode === 'radius' && (
-              <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 mb-5 text-xs text-gray-400 space-y-1">
-                <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO GET COORDINATES</p>
-                <p>1. Open <span className="text-white">Google Maps</span> and search for the site address.</p>
-                <p>2. Right-click on the exact centre of the building/property.</p>
-                <p>3. Click the coordinates that appear at the top of the menu — they are copied automatically.</p>
-                <p>4. Paste them below (they look like: <span className="text-white font-mono">37.7749, -122.4194</span>).</p>
-                <p className="pt-1">Set the radius to cover the full property boundary — e.g. <span className="text-white">50m</span> for a small building, <span className="text-white">200m</span> for a large campus.</p>
-              </div>
-            )}
+            {geoMode === 'radius' ? (
+              // Single-column layout for RADIUS mode — no map to place.
+              <div className="space-y-4">
+                <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 text-xs text-gray-400 space-y-1">
+                  <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO GET COORDINATES</p>
+                  <p>1. Open <span className="text-white">Google Maps</span> and search for the site address.</p>
+                  <p>2. Right-click on the exact centre of the building/property.</p>
+                  <p>3. Click the coordinates that appear at the top of the menu — they are copied automatically.</p>
+                  <p>4. Paste them below (they look like: <span className="text-white font-mono">37.7749, -122.4194</span>).</p>
+                  <p className="pt-1">Set the radius to cover the full property boundary — e.g. <span className="text-white">50m</span> for a small building, <span className="text-white">200m</span> for a large campus.</p>
+                </div>
 
-            {geoMode === 'draw' && (
-              <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 mb-4 text-xs text-gray-400 space-y-1">
-                <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO DRAW</p>
-                <p>1. Use the polygon tool in the map (top-right) to click each corner of the property.</p>
-                <p>2. Click the first point again to close the boundary.</p>
-                <p>3. Drag the vertices to adjust. Use the edit/delete tools to revise.</p>
-                <p className="pt-1">Centre and radius below auto-fill from your drawing — you can override them. Radius is the GPS-drift fallback if the polygon ever loads incorrectly on a guard's device.</p>
-              </div>
-            )}
+                {geoError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2">{geoError}</div>}
 
-            {geoError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{geoError}</div>}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-gray-500 text-xs tracking-widest mb-1">LATITUDE <span className="text-amber-400">*</span></label>
+                    <input
+                      type="number" step="any" placeholder="e.g. 37.7749"
+                      value={geo.center_lat}
+                      onChange={(e) => setGeo((g) => ({ ...g, center_lat: e.target.value }))}
+                      className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-500 text-xs tracking-widest mb-1">LONGITUDE <span className="text-amber-400">*</span></label>
+                    <input
+                      type="number" step="any" placeholder="e.g. -122.4194"
+                      value={geo.center_lng}
+                      onChange={(e) => setGeo((g) => ({ ...g, center_lng: e.target.value }))}
+                      className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    />
+                  </div>
+                </div>
 
-            {geoMode === 'draw' && (
-              <div className="mb-4">
-                <GeofenceMapEditor
-                  initialPolygon={drawnPolygon}
-                  initialCentre={
-                    geoSite.center_lat != null && geoSite.center_lng != null
-                      ? { lat: geoSite.center_lat, lng: geoSite.center_lng }
-                      : null
-                  }
-                  centreOverride={
-                    geo.center_lat && geo.center_lng && !isNaN(parseFloat(geo.center_lat)) && !isNaN(parseFloat(geo.center_lng))
-                      ? { lat: parseFloat(geo.center_lat), lng: parseFloat(geo.center_lng) }
-                      : null
-                  }
-                  onChange={handlePolygonChange}
-                />
-                <p className="text-gray-600 text-xs mt-1">
-                  Vertices: <span className="text-gray-300">{drawnPolygon.length}</span>
-                  {drawnPolygon.length > 0 && drawnPolygon.length < 3 && (
-                    <span className="text-red-400 ml-2">need ≥ 3</span>
-                  )}
-                  {drawnPolygon.length >= 4 && isSelfIntersecting(drawnPolygon) && (
-                    <span className="text-red-400 ml-2">edges cross — re-draw</span>
-                  )}
-                </p>
-              </div>
-            )}
+                <div>
+                  <label className="block text-gray-500 text-xs tracking-widest mb-1">RADIUS (METRES) <span className="text-amber-400">*</span></label>
+                  <input
+                    type="number" min="10" max="10000" placeholder="e.g. 100"
+                    value={geo.radius_meters}
+                    onChange={(e) => setGeo((g) => ({ ...g, radius_meters: e.target.value }))}
+                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                  />
+                  <p className="text-gray-600 text-xs mt-1">
+                    Guards outside this radius will trigger a geofence violation alert. A 16-point circular boundary is auto-generated from your centre + radius.
+                  </p>
+                </div>
 
-            <div className="grid grid-cols-2 gap-4 mb-4">
-              <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">LATITUDE <span className="text-amber-400">*</span></label>
-                <input
-                  type="number" step="any" placeholder="e.g. 37.7749"
-                  value={geo.center_lat}
-                  onChange={(e) => setGeo((g) => ({ ...g, center_lat: e.target.value }))}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-                />
-              </div>
-              <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">LONGITUDE <span className="text-amber-400">*</span></label>
-                <input
-                  type="number" step="any" placeholder="e.g. -122.4194"
-                  value={geo.center_lng}
-                  onChange={(e) => setGeo((g) => ({ ...g, center_lng: e.target.value }))}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-                />
-              </div>
-            </div>
-            <div className="mb-5">
-              <label className="block text-gray-500 text-xs tracking-widest mb-1">RADIUS (METRES) <span className="text-amber-400">*</span></label>
-              <input
-                type="number" min="10" max="10000" placeholder="e.g. 100"
-                value={geo.radius_meters}
-                onChange={(e) => setGeo((g) => ({ ...g, radius_meters: e.target.value }))}
-                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-              />
-              <p className="text-gray-600 text-xs mt-1">
-                {geoMode === 'radius'
-                  ? 'Guards outside this radius will trigger a geofence violation alert. A 16-point circular boundary is auto-generated from your centre + radius.'
-                  : 'Radius is the GPS-drift fallback — guards inside the polygon OR within this radius are considered on-post.'}
-              </p>
-            </div>
-
-            {geo.center_lat && geo.center_lng && geo.radius_meters && (
-              <div className="bg-[#0B1526] border border-amber-400/30 rounded-lg p-3 mb-5 text-xs text-gray-400">
-                <p className="text-amber-400 font-bold tracking-widest mb-1">PREVIEW</p>
-                <p>Centre: <span className="text-white font-mono">{geo.center_lat}, {geo.center_lng}</span></p>
-                <p>Boundary radius: <span className="text-white">{geo.radius_meters}m</span>
-                  {Number(geo.radius_meters) > 0 && (
-                    <span className="ml-2 text-gray-500">
-                      (~{(Number(geo.radius_meters) * 2).toFixed(0)}m diameter)
-                    </span>
-                  )}
-                </p>
-                {geoMode === 'draw' && (
-                  <p>Polygon: <span className="text-white">{drawnPolygon.length} vertices</span></p>
+                {geo.center_lat && geo.center_lng && geo.radius_meters && (
+                  <div className="bg-[#0B1526] border border-amber-400/30 rounded-lg p-3 text-xs text-gray-400">
+                    <p className="text-amber-400 font-bold tracking-widest mb-1">PREVIEW</p>
+                    <p>Centre: <span className="text-white font-mono">{geo.center_lat}, {geo.center_lng}</span></p>
+                    <p>Boundary radius: <span className="text-white">{geo.radius_meters}m</span>
+                      {Number(geo.radius_meters) > 0 && (
+                        <span className="ml-2 text-gray-500">
+                          (~{(Number(geo.radius_meters) * 2).toFixed(0)}m diameter)
+                        </span>
+                      )}
+                    </p>
+                    <a
+                      href={`https://www.google.com/maps?q=${geo.center_lat},${geo.center_lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-400 underline mt-1 inline-block"
+                    >
+                      Verify on Google Maps ↗
+                    </a>
+                  </div>
                 )}
-                <a
-                  href={`https://www.google.com/maps?q=${geo.center_lat},${geo.center_lng}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-amber-400 underline mt-1 inline-block"
-                >
-                  Verify on Google Maps ↗
-                </a>
+              </div>
+            ) : (
+              // Two-halves for DRAW mode on md+; single-column below.
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* LEFT half — instructions + inputs + preview */}
+                <div className="space-y-4">
+                  <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 text-xs text-gray-400 space-y-1">
+                    <p className="text-amber-400 font-bold tracking-widest mb-2">HOW TO DRAW</p>
+                    <p>1. Use the polygon tool in the map to click each corner of the property.</p>
+                    <p>2. Click the first point again to close the boundary.</p>
+                    <p>3. Drag the vertices to adjust. Use the edit/delete tools to revise.</p>
+                    <p className="pt-1">Centre and radius auto-fill from your drawing — you can override them. Radius is the GPS-drift fallback if the polygon ever loads incorrectly on a guard's device.</p>
+                  </div>
+
+                  {geoError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2">{geoError}</div>}
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-gray-500 text-xs tracking-widest mb-1">LATITUDE <span className="text-amber-400">*</span></label>
+                      <input
+                        type="number" step="any" placeholder="e.g. 37.7749"
+                        value={geo.center_lat}
+                        onChange={(e) => setGeo((g) => ({ ...g, center_lat: e.target.value }))}
+                        className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-gray-500 text-xs tracking-widest mb-1">LONGITUDE <span className="text-amber-400">*</span></label>
+                      <input
+                        type="number" step="any" placeholder="e.g. -122.4194"
+                        value={geo.center_lng}
+                        onChange={(e) => setGeo((g) => ({ ...g, center_lng: e.target.value }))}
+                        className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-500 text-xs tracking-widest mb-1">RADIUS (METRES) <span className="text-amber-400">*</span></label>
+                    <input
+                      type="number" min="10" max="10000" placeholder="e.g. 100"
+                      value={geo.radius_meters}
+                      onChange={(e) => setGeo((g) => ({ ...g, radius_meters: e.target.value }))}
+                      className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    />
+                    <p className="text-gray-600 text-xs mt-1">
+                      Radius is the GPS-drift fallback — guards inside the polygon OR within this radius are considered on-post.
+                    </p>
+                  </div>
+
+                  {geo.center_lat && geo.center_lng && geo.radius_meters && (
+                    <div className="bg-[#0B1526] border border-amber-400/30 rounded-lg p-3 text-xs text-gray-400">
+                      <p className="text-amber-400 font-bold tracking-widest mb-1">PREVIEW</p>
+                      <p>Centre: <span className="text-white font-mono">{geo.center_lat}, {geo.center_lng}</span></p>
+                      <p>Boundary radius: <span className="text-white">{geo.radius_meters}m</span>
+                        {Number(geo.radius_meters) > 0 && (
+                          <span className="ml-2 text-gray-500">
+                            (~{(Number(geo.radius_meters) * 2).toFixed(0)}m diameter)
+                          </span>
+                        )}
+                      </p>
+                      <p>Polygon: <span className="text-white">{drawnPolygon.length} vertices</span></p>
+                      <a
+                        href={`https://www.google.com/maps?q=${geo.center_lat},${geo.center_lng}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-amber-400 underline mt-1 inline-block"
+                      >
+                        Verify on Google Maps ↗
+                      </a>
+                    </div>
+                  )}
+                </div>
+
+                {/* RIGHT half — map + vertex count */}
+                <div>
+                  <GeofenceMapEditor
+                    initialPolygon={drawnPolygon}
+                    initialCentre={
+                      geoSite.center_lat != null && geoSite.center_lng != null
+                        ? { lat: geoSite.center_lat, lng: geoSite.center_lng }
+                        : null
+                    }
+                    centreOverride={
+                      geo.center_lat && geo.center_lng && !isNaN(parseFloat(geo.center_lat)) && !isNaN(parseFloat(geo.center_lng))
+                        ? { lat: parseFloat(geo.center_lat), lng: parseFloat(geo.center_lng) }
+                        : null
+                    }
+                    onChange={handlePolygonChange}
+                  />
+                  <p className="text-gray-600 text-xs mt-1">
+                    Vertices: <span className="text-gray-300">{drawnPolygon.length}</span>
+                    {drawnPolygon.length > 0 && drawnPolygon.length < 3 && (
+                      <span className="text-red-400 ml-2">need ≥ 3</span>
+                    )}
+                    {drawnPolygon.length >= 4 && isSelfIntersecting(drawnPolygon) && (
+                      <span className="text-red-400 ml-2">edges cross — re-draw</span>
+                    )}
+                  </p>
+                </div>
               </div>
             )}
 
-            <div className="flex gap-3">
+            <div className="flex gap-3 mt-6">
               <button onClick={() => setGeoSite(null)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={saveGeofence} disabled={geoSaving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
                 {geoSaving ? 'SAVING…' : 'SAVE GEOFENCE'}

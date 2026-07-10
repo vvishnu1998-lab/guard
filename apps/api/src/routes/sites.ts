@@ -110,9 +110,17 @@ router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   res.json(result.rows[0]);
 });
 
-// POST /api/sites — admin creates a site and its retention record (contract_end is optional)
+// POST /api/sites — admin creates a site and its retention record.
+// contract_end is optional (open-ended contract). geocoded_lat/lng are
+// optional too; when the admin's NEW SITE modal successfully geocodes
+// the address on blur, the client sends the resolved coordinates here
+// so they can pre-populate the geofence editor later (schema_v27).
 router.post('/', requireAuth('company_admin'), async (req, res) => {
-  const { name, address, contract_start, contract_end, instructions_pdf_url, timezone } = req.body;
+  const {
+    name, address, contract_start, contract_end,
+    instructions_pdf_url, timezone,
+    geocoded_lat, geocoded_lng,
+  } = req.body;
   if (!name || !address || !contract_start) {
     return res.status(400).json({ error: 'name, address, contract_start are required' });
   }
@@ -121,6 +129,11 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       error: `timezone must be one of: ${[...ALLOWED_TIMEZONES].join(', ')}`,
     });
   }
+  const lat = geocoded_lat != null && !Number.isNaN(Number(geocoded_lat)) ? Number(geocoded_lat) : null;
+  const lng = geocoded_lng != null && !Number.isNaN(Number(geocoded_lng)) ? Number(geocoded_lng) : null;
+  if (lat != null && (lat < -90  || lat > 90))  return res.status(400).json({ error: 'geocoded_lat out of range' });
+  if (lng != null && (lng < -180 || lng > 180)) return res.status(400).json({ error: 'geocoded_lng out of range' });
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -128,9 +141,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     // DEFAULT would apply. Postgres has no clean way to say "use DEFAULT"
     // via a bound parameter without dynamic SQL, so we spell it out here.
     const siteResult = await client.query(
-      `INSERT INTO sites (company_id, name, address, contract_start, contract_end, instructions_pdf_url, timezone)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, instructions_pdf_url || null, timezone || 'America/Los_Angeles']
+      `INSERT INTO sites (company_id, name, address, contract_start, contract_end, instructions_pdf_url, timezone, geocoded_lat, geocoded_lng)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, instructions_pdf_url || null, timezone || 'America/Los_Angeles', lat, lng]
     );
     const site = siteResult.rows[0];
     const accessUntil = contract_end ? (() => { const d = new Date(contract_end); d.setDate(d.getDate() + 90); return d; })() : null;

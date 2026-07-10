@@ -26,6 +26,7 @@ import billingRoutes from './routes/billing';
 import chatRoutes from './routes/chat';
 import notificationsRoutes from './routes/notifications';
 import activityLogRoutes from './routes/activityLog';
+import geocodeRoutes from './routes/geocode';
 
 // Cron jobs
 import './jobs/nightlyPurge';
@@ -128,6 +129,7 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/activity-log', activityLogRoutes);
+app.use('/api/geocode', geocodeRoutes);
 
 // Sentry error handler — MUST come after all routes and BEFORE any other
 // error-handling middleware. It captures the error then calls next(err),
