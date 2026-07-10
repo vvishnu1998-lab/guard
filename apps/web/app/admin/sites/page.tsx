@@ -1,9 +1,15 @@
 'use client';
 /**
  * Admin — Sites Management (/admin/sites)
- * List sites, create new site, set geofence, toggle client portal access, PDF instructions.
+ *
+ * Compact rows matching the Guards page pattern: search + status chips
+ * (ENABLED / DISABLED / ALL) in the header, alphabetical uniform-height
+ * rows, and a right-side "Details ▾" pill that expands each row inline
+ * to reveal geofence, instructions, client-access-until, data-deletion,
+ * and client-portal controls. All create/geofence/PDF/deactivate modals
+ * are preserved verbatim.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { adminGet, adminPost, adminPatch } from '../../../lib/adminApi';
 import {
@@ -15,7 +21,6 @@ import {
   type LatLng,
 } from '../../../lib/geofenceMath';
 
-// next/dynamic + ssr:false because Leaflet touches `window` at import time.
 const GeofenceMapEditor = dynamic(() => import('../../../components/GeofenceMapEditor'), {
   ssr: false,
   loading: () => (
@@ -39,7 +44,7 @@ interface Site {
   contract_end:                string;
   timezone:                    string;
   is_active:                   boolean;
-  client_access_disabled_at:   string | null;  // Fix A source of truth
+  client_access_disabled_at:   string | null;
   client_star_access_until:    string | null;
   data_delete_at:              string | null;
   has_geofence:                boolean;
@@ -48,6 +53,7 @@ interface Site {
   radius_meters:               number | null;
   polygon_coordinates:         LatLng[] | null;
   instructions_pdf_url:        string | null;
+  company_name?:               string;
 }
 
 interface DeactivatePreview {
@@ -57,6 +63,7 @@ interface DeactivatePreview {
 }
 
 type GeoMode = 'radius' | 'draw';
+type StatusFilter = 'enabled' | 'disabled' | 'all';
 
 // Keep in sync with ALLOWED_TIMEZONES in apps/api/src/routes/sites.ts.
 const TIMEZONE_OPTIONS: Array<{ value: string; label: string }> = [
@@ -78,10 +85,17 @@ const EMPTY_FORM = {
 };
 const EMPTY_GEO  = { center_lat: '', center_lng: '', radius_meters: '' };
 
+const STATUS_CHIPS: StatusFilter[] = ['enabled', 'disabled', 'all'];
+
 export default function SitesPage() {
   const [sites,        setSites]        = useState<Site[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [error,        setError]        = useState('');
+
+  // Redesign state
+  const [search,       setSearch]       = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('enabled');
+  const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
 
   // create-site modal
   const [showCreate,   setShowCreate]   = useState(false);
@@ -99,34 +113,66 @@ export default function SitesPage() {
   const [geoError,     setGeoError]     = useState('');
 
   const [toggling,     setToggling]     = useState<string | null>(null);
-  const [includeInactive, setIncludeInactive] = useState(false);
 
-  // deactivate flow — preview counts + confirm modal
+  // deactivate flow
   const [deactivateSite,     setDeactivateSite]     = useState<Site | null>(null);
   const [deactivatePreview,  setDeactivatePreview]  = useState<DeactivatePreview | null>(null);
   const [deactivateBusy,     setDeactivateBusy]     = useState(false);
   const [deactivateError,    setDeactivateError]    = useState('');
   const [activeToggling,     setActiveToggling]     = useState<string | null>(null);
 
-  // PDF modal (edit / replace)
+  // PDF modal
   const [pdfSite,      setPdfSite]      = useState<Site | null>(null);
   const [replacePdf,   setReplacePdf]   = useState<File | null>(null);
   const [pdfSaving,    setPdfSaving]    = useState(false);
   const [pdfError,     setPdfError]     = useState('');
   const pdfInputRef                     = useRef<HTMLInputElement>(null);
 
+  // Always fetch with include_inactive=1 so the chip toggle is a client-side
+  // filter with no round-trip. Search across ALL sites regardless of chip.
   const load = useCallback(async () => {
     try {
-      const url = includeInactive ? '/api/sites?include_inactive=1' : '/api/sites';
-      setSites(await adminGet<Site[]>(url));
+      setSites(await adminGet<Site[]>('/api/sites?include_inactive=1'));
       setError('');
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, [includeInactive]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  /* ── Open deactivate modal → fetch preview counts ────────────────── */
+  // Vishnu multi-company label — show company_name inline when the returned
+  // set spans more than one company (same conditional pattern as Guards + Shifts).
+  const showCompanyLabel = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of sites) if (s.company_name) set.add(s.company_name);
+    return set.size > 1;
+  }, [sites]);
+
+  const visible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return sites
+      .filter((s) =>
+        statusFilter === 'all' ? true
+        : statusFilter === 'enabled' ? s.is_active
+        : !s.is_active
+      )
+      .filter((s) => {
+        if (!q) return true;
+        return s.name.toLowerCase().includes(q)
+          || (s.address ?? '').toLowerCase().includes(q);
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  }, [sites, search, statusFilter]);
+
+  function toggleExpand(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  /* ── Modal handlers (unchanged from previous version) ────────────── */
   async function openDeactivate(site: Site) {
     setDeactivateSite(site);
     setDeactivatePreview(null);
@@ -141,7 +187,6 @@ export default function SitesPage() {
     }
   }
 
-  /* ── Confirm deactivate → run cascade ────────────────────────────── */
   async function confirmDeactivate() {
     if (!deactivateSite) return;
     setDeactivateBusy(true);
@@ -158,7 +203,6 @@ export default function SitesPage() {
     }
   }
 
-  /* ── Reactivate → single click, no modal ─────────────────────────── */
   async function reactivateSite(id: string) {
     setActiveToggling(id);
     try {
@@ -171,11 +215,9 @@ export default function SitesPage() {
     }
   }
 
-  /* ── Upload PDF to a site ───────────────────────────────────────── */
   async function uploadPdfToSite(siteId: string, file: File): Promise<void> {
     const fd = new FormData();
     fd.append('file', file);
-    // Do NOT set Content-Type — browser auto-sets multipart/form-data with boundary
     const res = await fetch(`${API}/api/sites/${siteId}/instructions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${getAdminToken()}` },
@@ -187,7 +229,6 @@ export default function SitesPage() {
     }
   }
 
-  /* ── Create site ─────────────────────────────────────────────────── */
   async function createSite() {
     if (!form.name || !form.address || !form.contract_start) {
       setFormError('Site name, address, and contract start are required'); return;
@@ -208,7 +249,6 @@ export default function SitesPage() {
     finally { setSaving(false); }
   }
 
-  /* ── Replace PDF on existing site ───────────────────────────────── */
   async function savePdf() {
     if (!replacePdf) { setPdfError('Select a PDF file first'); return; }
     setPdfSaving(true); setPdfError('');
@@ -220,17 +260,11 @@ export default function SitesPage() {
     finally { setPdfSaving(false); }
   }
 
-  /* ── Set geofence ────────────────────────────────────────────────── */
   function openGeo(site: Site) {
     setGeoSite(site);
-    // Defend against the API returning the polygon as a JSON string instead
-    // of a parsed array — would happen if node-pg's JSONB type parser were
-    // ever overridden. Treat anything non-array as "no polygon".
     const raw = site.polygon_coordinates;
     const existing: LatLng[] = Array.isArray(raw) ? raw : [];
     const validExisting = existing.length >= 3;
-    // Re-opening an existing fence: a 16-vertex equal-radius ring looks like
-    // the legacy radius synth → default to Radius mode. Anything else → Draw.
     const defaultMode: GeoMode = validExisting && !looksLikeCircleSynth(existing) ? 'draw' : 'radius';
     if (site.has_geofence && !validExisting) {
       // eslint-disable-next-line no-console
@@ -248,9 +282,6 @@ export default function SitesPage() {
     setGeoError('');
   }
 
-  // Draw mode: auto-fill centre + radius defaults whenever the polygon
-  // changes. Admin can override the inputs after; a re-draw stomps the
-  // overrides (acceptable per scope — no preservation across re-draws).
   function handlePolygonChange(poly: LatLng[]) {
     setDrawnPolygon(poly);
     if (poly.length >= 3) {
@@ -301,7 +332,6 @@ export default function SitesPage() {
     finally { setGeoSaving(false); }
   }
 
-  /* ── Toggle client access — Fix A: reads client_access_disabled_at ── */
   async function toggleClientAccess(id: string, enabled: boolean) {
     setToggling(id);
     try { await adminPatch(`/api/sites/${id}/client-access`, { enabled }); await load(); }
@@ -318,24 +348,35 @@ export default function SitesPage() {
     return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
   }
 
-  /* ── Render ──────────────────────────────────────────────────────── */
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold tracking-widest text-amber-400">SITES</h1>
-        <div className="flex items-center gap-4">
-          <label className="text-xs tracking-widest text-gray-500 flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includeInactive}
-              onChange={(e) => setIncludeInactive(e.target.checked)}
-              className="accent-amber-400"
-            />
-            SHOW INACTIVE
-          </label>
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl md:text-3xl font-bold tracking-widest text-amber-400">SITES</h1>
+        <div className="flex flex-wrap gap-3 items-center">
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search sites or address…"
+            className="bg-[#0F1E35] border border-[#1A3050] text-gray-200 text-sm rounded-lg px-3 py-2 min-w-[220px] focus:outline-none focus:border-amber-400"
+          />
+          <div className="flex items-center gap-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-1">
+            {STATUS_CHIPS.map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s)}
+                className={`px-3 py-1.5 rounded text-xs tracking-widest transition-colors ${
+                  statusFilter === s ? 'bg-amber-500 text-black font-bold' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {s.toUpperCase()}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() => { setShowCreate(true); setFormError(''); setForm(EMPTY_FORM); }}
-            className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors"
+            className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors min-h-[40px]"
           >
             + NEW SITE
           </button>
@@ -344,65 +385,72 @@ export default function SitesPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
+      {/* Compact list */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
-              <th className="text-left p-4">SITE</th>
-              <th className="text-left p-4">CONTRACT</th>
-              <th className="text-left p-4">GEOFENCE</th>
-              <th className="text-left p-4">INSTRUCTIONS</th>
-              <th className="text-left p-4">CLIENT ACCESS UNTIL</th>
-              <th className="text-left p-4">DATA DELETION</th>
-              <th className="text-right p-4">CLIENT PORTAL</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && (
-              <tr><td colSpan={6} className="text-center text-gray-500 py-10">Loading…</td></tr>
-            )}
-            {!loading && sites.length === 0 && (
-              <tr><td colSpan={6} className="text-center text-gray-500 py-10">No sites yet</td></tr>
-            )}
-            {sites.map((site) => {
-              const deleteIn    = daysUntil(site.data_delete_at);
-              const accessIn    = daysUntil(site.client_star_access_until);
-              // Fix A: label reads sites.client_access_disabled_at, the
-              // column the PATCH /client-access endpoint actually writes.
-              // Previously read drl.client_star_access_disabled (a dead
-              // legacy retention flag) and always showed "ENABLED".
-              const clientEnabled = !site.client_access_disabled_at;
-              const isDeactivated = !site.is_active;
-              return (
-                <tr key={site.id} className={`border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors ${isDeactivated ? 'opacity-60' : ''}`}>
-                  <td className="p-4">
-                    <p className="text-gray-200 font-medium">
-                      {site.name}
-                      {isDeactivated && (
-                        <span
-                          className="ml-2 inline-flex items-center text-[9px] font-bold tracking-widest text-gray-400 bg-gray-800/60 border border-gray-700 rounded px-1.5 py-0.5"
-                          title="Deactivated. History remains visible; future work is blocked."
-                        >
-                          INACTIVE
-                        </span>
-                      )}
+        {loading && <p className="p-8 text-center text-gray-500">Loading…</p>}
+        {!loading && visible.length === 0 && (
+          <p className="p-8 text-center text-gray-500">No sites match your criteria.</p>
+        )}
+        {!loading && visible.map((site) => {
+          const isExpanded    = expanded.has(site.id);
+          const isDeactivated = !site.is_active;
+          const clientEnabled = !site.client_access_disabled_at;
+          const accessIn      = daysUntil(site.client_star_access_until);
+          const deleteIn      = daysUntil(site.data_delete_at);
+          return (
+            <div key={site.id} className={`border-b border-[#1A3050] last:border-b-0 ${isDeactivated ? 'opacity-60' : ''}`}>
+              {/* Collapsed row — uniform height */}
+              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-4 px-4 py-3 hover:bg-[#0B1526] transition-colors">
+                <div className="min-w-0">
+                  <p className="text-gray-200 font-medium truncate">{site.name}</p>
+                  {site.address && <p className="text-gray-500 text-xs truncate">{site.address}</p>}
+                  {showCompanyLabel && site.company_name && (
+                    <p className="text-gray-600 text-[10px] tracking-widest mt-0.5">{site.company_name.toUpperCase()}</p>
+                  )}
+                </div>
+                <div className="text-gray-400 text-xs text-right whitespace-nowrap hidden md:block">
+                  {fmtDate(site.contract_start)}
+                  <span className="text-gray-600"> → </span>
+                  {site.contract_end ? fmtDate(site.contract_end) : <span className="text-gray-600 italic">no end date</span>}
+                </div>
+                {site.is_active ? (
+                  <span className="text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">ENABLED</span>
+                ) : (
+                  <span className="text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded">DISABLED</span>
+                )}
+                <button
+                  onClick={() => toggleExpand(site.id)}
+                  className="px-2.5 py-1 rounded-full text-[11px] font-bold tracking-widest bg-blue-500/20 border border-blue-500/40 text-blue-300 hover:bg-blue-500/30 transition-colors"
+                >
+                  DETAILS {isExpanded ? '▲' : '▾'}
+                </button>
+              </div>
+
+              {/* Expanded detail section */}
+              {isExpanded && (
+                <div className="bg-[#0B1526] px-4 py-4 border-t border-[#1A3050] space-y-4">
+                  {/* Contract dates — mirrored inside for mobile where they were hidden on the row */}
+                  <div className="md:hidden">
+                    <p className="text-gray-500 text-xs tracking-widest mb-1">CONTRACT</p>
+                    <p className="text-gray-300 text-sm">
+                      {fmtDate(site.contract_start)} <span className="text-gray-600">→</span>{' '}
+                      {site.contract_end ? fmtDate(site.contract_end) : <span className="text-gray-600 italic">no end date</span>}
                     </p>
-                    <p className="text-gray-500 text-xs">{site.address}</p>
-                  </td>
-                  <td className="p-4 text-gray-400 text-xs">
-                    {fmtDate(site.contract_start)} → {site.contract_end ? fmtDate(site.contract_end) : <span className="text-gray-600 italic">no end date</span>}
-                  </td>
-                  <td className="p-4">
+                  </div>
+
+                  {/* GEOFENCE */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-1">GEOFENCE</p>
                     {site.has_geofence ? (
-                      <div className="space-y-1">
-                        <span className="inline-flex items-center gap-1 text-xs text-green-400">
+                      <div className="flex items-center flex-wrap gap-3">
+                        <span className="inline-flex items-center gap-1.5 text-xs text-green-400">
                           <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" />
                           SET
                         </span>
-                        <p className="text-gray-500 text-xs">
+                        <span className="text-gray-500 text-xs font-mono">
                           {site.center_lat?.toFixed(5)}, {site.center_lng?.toFixed(5)}
-                        </p>
-                        <p className="text-gray-500 text-xs">{site.radius_meters}m radius</p>
+                        </span>
+                        <span className="text-gray-500 text-xs">{site.radius_meters}m radius</span>
                         <button
                           onClick={() => openGeo(site)}
                           className="text-xs text-amber-400 hover:text-amber-300 underline"
@@ -418,26 +466,31 @@ export default function SitesPage() {
                         NOT SET — Configure
                       </button>
                     )}
-                  </td>
-                  <td className="p-4">
+                  </div>
+
+                  {/* INSTRUCTIONS */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-1">INSTRUCTIONS</p>
                     {site.instructions_pdf_url ? (
-                      <div className="space-y-1">
+                      <div className="flex items-center gap-3">
                         <a href={site.instructions_pdf_url} target="_blank" rel="noopener noreferrer"
                            className="text-xs text-cyan-400 underline">View PDF</a>
-                        <br />
                         <button onClick={() => { setPdfSite(site); setReplacePdf(null); setPdfError(''); }}
                                 className="text-xs text-amber-400 hover:text-amber-300 underline">Replace</button>
                       </div>
                     ) : (
                       <button onClick={() => { setPdfSite(site); setReplacePdf(null); setPdfError(''); }}
-                              className="text-xs text-gray-500 border border-[#1A3050] px-2 py-1 rounded hover:border-amber-400 hover:text-amber-400 transition-colors">
+                              className="text-xs text-gray-400 border border-[#1A3050] px-2 py-1 rounded hover:border-amber-400 hover:text-amber-400 transition-colors">
                         + Upload
                       </button>
                     )}
-                  </td>
-                  <td className="p-4">
+                  </div>
+
+                  {/* CLIENT ACCESS UNTIL */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-1">CLIENT ACCESS UNTIL</p>
                     {site.client_star_access_until ? (
-                      <span className={`text-xs ${accessIn !== null && accessIn <= 14 ? 'text-red-400' : 'text-gray-400'}`}>
+                      <span className={`text-xs ${accessIn !== null && accessIn <= 14 ? 'text-red-400' : 'text-gray-300'}`}>
                         {fmtDate(site.client_star_access_until)}
                         {accessIn !== null && accessIn <= 30 && (
                           <span className="ml-1 text-red-400">({accessIn}d)</span>
@@ -446,10 +499,13 @@ export default function SitesPage() {
                     ) : (
                       <span className="text-gray-600 text-xs">—</span>
                     )}
-                  </td>
-                  <td className="p-4">
+                  </div>
+
+                  {/* DATA DELETION */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-1">DATA DELETION</p>
                     {site.data_delete_at ? (
-                      <span className={`text-xs ${deleteIn !== null && deleteIn <= 30 ? 'text-red-400' : 'text-gray-500'}`}>
+                      <span className={`text-xs ${deleteIn !== null && deleteIn <= 30 ? 'text-red-400' : 'text-gray-300'}`}>
                         {fmtDate(site.data_delete_at)}
                         {deleteIn !== null && deleteIn <= 30 && (
                           <span className="ml-1">({deleteIn}d)</span>
@@ -458,16 +514,19 @@ export default function SitesPage() {
                     ) : (
                       <span className="text-gray-600 text-xs">—</span>
                     )}
-                  </td>
-                  <td className="p-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
+                  </div>
+
+                  {/* CLIENT PORTAL — action controls; reactivate shown when deactivated */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-1">CLIENT PORTAL</p>
+                    <div className="flex items-center gap-2 flex-wrap">
                       {isDeactivated ? (
                         <button
                           onClick={() => reactivateSite(site.id)}
                           disabled={activeToggling === site.id}
                           className="text-xs tracking-widest px-3 py-1 rounded transition-colors bg-[#0B1526] text-gray-400 border border-[#1A3050] hover:border-amber-400 hover:text-amber-400 disabled:opacity-40"
                         >
-                          {activeToggling === site.id ? '…' : 'REACTIVATE'}
+                          {activeToggling === site.id ? '…' : 'REACTIVATE SITE'}
                         </button>
                       ) : (
                         <>
@@ -491,12 +550,12 @@ export default function SitesPage() {
                         </>
                       )}
                     </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* ── Create Site Modal ─────────────────────────────────────────── */}
@@ -510,9 +569,9 @@ export default function SitesPage() {
             {formError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{formError}</div>}
             <div className="space-y-4">
               {[
-                { key: 'name',           label: 'SITE NAME',       type: 'text', placeholder: 'e.g. Westfield Shopping Centre', required: true },
-                { key: 'address',        label: 'ADDRESS',         type: 'text', placeholder: 'Full address',                   required: true },
-                { key: 'contract_start', label: 'CONTRACT START',  type: 'date', placeholder: '',                               required: true },
+                { key: 'name',           label: 'SITE NAME',       type: 'text', placeholder: 'e.g. Westfield Shopping Centre' },
+                { key: 'address',        label: 'ADDRESS',         type: 'text', placeholder: 'Full address' },
+                { key: 'contract_start', label: 'CONTRACT START',  type: 'date', placeholder: '' },
               ].map(({ key, label, type, placeholder }) => (
                 <div key={key}>
                   <label className="block text-gray-500 text-xs tracking-widest mb-1">{label} <span className="text-amber-400">*</span></label>
@@ -632,7 +691,6 @@ export default function SitesPage() {
               Site: <span className="text-gray-300">{geoSite.name}</span>
             </p>
 
-            {/* Mode toggle */}
             <div className="flex gap-2 mb-5" role="radiogroup" aria-label="Geofence mode">
               <button
                 type="button"
@@ -748,7 +806,6 @@ export default function SitesPage() {
               </p>
             </div>
 
-            {/* Live preview of what they entered */}
             {geo.center_lat && geo.center_lng && geo.radius_meters && (
               <div className="bg-[#0B1526] border border-amber-400/30 rounded-lg p-3 mb-5 text-xs text-gray-400">
                 <p className="text-amber-400 font-bold tracking-widest mb-1">PREVIEW</p>
