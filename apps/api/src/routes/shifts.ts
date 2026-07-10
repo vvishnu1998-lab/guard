@@ -711,12 +711,19 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
 router.get('/inbound-swap-requests', requireAuth('guard'), async (req, res) => {
   const result = await pool.query(
     // Phase 2b: mobile alerts.tsx branches card copy + the accept
-    // confirmation dialog on initiated_by, so it comes back in the list.
+    // confirmation dialog on initiated_by. Post-walk-test 2026-07-10:
+    // ALSO return accepted-but-not-arrived handoff rows so the recipient's
+    // PENDING ARRIVAL card survives an app kill / tab reopen (previously
+    // this state only lived in an in-memory Set on the alerts screen).
+    // status + to_session_id in the SELECT so mobile can render the state.
     `SELECT ssr.id           AS history_id,
             ssr.shift_id,
             ssr.requested_at,
+            ssr.accepted_at,
+            ssr.status,
             ssr.reason,
             ssr.initiated_by,
+            ssr.to_session_id,
             ssr.from_guard_id,
             fg.name          AS from_guard_name,
             sh.scheduled_start,
@@ -728,7 +735,60 @@ router.get('/inbound-swap-requests', requireAuth('guard'), async (req, res) => {
        JOIN sites  si ON si.id = sh.site_id
        LEFT JOIN guards fg ON fg.id = ssr.from_guard_id
       WHERE ssr.to_guard_id = $1
-        AND ssr.status      = 'pending'
+        AND (
+          ssr.status = 'pending'
+          OR (
+            ssr.status = 'accepted'
+            AND ssr.initiated_by = 'guard_handoff'
+            AND ssr.to_session_id IS NULL
+          )
+        )
+      ORDER BY ssr.requested_at DESC
+      LIMIT 50`,
+    [req.user!.sub],
+  );
+  res.json(result.rows);
+});
+
+// Symmetric to /inbound-swap-requests but for the requester side. Home
+// screen surfaces a "PENDING HANDOFF · Waiting for james…" card so the
+// initiator doesn't lose sight of an in-flight request after they navigate
+// away from the modal.
+//
+// Includes both:
+//   - pending  — recipient hasn't responded yet
+//   - accepted-but-not-arrived — recipient agreed but hasn't clocked in
+// Cancelled/declined/expired drop off the list since there's nothing for
+// the requester to do at that point (they'll get a push instead).
+router.get('/outbound-swap-requests', requireAuth('guard'), async (req, res) => {
+  const result = await pool.query(
+    `SELECT ssr.id           AS history_id,
+            ssr.shift_id,
+            ssr.requested_at,
+            ssr.accepted_at,
+            ssr.status,
+            ssr.reason,
+            ssr.initiated_by,
+            ssr.to_session_id,
+            ssr.to_guard_id,
+            tg.name          AS to_guard_name,
+            sh.scheduled_start,
+            sh.scheduled_end,
+            si.name          AS site_name,
+            si.timezone      AS site_tz
+       FROM shift_swap_requests ssr
+       JOIN shifts sh ON sh.id = ssr.shift_id
+       JOIN sites  si ON si.id = sh.site_id
+       LEFT JOIN guards tg ON tg.id = ssr.to_guard_id
+      WHERE ssr.from_guard_id = $1
+        AND (
+          ssr.status = 'pending'
+          OR (
+            ssr.status = 'accepted'
+            AND ssr.initiated_by = 'guard_handoff'
+            AND ssr.to_session_id IS NULL
+          )
+        )
       ORDER BY ssr.requested_at DESC
       LIMIT 50`,
     [req.user!.sub],
@@ -1489,10 +1549,17 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       [hist.from_session_id],
     );
     const closed = await client.query<{ id: string; total_hours: number | null }>(
+      // Walk-test 2026-07-09 mosser towers: reddy clocked in 03:12Z, shift
+      // scheduled_start 03:20Z. James's handoff-clock-in fired ~03:19Z —
+      // BEFORE scheduled_start. NOW - MAX(clocked_in, scheduled_start) went
+      // negative, ROUND yielded -0.02h, chk_total_hours_nonneg rejected the
+      // UPDATE. Clamp with GREATEST(0, …) to match the manual clock-out and
+      // autoCompleteShifts patterns; option-C accounting still holds because
+      // pay only starts at scheduled_start regardless.
       `UPDATE shift_sessions ss
           SET clocked_out_at = NOW(),
               clock_out_reason = $2,
-              total_hours = ROUND((
+              total_hours = GREATEST(0, ROUND((
                 EXTRACT(EPOCH FROM (NOW() - GREATEST(ss.clocked_in_at, (
                   SELECT sh.scheduled_start FROM shifts sh WHERE sh.id = ss.shift_id
                 )))) / 3600.0
@@ -1500,7 +1567,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
                     SELECT SUM(bs.duration_minutes) / 60.0
                       FROM break_sessions bs WHERE bs.shift_session_id = ss.id
                   ), 0)
-              )::NUMERIC, 2)
+              )::NUMERIC, 2))
         WHERE ss.id = $1
         RETURNING ss.id, ss.total_hours`,
       [hist.from_session_id, `handed_off_to_${user!.sub}`],
