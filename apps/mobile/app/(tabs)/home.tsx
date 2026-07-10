@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   ActivityIndicator, Dimensions, Linking,
@@ -6,7 +6,7 @@ import {
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Sentry from '@sentry/react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
@@ -75,11 +75,89 @@ export default function HomeScreen() {
   const [currentTime, setCurrentTime] = useState(getCurrentTimeStr());
   const [elapsed, setElapsed] = useState(0);
 
+  // Walk-test 2026-07-09 BUG D: outbound handoff visibility. After the
+  // requester (Deepak/James) sends a handoff, they had no way to see the
+  // pending state without navigating into the shift detail's HISTORY.
+  // Home surfaces it directly.
+  interface OutboundHandoff {
+    history_id:      string;
+    shift_id:        string;
+    requested_at:    string;
+    accepted_at:     string | null;
+    status:          'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled';
+    initiated_by:    'admin' | 'guard_pre_shift' | 'guard_handoff';
+    to_session_id:   string | null;
+    to_guard_id:     string;
+    to_guard_name:   string | null;
+    site_name:       string;
+    site_tz:         string | null;
+    scheduled_end:   string;
+  }
+  const [outboundHandoff, setOutboundHandoff] = useState<OutboundHandoff | null>(null);
+  const [cancellingHandoff, setCancellingHandoff] = useState(false);
+  const outboundFetchRef = useRef<AbortController | null>(null);
+
+  async function fetchOutboundHandoff() {
+    outboundFetchRef.current?.abort();
+    const ctrl = new AbortController();
+    outboundFetchRef.current = ctrl;
+    try {
+      const rows = await apiClient.get<OutboundHandoff[]>('/shifts/outbound-swap-requests');
+      if (ctrl.signal.aborted) return;
+      // Home only cares about handoffs, not pre-shift swaps.
+      const handoff = rows.find((r) => r.initiated_by === 'guard_handoff') ?? null;
+      setOutboundHandoff(handoff);
+      Sentry.addBreadcrumb({
+        category: 'home_tab',
+        message: 'outbound_swap_requests_loaded',
+        level: 'info',
+        data: {
+          total_rows:      rows.length,
+          handoff_present: !!handoff,
+          handoff_status:  handoff?.status ?? null,
+        },
+      });
+    } catch (err: any) {
+      if (!ctrl.signal.aborted) {
+        Sentry.captureException(err, { extra: { where: 'home.fetchOutboundHandoff' } });
+      }
+    }
+  }
+
+  async function cancelOutboundHandoff() {
+    if (!outboundHandoff || cancellingHandoff) return;
+    setCancellingHandoff(true);
+    try {
+      await apiClient.post(`/shifts/${outboundHandoff.shift_id}/handoff-cancel`, {
+        history_id: outboundHandoff.history_id,
+      });
+      setOutboundHandoff(null);
+    } catch (err: any) {
+      Sentry.captureException(err, { extra: { where: 'home.cancelOutboundHandoff' } });
+      // eslint-disable-next-line no-alert
+      alert(err?.message ?? 'Could not cancel handoff.');
+    } finally {
+      setCancellingHandoff(false);
+    }
+  }
+
   // Clock tick every minute
   useEffect(() => {
     const id = setInterval(() => setCurrentTime(getCurrentTimeStr()), 60000);
     return () => clearInterval(id);
   }, []);
+
+  // BUG D — fetch outbound handoffs on focus AND every 30s so the card
+  // stays fresh without the user needing to pull-to-refresh. Push
+  // handler in _layout.tsx bumps the unread badge; here we refresh the
+  // visible card independently.
+  useFocusEffect(
+    useCallback(() => {
+      fetchOutboundHandoff();
+      const id = setInterval(fetchOutboundHandoff, 30_000);
+      return () => clearInterval(id);
+    }, []),
+  );
 
   // Working hours ticker.
   // Option C: pay starts at MAX(clocked_in_at, scheduled_start) — early
@@ -362,6 +440,50 @@ export default function HomeScreen() {
           </View>
         )}
 
+        {/* BUG D — outbound pending-handoff card. Renders between the Live
+            Map overlay and the shift-state block. Both pending (waiting
+            for reply) and accepted-not-arrived (waiting for arrival)
+            variants render here, differentiated by copy. Tap on the card
+            body routes to shift detail; explicit Cancel button POSTs
+            /handoff-cancel. */}
+        {outboundHandoff && (
+          <TouchableOpacity
+            style={styles.pendingOutboundCard}
+            onPress={() => router.push(`/shifts/${outboundHandoff.shift_id}`)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.pendingOutboundHeaderRow}>
+              <View style={styles.pendingOutboundBadge}>
+                <Text style={styles.pendingOutboundBadgeText}>
+                  {outboundHandoff.status === 'accepted' ? 'AWAITING ARRIVAL' : 'PENDING HANDOFF'}
+                </Text>
+              </View>
+              <Text style={styles.pendingOutboundElapsed}>
+                {(() => {
+                  const anchor = outboundHandoff.accepted_at ?? outboundHandoff.requested_at;
+                  const mins = Math.max(0, Math.floor((Date.now() - new Date(anchor).getTime()) / 60_000));
+                  return mins < 1 ? 'just now' : `${mins}m ago`;
+                })()}
+              </Text>
+            </View>
+            <Text style={styles.pendingOutboundBody}>
+              {outboundHandoff.status === 'accepted'
+                ? `${outboundHandoff.to_guard_name ?? 'They'} accepted — waiting for them to clock in.`
+                : `Waiting for ${outboundHandoff.to_guard_name ?? 'a guard'} to respond.`}
+            </Text>
+            <TouchableOpacity
+              style={[styles.pendingOutboundCancelBtn, cancellingHandoff && styles.pendingOutboundCancelBtnDisabled]}
+              onPress={cancelOutboundHandoff}
+              disabled={cancellingHandoff}
+              hitSlop={8}
+            >
+              <Text style={styles.pendingOutboundCancelText}>
+                {cancellingHandoff ? 'Cancelling…' : 'CANCEL HANDOFF'}
+              </Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        )}
+
         {isOnShift ? (
           <>
             {/* Stat bar */}
@@ -591,6 +713,56 @@ const styles = StyleSheet.create({
     color: '#070D1A',
     fontSize: 13,
     letterSpacing: 2,
+  },
+
+  // Pending outbound handoff card (BUG D — walk-test 2026-07-09)
+  pendingOutboundCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1.5,
+    borderColor: Colors.warning,
+    marginTop: Spacing.md,
+    marginHorizontal: Spacing.md,
+    padding: Spacing.md,
+  },
+  pendingOutboundHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.sm,
+  },
+  pendingOutboundBadge: {
+    backgroundColor: Colors.warning,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 2,
+    borderRadius: Radius.xs,
+  },
+  pendingOutboundBadgeText: {
+    color: '#070D1A',
+    fontFamily: Fonts.heading,
+    fontSize: 10,
+    letterSpacing: 1,
+  },
+  pendingOutboundElapsed: {
+    color: Colors.muted,
+    fontSize: 11,
+  },
+  pendingOutboundBody: {
+    color: Colors.textPrimary,
+    fontSize: 13,
+    marginBottom: Spacing.sm,
+  },
+  pendingOutboundCancelBtn: {
+    alignSelf: 'flex-start',
+    paddingVertical: 4,
+  },
+  pendingOutboundCancelBtnDisabled: { opacity: 0.5 },
+  pendingOutboundCancelText: {
+    color: Colors.danger,
+    fontFamily: Fonts.heading,
+    fontSize: 11,
+    letterSpacing: 1.5,
+    textDecorationLine: 'underline',
   },
 
   // Stat bar

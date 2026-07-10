@@ -23,6 +23,7 @@ import { useShiftStore } from '../store/shiftStore';
 import { apiClient } from '../lib/apiClient';
 import { navigateForNotification } from '../lib/navigateForNotification';
 import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locationBackground';
+import * as Sentry from '@sentry/react-native';
 import { initSentry } from '../lib/sentry';
 
 // Initialize at module load — before any component mounts — so early native
@@ -128,12 +129,30 @@ export default function RootLayout() {
   useEffect(() => {
     const sub = Notifications.addNotificationReceivedListener((notif) => {
       const data = notif.request.content.data as Record<string, any> | undefined;
+      // Walk-test 2026-07-09 BUG C: swap/handoff request pushes should
+      // bump the ALERTS badge (they route to the alerts tab, and the
+      // pending row shows up there). unreadStore.refresh() also counts
+      // inbound-swap-requests, so the server-side reconciliation lands
+      // the exact count on the followup fetch below. Explicit branch
+      // exists so a Sentry crumb can capture the routing.
+      const swapType = data?.type === 'swap_request_received'
+                    || data?.type === 'handoff_request_received';
       if (data?.type === 'chat') {
         bumpChat(1);
       } else if (data?.type) {
         bumpNotifications(1);
       }
-      // Re-sync from server shortly after — the new notification row should be visible.
+      if (data?.type) {
+        Sentry.addBreadcrumb({
+          category: 'push_foreground',
+          message: `received type=${data.type}`,
+          level: 'info',
+          data: { type: data.type, swap_related: swapType },
+        });
+      }
+      // Re-sync from server shortly after — the new notification row
+      // should be visible, and (BUG C) any pending swap/handoff should
+      // land in the inbound-swap-requests count too.
       setTimeout(() => refreshUnread(), 500);
     });
     return () => sub.remove();

@@ -59,8 +59,17 @@ export default function TabLayout() {
             tabBarIcon: ({ focused }) => TabIcon('calendar', focused),
           }}
         />
+        {/* Walk-test 2026-07-09 BUG B: the visible "ALERTS" tab used to
+            route to notifications.tsx (a generic push-history feed) while
+            the swap+handoff+geofence-violation cards lived in alerts.tsx,
+            reachable only via a push tap into /(tabs)/alerts. Guards who
+            opened the app manually and tapped the tab bar saw an empty
+            feed. Fix: the visible tab now routes to alerts.tsx.
+            notifications.tsx is kept as a hidden route so push-tap targets
+            that hit /(tabs)/notifications still work (nothing does today
+            but we don't remove the file). */}
         <Tabs.Screen
-          name="notifications"
+          name="alerts"
           options={{
             title: 'ALERTS',
             tabBarIcon: ({ focused }) => TabIcon('notifications', focused),
@@ -88,10 +97,10 @@ export default function TabLayout() {
         />
 
         {/* Hidden — accessible via router.push but not shown in tab bar */}
-        <Tabs.Screen name="reports"  options={{ href: null }} />
-        <Tabs.Screen name="tasks"    options={{ href: null }} />
-        <Tabs.Screen name="alerts"   options={{ href: null }} />
-        <Tabs.Screen name="profile"  options={{ href: null }} />
+        <Tabs.Screen name="reports"       options={{ href: null }} />
+        <Tabs.Screen name="tasks"         options={{ href: null }} />
+        <Tabs.Screen name="notifications" options={{ href: null }} />
+        <Tabs.Screen name="profile"       options={{ href: null }} />
       </Tabs>
 
       <DrawerOverlay />

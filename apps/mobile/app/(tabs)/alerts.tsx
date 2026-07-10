@@ -33,6 +33,9 @@ interface InboundSwap {
   history_id:       string;
   shift_id:         string;
   requested_at:     string;
+  accepted_at?:     string | null;   // walk-test BUG B fix
+  status?:          'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled'; // ditto
+  to_session_id?:   string | null;   // ditto
   reason:           string | null;
   from_guard_id:    string;
   from_guard_name:  string | null;
@@ -40,15 +43,8 @@ interface InboundSwap {
   scheduled_end:    string;
   site_name:        string;
   site_tz:          string | null;
-  // Phase 2b: server now branches copy + confirmation flow on this. Older
-  // API versions (pre-Phase 2a) don't return it — treat missing as pre-shift.
   initiated_by?:    'admin' | 'guard_pre_shift' | 'guard_handoff';
 }
-
-// Accepted-but-not-arrived pending state — recipient side. Populated
-// locally when the user taps ACCEPT on a handoff card so the card mutates
-// in place to "PENDING ARRIVAL — OPEN SHIFT" instead of vanishing.
-type AcceptedState = 'pre_shift_dismissed' | 'handoff_pending_arrival';
 
 function fmtDateTime(iso: string) {
   const d = new Date(iso);
@@ -69,10 +65,12 @@ export default function AlertsScreen() {
   // Per-row action-in-flight so tapping ACCEPT on one card doesn't grey out
   // every other card.
   const [busyId,     setBusyId]     = useState<string | null>(null);
-  // Handoff cards, once accepted, mutate in place to "PENDING ARRIVAL"
-  // instead of vanishing so the recipient can tap OPEN SHIFT → detail →
-  // wizard from the same surface. Keyed by history_id.
-  const [acceptedHandoffs, setAcceptedHandoffs] = useState<Set<string>>(new Set());
+  // Optimistic acceptance: the /inbound-swap-requests refetch is async, so
+  // between the ACCEPT tap and the response landing we mark the row locally
+  // as accepted. On refetch the server row's own status='accepted' + to_
+  // session_id=null keeps the card in PENDING ARRIVAL, so this Set just
+  // covers the sub-second gap.
+  const [optimisticAccepted, setOptimisticAccepted] = useState<Set<string>>(new Set());
 
   async function fetchAll() {
     try {
@@ -83,13 +81,35 @@ export default function AlertsScreen() {
       setViolations(v);
       setSwaps(s);
       setError(null);
+      // Walk-test 2026-07-09 diagnostic: capture what actually landed so
+      // any "empty alerts tab" report going forward has a Sentry trail.
+      const pending = s.filter((x) => (x.status ?? 'pending') === 'pending').length;
+      const arriving = s.filter((x) => x.status === 'accepted' && x.initiated_by === 'guard_handoff' && (x.to_session_id ?? null) === null).length;
+      Sentry.addBreadcrumb({
+        category: 'alerts_tab',
+        message: 'inbound_swap_requests_loaded',
+        level: 'info',
+        data: {
+          total_rows:       s.length,
+          pending_count:    pending,
+          arriving_count:   arriving,
+          violation_count:  v.length,
+          history_ids:      s.slice(0, 5).map((x) => x.history_id),
+        },
+      });
     } catch (err: any) {
       setError(err?.message ?? 'Could not load alerts');
+      Sentry.captureException(err, { extra: { where: 'alerts.fetchAll' } });
     }
   }
 
   useFocusEffect(
     useCallback(() => {
+      Sentry.addBreadcrumb({
+        category: 'alerts_tab',
+        message: 'tab focused',
+        level: 'info',
+      });
       setLoading(true);
       fetchAll().finally(() => setLoading(false));
     }, [])
@@ -139,9 +159,11 @@ export default function AlertsScreen() {
         accept,
       });
       if (isHandoff && accept) {
-        // Mutate card in place — don't remove — so recipient can tap
-        // OPEN SHIFT to walk into the wizard flow.
-        setAcceptedHandoffs((prev) => new Set(prev).add(swap.history_id));
+        // Optimistic pin so the card renders PENDING ARRIVAL immediately
+        // while fetchAll() lands. Post-refresh the server row itself has
+        // status='accepted' + to_session_id=null so the state survives.
+        setOptimisticAccepted((prev) => new Set(prev).add(swap.history_id));
+        fetchAll();
       } else {
         // Pre-shift swap or declined handoff: remove from list optimistically.
         setSwaps((prev) => prev.filter((s) => s.history_id !== swap.history_id));
@@ -204,7 +226,14 @@ export default function AlertsScreen() {
   function renderSwap(swap: InboundSwap) {
     const busy = busyId === swap.history_id;
     const isHandoff = swap.initiated_by === 'guard_handoff';
-    const isPendingArrival = isHandoff && acceptedHandoffs.has(swap.history_id);
+    // Walk-test 2026-07-09 BUG B: pending-arrival state is now derived
+    // from the server row (status='accepted' + to_session_id=null) instead
+    // of an in-memory Set. Optimistic Set is only consulted while the
+    // ACCEPT request is in flight, so the card doesn't flash back to
+    // pending in between.
+    const serverPendingArrival =
+      isHandoff && swap.status === 'accepted' && (swap.to_session_id ?? null) === null;
+    const isPendingArrival = serverPendingArrival || (isHandoff && optimisticAccepted.has(swap.history_id));
     const cardBorder = isHandoff ? Colors.warning : Colors.action;
     const badgeText  = isHandoff
       ? (isPendingArrival ? 'PENDING ARRIVAL' : 'HANDOFF REQUEST')
