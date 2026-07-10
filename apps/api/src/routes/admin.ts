@@ -253,12 +253,19 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
   res.json(result.rows);
 });
 
-// GET /api/admin/violations?since=24h|7d|30d&status=all|open|resolved&limit=N
+// GET /api/admin/violations?since=24h|7d|30d&status=all|open|resolved
+//                          &site_id=<uuid>&guard_id=<uuid>
+//                          &date_from=<iso>&date_to=<iso>&limit=N
 //
 // Company-scoped geofence breach history for the admin live-status page's
 // "RECENT BREACHES" section. Returns one row per geofence_violations row in
 // the company's sites, newest first. Defaults: since=24h, status=all, limit=100
 // (capped at 500).
+//
+// Precedence: if date_from and/or date_to are present, `since` is ignored.
+// date_to alone treats "now" as the upper bound; date_from alone treats
+// "beginning of time" as the lower bound (no INTERVAL floor). site_id and
+// guard_id filter directly on gv.* (both denormalized on the row).
 //
 // photo_url is returned as the raw S3 URL stored on the row. The
 // guard-media-prod bucket is configured for public read, so no fresh
@@ -271,10 +278,23 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
 //      violation is open).
 // The UI handles both cases as "photo unavailable".
 router.get('/violations', requireAuth('company_admin'), async (req, res) => {
-  const cid    = req.user!.company_id;
-  const sinceQ  = (req.query.since  as string | undefined) ?? '24h';
-  const statusQ = (req.query.status as string | undefined) ?? 'all';
-  const limitQ  = req.query.limit   as string | undefined;
+  const cid     = req.user!.company_id;
+  const sinceQ  = (req.query.since    as string | undefined) ?? '24h';
+  const statusQ = (req.query.status   as string | undefined) ?? 'all';
+  const limitQ  =  req.query.limit    as string | undefined;
+  const siteQ   = (req.query.site_id  as string | undefined)?.trim();
+  const guardQ  = (req.query.guard_id as string | undefined)?.trim();
+  const fromQ   = (req.query.date_from as string | undefined)?.trim();
+  const toQ     = (req.query.date_to   as string | undefined)?.trim();
+
+  // Simple input validation. Errors here become 400s rather than 500s from
+  // the DB. Format-only checks — the DB will still reject unknown UUIDs.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const ISO_RE  = /^\d{4}-\d{2}-\d{2}(T[\d:.+Z-]+)?$/;
+  if (siteQ  && !UUID_RE.test(siteQ))  return res.status(400).json({ error: 'invalid site_id'  });
+  if (guardQ && !UUID_RE.test(guardQ)) return res.status(400).json({ error: 'invalid guard_id' });
+  if (fromQ  && !ISO_RE.test(fromQ))   return res.status(400).json({ error: 'invalid date_from' });
+  if (toQ    && !ISO_RE.test(toQ))     return res.status(400).json({ error: 'invalid date_to'   });
 
   // Whitelist-only mapping — no user input flows directly into SQL.
   const SINCE_INTERVALS: Record<string, string> = {
@@ -292,6 +312,25 @@ router.get('/violations', requireAuth('company_admin'), async (req, res) => {
 
   const limit = Math.min(500, Math.max(1, parseInt(limitQ ?? '100', 10) || 100));
 
+  // Build the dynamic WHERE. All user-supplied values flow through numbered
+  // params; sinceInterval is a whitelist lookup so its interpolation is safe.
+  const args: unknown[] = [cid];
+  const extraClauses: string[] = [];
+
+  const useExplicitDates = Boolean(fromQ || toQ);
+  if (useExplicitDates) {
+    if (fromQ) { args.push(fromQ); extraClauses.push(`AND gv.occurred_at >= $${args.length}`); }
+    if (toQ)   { args.push(toQ);   extraClauses.push(`AND gv.occurred_at <= $${args.length}`); }
+  } else {
+    extraClauses.push(`AND gv.occurred_at >= NOW() - INTERVAL '${sinceInterval}'`);
+  }
+
+  if (siteQ)  { args.push(siteQ);  extraClauses.push(`AND gv.site_id  = $${args.length}`); }
+  if (guardQ) { args.push(guardQ); extraClauses.push(`AND gv.guard_id = $${args.length}`); }
+
+  args.push(limit);
+  const limitPos = args.length;
+
   const result = await pool.query(
     `SELECT gv.id,
             gv.occurred_at,
@@ -308,11 +347,11 @@ router.get('/violations', requireAuth('company_admin'), async (req, res) => {
      JOIN sites  s ON s.id = gv.site_id
      JOIN guards g ON g.id = gv.guard_id
      WHERE s.company_id = $1
-       AND gv.occurred_at >= NOW() - INTERVAL '${sinceInterval}'
+       ${extraClauses.join('\n       ')}
        ${statusClause}
      ORDER BY gv.occurred_at DESC
-     LIMIT $2`,
-    [cid, limit],
+     LIMIT $${limitPos}`,
+    args,
   );
   // S3 lockdown (PR2): re-sign the breach photo URLs.
   for (const row of result.rows) {
@@ -386,6 +425,7 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
        JOIN guards         g  ON g.id  = ss.guard_id
        JOIN sites          s  ON s.id  = gv.site_id
        WHERE s.company_id = $1
+         AND gv.occurred_at >= NOW() - INTERVAL '24 hours'
 
        UNION ALL
 

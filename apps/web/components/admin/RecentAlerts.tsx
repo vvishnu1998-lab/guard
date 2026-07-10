@@ -1,4 +1,5 @@
 'use client';
+import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
 
 interface Alert {
@@ -30,7 +31,17 @@ export default function RecentAlerts({ alerts = [] }: { alerts?: Alert[] }) {
         <h2 className="text-amber-400 font-bold tracking-widest text-sm">RECENT ALERTS</h2>
       </div>
       <div className="p-4 space-y-3">
-        {alerts.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No recent alerts</p>}
+        {alerts.length === 0 && (
+          <div className="text-center py-4 space-y-2">
+            <p className="text-gray-500 text-sm">No alerts in last 24 hours</p>
+            <Link
+              href="/admin/live-status"
+              className="inline-block text-amber-400 hover:text-amber-300 text-xs tracking-widest transition-colors"
+            >
+              View full history →
+            </Link>
+          </div>
+        )}
         {alerts.map((alert) => (
           <div key={alert.id} className={`border-l-4 rounded p-3 ${ALERT_STYLES[alert.type]}`}>
             <div className="flex justify-between items-start">

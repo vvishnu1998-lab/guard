@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { adminGet } from '../../../lib/adminApi';
+import { adminFetch, adminGet } from '../../../lib/adminApi';
 
 interface LiveGuard {
   id:             string;
@@ -42,6 +42,17 @@ interface Breach {
 
 type SinceFilter  = '24h' | '7d' | '30d';
 type StatusFilter = 'all' | 'open' | 'resolved';
+
+interface SiteOpt  { id: string; name: string }
+interface GuardOpt { id: string; name: string }
+
+const API = process.env.NEXT_PUBLIC_API_URL;
+
+// Chip window → hours, for computing date_from when the CSV export needs
+// an absolute lower bound (its endpoint accepts date_from/date_to only,
+// not since). Kept in one place so the chip labels and CSV window stay
+// in sync if we add more presets.
+const SINCE_HOURS: Record<SinceFilter, number> = { '24h': 24, '7d': 168, '30d': 720 };
 
 const PING_LABEL: Record<string, string> = {
   gps_only:   'GPS',
@@ -96,6 +107,12 @@ export default function LiveMapPage() {
   const [countdown,   setCountdown]   = useState(30);
   const [sinceFilter,  setSinceFilter]  = useState<SinceFilter>('24h');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [siteFilter,   setSiteFilter]   = useState('');       // '' = all
+  const [guardFilter,  setGuardFilter]  = useState('');       // '' = all
+  const [dateFrom,     setDateFrom]     = useState('');       // ISO date; '' = fall back to chip
+  const [dateTo,       setDateTo]       = useState('');       // ISO date; '' = "now"
+  const [sitesList,    setSitesList]    = useState<SiteOpt[]>([]);
+  const [guardsList,   setGuardsList]   = useState<GuardOpt[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Breach-alert email deep-link: /admin/live-status?breach=<violation_id>
@@ -114,15 +131,88 @@ export default function LiveMapPage() {
     if (targetBreachIdRef.current) setSinceFilter('7d');
   }, []);
 
-  const loadBreaches = useCallback(async (since: SinceFilter, status: StatusFilter) => {
+  const loadBreaches = useCallback(async (
+    since: SinceFilter,
+    status: StatusFilter,
+    site: string,
+    guard: string,
+    from: string,
+    to: string,
+  ) => {
     try {
-      const data = await adminGet<Breach[]>(
-        `/api/admin/violations?since=${since}&status=${status}&limit=100`,
-      );
+      const qp = new URLSearchParams({ since, status, limit: '100' });
+      if (site)  qp.set('site_id',  site);
+      if (guard) qp.set('guard_id', guard);
+      if (from)  qp.set('date_from', from);
+      if (to)    qp.set('date_to',   to);
+      const data = await adminGet<Breach[]>(`/api/admin/violations?${qp.toString()}`);
       setBreaches(data);
     } catch (e: any) { setError(e.message); }
     finally { setBreachesLoading(false); }
   }, []);
+
+  // Sites + guards for the filter dropdowns. One-shot; both scoped to
+  // the caller's company by the underlying endpoints. Silent on error —
+  // the breaches table still works with empty dropdowns.
+  useEffect(() => {
+    adminGet<Array<{ id: string; name: string }>>('/api/sites')
+      .then((rows) => setSitesList(rows.map((r) => ({ id: r.id, name: r.name }))))
+      .catch(() => { /* keep empty */ });
+    adminGet<Array<{ id: string; name: string }>>('/api/guards')
+      .then((rows) => setGuardsList(rows.map((r) => ({ id: r.id, name: r.name }))))
+      .catch(() => { /* keep empty */ });
+  }, []);
+
+  // CSV download — uses the shared /api/exports/analytics/csv endpoint with
+  // type=violations, mirroring current filter state. When date_from/date_to
+  // aren't set, chip-window is materialised into an absolute date_from
+  // (the CSV export doesn't understand `since=`). Uses adminFetch → blob so
+  // the Authorization header is sent (window.location.href downloads
+  // wouldn't include cross-origin cookies).
+  const [csvLoading, setCsvLoading] = useState(false);
+  async function downloadCsv() {
+    setCsvLoading(true);
+    setError('');
+    try {
+      const qp = new URLSearchParams({ type: 'violations' });
+      if (siteFilter)  qp.set('site_id',  siteFilter);
+      if (guardFilter) qp.set('guard_id', guardFilter);
+      if (dateFrom || dateTo) {
+        if (dateFrom) qp.set('date_from', dateFrom);
+        if (dateTo)   qp.set('date_to',   dateTo);
+      } else {
+        const fromMs = Date.now() - SINCE_HOURS[sinceFilter] * 3_600_000;
+        qp.set('date_from', new Date(fromMs).toISOString());
+      }
+      const res = await adminFetch(`/api/exports/analytics/csv?${qp.toString()}`);
+      if (!res.ok) {
+        const msg = await res.text().catch(() => '');
+        throw new Error(`CSV download failed (${res.status}): ${msg.slice(0, 200)}`);
+      }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `violations-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      setError(e.message ?? 'CSV download failed');
+    } finally {
+      setCsvLoading(false);
+    }
+  }
+
+  function clearBreachFilters() {
+    setSiteFilter('');
+    setGuardFilter('');
+    setDateFrom('');
+    setDateTo('');
+  }
+  const hasDateFilter = Boolean(dateFrom || dateTo);
+  const hasAnyFilter  = Boolean(siteFilter || guardFilter || dateFrom || dateTo);
 
   // Scroll-into-view + flash highlight when the breach-alert deep-link
   // lands on a known breach id. Fires after each breaches load until the
@@ -145,7 +235,7 @@ export default function LiveMapPage() {
     try {
       const [g] = await Promise.all([
         adminGet<LiveGuard[]>('/api/admin/live-guards'),
-        loadBreaches(sinceFilter, statusFilter),
+        loadBreaches(sinceFilter, statusFilter, siteFilter, guardFilter, dateFrom, dateTo),
       ]);
       setGuards(g);
       setError('');
@@ -155,7 +245,7 @@ export default function LiveMapPage() {
       setLastRefresh(new Date());
       setCountdown(30);
     }
-  }, [loadBreaches, sinceFilter, statusFilter]);
+  }, [loadBreaches, sinceFilter, statusFilter, siteFilter, guardFilter, dateFrom, dateTo]);
 
   // `load` is recreated when sinceFilter/statusFilter change, so this effect
   // re-runs: it fires an immediate fetch (taking the new filters into account)
@@ -301,14 +391,21 @@ export default function LiveMapPage() {
             <p className="text-gray-600 text-xs mt-1">Geofence violations across all sites</p>
           </div>
           <div className="flex items-center gap-2">
-            {/* Time-range chips */}
-            <div className="flex items-center gap-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-1">
+            {/* Time-range chips. When a date range is set, chips are visually
+                muted to signal they're overridden; clicking one clears the
+                date range and re-activates the chip. */}
+            <div
+              className={`flex items-center gap-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-1 ${
+                hasDateFilter ? 'opacity-50' : ''
+              }`}
+              title={hasDateFilter ? 'Date range is overriding — click to reset' : undefined}
+            >
               {(['24h', '7d', '30d'] as const).map((s) => (
                 <button
                   key={s}
-                  onClick={() => setSinceFilter(s)}
+                  onClick={() => { setSinceFilter(s); setDateFrom(''); setDateTo(''); }}
                   className={`px-3 py-1 rounded text-xs tracking-widest transition-colors ${
-                    sinceFilter === s
+                    !hasDateFilter && sinceFilter === s
                       ? 'bg-amber-500 text-black font-bold'
                       : 'text-gray-500 hover:text-gray-300'
                   }`}
@@ -333,6 +430,75 @@ export default function LiveMapPage() {
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+
+        {/* Filter bar: site, guard, date range, CSV. Dropdowns filter on
+            gv.site_id / gv.guard_id (denormalized). Date range overrides
+            the time-chip window per the endpoint precedence rule. */}
+        <div className="flex items-center flex-wrap gap-3 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-3">
+          <div className="flex items-center gap-2">
+            <label className="text-gray-500 text-[10px] tracking-widest">SITE</label>
+            <select
+              value={siteFilter}
+              onChange={(e) => setSiteFilter(e.target.value)}
+              className="bg-[#0B1526] border border-[#1A3050] text-gray-300 text-xs rounded p-1.5 min-w-[10rem]"
+            >
+              <option value="">All sites</option>
+              {sitesList.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-gray-500 text-[10px] tracking-widest">GUARD</label>
+            <select
+              value={guardFilter}
+              onChange={(e) => setGuardFilter(e.target.value)}
+              className="bg-[#0B1526] border border-[#1A3050] text-gray-300 text-xs rounded p-1.5 min-w-[10rem]"
+            >
+              <option value="">All guards</option>
+              {guardsList.map((g) => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="text-gray-500 text-[10px] tracking-widest">FROM</label>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="bg-[#0B1526] border border-[#1A3050] text-gray-300 text-xs rounded p-1.5"
+            />
+            <label className="text-gray-500 text-[10px] tracking-widest">TO</label>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="bg-[#0B1526] border border-[#1A3050] text-gray-300 text-xs rounded p-1.5"
+            />
+          </div>
+
+          {hasAnyFilter && (
+            <button
+              onClick={clearBreachFilters}
+              className="text-gray-500 hover:text-gray-300 text-xs tracking-widest px-2 py-1.5 border border-[#1A3050] rounded hover:border-gray-500 transition-colors"
+            >
+              CLEAR
+            </button>
+          )}
+
+          <div className="ml-auto">
+            <button
+              onClick={downloadCsv}
+              disabled={csvLoading}
+              className="text-amber-400 hover:text-amber-300 text-xs tracking-widest px-3 py-1.5 border border-amber-500/40 rounded hover:border-amber-400 hover:bg-amber-400/5 transition-colors disabled:opacity-50 disabled:cursor-wait"
+            >
+              {csvLoading ? 'PREPARING…' : 'DOWNLOAD CSV'}
+            </button>
           </div>
         </div>
 

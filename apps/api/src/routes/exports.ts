@@ -7,6 +7,7 @@
  *
  * Query params (all optional):
  *   site_id    — filter to a single site
+ *   guard_id   — filter to a single guard (applies to all sheets — every query joins `guards g`)
  *   date_from  — ISO date string
  *   date_to    — ISO date string
  *   type       — 'hours' | 'reports' | 'incidents' | 'violations' (default: all sheets)
@@ -22,17 +23,21 @@ const router = Router();
 
 async function fetchAnalyticsData(companyId: string, params: {
   site_id?:   string;
+  guard_id?:  string;
   date_from?: string;
   date_to?:   string;
 }) {
-  const { site_id, date_from, date_to } = params;
+  const { site_id, guard_id, date_from, date_to } = params;
 
   // Build parameterized args + filter clauses for a query.
-  // dateFrom/dateTo are column references for that specific query.
+  // dateFrom/dateTo are column references for that specific query. guard_id
+  // filters on `g.id` which every sheet's query already JOINs (hours + reports
+  // via shift_sessions.guard_id, violations via geofence_violations.guard_id).
   function buildArgs(dateFrom: string, dateTo: string) {
     const args: string[] = [companyId];
     const clauses: string[] = [];
     if (site_id)   { args.push(site_id);   clauses.push(`AND s.id = $${args.length}`); }
+    if (guard_id)  { args.push(guard_id);  clauses.push(`AND g.id = $${args.length}`); }
     if (date_from) { args.push(date_from); clauses.push(`AND ${dateFrom} >= $${args.length}`); }
     if (date_to)   { args.push(date_to);   clauses.push(`AND ${dateTo} <= $${args.length}`); }
     return { args, filter: clauses.join(' ') };
@@ -114,8 +119,8 @@ function rowsToCsv(headers: string[], rows: Record<string, unknown>[]): string {
 }
 
 router.get('/analytics/csv', requireAuth('company_admin'), async (req: Request, res: Response) => {
-  const { site_id, date_from, date_to, type } = req.query as Record<string, string>;
-  const data = await fetchAnalyticsData(req.user!.company_id!, { site_id, date_from, date_to });
+  const { site_id, guard_id, date_from, date_to, type } = req.query as Record<string, string>;
+  const data = await fetchAnalyticsData(req.user!.company_id!, { site_id, guard_id, date_from, date_to });
 
   const sections: string[] = [];
 
@@ -147,8 +152,8 @@ router.get('/analytics/csv', requireAuth('company_admin'), async (req: Request, 
 // ── Excel (XLSX) export ──────────────────────────────────────────────────────
 
 router.get('/analytics/xlsx', requireAuth('company_admin'), async (req: Request, res: Response) => {
-  const { site_id, date_from, date_to } = req.query as Record<string, string>;
-  const data = await fetchAnalyticsData(req.user!.company_id!, { site_id, date_from, date_to });
+  const { site_id, guard_id, date_from, date_to } = req.query as Record<string, string>;
+  const data = await fetchAnalyticsData(req.user!.company_id!, { site_id, guard_id, date_from, date_to });
 
   // Dynamically import xlsx to keep startup fast
   const XLSX = require('xlsx');
