@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { adminFetch, adminGet } from '../../../lib/adminApi';
+import { adminDownload, adminGet } from '../../../lib/adminApi';
 
 interface LiveGuard {
   id:             string;
@@ -166,9 +166,7 @@ export default function LiveMapPage() {
   // CSV download — uses the shared /api/exports/analytics/csv endpoint with
   // type=violations, mirroring current filter state. When date_from/date_to
   // aren't set, chip-window is materialised into an absolute date_from
-  // (the CSV export doesn't understand `since=`). Uses adminFetch → blob so
-  // the Authorization header is sent (window.location.href downloads
-  // wouldn't include cross-origin cookies).
+  // (the CSV export doesn't understand `since=`).
   const [csvLoading, setCsvLoading] = useState(false);
   async function downloadCsv() {
     setCsvLoading(true);
@@ -184,20 +182,8 @@ export default function LiveMapPage() {
         const fromMs = Date.now() - SINCE_HOURS[sinceFilter] * 3_600_000;
         qp.set('date_from', new Date(fromMs).toISOString());
       }
-      const res = await adminFetch(`/api/exports/analytics/csv?${qp.toString()}`);
-      if (!res.ok) {
-        const msg = await res.text().catch(() => '');
-        throw new Error(`CSV download failed (${res.status}): ${msg.slice(0, 200)}`);
-      }
-      const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `violations-${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const filename = `violations-${new Date().toISOString().slice(0, 10)}.csv`;
+      await adminDownload(`/api/exports/analytics/csv?${qp.toString()}`, filename);
     } catch (e: any) {
       setError(e.message ?? 'CSV download failed');
     } finally {

@@ -58,3 +58,31 @@ export async function adminDelete(path: string): Promise<void> {
     throw new Error((err as any).error ?? `Request failed: ${res.status}`);
   }
 }
+
+/**
+ * Download a file from an authenticated admin endpoint. Uses fetch + blob so
+ * the Bearer token goes on the request header — window.location.href
+ * downloads don't send cross-origin cookies (or headers), which is why the
+ * old ?token= query-param pattern silently 401'd in prod.
+ *
+ * Throws on non-2xx or on any transport error. The caller shows a UI error.
+ */
+export async function adminDownload(path: string, filename: string): Promise<void> {
+  const res = await adminFetch(path);
+  if (!res.ok) {
+    const msg = await res.text().catch(() => '');
+    throw new Error(`Download failed (${res.status}): ${msg.slice(0, 200)}`);
+  }
+  const blob = await res.blob();
+  const url  = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}

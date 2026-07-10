@@ -1,6 +1,9 @@
 /**
  * Export routes — Star admin analytics CSV and Excel downloads.
- * All queries are scoped to company_id to enforce data isolation.
+ * Company_admin callers are scoped to their own company_id. Vishnu
+ * (super-admin) is allowed with the company_id predicate dropped —
+ * exports span every company, mirroring the pattern on GET /api/sites
+ * and GET /api/admin/violations.
  *
  * GET /api/exports/analytics/csv   → UTF-8 CSV attachment
  * GET /api/exports/analytics/xlsx  → Excel workbook attachment
@@ -21,26 +24,36 @@ const router = Router();
 
 // ── Shared query builder ─────────────────────────────────────────────────────
 
-async function fetchAnalyticsData(companyId: string, params: {
+async function fetchAnalyticsData(companyId: string | null, params: {
   site_id?:   string;
   guard_id?:  string;
   date_from?: string;
   date_to?:   string;
 }) {
   const { site_id, guard_id, date_from, date_to } = params;
+  const isVishnu = companyId === null;   // caller passes null for super-admin
 
   // Build parameterized args + filter clauses for a query.
   // dateFrom/dateTo are column references for that specific query. guard_id
   // filters on `g.id` which every sheet's query already JOINs (hours + reports
   // via shift_sessions.guard_id, violations via geofence_violations.guard_id).
+  // cidPredicate is either `s.company_id = $1` or `true` — the caller splices
+  // it in as the leading WHERE so Vishnu can pull all-company exports.
   function buildArgs(dateFrom: string, dateTo: string) {
-    const args: string[] = [companyId];
+    const args: string[] = [];
+    let cidPredicate: string;
+    if (isVishnu) {
+      cidPredicate = 'true';
+    } else {
+      args.push(companyId!);
+      cidPredicate = `s.company_id = $${args.length}`;
+    }
     const clauses: string[] = [];
     if (site_id)   { args.push(site_id);   clauses.push(`AND s.id = $${args.length}`); }
     if (guard_id)  { args.push(guard_id);  clauses.push(`AND g.id = $${args.length}`); }
     if (date_from) { args.push(date_from); clauses.push(`AND ${dateFrom} >= $${args.length}`); }
     if (date_to)   { args.push(date_to);   clauses.push(`AND ${dateTo} <= $${args.length}`); }
-    return { args, filter: clauses.join(' ') };
+    return { args, cidPredicate, filter: clauses.join(' ') };
   }
 
   // Guard hours by site
@@ -57,7 +70,7 @@ async function fetchAnalyticsData(companyId: string, params: {
     FROM shift_sessions ss
     JOIN sites s  ON s.id = ss.site_id
     JOIN guards g ON g.id = ss.guard_id
-    WHERE s.company_id = $1
+    WHERE ${hq.cidPredicate}
       ${hq.filter}
     ORDER BY ss.clocked_in_at DESC
     LIMIT 5000
@@ -77,7 +90,7 @@ async function fetchAnalyticsData(companyId: string, params: {
     JOIN sites s         ON s.id = r.site_id
     JOIN shift_sessions ss ON ss.id = r.shift_session_id
     JOIN guards g        ON g.id = ss.guard_id
-    WHERE s.company_id = $1
+    WHERE ${rq.cidPredicate}
       ${rq.filter}
     ORDER BY r.reported_at DESC
     LIMIT 5000
@@ -97,7 +110,7 @@ async function fetchAnalyticsData(companyId: string, params: {
     FROM geofence_violations gv
     JOIN sites s  ON s.id = gv.site_id
     JOIN guards g ON g.id = gv.guard_id
-    WHERE s.company_id = $1
+    WHERE ${vq.cidPredicate}
       ${vq.filter}
     ORDER BY gv.occurred_at DESC
     LIMIT 2000
@@ -118,9 +131,13 @@ function rowsToCsv(headers: string[], rows: Record<string, unknown>[]): string {
   return `${header}\n${body}`;
 }
 
-router.get('/analytics/csv', requireAuth('company_admin'), async (req: Request, res: Response) => {
+router.get('/analytics/csv', requireAuth('company_admin', 'vishnu'), async (req: Request, res: Response) => {
   const { site_id, guard_id, date_from, date_to, type } = req.query as Record<string, string>;
-  const data = await fetchAnalyticsData(req.user!.company_id!, { site_id, guard_id, date_from, date_to });
+  const isVishnu = req.user!.role === 'vishnu';
+  const data = await fetchAnalyticsData(
+    isVishnu ? null : req.user!.company_id!,
+    { site_id, guard_id, date_from, date_to },
+  );
 
   const sections: string[] = [];
 
@@ -151,9 +168,13 @@ router.get('/analytics/csv', requireAuth('company_admin'), async (req: Request, 
 
 // ── Excel (XLSX) export ──────────────────────────────────────────────────────
 
-router.get('/analytics/xlsx', requireAuth('company_admin'), async (req: Request, res: Response) => {
+router.get('/analytics/xlsx', requireAuth('company_admin', 'vishnu'), async (req: Request, res: Response) => {
   const { site_id, guard_id, date_from, date_to } = req.query as Record<string, string>;
-  const data = await fetchAnalyticsData(req.user!.company_id!, { site_id, guard_id, date_from, date_to });
+  const isVishnu = req.user!.role === 'vishnu';
+  const data = await fetchAnalyticsData(
+    isVishnu ? null : req.user!.company_id!,
+    { site_id, guard_id, date_from, date_to },
+  );
 
   // Dynamically import xlsx to keep startup fast
   const XLSX = require('xlsx');

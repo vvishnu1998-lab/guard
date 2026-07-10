@@ -262,6 +262,11 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
 // the company's sites, newest first. Defaults: since=24h, status=all, limit=100
 // (capped at 500).
 //
+// Vishnu (super-admin) sees ALL companies' breaches — the company_id
+// predicate is dropped when isVishnu, mirroring the pattern in
+// GET /api/sites and GET /api/guards. site_id / guard_id filters still
+// scope the result set exactly as before.
+//
 // Precedence: if date_from and/or date_to are present, `since` is ignored.
 // date_to alone treats "now" as the upper bound; date_from alone treats
 // "beginning of time" as the lower bound (no INTERVAL floor). site_id and
@@ -277,8 +282,9 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
 //      (location_pings keeps its retain_as_evidence flag set while the
 //      violation is open).
 // The UI handles both cases as "photo unavailable".
-router.get('/violations', requireAuth('company_admin'), async (req, res) => {
-  const cid     = req.user!.company_id;
+router.get('/violations', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const isVishnu = req.user!.role === 'vishnu';
+  const cid      = req.user!.company_id;   // undefined for vishnu
   const sinceQ  = (req.query.since    as string | undefined) ?? '24h';
   const statusQ = (req.query.status   as string | undefined) ?? 'all';
   const limitQ  =  req.query.limit    as string | undefined;
@@ -314,7 +320,18 @@ router.get('/violations', requireAuth('company_admin'), async (req, res) => {
 
   // Build the dynamic WHERE. All user-supplied values flow through numbered
   // params; sinceInterval is a whitelist lookup so its interpolation is safe.
-  const args: unknown[] = [cid];
+  // For Vishnu, cidPredicate is 'true' and cid is never pushed — every
+  // subsequent $N still resolves correctly because we push then reference by
+  // args.length.
+  const args: unknown[] = [];
+  let cidPredicate: string;
+  if (isVishnu) {
+    cidPredicate = 'true';
+  } else {
+    args.push(cid);
+    cidPredicate = `s.company_id = $${args.length}`;
+  }
+
   const extraClauses: string[] = [];
 
   const useExplicitDates = Boolean(fromQ || toQ);
@@ -346,7 +363,7 @@ router.get('/violations', requireAuth('company_admin'), async (req, res) => {
      FROM geofence_violations gv
      JOIN sites  s ON s.id = gv.site_id
      JOIN guards g ON g.id = gv.guard_id
-     WHERE s.company_id = $1
+     WHERE ${cidPredicate}
        ${extraClauses.join('\n       ')}
        ${statusClause}
      ORDER BY gv.occurred_at DESC
@@ -403,8 +420,22 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
 });
 
 // GET /api/admin/recent-alerts — geofence violations + missed shifts, merged and sorted
-router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
-  const cid = req.user!.company_id;
+//
+// Vishnu (super-admin) sees ALL companies' alerts — the company_id
+// predicate becomes `true` in both UNION branches, mirroring the pattern
+// in GET /api/sites and GET /api/admin/violations. Response shape unchanged.
+router.get('/recent-alerts', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const isVishnu = req.user!.role === 'vishnu';
+
+  const args: unknown[] = [];
+  let cidWhere: string;
+  if (isVishnu) {
+    cidWhere = 'true';
+  } else {
+    args.push(req.user!.company_id);
+    cidWhere = `s.company_id = $${args.length}`;   // $1, referenced twice below
+  }
+
   const result = await pool.query(
     `SELECT * FROM (
 
@@ -424,7 +455,7 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
        JOIN shift_sessions ss ON ss.id = gv.shift_session_id
        JOIN guards         g  ON g.id  = ss.guard_id
        JOIN sites          s  ON s.id  = gv.site_id
-       WHERE s.company_id = $1
+       WHERE ${cidWhere}
          AND gv.occurred_at >= NOW() - INTERVAL '24 hours'
 
        UNION ALL
@@ -447,7 +478,7 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
        FROM shifts sh
        JOIN sites  s ON s.id = sh.site_id
        JOIN guards g ON g.id = sh.guard_id
-       WHERE s.company_id = $1
+       WHERE ${cidWhere}
          AND sh.status IN ('scheduled', 'missed')
          AND sh.scheduled_start + INTERVAL '15 minutes' <= NOW()
          AND sh.missed_alert_sent_at IS NOT NULL
@@ -456,7 +487,7 @@ router.get('/recent-alerts', requireAuth('company_admin'), async (req, res) => {
      ) combined
      ORDER BY occurred_at DESC
      LIMIT 15`,
-    [cid]
+    args
   );
   res.json(result.rows);
 });

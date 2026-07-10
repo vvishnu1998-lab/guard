@@ -1,7 +1,6 @@
 'use client';
 import { useState } from 'react';
-
-const API = process.env.NEXT_PUBLIC_API_URL;
+import { adminDownload } from '../../lib/adminApi';
 
 type ExportType = 'all' | 'hours' | 'reports' | 'violations';
 
@@ -11,26 +10,27 @@ export default function ExportPanel() {
   const [dateTo,   setDateTo]   = useState('');
   const [expType,  setExpType]  = useState<ExportType>('all');
   const [open,     setOpen]     = useState(false);
+  const [busy,     setBusy]     = useState<'csv' | 'xlsx' | null>(null);
+  const [error,    setError]    = useState('');
 
-  function buildUrl(format: 'csv' | 'xlsx') {
-    const token = document.cookie
-      .split('; ')
-      .find((c) => c.startsWith('guard_admin_access='))
-      ?.split('=')[1] ?? '';
-
-    const params = new URLSearchParams();
-    if (siteId)   params.set('site_id',   siteId);
-    if (dateFrom) params.set('date_from', dateFrom);
-    if (dateTo)   params.set('date_to',   dateTo);
-    if (expType !== 'all') params.set('type', expType);
-
-    // Append token as query param for download links (cookies not sent cross-origin on downloads)
-    params.set('token', token);
-    return `${API}/api/exports/analytics/${format}?${params.toString()}`;
-  }
-
-  function download(format: 'csv' | 'xlsx') {
-    window.location.href = buildUrl(format);
+  async function download(format: 'csv' | 'xlsx') {
+    setBusy(format);
+    setError('');
+    try {
+      const params = new URLSearchParams();
+      if (siteId)   params.set('site_id',   siteId);
+      if (dateFrom) params.set('date_from', dateFrom);
+      if (dateTo)   params.set('date_to',   dateTo);
+      if (expType !== 'all') params.set('type', expType);
+      const qs = params.toString();
+      const path = `/api/exports/analytics/${format}${qs ? `?${qs}` : ''}`;
+      const filename = `guard-analytics-${new Date().toISOString().slice(0, 10)}.${format}`;
+      await adminDownload(path, filename);
+    } catch (e: any) {
+      setError(e.message ?? 'Download failed');
+    } finally {
+      setBusy(null);
+    }
   }
 
   return (
@@ -77,19 +77,25 @@ export default function ExportPanel() {
             />
           </div>
 
+          {error && (
+            <p className="text-red-400 text-xs">{error}</p>
+          )}
+
           {/* Download buttons */}
           <div className="flex gap-2 pt-1">
             <button
               onClick={() => download('csv')}
-              className="flex-1 bg-[#0B1526] border border-[#1A3050] text-gray-300 text-xs tracking-widest py-2 rounded hover:border-amber-400 hover:text-amber-400 transition-colors"
+              disabled={busy !== null}
+              className="flex-1 bg-[#0B1526] border border-[#1A3050] text-gray-300 text-xs tracking-widest py-2 rounded hover:border-amber-400 hover:text-amber-400 transition-colors disabled:opacity-50 disabled:cursor-wait"
             >
-              CSV
+              {busy === 'csv' ? '…' : 'CSV'}
             </button>
             <button
               onClick={() => download('xlsx')}
-              className="flex-1 bg-amber-400 text-gray-900 text-xs tracking-widest py-2 rounded font-bold hover:bg-amber-300 transition-colors"
+              disabled={busy !== null}
+              className="flex-1 bg-amber-400 text-gray-900 text-xs tracking-widest py-2 rounded font-bold hover:bg-amber-300 transition-colors disabled:opacity-50 disabled:cursor-wait"
             >
-              EXCEL
+              {busy === 'xlsx' ? '…' : 'EXCEL'}
             </button>
           </div>
           <p className="text-gray-600 text-xs">Max 5,000 rows per sheet. Scoped to your company.</p>
