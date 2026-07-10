@@ -50,36 +50,83 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   res.json(result.rows);
 });
 
+// POST /api/guards — create a guard with a server-generated badge number.
+//
+// Badge format: GRD#### (zero-padded 4-digit int), scoped per company. The
+// next number is MAX(existing GRD#### badges for this company) + 1. Any
+// non-GRD#### legacy badges (grd01, 002, etc.) are ignored for the max
+// calculation and grandfathered as-is. If a caller supplies badge_number
+// in the body, it's ignored — the server is authoritative.
+//
+// Concurrency: badge generation and INSERT run inside one transaction with
+// a per-company xact-scoped advisory lock. Two concurrent POSTs for the
+// same company queue rather than racing on MAX(...) + INSERT. bcrypt runs
+// BEFORE the transaction (it's ~200ms) so the lock is held only for the
+// couple of fast queries.
 router.post('/', requireAuth('company_admin'), async (req, res) => {
-  const { name, email, badge_number, temp_password } = req.body;
+  const { name, email, badge_number: bodyBadge, temp_password } = req.body;
 
-  // Validate required fields
-  if (!name?.trim())         return res.status(400).json({ error: 'Guard name is required' });
-  if (!email?.trim())        return res.status(400).json({ error: 'Email is required' });
-  if (!badge_number?.trim()) return res.status(400).json({ error: 'Badge number is required' });
-  if (!temp_password)        return res.status(400).json({ error: 'Temporary password is required' });
+  // Validate required fields (badge_number is auto-generated — no longer required)
+  if (!name?.trim())    return res.status(400).json({ error: 'Guard name is required' });
+  if (!email?.trim())   return res.status(400).json({ error: 'Email is required' });
+  if (!temp_password)   return res.status(400).json({ error: 'Temporary password is required' });
   // Forced rotation on first login is wired via guards.must_change_password DEFAULT true.
   const policyErr = validatePassword(temp_password);
   if (policyErr) return res.status(400).json({ error: policyErr });
 
+  if (bodyBadge != null && String(bodyBadge).trim() !== '') {
+    // Auto-generation is authoritative — any client-supplied badge is
+    // ignored. Logged so a stale-client deploy shows up in logs.
+    console.warn('[POST /api/guards] badge_number in body ignored (auto-generated)');
+  }
+
+  const password_hash = await bcrypt.hash(temp_password, 12);   // slow: outside txn
+
+  const client = await pool.connect();
   try {
-    const password_hash = await bcrypt.hash(temp_password, 12);
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    // Serialize badge generation per company. hashtext(uuid_text) → int4;
+    // pg_advisory_xact_lock's 2-arg form takes (int, int) — namespace 0 is
+    // arbitrary but stable. Lock releases on COMMIT or ROLLBACK.
+    await client.query('SELECT pg_advisory_xact_lock(0, hashtext($1))', [req.user!.company_id]);
+
+    const maxRes = await client.query(
+      `SELECT COALESCE(MAX(CAST(SUBSTRING(badge_number FROM 4) AS INTEGER)), 0) AS max_num
+       FROM guards
+       WHERE company_id = $1 AND badge_number ~ '^GRD[0-9]{4}$'`,
+      [req.user!.company_id]
+    );
+    const nextNum = Number(maxRes.rows[0].max_num) + 1;
+    if (nextNum > 9999) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Badge rollover: this company has reached GRD9999. Contact support.' });
+    }
+    const badge = `GRD${String(nextNum).padStart(4, '0')}`;
+
+    const result = await client.query(
       `INSERT INTO guards (company_id, name, email, password_hash, badge_number)
        VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, badge_number, is_active, created_at`,
-      [req.user!.company_id, name.trim(), email.trim().toLowerCase(), password_hash, badge_number.trim()]
+      [req.user!.company_id, name.trim(), email.trim().toLowerCase(), password_hash, badge]
     );
+    await client.query('COMMIT');
     res.status(201).json(result.rows[0]);
   } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
     // PostgreSQL unique_violation = error code 23505
     if (err.code === '23505' && err.constraint?.includes('email')) {
       return res.status(409).json({ error: 'A guard with this email already exists' });
     }
     if (err.code === '23505' && err.constraint?.includes('badge')) {
+      // Should be unreachable while the advisory lock is in place, but keep
+      // the 409 as a defence-in-depth so any manual INSERT bypassing the
+      // lock still surfaces a clean error to the caller.
       return res.status(409).json({ error: 'A guard with this badge number already exists' });
     }
     console.error('[POST /api/guards] Error:', err);
     res.status(500).json({ error: err.message ?? 'Failed to create guard' });
+  } finally {
+    client.release();
   }
 });
 

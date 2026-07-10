@@ -85,7 +85,8 @@ export default function GuardsPage() {
   const [error,      setError]      = useState('');
   const [showAdd,    setShowAdd]    = useState(false);
   const [showAssign, setShowAssign] = useState<Guard | null>(null);
-  const [form,       setForm]       = useState({ name: '', email: '', badge_number: '', temp_password: '' });
+  const [form,       setForm]       = useState({ name: '', email: '', temp_password: '' });
+  const [addedBadge, setAddedBadge] = useState<string | null>(null);
   const [assignForm, setAssignForm] = useState({ site_id: '', assigned_from: '', assigned_until: '' });
   const [saving,     setSaving]     = useState(false);
   const [formError,  setFormError]  = useState('');
@@ -124,12 +125,14 @@ export default function GuardsPage() {
   useEffect(() => { load(); }, [load]);
 
   async function addGuard() {
-    const { name, email, badge_number, temp_password } = form;
-    if (!name || !email || !badge_number || !temp_password) { setFormError('All fields required'); return; }
+    const { name, email, temp_password } = form;
+    if (!name || !email || !temp_password) { setFormError('All fields required'); return; }
     setSaving(true); setFormError('');
     try {
-      await adminPost('/api/guards', form);
-      setShowAdd(false); setForm({ name: '', email: '', badge_number: '', temp_password: '' });
+      const created = await adminPost<{ badge_number: string }>('/api/guards', form);
+      setShowAdd(false);
+      setForm({ name: '', email: '', temp_password: '' });
+      setAddedBadge(created.badge_number);
       await load();
     } catch (e: any) { setFormError(e.message); }
     finally { setSaving(false); }
@@ -283,6 +286,14 @@ export default function GuardsPage() {
       </div>
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
+
+      {addedBadge && (
+        <div className="bg-green-900/40 border border-green-500 text-green-300 text-sm rounded-lg px-4 py-3 flex items-center justify-between">
+          <span>Guard added with badge <span className="font-mono font-bold text-green-200">{addedBadge}</span>.</span>
+          <button onClick={() => setAddedBadge(null)} aria-label="Dismiss"
+            className="text-green-400 hover:text-green-200 text-lg leading-none">✕</button>
+        </div>
+      )}
 
       {/* Desktop list */}
       <div className="hidden md:block bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
@@ -484,11 +495,11 @@ export default function GuardsPage() {
               <button onClick={() => setShowAdd(false)} className="text-gray-500 hover:text-gray-300 text-xl w-10 h-10 flex items-center justify-center">✕</button>
             </div>
             {formError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{formError}</div>}
+            <p className="text-gray-500 text-xs mb-4">Badge number will be assigned automatically on creation (GRD####, per-company sequence).</p>
             <div className="space-y-4">
               {([
                 ['name',          'FULL NAME',          'text',     'e.g. James Wilson'],
                 ['email',         'EMAIL',              'email',    'guard@company.com'],
-                ['badge_number',  'BADGE NUMBER',       'text',     'e.g. GRD-042'],
                 ['temp_password', 'TEMPORARY PASSWORD', 'password', 'Min 6 characters'],
               ] as const).map(([key, label, type, ph]) => (
                 <div key={key}>
