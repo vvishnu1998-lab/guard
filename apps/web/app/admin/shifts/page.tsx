@@ -1,13 +1,27 @@
 'use client';
 /**
  * Admin — Shifts Scheduling (/admin/shifts)
- * Guard-centric cards grid. Clicking a card opens that guard's full schedule.
- * The original Schedule Shift modal is preserved.
+ *
+ * Two views, toggled via ?view=site|guard (default: site).
+ *   • VIEW BY SITE  — grid of site cards summarising shift counts +
+ *     assigned/unassigned split for a rolling 2-week window from now.
+ *     Clicking a card drills into /admin/shifts/site/<siteId>.
+ *   • VIEW BY GUARD — the previous guard-centric card grid, unchanged
+ *     apart from being wrapped in the view switch. Selecting a guard
+ *     opens the same in-page detail panel + shift table as before.
+ *
+ * Shared "Schedule Shift" and "Assign Guard" modals are extracted into
+ * components so the site drill-in can trigger them without duplicating
+ * ~300 lines of form state.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { adminGet, adminPost, adminPatch } from '../../../lib/adminApi';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { adminGet } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
+import ScheduleShiftModal from '../../../components/admin/ScheduleShiftModal';
+import AssignGuardModal, { AssignableShift } from '../../../components/admin/AssignGuardModal';
+import { fmtDateShort, fmtDuration, fmtTime } from '../../../lib/shiftFormat';
 
 interface Shift {
   id:               string;
@@ -16,13 +30,14 @@ interface Shift {
   guard_name:       string | null;
   site_name:        string;
   site_is_active?:  boolean;
+  company_name?:    string;
   scheduled_start:  string;
   scheduled_end:    string;
   status:           'unassigned' | 'scheduled' | 'active' | 'completed' | 'cancelled' | 'missed';
 }
 
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean; photo_url?: string | null; }
-interface Site  { id: string; name: string; }
+interface Site  { id: string; name: string; address?: string; company_name?: string }
 
 const STATUS_STYLES: Record<string, string> = {
   unassigned: 'bg-amber-400/20 text-amber-400 border border-amber-400/40',
@@ -33,53 +48,17 @@ const STATUS_STYLES: Record<string, string> = {
   missed:     'bg-red-900/30 text-red-400 border border-red-700/40',
 };
 
-const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const AVAILABILITY_STYLES: Record<string, string> = {
+  'ON SHIFT':  'bg-green-500/20 text-green-400 border border-green-500/40',
+  'SCHEDULED': 'bg-blue-500/20  text-blue-400  border border-blue-500/40',
+  'AVAILABLE': 'bg-[#00C8FF]/10 text-[#00C8FF] border border-[#00C8FF]/30',
+};
 
-function fmtDT(iso: string) {
-  return new Date(iso).toLocaleString('en-GB', {
-    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
-  });
-}
-
-function fmtDateShort(iso: string) {
-  return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-}
-
-function fmtTime(iso: string) {
-  return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
-
-function fmtDuration(start: string, end: string) {
-  const h = (new Date(end).getTime() - new Date(start).getTime()) / 3_600_000;
-  return `${h.toFixed(1)}h`;
-}
-
-function fmtDate(d: Date) {
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  return `${dd}/${mm}/${d.getFullYear()}`;
-}
-
-function buildISO(date: Date, timeStr: string): string {
-  const [h, m] = timeStr.split(':').map(Number);
-  const d = new Date(date);
-  d.setHours(h, m, 0, 0);
-  return d.toISOString();
-}
-
-/** Derive availability badge — today-only logic, independent of the week range picker */
 function getAvailability(guardId: string, shifts: Shift[]) {
   const now = new Date();
-  // Date portion of today in local time
   const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-
   const guardShifts = shifts.filter((s) => s.guard_id === guardId);
-
-  // ON SHIFT — active status (clocked in, not clocked out)
   if (guardShifts.some((s) => s.status === 'active')) return 'ON SHIFT';
-
-  // SCHEDULED — has a scheduled shift whose start date (local) is today and not yet active
   const hasScheduledToday = guardShifts.some((s) => {
     if (s.status !== 'scheduled') return false;
     const start = new Date(s.scheduled_start);
@@ -87,15 +66,8 @@ function getAvailability(guardId: string, shifts: Shift[]) {
     return startStr === todayStr;
   });
   if (hasScheduledToday) return 'SCHEDULED';
-
   return 'AVAILABLE';
 }
-
-const AVAILABILITY_STYLES: Record<string, string> = {
-  'ON SHIFT':  'bg-green-500/20 text-green-400 border border-green-500/40',
-  'SCHEDULED': 'bg-blue-500/20  text-blue-400  border border-blue-500/40',
-  'AVAILABLE': 'bg-[#00C8FF]/10 text-[#00C8FF] border border-[#00C8FF]/30',
-};
 
 function getWeekBounds(referenceDate: Date) {
   const d = new Date(referenceDate);
@@ -104,83 +76,16 @@ function getWeekBounds(referenceDate: Date) {
   const end   = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23, 59, 59, 999);
   return { start, end };
 }
-
 function isoWeek(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-/** Mini inline calendar component */
-function MiniCalendar({
-  year, month, selectedDate, selectedDates, highlightDows, minDate, multiSelect,
-  onSelectDate, onPrevMonth, onNextMonth,
-}: {
-  year: number; month: number;
-  selectedDate: Date | null;
-  selectedDates?: Date[];
-  highlightDows: number[];
-  minDate?: Date;
-  multiSelect?: boolean;
-  onSelectDate: (d: Date) => void;
-  onPrevMonth: () => void; onNextMonth: () => void;
-}) {
-  const firstDay = new Date(year, month, 1).getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const cells: (number | null)[] = Array(firstDay).fill(null);
-  for (let i = 1; i <= daysInMonth; i++) cells.push(i);
-  while (cells.length % 7 !== 0) cells.push(null);
-
-  const minMidnight = minDate ? new Date(minDate.getFullYear(), minDate.getMonth(), minDate.getDate()).getTime() : -Infinity;
-  const selectedKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  const selectedSet = new Set((selectedDates ?? []).map(selectedKey));
-
-  return (
-    <div className="mt-3 bg-[#070F1E] border border-[#1A3050] rounded-xl p-3">
-      <div className="flex items-center justify-between mb-3">
-        <button type="button" onClick={onPrevMonth} className="text-gray-400 hover:text-amber-400 px-2 py-1 rounded transition-colors text-sm">‹</button>
-        <span className="text-gray-200 text-xs font-bold tracking-widest">{MONTH_NAMES[month].toUpperCase()} {year}</span>
-        <button type="button" onClick={onNextMonth} className="text-gray-400 hover:text-amber-400 px-2 py-1 rounded transition-colors text-sm">›</button>
-      </div>
-      <div className="grid grid-cols-7 mb-1">
-        {DAYS.map((d) => <div key={d} className="text-center text-gray-600 text-xs tracking-widest py-1">{d.toUpperCase().slice(0,2)}</div>)}
-      </div>
-      <div className="grid grid-cols-7">
-        {cells.map((day, idx) => {
-          if (day === null) return <div key={`e-${idx}`} />;
-          const thisDate = new Date(year, month, day);
-          const dow = thisDate.getDay();
-          const isHighlighted = highlightDows.includes(dow);
-          const isSelectedSingle = !multiSelect && selectedDate !== null &&
-            selectedDate.getFullYear() === year && selectedDate.getMonth() === month && selectedDate.getDate() === day;
-          const isSelectedMulti = !!multiSelect && selectedSet.has(selectedKey(thisDate));
-          const isPast = thisDate.getTime() < minMidnight;
-          return (
-            <button key={day} type="button" disabled={isPast} onClick={() => onSelectDate(thisDate)}
-              className={['text-center text-xs py-1.5 rounded transition-colors',
-                isPast ? 'text-gray-700 cursor-not-allowed opacity-40'
-                : isSelectedMulti ? 'bg-[#00C8FF] text-[#0B1526] font-bold hover:bg-[#00C8FF]/90'
-                : isSelectedSingle ? 'ring-2 ring-amber-400 text-amber-400 font-bold bg-amber-400/10'
-                : isHighlighted ? 'bg-amber-400/20 text-amber-300 hover:bg-amber-400/30'
-                : 'text-gray-400 hover:bg-[#1A3050] hover:text-gray-200'].join(' ')}>
-              {day}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** Guard avatar — photo or initials */
 function GuardAvatar({ name, photoUrl, size = 'md' }: { name: string; photoUrl?: string | null; size?: 'sm' | 'md' | 'lg' }) {
   const [imgError, setImgError] = useState(false);
   const initials = name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
   const sizeClass = size === 'lg' ? 'w-16 h-16 text-2xl' : size === 'sm' ? 'w-8 h-8 text-xs' : 'w-12 h-12 text-base';
-
   if (photoUrl && !imgError) {
-    return (
-      <img src={photoUrl} alt={name} onError={() => setImgError(true)}
-        className={`${sizeClass} rounded-full object-cover border-2 border-[#1A3050]`} />
-    );
+    return <img src={photoUrl} alt={name} onError={() => setImgError(true)} className={`${sizeClass} rounded-full object-cover border-2 border-[#1A3050]`} />;
   }
   return (
     <div className={`${sizeClass} rounded-full bg-[#00C8FF]/20 border-2 border-[#00C8FF]/40 flex items-center justify-center font-bold text-[#00C8FF] shrink-0`}>
@@ -190,103 +95,45 @@ function GuardAvatar({ name, photoUrl, size = 'md' }: { name: string; photoUrl?:
 }
 
 export default function ShiftsPage() {
-  const router = useRouter();
+  return (
+    <Suspense fallback={<div className="text-gray-500 text-sm py-12 text-center">Loading…</div>}>
+      <ShiftsPageInner />
+    </Suspense>
+  );
+}
+
+function ShiftsPageInner() {
+  const router       = useRouter();
+  const searchParams = useSearchParams();
+  const view: 'site' | 'guard' = searchParams?.get('view') === 'guard' ? 'guard' : 'site';
+
   const [shifts,  setShifts]  = useState<Shift[]>([]);
   const [guards,  setGuards]  = useState<Guard[]>([]);
   const [sites,   setSites]   = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
 
-  // Week filter
-  const today = new Date();
-  const todayInputMin = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  // Schedule modal state — prefilled site/guard passed via props
+  const [showModal,            setShowModal]            = useState(false);
+  const [modalPrefilledSite,   setModalPrefilledSite]   = useState<string | undefined>();
+  const [modalPrefilledGuard,  setModalPrefilledGuard]  = useState<string | undefined>();
+
+  // Assign-guard modal state
+  const [assignShift, setAssignShift] = useState<Shift | null>(null);
+
+  // Guard-view state (only used when view=guard, but kept mounted for cheap toggles)
+  const today = useMemo(() => new Date(), []);
   const [weekRef, setWeekRef] = useState<Date>(today);
   const { start: weekStart, end: weekEnd } = useMemo(() => getWeekBounds(weekRef), [weekRef]);
-
-  // Guard detail panel
   const [selectedGuard, setSelectedGuard] = useState<Guard | null>(null);
-  const [guardPanelPrefilledGuard, setGuardPanelPrefilledGuard] = useState('');
 
-  // Schedule modal
-  const [showModal, setShowModal] = useState(false);
-  const [saving,    setSaving]    = useState(false);
-  const [formError, setFormError] = useState('');
-
-  // Assign-guard panel
-  const [assignShift,   setAssignShift]   = useState<Shift | null>(null);
-  const [assignGuardId, setAssignGuardId] = useState('');
-  const [assigning,     setAssigning]     = useState(false);
-  const [assignError,   setAssignError]   = useState('');
-
-  // Form state
-  const [guardId,    setGuardId]    = useState('');
-  const [siteId,     setSiteId]     = useState('');
-  const [startTime,  setStartTime]  = useState('');
-  const [endTime,    setEndTime]    = useState('');
-  const [singleDate, setSingleDate] = useState('');
-  const [repeatMode, setRepeatMode] = useState<'none' | 'days' | 'specific'>('none');
-  const [repeatDays, setRepeatDays] = useState<number[]>([]);
-  const [calYear,  setCalYear]  = useState(today.getFullYear());
-  const [calMonth, setCalMonth] = useState(today.getMonth());
-  const [calStart, setCalStart] = useState<Date | null>(null);
-  const [specificDates, setSpecificDates] = useState<Date[]>([]);
-
-  // Phase A — when an admin picks a guard, the SITE dropdown narrows to that
-  // guard's currently-active assignments. Empty list ⇒ submit disabled with
-  // a hint pointing at /admin/guards. No guard ⇒ all company sites (legacy
-  // unassigned-shift flow). The actual per-date check runs server-side; this
-  // dropdown is a UI convenience to keep admins from being able to pick a
-  // site that would 422 on submit.
-  const [assignedSites, setAssignedSites] = useState<Site[] | null>(null); // null = not loaded yet / no guard picked
-  const [assignedSitesLoading, setAssignedSitesLoading] = useState(false);
-
-  useEffect(() => {
-    if (!guardId) { setAssignedSites(null); return; }
-    let cancelled = false;
-    setAssignedSitesLoading(true);
-    (async () => {
-      try {
-        // Filter the dropdown by TOMORROW's Pacific date, not today's.
-        // Rationale: this modal is for *new* shift scheduling, so the
-        // useful filter is "sites the guard can still cover going forward."
-        // An admin who clicks End Now (which sets assigned_until = today,
-        // i.e., today is still covered) intuitively expects the site to
-        // disappear from the scheduling dropdown — querying today would
-        // keep it visible since today is technically still in-window.
-        // Server-side per-date enforcement on POST /api/shifts re-validates
-        // against the actual shift date, so this is purely a UI heuristic.
-        const tomorrow = new Intl.DateTimeFormat('en-CA', {
-          timeZone: 'America/Los_Angeles',
-          year: 'numeric', month: '2-digit', day: '2-digit',
-        }).format(new Date(Date.now() + 24 * 60 * 60 * 1000));
-        const r = await adminGet<{ sites: { site_id: string; site_name: string }[] }>(
-          `/api/guards/${guardId}/assigned-sites?date=${tomorrow}`
-        );
-        if (cancelled) return;
-        const filtered: Site[] = r.sites.map(s => ({ id: s.site_id, name: s.site_name }));
-        setAssignedSites(filtered);
-        // If the currently-picked site is no longer in the filtered list, clear it.
-        setSiteId(prev => (prev && !filtered.some(s => s.id === prev) ? '' : prev));
-      } catch { if (!cancelled) setAssignedSites([]); }
-      finally { if (!cancelled) setAssignedSitesLoading(false); }
-    })();
-    return () => { cancelled = true; };
-  }, [guardId]);
-
-  // Effective site list shown in the dropdown. Empty array (guard with no
-  // assignments) renders an empty <select> + disabled submit; null (no guard
-  // selected) keeps the legacy "all sites" view.
-  const visibleSites: Site[] = guardId
-    ? (assignedSites ?? [])
-    : sites;
-  const noAssignmentsForGuard = !!guardId && assignedSites !== null && assignedSites.length === 0;
-
-  const isOvernight = useMemo(() => {
-    if (!startTime || !endTime) return false;
-    const [sh, sm] = startTime.split(':').map(Number);
-    const [eh, em] = endTime.split(':').map(Number);
-    return eh * 60 + em < sh * 60 + sm;
-  }, [startTime, endTime]);
+  // Rolling 2-week window (site view). Anchored at midnight local to avoid
+  // off-by-fractional-day drift as the tab sits open.
+  const { twoWeekStart, twoWeekEnd } = useMemo(() => {
+    const s = new Date(today); s.setHours(0, 0, 0, 0);
+    const e = new Date(s); e.setDate(s.getDate() + 14); e.setHours(23, 59, 59, 999);
+    return { twoWeekStart: s, twoWeekEnd: e };
+  }, [today]);
 
   const load = useCallback(async () => {
     try {
@@ -302,104 +149,28 @@ export default function ShiftsPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  function resetModal() {
-    setGuardId(''); setSiteId('');
-    setStartTime(''); setEndTime('');
-    setSingleDate('');
-    setRepeatMode('none'); setRepeatDays([]);
-    setCalStart(null);
-    setSpecificDates([]);
-    setCalYear(today.getFullYear()); setCalMonth(today.getMonth());
-    setFormError('');
+  function setView(next: 'site' | 'guard') {
+    const params = new URLSearchParams(searchParams?.toString() ?? '');
+    params.set('view', next);
+    router.replace(`/admin/shifts?${params.toString()}`, { scroll: false });
   }
 
-  function toggleSpecificDate(d: Date) {
-    setSpecificDates((prev) => {
-      const key = (x: Date) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
-      const k = key(d);
-      const exists = prev.some((x) => key(x) === k);
-      if (exists) return prev.filter((x) => key(x) !== k);
-      return [...prev, d].sort((a, b) => a.getTime() - b.getTime());
-    });
-  }
-
-  function fmtSpecificDate(d: Date): string {
-    // YYYY-MM-DD in *local* tz — matches the server's expectation that the
-    // admin's calendar selection is the Pacific calendar date they meant.
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-
-  function openScheduleForGuard(g: Guard) {
-    resetModal();
-    setGuardPanelPrefilledGuard(g.id);
-    setGuardId(g.id);
+  function openScheduleModal(opts?: { siteId?: string; guardId?: string }) {
+    setModalPrefilledSite(opts?.siteId);
+    setModalPrefilledGuard(opts?.guardId);
     setShowModal(true);
   }
 
-  async function createShift() {
-    if (!siteId)    { setFormError('Site is required'); return; }
-    if (!startTime) { setFormError('Start time is required'); return; }
-    if (!endTime)   { setFormError('End time is required'); return; }
-    if (repeatMode === 'none') {
-      if (!singleDate) { setFormError('Date is required'); return; }
-    } else if (repeatMode === 'days') {
-      if (repeatDays.length === 0) { setFormError('Select at least one day'); return; }
-      if (!calStart) { setFormError('Select a start date from the calendar'); return; }
-    } else {
-      if (specificDates.length === 0) { setFormError('Pick at least one date'); return; }
-      if (specificDates.length > 60)  { setFormError('Pick at most 60 dates'); return; }
-    }
+  const unassignedCount = shifts.filter((s) => s.status === 'unassigned').length;
+  const activeGuards    = guards.filter((g) => g.is_active !== false);
 
-    setSaving(true); setFormError('');
-    try {
-      if (repeatMode === 'none') {
-        const baseDate = new Date(singleDate + 'T00:00:00');
-        const scheduledStart = buildISO(baseDate, startTime);
-        const endDate = isOvernight ? new Date(baseDate.getTime() + 86400000) : baseDate;
-        const scheduledEnd = buildISO(endDate, endTime);
-        const payload: any = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd };
-        if (guardId) payload.guard_id = guardId;
-        await adminPost('/api/shifts', payload);
-      } else if (repeatMode === 'days') {
-        const scheduledStart = buildISO(calStart!, startTime);
-        const endBaseDate = isOvernight ? new Date(calStart!.getTime() + 86400000) : calStart!;
-        const scheduledEnd = buildISO(endBaseDate, endTime);
-        const payload: any = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd, repeat_days: repeatDays };
-        if (guardId) payload.guard_id = guardId;
-        await adminPost('/api/shifts', payload);
-      } else {
-        const payload: any = {
-          mode: 'specific_dates',
-          site_id: siteId,
-          start_time: startTime,
-          end_time: endTime,
-          dates: specificDates.map(fmtSpecificDate),
-        };
-        if (guardId) payload.guard_id = guardId;
-        await adminPost('/api/shifts', payload);
-      }
-      setShowModal(false); resetModal();
-      await load();
-    } catch (e: any) { setFormError(e.message); }
-    finally { setSaving(false); }
-  }
-
-  function toggleRepeatDay(day: number) {
-    setRepeatDays((prev) => prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]);
-  }
-  function prevMonth() { if (calMonth === 0) { setCalMonth(11); setCalYear((y) => y - 1); } else setCalMonth((m) => m - 1); }
-  function nextMonth() { if (calMonth === 11) { setCalMonth(0); setCalYear((y) => y + 1); } else setCalMonth((m) => m + 1); }
-
-  async function assignGuard() {
-    if (!assignGuardId) { setAssignError('Select a guard'); return; }
-    setAssigning(true); setAssignError('');
-    try {
-      await adminPatch(`/api/shifts/${assignShift!.id}/assign-guard`, { guard_id: assignGuardId });
-      setAssignShift(null); setAssignGuardId('');
-      await load();
-    } catch (e: any) { setAssignError(e.message); }
-    finally { setAssigning(false); }
-  }
+  // Vishnu multi-company label — same conditional pattern as guards page.
+  const showCompanyLabel = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of shifts)  if (s.company_name) set.add(s.company_name);
+    for (const s of sites)   if (s.company_name) set.add(s.company_name);
+    return set.size > 1;
+  }, [shifts, sites]);
 
   // Guard detail panel data
   const selectedGuardShifts = useMemo(() => {
@@ -408,12 +179,6 @@ export default function ShiftsPage() {
       .filter((s) => s.guard_id === selectedGuard.id)
       .sort((a, b) => new Date(b.scheduled_start).getTime() - new Date(a.scheduled_start).getTime());
   }, [selectedGuard, shifts]);
-
-  // Unassigned shifts count
-  const unassignedCount = shifts.filter((s) => s.status === 'unassigned').length;
-
-  // Active guards — for the current week view
-  const activeGuards = guards.filter((g) => g.is_active !== false);
 
   function prevWeek() { const d = new Date(weekRef); d.setDate(d.getDate() - 7); setWeekRef(d); }
   function nextWeek() { const d = new Date(weekRef); d.setDate(d.getDate() + 7); setWeekRef(d); }
@@ -424,16 +189,36 @@ export default function ShiftsPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-3xl font-bold tracking-widest text-amber-400">SHIFTS</h1>
         <div className="flex gap-3 items-center flex-wrap">
-          {/* Week navigator */}
-          <div className="flex items-center gap-2 bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-1.5">
-            <button onClick={prevWeek} className="text-gray-400 hover:text-amber-400 px-1 transition-colors">‹</button>
-            <span className="text-gray-300 text-xs tracking-widest whitespace-nowrap">
-              {isoWeek(weekStart)} – {isoWeek(weekEnd)}
-            </span>
-            <button onClick={nextWeek} className="text-gray-400 hover:text-amber-400 px-1 transition-colors">›</button>
+          {/* View toggle */}
+          <div className="flex items-center gap-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-1">
+            {([['site', 'BY SITE'], ['guard', 'BY GUARD']] as const).map(([v, label]) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`px-3 py-1.5 rounded text-xs tracking-widest transition-colors ${
+                  view === v ? 'bg-amber-500 text-black font-bold' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+          {/* Range display — site view shows 2-week window; guard view keeps the ± week navigator */}
+          {view === 'site' ? (
+            <div className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-1.5 text-gray-400 text-xs tracking-widest whitespace-nowrap">
+              {isoWeek(twoWeekStart)} — {isoWeek(twoWeekEnd)} · rolling 2 weeks
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-1.5">
+              <button onClick={prevWeek} className="text-gray-400 hover:text-amber-400 px-1 transition-colors">‹</button>
+              <span className="text-gray-300 text-xs tracking-widest whitespace-nowrap">
+                {isoWeek(weekStart)} – {isoWeek(weekEnd)}
+              </span>
+              <button onClick={nextWeek} className="text-gray-400 hover:text-amber-400 px-1 transition-colors">›</button>
+            </div>
+          )}
           <button
-            onClick={() => { resetModal(); setGuardId(''); setGuardPanelPrefilledGuard(''); setShowModal(true); }}
+            onClick={() => openScheduleModal()}
             className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors"
           >
             + SCHEDULE SHIFT
@@ -443,66 +228,123 @@ export default function ShiftsPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      {/* Unassigned alert */}
+      {/* Unassigned alert — surfaced on both views */}
       {unassignedCount > 0 && (
         <div className="bg-amber-400/10 border border-amber-400/40 rounded-lg px-4 py-3 flex items-center gap-3">
           <span className="text-amber-400 text-lg">⚠</span>
           <span className="text-amber-300 text-sm">
             <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard.
-            Click a guard card and use "Schedule New Shift" to assign.
           </span>
         </div>
       )}
 
-      {/* ── Guard cards grid ───────────────────────────────────────────── */}
-      {loading ? (
-        <div className="text-gray-500 text-sm py-12 text-center">Loading…</div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {activeGuards.map((guard) => {
-            const availability = getAvailability(guard.id, shifts);
-            const weekShifts = shifts.filter(
-              (s) => s.guard_id === guard.id &&
-                new Date(s.scheduled_start) >= weekStart &&
-                new Date(s.scheduled_start) <= weekEnd &&
-                s.status !== 'cancelled'
-            );
-            const isSelected = selectedGuard?.id === guard.id;
-
-            return (
-              <button
-                key={guard.id}
-                onClick={() => setSelectedGuard(isSelected ? null : guard)}
-                className={`text-left bg-[#0F1E35] border rounded-xl p-4 transition-all hover:border-[#00C8FF]/50 hover:shadow-lg hover:shadow-[#00C8FF]/5 ${
-                  isSelected ? 'border-[#00C8FF] shadow-lg shadow-[#00C8FF]/10' : 'border-[#1A3050]'
-                }`}
-              >
-                <div className="flex items-center gap-3 mb-3">
-                  <GuardAvatar name={guard.name} photoUrl={guard.photo_url} />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-white font-semibold text-sm truncate">{guard.name}</p>
-                    <p className="text-gray-600 text-xs">{guard.badge_number}</p>
+      {/* ── Site view ──────────────────────────────────────────────────── */}
+      {view === 'site' && (
+        loading ? (
+          <div className="text-gray-500 text-sm py-12 text-center">Loading…</div>
+        ) : sites.length === 0 ? (
+          <div className="text-gray-500 text-sm py-12 text-center">No sites configured yet.</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[...sites].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map((site) => {
+              const inWindow = shifts.filter((s) =>
+                s.site_id === site.id &&
+                s.status !== 'cancelled' &&
+                new Date(s.scheduled_start) >= twoWeekStart &&
+                new Date(s.scheduled_start) <= twoWeekEnd
+              );
+              const assigned   = inWindow.filter((s) => s.guard_id !== null).length;
+              const unassigned = inWindow.length - assigned;
+              const totalHours = inWindow.reduce((acc, s) => acc +
+                (new Date(s.scheduled_end).getTime() - new Date(s.scheduled_start).getTime()) / 3_600_000, 0);
+              const isActive = inWindow.length > 0;
+              return (
+                <Link
+                  key={site.id}
+                  href={`/admin/shifts/site/${site.id}`}
+                  className="text-left bg-[#0F1E35] border border-[#1A3050] rounded-xl p-4 transition-all hover:border-[#00C8FF]/50 hover:shadow-lg hover:shadow-[#00C8FF]/5 block"
+                >
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <div className="min-w-0">
+                      <p className="text-white font-semibold text-sm truncate">{site.name}</p>
+                      {site.address && <p className="text-gray-500 text-xs truncate">{site.address}</p>}
+                      {showCompanyLabel && site.company_name && (
+                        <p className="text-gray-600 text-[10px] tracking-widest mt-0.5">{site.company_name.toUpperCase()}</p>
+                      )}
+                    </div>
+                    <span className={`text-[10px] tracking-widest font-bold px-2 py-0.5 rounded shrink-0 ${
+                      isActive
+                        ? 'bg-green-500/20 text-green-400 border border-green-500/40'
+                        : 'bg-gray-700/30 text-gray-500 border border-gray-600/40'
+                    }`}>
+                      {isActive ? 'ACTIVE' : 'INACTIVE'}
+                    </span>
                   </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className={`inline-block text-xs tracking-widest font-medium px-2 py-0.5 rounded ${AVAILABILITY_STYLES[availability]}`}>
-                    {availability}
-                  </span>
-                  <span className="text-gray-600 text-xs">{weekShifts.length} shift{weekShifts.length !== 1 ? 's' : ''}</span>
-                </div>
-              </button>
-            );
-          })}
-          {activeGuards.length === 0 && (
-            <div className="col-span-4 text-center text-gray-500 py-12">No active guards found.</div>
-          )}
-        </div>
+                  <p className="text-gray-300 text-sm">
+                    <span className="text-white font-bold">{inWindow.length}</span> shift{inWindow.length === 1 ? '' : 's'} this window
+                    {inWindow.length > 0 && (
+                      <span className="text-gray-500"> — {assigned} assigned, {unassigned} unassigned</span>
+                    )}
+                  </p>
+                  {inWindow.length > 0 && (
+                    <p className="text-gray-500 text-xs mt-1">{totalHours.toFixed(1)}h scheduled</p>
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+        )
       )}
 
-      {/* ── Guard detail side panel ─────────────────────────────────────── */}
-      {selectedGuard && (
+      {/* ── Guard view (preserved from previous UI) ────────────────────── */}
+      {view === 'guard' && (
+        loading ? (
+          <div className="text-gray-500 text-sm py-12 text-center">Loading…</div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {activeGuards.map((guard) => {
+              const availability = getAvailability(guard.id, shifts);
+              const weekShifts = shifts.filter(
+                (s) => s.guard_id === guard.id &&
+                  new Date(s.scheduled_start) >= weekStart &&
+                  new Date(s.scheduled_start) <= weekEnd &&
+                  s.status !== 'cancelled'
+              );
+              const isSelected = selectedGuard?.id === guard.id;
+              return (
+                <button
+                  key={guard.id}
+                  onClick={() => setSelectedGuard(isSelected ? null : guard)}
+                  className={`text-left bg-[#0F1E35] border rounded-xl p-4 transition-all hover:border-[#00C8FF]/50 hover:shadow-lg hover:shadow-[#00C8FF]/5 ${
+                    isSelected ? 'border-[#00C8FF] shadow-lg shadow-[#00C8FF]/10' : 'border-[#1A3050]'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 mb-3">
+                    <GuardAvatar name={guard.name} photoUrl={guard.photo_url} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-white font-semibold text-sm truncate">{guard.name}</p>
+                      <p className="text-gray-600 text-xs">{guard.badge_number}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className={`inline-block text-xs tracking-widest font-medium px-2 py-0.5 rounded ${AVAILABILITY_STYLES[availability]}`}>
+                      {availability}
+                    </span>
+                    <span className="text-gray-600 text-xs">{weekShifts.length} shift{weekShifts.length !== 1 ? 's' : ''}</span>
+                  </div>
+                </button>
+              );
+            })}
+            {activeGuards.length === 0 && (
+              <div className="col-span-4 text-center text-gray-500 py-12">No active guards found.</div>
+            )}
+          </div>
+        )
+      )}
+
+      {/* ── Guard detail side panel (guard view only) ──────────────────── */}
+      {view === 'guard' && selectedGuard && (
         <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
-          {/* Panel header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-[#1A3050]">
             <div className="flex items-center gap-4">
               <GuardAvatar name={selectedGuard.name} photoUrl={selectedGuard.photo_url} size="lg" />
@@ -513,7 +355,7 @@ export default function ShiftsPage() {
             </div>
             <div className="flex items-center gap-3">
               <button
-                onClick={() => openScheduleForGuard(selectedGuard)}
+                onClick={() => openScheduleModal({ guardId: selectedGuard.id })}
                 className="bg-amber-400 text-gray-900 font-bold tracking-widest text-xs px-3 py-1.5 rounded-lg hover:bg-amber-300 transition-colors"
               >
                 + SCHEDULE NEW SHIFT
@@ -522,7 +364,6 @@ export default function ShiftsPage() {
             </div>
           </div>
 
-          {/* Shift list */}
           {selectedGuardShifts.length === 0 ? (
             <div className="text-center text-gray-500 text-sm py-10">No shifts scheduled for this guard.</div>
           ) : (
@@ -567,180 +408,22 @@ export default function ShiftsPage() {
         </div>
       )}
 
-      {/* ── Schedule Shift Modal ──────────────────────────────────────── */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-amber-400 font-bold tracking-widest text-lg">SCHEDULE SHIFT</h2>
-              <button onClick={() => setShowModal(false)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
-            </div>
-            {formError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{formError}</div>}
-            <div className="space-y-4">
-
-              <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">GUARD <span className="text-gray-600 text-xs normal-case">(optional)</span></label>
-                <select value={guardId} onChange={(e) => setGuardId(e.target.value)}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400">
-                  <option value="">Unassigned</option>
-                  {guards.filter((g: any) => g.is_active !== false).map((g) => (
-                    <option key={g.id} value={g.id}>{g.name} — {g.badge_number}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">SITE <span className="text-amber-400">*</span></label>
-                <select value={siteId} onChange={(e) => setSiteId(e.target.value)} disabled={noAssignmentsForGuard}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400 disabled:opacity-40">
-                  <option value="">
-                    {noAssignmentsForGuard
-                      ? 'No sites assigned — assign guard on the Guards page first'
-                      : (assignedSitesLoading ? 'Loading sites…' : 'Select site…')}
-                  </option>
-                  {visibleSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-                {noAssignmentsForGuard && (
-                  <p className="text-amber-400/80 text-xs mt-1">
-                    This guard has no active site assignments. Go to <span className="font-mono">/admin/guards</span> and click ASSIGN.
-                  </p>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-gray-500 text-xs tracking-widest mb-1">START TIME <span className="text-amber-400">*</span></label>
-                  <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)}
-                    className="w-full bg-[#070F1E] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
-                </div>
-                <div>
-                  <label className="block text-gray-500 text-xs tracking-widest mb-1">END TIME <span className="text-amber-400">*</span></label>
-                  <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)}
-                    className="w-full bg-[#070F1E] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
-                </div>
-              </div>
-
-              {isOvernight && startTime && endTime && (
-                <p className="text-cyan-400 text-xs tracking-wide -mt-1">Overnight — ends next day</p>
-              )}
-
-              <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">REPEAT</label>
-                <select value={repeatMode} onChange={(e) => { setRepeatMode(e.target.value as 'none' | 'days' | 'specific'); setRepeatDays([]); setCalStart(null); setSpecificDates([]); }}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400">
-                  <option value="none">Does not repeat</option>
-                  <option value="days">Repeat on selected days</option>
-                  <option value="specific">Pick specific dates</option>
-                </select>
-              </div>
-
-              {repeatMode === 'none' && (
-                <div>
-                  <label className="block text-gray-500 text-xs tracking-widest mb-1">DATE <span className="text-amber-400">*</span></label>
-                  <div className="relative">
-                    <input type="date" value={singleDate} min={todayInputMin} onChange={(e) => setSingleDate(e.target.value)}
-                      className="w-full bg-[#070F1E] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400" />
-                    {singleDate && (
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none">
-                        {fmtDate(new Date(singleDate + 'T00:00:00'))}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {repeatMode === 'days' && (
-                <div>
-                  <p className="text-gray-500 text-xs tracking-widest mb-2">SELECT DAYS</p>
-                  <div className="flex gap-2 flex-wrap">
-                    {DAYS.map((day, idx) => (
-                      <button key={day} type="button" onClick={() => toggleRepeatDay(idx)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold tracking-widest transition-colors ${
-                          repeatDays.includes(idx) ? 'bg-amber-400 text-gray-900' : 'bg-[#0B1526] border border-[#1A3050] text-gray-400 hover:border-amber-400/50'
-                        }`}>
-                        {day.toUpperCase()}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="text-gray-600 text-xs mt-2 mb-1">SELECT START DATE — shifts repeat for 28 days from this date.</p>
-                  {calStart && <p className="text-amber-400 text-xs mb-1">Start: {fmtDate(calStart)}</p>}
-                  <MiniCalendar year={calYear} month={calMonth} selectedDate={calStart} highlightDows={repeatDays}
-                    minDate={today}
-                    onSelectDate={(d) => setCalStart(d)} onPrevMonth={prevMonth} onNextMonth={nextMonth} />
-                </div>
-              )}
-
-              {repeatMode === 'specific' && (
-                <div data-testid="specific-dates-panel">
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-gray-500 text-xs tracking-widest">
-                      {specificDates.length} DATE{specificDates.length === 1 ? '' : 'S'} SELECTED
-                    </p>
-                    {specificDates.length > 0 && (
-                      <button type="button" onClick={() => setSpecificDates([])}
-                        className="text-gray-500 hover:text-amber-400 text-xs tracking-widest underline">
-                        CLEAR ALL
-                      </button>
-                    )}
-                  </div>
-                  {specificDates.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mb-2">
-                      {specificDates.map((d) => (
-                        <button key={fmtSpecificDate(d)} type="button" onClick={() => toggleSpecificDate(d)}
-                          className="px-2 py-0.5 rounded bg-[#00C8FF]/15 border border-[#00C8FF]/40 text-[#00C8FF] text-xs font-mono hover:bg-[#00C8FF]/25 transition-colors">
-                          {fmtDate(d)} ×
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  <p className="text-gray-600 text-xs mb-1">Pick up to 60 individual dates. One shift per date, all sharing the same time + site.</p>
-                  <MiniCalendar year={calYear} month={calMonth} selectedDate={null} selectedDates={specificDates}
-                    highlightDows={[]} minDate={today} multiSelect
-                    onSelectDate={toggleSpecificDate} onPrevMonth={prevMonth} onNextMonth={nextMonth} />
-                </div>
-              )}
-            </div>
-
-            <div className="flex gap-3 mt-6">
-              <button onClick={() => setShowModal(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
-              <button onClick={createShift} disabled={saving || noAssignmentsForGuard} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
-                {saving ? 'SAVING…' : repeatMode === 'none' ? 'SCHEDULE' : `CREATE ${repeatMode === 'specific' ? specificDates.length || '' : ''} SHIFTS`.replace(/\s+/g, ' ').trim()}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Assign Guard Modal ────────────────────────────────────────── */}
-      {assignShift && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-sm bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-amber-400 font-bold tracking-widest text-lg">ASSIGN GUARD</h2>
-              <button onClick={() => setAssignShift(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
-            </div>
-            <p className="text-gray-500 text-xs mb-1">Site: <span className="text-gray-300">{assignShift.site_name}</span><InactiveSiteBadge siteIsActive={assignShift.site_is_active} /></p>
-            <p className="text-gray-500 text-xs mb-4">{fmtDT(assignShift.scheduled_start)} → {fmtDT(assignShift.scheduled_end)}</p>
-            {assignError && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{assignError}</div>}
-            <div className="mb-5">
-              <label className="block text-gray-500 text-xs tracking-widest mb-1">GUARD <span className="text-amber-400">*</span></label>
-              <select value={assignGuardId} onChange={(e) => setAssignGuardId(e.target.value)}
-                className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400">
-                <option value="">Select guard…</option>
-                {guards.filter((g: any) => g.is_active !== false).map((g) => (
-                  <option key={g.id} value={g.id}>{g.name} — {g.badge_number}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex gap-3">
-              <button onClick={() => setAssignShift(null)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
-              <button onClick={assignGuard} disabled={assigning} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
-                {assigning ? 'ASSIGNING…' : 'ASSIGN'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Shared modals */}
+      <ScheduleShiftModal
+        open={showModal}
+        onClose={() => setShowModal(false)}
+        onCreated={load}
+        guards={guards}
+        sites={sites}
+        prefilledSiteId={modalPrefilledSite}
+        prefilledGuardId={modalPrefilledGuard}
+      />
+      <AssignGuardModal
+        shift={assignShift as AssignableShift | null}
+        guards={guards}
+        onClose={() => setAssignShift(null)}
+        onAssigned={load}
+      />
     </div>
   );
 }

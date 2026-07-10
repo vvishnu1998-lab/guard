@@ -1716,8 +1716,10 @@ router.post('/:id/handoff-cancel', requireAuth('guard'), async (req, res) => {
   }
 });
 
-// GET /api/shifts  — guard sees their shifts; admin sees all for company
-router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
+// GET /api/shifts  — guard sees their shifts; company_admin sees their
+// company's; vishnu sees every company's (company_name is joined so the
+// admin UI can label cross-company rows).
+router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res) => {
   const { user } = req;
   let result;
   if (user!.role === 'guard') {
@@ -1749,16 +1751,20 @@ router.get('/', requireAuth('guard', 'company_admin'), async (req, res) => {
       [user!.sub]
     );
   } else {
+    // Company-admin path + vishnu (all-companies) bypass.
+    const isVishnu = user!.role === 'vishnu';
     result = await pool.query(
       `SELECT s.*, si.name as site_name, si.is_active AS site_is_active,
               si.instructions_pdf_url, g.name as guard_name,
+              co.name AS company_name,
               COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
        JOIN companies co ON co.id = si.company_id
        LEFT JOIN guards g ON s.guard_id = g.id
-       WHERE si.company_id = $1 ORDER BY s.scheduled_start DESC LIMIT 100`,
-      [user!.company_id]
+       ${isVishnu ? '' : 'WHERE si.company_id = $1'}
+       ORDER BY s.scheduled_start DESC LIMIT 100`,
+      isVishnu ? [] : [user!.company_id]
     );
   }
   res.json(result.rows);
