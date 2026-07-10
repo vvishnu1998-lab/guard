@@ -76,6 +76,20 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
        RETURNING ss.id`
     );
 
+    // Walk-test 2026-07-09 BUG I: for every session we just auto-closed,
+    // resolve its lingering open geofence violations. Uses the freshly-set
+    // clocked_out_at as the resolution timestamp for parity with the
+    // manual clock-out path.
+    await client.query(
+      `UPDATE geofence_violations gv
+          SET resolved_at = ss.clocked_out_at,
+              duration_minutes = ROUND(EXTRACT(EPOCH FROM (ss.clocked_out_at - gv.occurred_at)) / 60)::INT
+         FROM shift_sessions ss
+        WHERE gv.shift_session_id = ss.id
+          AND gv.resolved_at IS NULL
+          AND ss.clocked_out_at > NOW() - INTERVAL '10 minutes'`
+    );
+
     // Step 3: Mark the overdue shifts. Shifts with at least one
     //         shift_sessions row → 'completed' (guard worked, may or may
     //         not have clocked out). Shifts with zero session rows →

@@ -1601,6 +1601,18 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       [newSession.id, hist.history_id],
     );
 
+    // Walk-test 2026-07-09 BUG I: auto-resolve any lingering open geofence
+    // violations on the outgoing guard's session — same pattern as
+    // /clock-out. Symmetric because handoff-clock-in IS a clock-out for A.
+    await client.query(
+      `UPDATE geofence_violations
+          SET resolved_at = NOW(),
+              duration_minutes = ROUND(EXTRACT(EPOCH FROM (NOW() - occurred_at)) / 60)::INT
+        WHERE shift_session_id = $1
+          AND resolved_at IS NULL`,
+      [hist.from_session_id],
+    );
+
     await client.query('COMMIT');
 
     res.status(201).json(newSession);
@@ -2170,6 +2182,21 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
       ]
     );
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);
+
+    // Walk-test 2026-07-09 BUG I: auto-resolve any lingering open geofence
+    // violations for this session so the alerts feed doesn't keep flashing
+    // them after the shift ends. Uses clocked_out_at (the session's actual
+    // end) as the resolution timestamp for semantic accuracy.
+    await client.query(
+      `UPDATE geofence_violations
+          SET resolved_at = ss.clocked_out_at,
+              duration_minutes = ROUND(EXTRACT(EPOCH FROM (ss.clocked_out_at - occurred_at)) / 60)::INT
+         FROM shift_sessions ss
+        WHERE geofence_violations.shift_session_id = ss.id
+          AND ss.id = $1
+          AND geofence_violations.resolved_at IS NULL`,
+      [session.id],
+    );
 
     await client.query('COMMIT');
     res.json({ ...session, total_hours: netHours, handover_notes: handover_notes ?? null });

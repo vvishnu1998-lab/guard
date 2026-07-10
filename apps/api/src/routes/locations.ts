@@ -321,6 +321,20 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       if (violationInsert.rows[0]) {
         freshViolationId = violationInsert.rows[0].id;
       }
+    } else {
+      // Walk-test 2026-07-09 BUG I: guard is back inside the boundary; if
+      // this session has any open violations, resolve them here so the
+      // alerts feed reflects reality within one ping cadence (typically
+      // 30 min). Server-side re-computed isWithin per Item 3, so the
+      // client can't spoof a fake resolve.
+      await client.query(
+        `UPDATE geofence_violations
+            SET resolved_at = NOW(),
+                duration_minutes = ROUND(EXTRACT(EPOCH FROM (NOW() - occurred_at)) / 60)::INT
+          WHERE shift_session_id = $1
+            AND resolved_at IS NULL`,
+        [shift_session_id],
+      );
     }
 
     await client.query('COMMIT');
