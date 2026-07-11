@@ -270,6 +270,8 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        s.name    AS site_name,
        ss.id     AS session_id,
        ss.clocked_in_at,
+       sh.scheduled_start,
+       sh.scheduled_end,
        lp.latitude  AS last_lat,
        lp.longitude AS last_lng,
        lp.pinged_at  AS last_ping_at,
@@ -281,6 +283,7 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
      FROM shift_sessions ss
      JOIN guards g ON g.id = ss.guard_id
      JOIN sites  s ON s.id = ss.site_id
+     JOIN shifts sh ON sh.id = ss.shift_id
      LEFT JOIN LATERAL (
        SELECT latitude, longitude, lp_inner.pinged_at, ping_type
        FROM location_pings lp_inner

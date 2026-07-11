@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { adminGet } from '../../../../lib/adminApi';
 import { fmtTime } from '../../../../lib/shiftFormat';
 
@@ -27,10 +27,16 @@ interface Site {
 }
 
 interface LiveGuard {
-  id:            string;
-  name:          string;
-  site_name:     string;
-  clocked_in_at: string;
+  id:               string;
+  name:             string;
+  site_name:        string;
+  clocked_in_at:    string;
+  // Populated by /api/admin/live-guards via JOIN shifts. Optional so
+  // future consumers of the LiveGuard type without these fields still
+  // compile; in practice they're always set (shift_sessions.shift_id
+  // is NOT NULL and shifts.scheduled_start/end are NOT NULL).
+  scheduled_start?: string | null;
+  scheduled_end?:   string | null;
 }
 
 interface Shift {
@@ -51,6 +57,7 @@ const DATE_KEY = new Intl.DateTimeFormat('en-CA', {
 
 export default function SiteDetailPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const siteId = params?.id ?? '';
 
   const [site,    setSite]    = useState<Site | null>(null);
@@ -92,7 +99,9 @@ export default function SiteDetailPage() {
       .filter((s) =>
         s.site_id === siteId &&
         s.status !== 'cancelled' &&
-        new Date(s.scheduled_end) >= now &&
+        // Fix 4: only shifts that haven't started yet — anything already
+        // in progress is handled by the GUARD ON SHIFT section above.
+        new Date(s.scheduled_start) > now &&
         new Date(s.scheduled_start) <= end
       )
       .sort((a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime());
@@ -120,9 +129,12 @@ export default function SiteDetailPage() {
   if (error || !site) {
     return (
       <div className="space-y-4">
-        <Link href="/admin/sites" className="text-gray-500 hover:text-amber-400 text-xs tracking-widest inline-flex items-center gap-1">
-          ← BACK TO SITES
-        </Link>
+        <button
+          onClick={() => router.back()}
+          className="text-gray-500 hover:text-amber-400 text-xs tracking-widest inline-flex items-center gap-1"
+        >
+          ← BACK
+        </button>
         <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">
           {error || 'Site not found.'}
         </div>
@@ -134,12 +146,12 @@ export default function SiteDetailPage() {
     <div className="space-y-8">
       {/* Header + back link */}
       <div>
-        <Link
-          href="/admin/sites"
+        <button
+          onClick={() => router.back()}
           className="text-gray-500 hover:text-amber-400 text-xs tracking-widest inline-flex items-center gap-1 mb-2"
         >
-          ← BACK TO SITES
-        </Link>
+          ← BACK
+        </button>
         <h1 className="text-2xl md:text-3xl font-bold tracking-widest text-amber-400 break-words">
           {site.name.toUpperCase()}
         </h1>
@@ -165,6 +177,11 @@ export default function SiteDetailPage() {
                       <p className="text-gray-500 text-xs mt-0.5 font-mono">
                         Clocked in {fmtTime(g.clocked_in_at)}
                       </p>
+                      {g.scheduled_start && g.scheduled_end && (
+                        <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                          Scheduled {fmtTime(g.scheduled_start)} → {fmtTime(g.scheduled_end)}
+                        </p>
+                      )}
                     </div>
                     <Link
                       href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
