@@ -14,7 +14,7 @@
  * components so the site drill-in can trigger them without duplicating
  * ~300 lines of form state.
  */
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { adminGet } from '../../../lib/adminApi';
@@ -177,6 +177,55 @@ function ShiftsPageInner() {
     setModalPrefilledSite(opts?.siteId);
     setModalPrefilledGuard(opts?.guardId);
     setShowModal(true);
+  }
+
+  // Deep-link handler: /admin/shifts?newShift=1&siteId=<uuid> opens the
+  // Schedule Shift modal pre-populated with that site. Consumed by the
+  // "MANAGE SCHEDULE" link on /admin/sites/[id]. One-shot: params are
+  // stripped after the modal opens so a later view toggle or back-nav
+  // doesn't reopen it.
+  const deepLinkHandled     = useRef(false);
+  // Fix 2: when the modal was opened via deep-link, Cancel returns the
+  // admin to /admin (dashboard) rather than leaving them stranded on
+  // /admin/shifts. Save + close (onCreated → onClose) stays on the page.
+  // The ref is set in the deep-link useEffect and cleared in handleClose
+  // so subsequent normal opens behave normally.
+  const openedViaDeepLink   = useRef(false);
+  const createdFromDeepLink = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    const newShift = searchParams?.get('newShift');
+    const siteId   = searchParams?.get('siteId');
+    if (newShift === '1' && siteId) {
+      deepLinkHandled.current   = true;
+      openedViaDeepLink.current = true;
+      openScheduleModal({ siteId });
+      const p = new URLSearchParams(searchParams?.toString() ?? '');
+      p.delete('newShift');
+      p.delete('siteId');
+      const qs = p.toString();
+      router.replace(qs ? `/admin/shifts?${qs}` : '/admin/shifts', { scroll: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, router]);
+
+  // ScheduleShiftModal collapses "save" and "cancel" into one onClose
+  // prop (it calls onCreated() then onClose() after a successful save).
+  // We differentiate by having onCreated stamp `createdFromDeepLink`
+  // — then handleClose sees it and skips the redirect.
+  function handleModalCreated() {
+    createdFromDeepLink.current = openedViaDeepLink.current;
+    load();
+  }
+  function handleModalClose() {
+    const wasDeepLink = openedViaDeepLink.current;
+    const wasCreated  = createdFromDeepLink.current;
+    openedViaDeepLink.current   = false;
+    createdFromDeepLink.current = false;
+    setShowModal(false);
+    if (wasDeepLink && !wasCreated) {
+      router.push('/admin');
+    }
   }
 
   const unassignedCount = shifts.filter((s) => s.status === 'unassigned').length;
@@ -444,8 +493,8 @@ function ShiftsPageInner() {
       {/* Shared modals */}
       <ScheduleShiftModal
         open={showModal}
-        onClose={() => setShowModal(false)}
-        onCreated={load}
+        onClose={handleModalClose}
+        onCreated={handleModalCreated}
         guards={guards}
         sites={sites}
         prefilledSiteId={modalPrefilledSite}
