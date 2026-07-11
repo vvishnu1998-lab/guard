@@ -74,7 +74,26 @@ export async function adminDownload(path: string, filename: string): Promise<voi
     throw new Error(`Download failed (${res.status}): ${msg.slice(0, 200)}`);
   }
   const blob = await res.blob();
-  const url  = URL.createObjectURL(blob);
+  triggerBlobDownload(blob, filename);
+}
+
+/**
+ * POST-body download variant: sends filter payload as JSON, gets a blob
+ * back, triggers browser download. Used by activity-logs PDF export
+ * where filter state is too large / structured for query params.
+ */
+export async function adminDownloadPost(path: string, body: unknown, filename: string): Promise<void> {
+  const res = await adminFetch(path, { method: 'POST', body: JSON.stringify(body) });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => '');
+    throw new Error(`Download failed (${res.status}): ${msg.slice(0, 200)}`);
+  }
+  const blob = await res.blob();
+  triggerBlobDownload(blob, filename);
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
   try {
     const a = document.createElement('a');
     a.href = url;
