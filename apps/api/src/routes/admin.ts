@@ -276,6 +276,7 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        lp.longitude AS last_lng,
        lp.pinged_at  AS last_ping_at,
        lp.ping_type  AS last_ping_type,
+       lr.reported_at AS last_report_at,
        EXISTS (
          SELECT 1 FROM geofence_violations gv
          WHERE gv.shift_session_id = ss.id AND gv.resolved_at IS NULL
@@ -290,6 +291,12 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        WHERE lp_inner.shift_session_id = ss.id
        ORDER BY lp_inner.pinged_at DESC LIMIT 1
      ) lp ON true
+     LEFT JOIN LATERAL (
+       SELECT reported_at
+       FROM reports r
+       WHERE r.shift_session_id = ss.id
+       ORDER BY reported_at DESC LIMIT 1
+     ) lr ON true
      -- e2fec53 status filter removed in Week-1 C2 (see /kpis comment above)
      WHERE s.company_id = $1 AND ss.clocked_out_at IS NULL
      ORDER BY s.name, g.name`,
