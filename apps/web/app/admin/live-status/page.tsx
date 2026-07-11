@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { adminDownload, adminGet } from '../../../lib/adminApi';
+import { computeLateness } from '../../../lib/lateness';
 
 interface LiveGuard {
   id:              string;
@@ -60,39 +61,6 @@ function shiftDuration(iso: string): string {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h}h ${m.toString().padStart(2, '0')}m`;
-}
-
-// Formats a timestamp as "HH:MM (+Nm late)" in Pacific time, where
-// lateness = actual time - most recent scheduled boundary at or before
-// actual. Boundaries are `scheduleMinutes` past the hour (e.g. [0, 30]
-// for the every-30-min ping schedule, [0] for the top-of-hour report
-// schedule). Whole-minute floor per D2. On-boundary (0m late) reads
-// "(on time)". Null actual → "—" (no ping/report yet this shift).
-//
-// Timezone note: because our schedules are :00 and :30 past the hour
-// (both timezone-invariant on whole-hour offsets like Pacific), the
-// boundary math runs on UTC ms and the display formatter converts the
-// same instant into Pacific. Handles DST because Intl.DateTimeFormat
-// does — the underlying instant doesn't change.
-export function computeLateness(
-  actualISO: string | null,
-  scheduleMinutes: number[],
-): { display: string } {
-  if (!actualISO) return { display: '—' };
-  const actual        = new Date(actualISO);
-  const actualMs      = actual.getTime();
-  const hourStartMs   = Math.floor(actualMs / 3_600_000) * 3_600_000;
-  const candidates: number[] = [];
-  for (const m of scheduleMinutes) {
-    candidates.push(hourStartMs + m * 60_000);
-    candidates.push(hourStartMs - 3_600_000 + m * 60_000);
-  }
-  const boundaryMs = Math.max(...candidates.filter((b) => b <= actualMs));
-  const lateMins   = Math.floor((actualMs - boundaryMs) / 60_000);
-  const time = new Intl.DateTimeFormat('en-GB', {
-    hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
-  }).format(actual);
-  return { display: lateMins === 0 ? `${time} (on time)` : `${time} (+${lateMins}m late)` };
 }
 
 function fmtBreachTime(iso: string): string {
