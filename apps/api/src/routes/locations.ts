@@ -203,6 +203,15 @@ async function validatePhotoOrQuarantine(
 }
 
 // GET /api/locations/violations — guard's own violation history (mobile alerts tab)
+//
+// P3 (2026-07-10): auto-archive resolved violations older than 24 hours from
+// the mobile view. Guards see:
+//   * OPEN violations (resolved_at IS NULL) — safety-relevant, always visible.
+//   * RESOLVED violations within the last 24 hours — short retrospective.
+// Older resolved rows are hidden from mobile only. Admin surfaces
+// (/api/admin/violations, /api/admin/recent-alerts, /api/exports/*, and the
+// client portal's /api/client/violations) are unchanged and retain full
+// history for audit.
 router.get('/violations', requireAuth('guard'), async (req, res) => {
   const result = await pool.query(
     `SELECT gv.id, gv.occurred_at, gv.resolved_at, gv.duration_minutes,
@@ -211,6 +220,8 @@ router.get('/violations', requireAuth('guard'), async (req, res) => {
      FROM geofence_violations gv
      JOIN sites si ON si.id = gv.site_id
      WHERE gv.guard_id = $1
+       AND (gv.resolved_at IS NULL
+            OR gv.resolved_at > NOW() - INTERVAL '24 hours')
      ORDER BY gv.occurred_at DESC LIMIT 50`,
     [req.user!.sub]
   );
