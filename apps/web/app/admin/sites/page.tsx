@@ -82,6 +82,52 @@ interface CredentialsBanner {
   mode:          'created' | 'reset';
 }
 
+// Session S6 — site scheduling profiles.
+interface ProfileShift {
+  id?:                 string;   // present when fetched from server
+  clientKey?:          string;   // client-side stable React key for new rows
+  day_of_week:         number;   // 0=Sun … 6=Sat
+  shift_start_time:    string;   // "HH:MM" or "HH:MM:SS"
+  shift_length_hours:  number;   // e.g. 8, 12, 8.5
+  guards_needed:       number;   // 1-10
+  active:              boolean;
+}
+
+interface Profile {
+  id:            string;
+  site_id:       string;
+  profile_name:  string;
+  is_active:     boolean;
+  created_at:    string;
+  updated_at:    string;
+  shifts:        ProfileShift[];
+}
+
+interface CoverageStatus {
+  site_id:            string;
+  has_active_profile: boolean;
+  required:           number;
+  scheduled:          number;
+  gaps:               number;
+}
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+let __shiftKeyCounter = 0;
+function nextShiftKey() { return `s${++__shiftKeyCounter}`; }
+function makeShiftDraft(dow: number, prev?: ProfileShift): ProfileShift {
+  if (prev) return { ...prev, id: undefined, clientKey: nextShiftKey(), day_of_week: dow };
+  return {
+    clientKey:          nextShiftKey(),
+    day_of_week:        dow,
+    shift_start_time:   '08:00',
+    shift_length_hours: 8,
+    guards_needed:      1,
+    active:             true,
+  };
+}
+
 // Cryptographically secure temp password for the ADD CLIENT modal. Same
 // alphabet as apps/api/src/utils/tempPassword.ts (no 0/O/I/l/1 confusion).
 const TEMP_PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
@@ -223,6 +269,21 @@ export default function SitesPage() {
   const [clientFormError, setClientFormError] = useState('');
   const [clientToggling, setClientToggling] = useState<string | null>(null);
 
+  // Session S6 — scheduling profiles state.
+  const [profilesPerSite, setProfilesPerSite] = useState<Record<string, Profile[] | undefined>>({});
+  const [coveragePerSite, setCoveragePerSite] = useState<Record<string, CoverageStatus | undefined>>({});
+  const [profileModalMode, setProfileModalMode] = useState<'create' | 'edit' | null>(null);
+  const [profileModalSiteId, setProfileModalSiteId] = useState<string | null>(null);
+  const [editingProfile,   setEditingProfile]   = useState<Profile | null>(null);
+  const [profileForm,      setProfileForm]      = useState<{
+    profile_name: string;
+    is_active:    boolean;
+    shifts:       ProfileShift[];
+  }>({ profile_name: '', is_active: true, shifts: [] });
+  const [profileSaving,   setProfileSaving]   = useState(false);
+  const [profileFormError, setProfileFormError] = useState('');
+  const [profileToggling, setProfileToggling] = useState<string | null>(null);
+
   // Always fetch with include_inactive=1 so the chip toggle is a client-side
   // filter with no round-trip. Search across ALL sites regardless of chip.
   const load = useCallback(async () => {
@@ -266,11 +327,159 @@ export default function SitesPage() {
       else {
         next.add(id);
         // Session C — lazy-fetch clients on first expand.
-        if (clientsPerSite[id] === undefined) fetchClientsForSite(id);
+        if (clientsPerSite[id]  === undefined) fetchClientsForSite(id);
+        // Session S6 — lazy-fetch scheduling profiles + coverage snapshot.
+        if (profilesPerSite[id] === undefined) fetchProfilesForSite(id);
       }
       return next;
     });
   }
+
+  // ── Session S6 — scheduling profiles handlers ──────────────────────────
+  async function fetchProfilesForSite(siteId: string) {
+    try {
+      const [prof, cov] = await Promise.all([
+        adminGet<{ profiles: Profile[] }>(`/api/scheduling/site/${siteId}`),
+        adminGet<CoverageStatus>(`/api/scheduling/site/${siteId}/coverage-status`),
+      ]);
+      setProfilesPerSite((prev) => ({ ...prev, [siteId]: prof.profiles }));
+      setCoveragePerSite((prev) => ({ ...prev, [siteId]: cov }));
+    } catch (e: any) {
+      setProfilesPerSite((prev) => ({ ...prev, [siteId]: [] }));
+      setError(e?.message ?? 'Failed to load scheduling profiles');
+    }
+  }
+
+  function openCreateProfileModal(siteId: string) {
+    setProfileModalMode('create');
+    setProfileModalSiteId(siteId);
+    setEditingProfile(null);
+    setProfileForm({ profile_name: '', is_active: true, shifts: [] });
+    setProfileFormError('');
+  }
+
+  function openEditProfileModal(siteId: string, profile: Profile) {
+    setProfileModalMode('edit');
+    setProfileModalSiteId(siteId);
+    setEditingProfile(profile);
+    setProfileForm({
+      profile_name: profile.profile_name,
+      is_active:    profile.is_active,
+      shifts:       profile.shifts.map((s) => ({ ...s, clientKey: nextShiftKey() })),
+    });
+    setProfileFormError('');
+  }
+
+  function closeProfileModal() {
+    setProfileModalMode(null);
+    setProfileModalSiteId(null);
+    setEditingProfile(null);
+    setProfileForm({ profile_name: '', is_active: true, shifts: [] });
+    setProfileFormError('');
+  }
+
+  function addShiftToDay(dow: number) {
+    setProfileForm((f) => ({ ...f, shifts: [...f.shifts, makeShiftDraft(dow)] }));
+  }
+  function updateShiftAt(idx: number, patch: Partial<ProfileShift>) {
+    setProfileForm((f) => ({
+      ...f,
+      shifts: f.shifts.map((s, i) => (i === idx ? { ...s, ...patch } : s)),
+    }));
+  }
+  function removeShiftAt(idx: number) {
+    setProfileForm((f) => ({ ...f, shifts: f.shifts.filter((_, i) => i !== idx) }));
+  }
+  function copyMondayToWeekdays() {
+    setProfileForm((f) => {
+      const mondayShifts = f.shifts.filter((s) => s.day_of_week === 1);
+      if (mondayShifts.length === 0) return f;
+      const keepOthers = f.shifts.filter((s) => s.day_of_week === 0 || s.day_of_week === 1 || s.day_of_week === 6);
+      const copies: ProfileShift[] = [];
+      for (const dow of [2, 3, 4, 5]) {
+        for (const src of mondayShifts) copies.push(makeShiftDraft(dow, src));
+      }
+      return { ...f, shifts: [...keepOthers, ...copies] };
+    });
+  }
+  function copyFromPreviousDay(dow: number) {
+    setProfileForm((f) => {
+      const src = f.shifts.filter((s) => s.day_of_week === dow - 1);
+      if (src.length === 0) return f;
+      const removed = f.shifts.filter((s) => s.day_of_week !== dow);
+      const copies  = src.map((s) => makeShiftDraft(dow, s));
+      return { ...f, shifts: [...removed, ...copies] };
+    });
+  }
+
+  async function saveProfile() {
+    const name = profileForm.profile_name.trim();
+    if (name.length < 2) { setProfileFormError('Profile name must be at least 2 characters'); return; }
+    if (profileForm.shifts.length === 0) { setProfileFormError('Add at least one shift somewhere in the week'); return; }
+    const cleanShifts = profileForm.shifts.map((s) => ({
+      day_of_week:        s.day_of_week,
+      shift_start_time:   s.shift_start_time.length === 5 ? `${s.shift_start_time}:00` : s.shift_start_time,
+      shift_length_hours: Number(s.shift_length_hours),
+      guards_needed:      Number(s.guards_needed),
+      active:             s.active,
+    }));
+    setProfileSaving(true); setProfileFormError('');
+    try {
+      const siteId = profileModalSiteId!;
+      if (profileModalMode === 'create') {
+        await adminPost(`/api/scheduling/site/${siteId}/profile`, {
+          profile_name: name,
+          is_active:    profileForm.is_active,
+          shifts:       cleanShifts,
+        });
+      } else if (editingProfile) {
+        await adminPatch(`/api/scheduling/profile/${editingProfile.id}`, {
+          profile_name: name,
+          is_active:    profileForm.is_active,
+          shifts:       cleanShifts,
+        });
+      }
+      closeProfileModal();
+      await fetchProfilesForSite(siteId);
+    } catch (e: any) { setProfileFormError(e?.message ?? 'Failed to save profile'); }
+    finally { setProfileSaving(false); }
+  }
+
+  async function toggleProfileActive(profile: Profile, siteId: string) {
+    const msg = profile.is_active
+      ? `Deactivate profile "${profile.profile_name}"?`
+      : `Activate profile "${profile.profile_name}"? Any currently active profile at this site will be deactivated.`;
+    if (!confirm(msg)) return;
+    setProfileToggling(profile.id);
+    try {
+      await adminPatch(`/api/scheduling/profile/${profile.id}`, { is_active: !profile.is_active });
+      await fetchProfilesForSite(siteId);
+    } catch (e: any) { setError(e?.message ?? 'Failed to toggle profile'); }
+    finally { setProfileToggling(null); }
+  }
+
+  async function deleteProfile(profile: Profile, siteId: string) {
+    if (!confirm(`Delete profile "${profile.profile_name}"? This can't be undone.`)) return;
+    try {
+      await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001'}/api/scheduling/profile/${profile.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type':  'application/json',
+          Authorization:   `Bearer ${document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? ''}`,
+        },
+      }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error ?? 'Delete failed'); });
+      await fetchProfilesForSite(siteId);
+    } catch (e: any) { setError(e?.message ?? 'Failed to delete profile'); }
+  }
+
+  // Derived — coverage summary shown in the CREATE/EDIT modal footer.
+  const profileFormSummary = useMemo(() => {
+    const active = profileForm.shifts.filter((s) => s.active);
+    const shiftsWeek  = active.length;
+    const hoursWeek   = active.reduce((sum, s) => sum + s.shift_length_hours, 0);
+    const guardsWeek  = active.reduce((sum, s) => sum + s.guards_needed, 0);
+    return { shiftsWeek, hoursWeek, guardsWeek };
+  }, [profileForm.shifts]);
 
   // ── Session C — client management handlers ─────────────────────────────
   async function fetchClientsForSite(siteId: string) {
@@ -1007,6 +1216,112 @@ export default function SitesPage() {
                     })()}
                   </div>
 
+                  {/* Session S6 — SCHEDULING PROFILES. Lazy-fetched with
+                      clients on expand. Shows one row per profile with an
+                      active/inactive pill, summary line, and EDIT / toggle /
+                      delete controls. Coverage summary at bottom lights up
+                      only when an active profile exists AND the coverage
+                      status is loaded. */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-2">SCHEDULING PROFILES</p>
+                    {(() => {
+                      const list = profilesPerSite[site.id];
+                      if (list === undefined) return <p className="text-gray-600 text-xs">Loading…</p>;
+                      const activeProfile = list.find((p) => p.is_active);
+                      const cov = coveragePerSite[site.id];
+                      if (list.length === 0) {
+                        return (
+                          <div className="space-y-2">
+                            <p className="text-gray-600 text-xs">No scheduling profile configured for this site.</p>
+                            <button
+                              onClick={() => openCreateProfileModal(site.id)}
+                              disabled={isDeactivated}
+                              className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              + CREATE PROFILE
+                            </button>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="space-y-2">
+                          {list.map((p) => {
+                            const activeShifts = p.shifts.filter((s) => s.active);
+                            const shiftsWeek   = activeShifts.length;
+                            const hoursWeek    = activeShifts.reduce((s, sh) => s + Number(sh.shift_length_hours), 0);
+                            const guardsWeek   = activeShifts.reduce((s, sh) => s + sh.guards_needed, 0);
+                            const daysCovered  = new Set(activeShifts.map((s) => s.day_of_week)).size;
+                            return (
+                              <div key={p.id}
+                                className={`bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 ${!p.is_active ? 'opacity-70' : ''}`}>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-gray-200 font-medium text-sm">{p.profile_name}</span>
+                                  {p.is_active ? (
+                                    <span className="text-[10px] tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-1.5 py-0.5 rounded">ACTIVE</span>
+                                  ) : (
+                                    <span className="text-[10px] tracking-widest text-gray-500 bg-gray-500/10 border border-gray-500/30 px-1.5 py-0.5 rounded">INACTIVE</span>
+                                  )}
+                                  <div className="ml-auto flex items-center gap-2 shrink-0">
+                                    <button
+                                      onClick={() => openEditProfileModal(site.id, p)}
+                                      disabled={isDeactivated}
+                                      className="text-xs text-gray-400 hover:text-amber-400 tracking-widest disabled:opacity-40"
+                                    >
+                                      EDIT
+                                    </button>
+                                    <button
+                                      onClick={() => toggleProfileActive(p, site.id)}
+                                      disabled={profileToggling === p.id || isDeactivated}
+                                      className={`text-xs tracking-widest disabled:opacity-40 ${
+                                        p.is_active ? 'text-gray-400 hover:text-gray-200' : 'text-green-400 hover:text-green-300'
+                                      }`}
+                                    >
+                                      {profileToggling === p.id ? '…' : p.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
+                                    </button>
+                                    <button
+                                      onClick={() => deleteProfile(p, site.id)}
+                                      disabled={isDeactivated}
+                                      className="text-xs text-red-400 hover:text-red-300 tracking-widest disabled:opacity-40"
+                                    >
+                                      DELETE
+                                    </button>
+                                  </div>
+                                </div>
+                                <p className="text-gray-500 text-xs mt-1">
+                                  {shiftsWeek} shift{shiftsWeek === 1 ? '' : 's'}/week · {daysCovered} day{daysCovered === 1 ? '' : 's'} covered ·{' '}
+                                  {hoursWeek.toFixed(hoursWeek % 1 === 0 ? 0 : 1)}h coverage ·{' '}
+                                  {guardsWeek} guard{guardsWeek === 1 ? '' : 's'} needed/week
+                                </p>
+                              </div>
+                            );
+                          })}
+                          <button
+                            onClick={() => openCreateProfileModal(site.id)}
+                            disabled={isDeactivated}
+                            className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            + CREATE PROFILE
+                          </button>
+                          {activeProfile && cov && (
+                            <div className="mt-2 flex items-center gap-3 flex-wrap text-xs">
+                              <span className="text-gray-500 tracking-widest">COVERAGE NEXT 2 WEEKS</span>
+                              <span className="text-gray-300 font-mono">{cov.scheduled} / {cov.required} scheduled</span>
+                              {cov.gaps > 0 ? (
+                                <span className="text-red-400 tracking-widest text-[11px] bg-red-500/10 border border-red-500/40 px-2 py-0.5 rounded">
+                                  ⚠ {cov.gaps} shift{cov.gaps === 1 ? '' : 's'} unassigned
+                                </span>
+                              ) : (
+                                <span className="text-green-400 tracking-widest text-[11px] bg-green-500/10 border border-green-500/40 px-2 py-0.5 rounded">
+                                  ✓ Fully covered
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+
                   {/* FIX 1: DEACTIVATE SITE — its own section, destructive red,
                       only shown for active sites. Reactivate is handled inside
                       CLIENT PORTAL above. */}
@@ -1663,6 +1978,168 @@ export default function SitesPage() {
                 className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors"
               >
                 {clientSaving ? 'SAVING…' : clientModalMode === 'add' ? 'ADD CLIENT' : 'SAVE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Session S6 — Create / Edit Scheduling Profile Modal ─────────── */}
+      {profileModalMode !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8">
+          <div className="w-full max-w-3xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">
+                {profileModalMode === 'create' ? 'CREATE PROFILE' : 'EDIT PROFILE'}
+              </h2>
+              <button onClick={closeProfileModal} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            {profileFormError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{profileFormError}</div>
+            )}
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
+                <div>
+                  <label className="block text-gray-500 text-xs tracking-widest mb-1">PROFILE NAME <span className="text-amber-400">*</span></label>
+                  <input
+                    type="text" placeholder="e.g. Regular, Holiday, Special Event"
+                    value={profileForm.profile_name}
+                    onChange={(e) => setProfileForm((f) => ({ ...f, profile_name: e.target.value }))}
+                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-xs tracking-widest text-gray-400 select-none cursor-pointer min-h-[40px]">
+                  <input
+                    type="checkbox" className="accent-amber-400 w-4 h-4"
+                    checked={profileForm.is_active}
+                    onChange={(e) => setProfileForm((f) => ({ ...f, is_active: e.target.checked }))}
+                  />
+                  SET AS ACTIVE
+                </label>
+              </div>
+
+              <div>
+                <p className="text-gray-500 text-xs tracking-widest mb-2">WEEKLY SHIFT PATTERN</p>
+                <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-3 space-y-3">
+                  {DAY_NAMES.map((dayName, dow) => {
+                    const dayShifts = profileForm.shifts
+                      .map((s, i) => ({ s, i }))
+                      .filter(({ s }) => s.day_of_week === dow);
+                    return (
+                      <div key={dow} className="border-b border-[#1A3050] last:border-b-0 pb-3 last:pb-0">
+                        <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                          <span className="text-gray-300 text-xs font-bold tracking-widest w-24 shrink-0">
+                            {dayName.toUpperCase()}
+                          </span>
+                          <div className="flex items-center gap-2 flex-wrap ml-auto">
+                            <button
+                              type="button"
+                              onClick={() => addShiftToDay(dow)}
+                              className="text-[11px] text-amber-400 tracking-widest border border-amber-400/40 rounded px-2 py-0.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors"
+                            >
+                              + Add shift
+                            </button>
+                            {dow === 1 && dayShifts.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={copyMondayToWeekdays}
+                                className="text-[11px] text-cyan-400 tracking-widest border border-cyan-500/40 rounded px-2 py-0.5 hover:bg-cyan-500/10 transition-colors"
+                              >
+                                Copy to Tue-Fri
+                              </button>
+                            )}
+                            {dow > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => copyFromPreviousDay(dow)}
+                                className="text-[11px] text-gray-400 tracking-widest border border-[#1A3050] rounded px-2 py-0.5 hover:border-gray-500 hover:text-gray-200 transition-colors"
+                              >
+                                Copy from {DAY_SHORT[dow - 1]}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {dayShifts.length === 0 ? (
+                          <p className="text-gray-600 text-xs italic ml-24">No shifts</p>
+                        ) : (
+                          <div className="space-y-1.5 ml-24">
+                            {dayShifts.map(({ s, i }) => (
+                              <div key={s.clientKey ?? s.id ?? i} className="flex items-center gap-2 flex-wrap">
+                                <input
+                                  type="time"
+                                  value={s.shift_start_time.slice(0, 5)}
+                                  onChange={(e) => updateShiftAt(i, { shift_start_time: e.target.value })}
+                                  className="bg-[#070F1E] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs w-24"
+                                />
+                                <span className="text-gray-500 text-xs">×</span>
+                                <input
+                                  type="number" min="0.5" max="24" step="0.25"
+                                  value={s.shift_length_hours}
+                                  onChange={(e) => updateShiftAt(i, { shift_length_hours: Number(e.target.value) })}
+                                  className="bg-[#070F1E] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs w-16"
+                                />
+                                <span className="text-gray-500 text-xs">h ·</span>
+                                <input
+                                  type="number" min="1" max="10" step="1"
+                                  value={s.guards_needed}
+                                  onChange={(e) => updateShiftAt(i, { guards_needed: Number(e.target.value) })}
+                                  className="bg-[#070F1E] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs w-12"
+                                />
+                                <span className="text-gray-500 text-xs">guard{s.guards_needed === 1 ? '' : 's'}</span>
+                                <label className="text-gray-500 text-[10px] tracking-widest inline-flex items-center gap-1 ml-1 select-none cursor-pointer">
+                                  <input
+                                    type="checkbox" className="accent-amber-400 w-3 h-3"
+                                    checked={s.active}
+                                    onChange={(e) => updateShiftAt(i, { active: e.target.checked })}
+                                  />
+                                  ACTIVE
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => removeShiftAt(i)}
+                                  aria-label="Remove shift"
+                                  className="ml-auto text-red-400 hover:text-red-300 text-sm px-2"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Live coverage summary */}
+              <div className="bg-[#0B1526] border border-amber-400/30 rounded-lg p-3 text-xs">
+                <p className="text-amber-400 font-bold tracking-widest mb-1">COVERAGE SUMMARY</p>
+                <p className="text-gray-300">
+                  {profileFormSummary.shiftsWeek} shift{profileFormSummary.shiftsWeek === 1 ? '' : 's'}/week ·{' '}
+                  {profileFormSummary.hoursWeek.toFixed(profileFormSummary.hoursWeek % 1 === 0 ? 0 : 1)}h coverage ·{' '}
+                  {profileFormSummary.guardsWeek} guard{profileFormSummary.guardsWeek === 1 ? '' : 's'} needed/week
+                </p>
+                <p className="text-gray-600 mt-1">
+                  Overnight shifts (start + length crossing midnight) are supported — pattern is by start time only.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={closeProfileModal}
+                className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={saveProfile}
+                disabled={profileSaving}
+                className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors"
+              >
+                {profileSaving ? 'SAVING…' : profileModalMode === 'create' ? 'CREATE PROFILE' : 'SAVE'}
               </button>
             </div>
           </div>

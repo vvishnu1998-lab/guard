@@ -39,6 +39,15 @@ interface Shift {
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean; photo_url?: string | null; }
 interface Site  { id: string; name: string; address?: string; company_name?: string }
 
+// Session S6 — coverage-status snapshot per site (rolling 14-day window).
+interface CoverageStatus {
+  site_id:            string;
+  has_active_profile: boolean;
+  required:           number;
+  scheduled:          number;
+  gaps:               number;
+}
+
 const STATUS_STYLES: Record<string, string> = {
   unassigned: 'bg-amber-400/20 text-amber-400 border border-amber-400/40',
   scheduled:  'bg-blue-500/20 text-blue-400 border border-blue-500/40',
@@ -112,6 +121,8 @@ function ShiftsPageInner() {
   const [sites,   setSites]   = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
+  // Session S6 — coverage snapshot by site_id. Loaded once alongside sites.
+  const [coverage, setCoverage] = useState<Record<string, CoverageStatus>>({});
 
   // Schedule modal state — prefilled site/guard passed via props
   const [showModal,            setShowModal]            = useState(false);
@@ -137,12 +148,19 @@ function ShiftsPageInner() {
 
   const load = useCallback(async () => {
     try {
-      const [sh, g, s] = await Promise.all([
+      const [sh, g, s, cov] = await Promise.all([
         adminGet<Shift[]>('/api/shifts'),
         adminGet<Guard[]>('/api/guards'),
         adminGet<Site[]>('/api/sites'),
+        // Session S6 — bundle the coverage snapshot in the initial fetch so
+        // every site card can render its gap pill without an N+1 round-trip.
+        adminGet<CoverageStatus[]>('/api/scheduling/coverage-status').catch(() => [] as CoverageStatus[]),
       ]);
-      setShifts(sh); setGuards(g.filter((g) => g)); setSites(s); setError('');
+      setShifts(sh); setGuards(g.filter((g) => g)); setSites(s);
+      const covMap: Record<string, CoverageStatus> = {};
+      for (const c of cov) covMap[c.site_id] = c;
+      setCoverage(covMap);
+      setError('');
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   }, []);
@@ -289,6 +307,21 @@ function ShiftsPageInner() {
                   {inWindow.length > 0 && (
                     <p className="text-gray-500 text-xs mt-1">{totalHours.toFixed(1)}h scheduled</p>
                   )}
+                  {/* Session S6 — gap pill. Only rendered when the site has
+                      an active scheduling profile; silent otherwise. */}
+                  {(() => {
+                    const cov = coverage[site.id];
+                    if (!cov?.has_active_profile) return null;
+                    return cov.gaps > 0 ? (
+                      <p className="text-red-400 text-[11px] tracking-widest mt-1 bg-red-500/10 border border-red-500/40 px-2 py-0.5 rounded inline-block">
+                        ⚠ {cov.gaps} gap{cov.gaps === 1 ? '' : 's'} in next 2 weeks
+                      </p>
+                    ) : (
+                      <p className="text-green-400 text-[11px] tracking-widest mt-1 bg-green-500/10 border border-green-500/40 px-2 py-0.5 rounded inline-block">
+                        ✓ Fully covered
+                      </p>
+                    );
+                  })()}
                 </Link>
               );
             })}

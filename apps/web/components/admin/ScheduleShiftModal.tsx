@@ -119,6 +119,12 @@ export default function ScheduleShiftModal({
   const [assignedSites, setAssignedSites] = useState<Site[] | null>(null);
   const [assignedSitesLoading, setAssignedSitesLoading] = useState(false);
 
+  // Session S6 — if the selected site has an active scheduling profile,
+  // auto-fill date + start/end times from its first active shift (starting
+  // from today's day-of-week and rolling forward). Shown as a subtle cyan
+  // hint above the form; admin can override any field.
+  const [siteProfile, setSiteProfile] = useState<{ profile_name: string } | null>(null);
+
   // Re-initialise state when the modal opens. When it closes, state is
   // retained until the next open — cheap since the modal is unmounted-invisible.
   useEffect(() => {
@@ -134,6 +140,56 @@ export default function ScheduleShiftModal({
     setFormError('');
     setSaving(false);
   }, [open, prefilledSiteId, prefilledGuardId, today]);
+
+  // Session S6 — fetch site's active profile on site pick + auto-fill.
+  useEffect(() => {
+    if (!siteId) { setSiteProfile(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await adminGet<{ profiles: Array<{
+          profile_name: string;
+          is_active:    boolean;
+          shifts:       Array<{ day_of_week: number; shift_start_time: string; shift_length_hours: number; active: boolean }>;
+        }> }>(`/api/scheduling/site/${siteId}`);
+        if (cancelled) return;
+        const active = r.profiles.find((p) => p.is_active);
+        if (!active) { setSiteProfile(null); return; }
+        setSiteProfile({ profile_name: active.profile_name });
+        // Find the first upcoming shift starting today's day-of-week and
+        // rolling forward up to 6 days.
+        const today = new Date();
+        const todayDow = today.getDay();
+        let candidate: { day_of_week: number; shift_start_time: string; shift_length_hours: number } | null = null;
+        let candidateDow = todayDow;
+        for (let offset = 0; offset < 7; offset++) {
+          const dow = (todayDow + offset) % 7;
+          const forDay = active.shifts.filter((s) => s.day_of_week === dow && s.active)
+            .sort((a, b) => a.shift_start_time.localeCompare(b.shift_start_time));
+          if (forDay.length > 0) {
+            candidate = forDay[0];
+            candidateDow = dow;
+            break;
+          }
+        }
+        if (!candidate) return;
+        // Materialise date + times.
+        const daysToAdd = (candidateDow - todayDow + 7) % 7;
+        const target = new Date(today.getFullYear(), today.getMonth(), today.getDate() + daysToAdd);
+        const dateStr = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
+        const startStr = candidate.shift_start_time.slice(0, 5);
+        const [h, m] = startStr.split(':').map(Number);
+        const total = h * 60 + m + candidate.shift_length_hours * 60;
+        const endH = Math.floor(total / 60) % 24;
+        const endM = Math.floor(total % 60);
+        const endStr = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+        setSingleDate(dateStr);
+        setStartTime(startStr);
+        setEndTime(endStr);
+      } catch { if (!cancelled) setSiteProfile(null); }
+    })();
+    return () => { cancelled = true; };
+  }, [siteId]);
 
   useEffect(() => {
     if (!guardId) { setAssignedSites(null); return; }
@@ -273,6 +329,11 @@ export default function ScheduleShiftModal({
             {noAssignmentsForGuard && (
               <p className="text-amber-400/80 text-xs mt-1">
                 This guard has no active site assignments. Go to <span className="font-mono">/admin/guards</span> and click ASSIGN.
+              </p>
+            )}
+            {siteProfile && (
+              <p className="text-cyan-400 text-xs mt-1">
+                Auto-filled from <span className="font-bold">{siteProfile.profile_name}</span> profile. You can override.
               </p>
             )}
           </div>
