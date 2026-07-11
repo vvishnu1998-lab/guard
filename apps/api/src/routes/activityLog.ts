@@ -92,12 +92,23 @@ interface ReportRow {
   site_id:      string;
   site_name:    string;
   photos:       string[] | null;
+  session_id:      string;
   shift_id:        string;
   scheduled_start: string;
   scheduled_end:   string;
 }
 
-type StatusKind = 'on_time' | 'late' | 'missed' | 'activity_report' | 'incident_report' | 'maintenance_report';
+type StatusKind =
+  | 'on_time'
+  | 'late'
+  | 'missed'
+  | 'activity_report'
+  | 'incident_report'
+  | 'maintenance_report'
+  | 'clocked_in_on_time'
+  | 'clocked_in_late'
+  | 'missed_clock_in'
+  | 'missed_report';
 
 export interface ActivityRow {
   id:             string;
@@ -161,6 +172,19 @@ function buildPingStatus(deltaMin: number): { text: string; kind: 'on_time' | 'l
   const plural = m === 1 ? 'minute' : 'minutes';
   if (m < LATE_THRESHOLD_MIN) return { text: `Ping (${m} ${plural})`, kind: 'on_time' };
   return { text: `Late Ping (${m} ${plural})`, kind: 'late' };
+}
+
+/** First UTC :00 boundary at or after `ms`. Used by missed-report synth. */
+function ceilHour(ms: number): number {
+  const d = new Date(ms);
+  const alreadyOnHour =
+    d.getUTCMilliseconds() === 0 && d.getUTCSeconds() === 0 && d.getUTCMinutes() === 0;
+  if (alreadyOnHour) return d.getTime();
+  d.setUTCMilliseconds(0);
+  d.setUTCSeconds(0);
+  d.setUTCMinutes(0);
+  d.setUTCHours(d.getUTCHours() + 1);
+  return d.getTime();
 }
 
 export interface FetchOpts {
@@ -275,6 +299,7 @@ export async function fetchActivityRows(
       g.name AS guard_name,
       r.site_id,
       si.name      AS site_name,
+      ss.id              AS session_id,
       sh.id              AS shift_id,
       sh.scheduled_start,
       sh.scheduled_end,
@@ -302,7 +327,7 @@ export async function fetchActivityRows(
     reportQuery += ` AND ss.id = $${reportParams.length + 1}`;
     reportParams.push(sessionId);
   }
-  reportQuery += ' GROUP BY r.id, ss.guard_id, g.name, si.name, sh.id, sh.scheduled_start, sh.scheduled_end';
+  reportQuery += ' GROUP BY r.id, ss.id, ss.guard_id, g.name, si.name, sh.id, sh.scheduled_start, sh.scheduled_end';
   const reportsResult = await pool.query<ReportRow>(reportQuery, reportParams);
 
   // ── Build merged feed ────────────────────────────────────────────────────
@@ -316,12 +341,61 @@ export async function fetchActivityRows(
     pingsBySession.set(p.shift_session_id, arr);
   }
 
+  // Group reports by session so the missed-report hourly scan can
+  // check "did any report land in this hour window" in O(1) lookups.
+  // Values are sorted reported_at millis for linear scan (typical
+  // volumes per session are <10 reports — no need for binary search).
+  const reportsBySession = new Map<string, number[]>();
+  for (const r of reportsResult.rows) {
+    const arr = reportsBySession.get(r.session_id) ?? [];
+    arr.push(Date.parse(r.reported_at));
+    reportsBySession.set(r.session_id, arr);
+  }
+  for (const arr of reportsBySession.values()) arr.sort((a, b) => a - b);
+
   const nowMs = Date.now();
 
   for (const s of sessions) {
     const sessionStartMs = Date.parse(s.clocked_in_at);
     const sessionEndMs   = s.clocked_out_at ? Date.parse(s.clocked_out_at) : nowMs;
+    const scheduledStartMs = Date.parse(s.scheduled_start);
+    const scheduledEndMs   = Date.parse(s.scheduled_end);
     const sessionPings   = pingsBySession.get(s.session_id) ?? [];
+
+    // 1) Clocked In event ─ one per session, at clocked_in_at. Lateness =
+    //    clocked_in_at - scheduled_start, floor to whole minutes. > 10 min
+    //    (matches LATE_THRESHOLD_MIN for pings) → 'clocked_in_late'.
+    const clockInLateMin = Math.floor((sessionStartMs - scheduledStartMs) / 60_000);
+    const clockedInLate  = clockInLateMin > LATE_THRESHOLD_MIN;
+    // Only emit if clock-in falls in the caller's date-range window.
+    if (sessionStartMs >= fromMs && sessionStartMs <= toMs) {
+      rows.push({
+        id:              `clockin-${s.session_id}`,
+        kind:            'ping',
+        guard_id:        s.guard_id,
+        guard_name:      s.guard_name,
+        site_id:         s.site_id,
+        site_name:       s.site_name,
+        status:          'Clocked In',
+        status_kind:     clockedInLate ? 'clocked_in_late' : 'clocked_in_on_time',
+        log_time:        s.clocked_in_at,
+        log_media_url:   null,
+        log_media_urls:  [],
+        event_time:      s.clocked_in_at,
+        detail_id:       null,
+        shift_id:        s.shift_id,
+        scheduled_start: s.scheduled_start,
+        scheduled_end:   s.scheduled_end,
+        report_type:     null,
+        severity:        null,
+        description:     null,
+        latitude:        null,
+        longitude:       null,
+        accuracy_m:      null,
+        is_within_geofence: null,
+        ping_type:       null,
+      });
+    }
 
     let windowStart = nextHalfHour(sessionStartMs);
     while (windowStart < sessionEndMs) {
@@ -398,6 +472,135 @@ export async function fetchActivityRows(
       }
 
       windowStart = windowEnd;
+    }
+
+    // 3) Missed Report — hourly windows [HH:00, HH+1:00) that fall
+    //    entirely within the on-duty span, are entirely in the past,
+    //    and have no report of any type. Session-scoped so end-bound is
+    //    min(clocked_out_at, scheduled_end).
+    const sessionReports    = reportsBySession.get(s.session_id) ?? [];
+    const missedReportEndMs = Math.min(sessionEndMs, scheduledEndMs);
+    let hourStart = ceilHour(sessionStartMs);
+    while (hourStart + 3_600_000 <= missedReportEndMs && hourStart + 3_600_000 <= nowMs) {
+      const hourEnd = hourStart + 3_600_000;
+      if (hourEnd > fromMs && hourStart < toMs) {
+        const hasReport = sessionReports.some((t) => t >= hourStart && t < hourEnd);
+        if (!hasReport) {
+          rows.push({
+            id:              `missed-report-${s.session_id}-${hourStart}`,
+            kind:            'report',
+            guard_id:        s.guard_id,
+            guard_name:      s.guard_name,
+            site_id:         s.site_id,
+            site_name:       s.site_name,
+            status:          'Missed Report',
+            status_kind:     'missed_report',
+            log_time:        null,
+            log_media_url:   null,
+            log_media_urls:  [],
+            event_time:      new Date(hourStart).toISOString(),
+            detail_id:       null,
+            shift_id:        s.shift_id,
+            scheduled_start: s.scheduled_start,
+            scheduled_end:   s.scheduled_end,
+            report_type:     null,
+            severity:        null,
+            description:     null,
+            latitude:        null,
+            longitude:       null,
+            accuracy_m:      null,
+            is_within_geofence: null,
+            ping_type:       null,
+          });
+        }
+      }
+      hourStart += 3_600_000;
+    }
+  }
+
+  // 4) Missed Clock In — one row per scheduled shift with no
+  //    shift_session, whose scheduled_start is at least 10 minutes in
+  //    the past. Skipped when session_id is set (that specific shift
+  //    has a session by definition). Uses the same scope predicate as
+  //    the sessions query, but referenced against `sh` since no `ss`
+  //    row exists to filter on.
+  if (!sessionId) {
+    let mciScopeWhere: string;
+    const mciParams: unknown[] = [fromIso, toIso];
+    if (scope.role === 'client') {
+      mciScopeWhere = `sh.site_id = $${mciParams.length + 1}`;
+      mciParams.push(scope.site_id);
+    } else {
+      mciScopeWhere = `si.company_id = $${mciParams.length + 1}`;
+      mciParams.push(scope.company_id);
+    }
+
+    let mciQuery = `
+      SELECT
+        sh.id                AS shift_id,
+        sh.scheduled_start,
+        sh.scheduled_end,
+        sh.guard_id,
+        g.name               AS guard_name,
+        sh.site_id,
+        si.name              AS site_name
+      FROM shifts sh
+      JOIN guards g  ON g.id  = sh.guard_id
+      JOIN sites  si ON si.id = sh.site_id
+      LEFT JOIN shift_sessions ss ON ss.shift_id = sh.id
+      WHERE ss.id IS NULL
+        AND sh.status IN ('scheduled', 'missed')
+        AND sh.scheduled_start >= $1
+        AND sh.scheduled_start <= $2
+        AND sh.scheduled_start + INTERVAL '10 minutes' < NOW()
+        AND ${mciScopeWhere}`;
+
+    if (guardId && isAdmin) {
+      mciQuery += ` AND sh.guard_id = $${mciParams.length + 1}`;
+      mciParams.push(guardId);
+    }
+    if (siteId && isAdmin) {
+      mciQuery += ` AND sh.site_id = $${mciParams.length + 1}`;
+      mciParams.push(siteId);
+    }
+
+    const mciRes = await pool.query<{
+      shift_id:        string;
+      scheduled_start: string;
+      scheduled_end:   string;
+      guard_id:        string;
+      guard_name:      string;
+      site_id:         string;
+      site_name:       string;
+    }>(mciQuery, mciParams);
+
+    for (const m of mciRes.rows) {
+      rows.push({
+        id:              `missed-clock-in-${m.shift_id}`,
+        kind:            'ping',
+        guard_id:        m.guard_id,
+        guard_name:      m.guard_name,
+        site_id:         m.site_id,
+        site_name:       m.site_name,
+        status:          'Missed Clock In',
+        status_kind:     'missed_clock_in',
+        log_time:        null,
+        log_media_url:   null,
+        log_media_urls:  [],
+        event_time:      m.scheduled_start,
+        detail_id:       null,
+        shift_id:        m.shift_id,
+        scheduled_start: m.scheduled_start,
+        scheduled_end:   m.scheduled_end,
+        report_type:     null,
+        severity:        null,
+        description:     null,
+        latitude:        null,
+        longitude:       null,
+        accuracy_m:      null,
+        is_within_geofence: null,
+        ping_type:       null,
+      });
     }
   }
 
