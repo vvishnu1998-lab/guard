@@ -10,7 +10,7 @@ const NAV_ITEMS = [
   { href: '/admin/live-status', label: 'LIVE STATUS'    },
   { href: '/admin/sites',       label: 'SITES'          },
   { href: '/admin/guards',      label: 'GUARDS'         },
-  { href: '/admin/shifts',      label: 'SHIFTS'         },
+  { href: '/admin/shifts',      label: 'SCHEDULE'       },
   { href: '/admin/tasks',       label: 'TASKS'          },
   { href: '/admin/activity',    label: 'REPORTS'        },
   { href: '/admin/analytics', label: 'ANALYTICS'      },
