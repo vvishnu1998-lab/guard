@@ -159,11 +159,19 @@ export default function SiteDetailPage() {
               const hoursWorked = (Date.now() - new Date(g.clocked_in_at).getTime()) / 3_600_000;
               return (
                 <li key={g.id} className="py-3 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-gray-200 text-sm">{g.name}</p>
-                    <p className="text-gray-500 text-xs mt-0.5 font-mono">
-                      Clocked in {fmtTime(g.clocked_in_at)}
-                    </p>
+                  <div className="min-w-0 flex items-center gap-3">
+                    <div className="min-w-0">
+                      <p className="text-gray-200 text-sm">{g.name}</p>
+                      <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                        Clocked in {fmtTime(g.clocked_in_at)}
+                      </p>
+                    </div>
+                    <Link
+                      href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
+                      className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+                    >
+                      CHAT →
+                    </Link>
                   </div>
                   <p className="text-gray-400 text-xs shrink-0">{hoursWorked.toFixed(1)}h</p>
                 </li>
@@ -175,7 +183,15 @@ export default function SiteDetailPage() {
 
       {/* Upcoming shifts (next 7 days, grouped by day) */}
       <section>
-        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
+        <div className="flex items-center justify-between mb-3 gap-3">
+          <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
+          <Link
+            href={`/admin/shifts?newShift=1&siteId=${siteId}`}
+            className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+          >
+            MANAGE SCHEDULE →
+          </Link>
+        </div>
         {shiftsByDay.length === 0 ? (
           <p className="text-gray-500 text-sm">No upcoming shifts in the next 7 days.</p>
         ) : (

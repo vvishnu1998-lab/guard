@@ -14,7 +14,7 @@
  * components so the site drill-in can trigger them without duplicating
  * ~300 lines of form state.
  */
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { adminGet } from '../../../lib/adminApi';
@@ -178,6 +178,28 @@ function ShiftsPageInner() {
     setModalPrefilledGuard(opts?.guardId);
     setShowModal(true);
   }
+
+  // Deep-link handler: /admin/shifts?newShift=1&siteId=<uuid> opens the
+  // Schedule Shift modal pre-populated with that site. Consumed by the
+  // "MANAGE SCHEDULE" link on /admin/sites/[id]. One-shot: params are
+  // stripped after the modal opens so a later view toggle or back-nav
+  // doesn't reopen it.
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    const newShift = searchParams?.get('newShift');
+    const siteId   = searchParams?.get('siteId');
+    if (newShift === '1' && siteId) {
+      deepLinkHandled.current = true;
+      openScheduleModal({ siteId });
+      const p = new URLSearchParams(searchParams?.toString() ?? '');
+      p.delete('newShift');
+      p.delete('siteId');
+      const qs = p.toString();
+      router.replace(qs ? `/admin/shifts?${qs}` : '/admin/shifts', { scroll: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, router]);
 
   const unassignedCount = shifts.filter((s) => s.status === 'unassigned').length;
   const activeGuards    = guards.filter((g) => g.is_active !== false);

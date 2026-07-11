@@ -3,8 +3,14 @@
  * Admin — Chat (/admin/chat)
  * Left panel: room list with last message preview and unread badge.
  * Right panel: message thread with auto-scroll and 10s polling.
+ *
+ * Query params handled on mount (see ChatPageInner):
+ *   ?siteId=<uuid>&guardId=<uuid>  — POST /api/chat/rooms (idempotent
+ *   UPSERT on (site_id, guard_id)) and open that room. Deep-linked from
+ *   /admin/sites/[id] guard-on-shift row.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { adminGet, adminPost } from '../../../lib/adminApi';
 
 interface ChatRoom {
@@ -41,6 +47,17 @@ function fmtTs(iso: string | null) {
 }
 
 export default function ChatPage() {
+  return (
+    <Suspense fallback={<div className="text-gray-500 text-sm py-12 text-center">Loading…</div>}>
+      <ChatPageInner />
+    </Suspense>
+  );
+}
+
+function ChatPageInner() {
+  const router       = useRouter();
+  const searchParams = useSearchParams();
+
   const [rooms,      setRooms]      = useState<ChatRoom[]>([]);
   const [messages,   setMessages]   = useState<ChatMessage[]>([]);
   const [selected,   setSelected]   = useState<ChatRoom | null>(null);
@@ -71,6 +88,38 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => { loadRooms(); }, [loadRooms]);
+
+  // Deep-link handler: /admin/chat?siteId=<uuid>&guardId=<uuid> POSTs to
+  // /api/chat/rooms (idempotent UPSERT — returns existing row if one
+  // exists for this site+guard pair) and opens that room on mount.
+  // Consumed by the "CHAT" link on /admin/sites/[id]. One-shot: params
+  // are stripped after handling so a rerender doesn't reopen.
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    const siteId  = searchParams?.get('siteId');
+    const guardId = searchParams?.get('guardId');
+    if (!siteId || !guardId) return;
+    deepLinkHandled.current = true;
+    (async () => {
+      try {
+        const room = await adminPost<ChatRoom>('/api/chat/rooms', {
+          site_id: siteId,
+          guard_id: guardId,
+        });
+        await loadRooms();
+        setSelected(room);
+      } catch (e: any) {
+        setError(e.message ?? 'Failed to open chat');
+      } finally {
+        const p = new URLSearchParams(searchParams?.toString() ?? '');
+        p.delete('siteId');
+        p.delete('guardId');
+        const qs = p.toString();
+        router.replace(qs ? `/admin/chat?${qs}` : '/admin/chat', { scroll: false });
+      }
+    })();
+  }, [searchParams, router, loadRooms]);
 
   // ── Load messages for selected room ───────────────────────────────────
   const loadMessages = useCallback(async (roomId: string, silent = false) => {
