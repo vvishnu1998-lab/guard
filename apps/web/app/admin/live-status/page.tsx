@@ -13,17 +13,18 @@ import { useSearchParams } from 'next/navigation';
 import { adminDownload, adminGet } from '../../../lib/adminApi';
 
 interface LiveGuard {
-  id:             string;
-  name:           string;
-  badge_number:   string;
-  site_name:      string;
-  session_id:     string;
-  clocked_in_at:  string;
-  last_lat:       number | null;
-  last_lng:       number | null;
-  last_ping_at:   string | null;
-  last_ping_type: 'gps_only' | 'gps_photo' | 'clock_in' | null;
-  has_violation:  boolean;
+  id:              string;
+  name:            string;
+  badge_number:    string;
+  site_name:       string;
+  session_id:      string;
+  clocked_in_at:   string;
+  last_lat:        number | null;
+  last_lng:        number | null;
+  last_ping_at:    string | null;
+  last_ping_type:  'gps_only' | 'gps_photo' | 'clock_in' | null;
+  last_report_at:  string | null;
+  has_violation:   boolean;
 }
 
 interface Breach {
@@ -54,18 +55,6 @@ const API = process.env.NEXT_PUBLIC_API_URL;
 // in sync if we add more presets.
 const SINCE_HOURS: Record<SinceFilter, number> = { '24h': 24, '7d': 168, '30d': 720 };
 
-const PING_LABEL: Record<string, string> = {
-  gps_only:   'GPS',
-  gps_photo:  'GPS + PHOTO',
-  clock_in:   'CLOCK-IN',
-};
-
-function elapsed(iso: string): string {
-  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-  if (mins < 60) return `${mins}m ago`;
-  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
-}
-
 function shiftDuration(iso: string): string {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
   const h = Math.floor(mins / 60);
@@ -73,10 +62,37 @@ function shiftDuration(iso: string): string {
   return `${h}h ${m.toString().padStart(2, '0')}m`;
 }
 
-function pingAge(iso: string | null): { label: string; urgent: boolean } {
-  if (!iso) return { label: '—', urgent: false };
-  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-  return { label: elapsed(iso), urgent: mins >= 35 };
+// Formats a timestamp as "HH:MM (+Nm late)" in Pacific time, where
+// lateness = actual time - most recent scheduled boundary at or before
+// actual. Boundaries are `scheduleMinutes` past the hour (e.g. [0, 30]
+// for the every-30-min ping schedule, [0] for the top-of-hour report
+// schedule). Whole-minute floor per D2. On-boundary (0m late) reads
+// "(on time)". Null actual → "—" (no ping/report yet this shift).
+//
+// Timezone note: because our schedules are :00 and :30 past the hour
+// (both timezone-invariant on whole-hour offsets like Pacific), the
+// boundary math runs on UTC ms and the display formatter converts the
+// same instant into Pacific. Handles DST because Intl.DateTimeFormat
+// does — the underlying instant doesn't change.
+export function computeLateness(
+  actualISO: string | null,
+  scheduleMinutes: number[],
+): { display: string } {
+  if (!actualISO) return { display: '—' };
+  const actual        = new Date(actualISO);
+  const actualMs      = actual.getTime();
+  const hourStartMs   = Math.floor(actualMs / 3_600_000) * 3_600_000;
+  const candidates: number[] = [];
+  for (const m of scheduleMinutes) {
+    candidates.push(hourStartMs + m * 60_000);
+    candidates.push(hourStartMs - 3_600_000 + m * 60_000);
+  }
+  const boundaryMs = Math.max(...candidates.filter((b) => b <= actualMs));
+  const lateMins   = Math.floor((actualMs - boundaryMs) / 60_000);
+  const time = new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
+  }).format(actual);
+  return { display: lateMins === 0 ? `${time} (on time)` : `${time} (+${lateMins}m late)` };
 }
 
 function fmtBreachTime(iso: string): string {
@@ -308,18 +324,24 @@ export default function LiveMapPage() {
               <th className="text-left p-4">SITE</th>
               <th className="text-left p-4">ON SHIFT</th>
               <th className="text-left p-4">LAST PING</th>
-              <th className="text-left p-4">PING TYPE</th>
-              <th className="text-left p-4">COORDINATES</th>
+              <th className="text-left p-4">LAST REPORT</th>
               <th className="text-center p-4">STATUS</th>
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td colSpan={7} className="text-center text-gray-500 py-10">Loading…</td></tr>}
+            {loading && <tr><td colSpan={6} className="text-center text-gray-500 py-10">Loading…</td></tr>}
             {!loading && guards.length === 0 && (
-              <tr><td colSpan={7} className="text-center text-gray-500 py-10">No guards currently on duty</td></tr>
+              <tr><td colSpan={6} className="text-center text-gray-500 py-10">No guards currently on duty</td></tr>
             )}
             {guards.map((g) => {
-              const ping = pingAge(g.last_ping_at);
+              const ping   = computeLateness(g.last_ping_at,   [0, 30]);
+              const report = computeLateness(g.last_report_at, [0]);
+              // Stale-ping urgency signal: unchanged from prior behavior —
+              // colors the LAST PING cell red when the last ping is older
+              // than 35 min from wall-clock (independent of the lateness
+              // display text, which measures against the schedule boundary).
+              const pingStale = g.last_ping_at != null &&
+                (Date.now() - new Date(g.last_ping_at).getTime()) / 60_000 >= 35;
               return (
                 <tr
                   key={g.id}
@@ -334,26 +356,17 @@ export default function LiveMapPage() {
                   <td className="p-4 text-gray-400 text-xs">{g.site_name}</td>
                   <td className="p-4 text-gray-400 text-xs">{shiftDuration(g.clocked_in_at)}</td>
                   <td className="p-4">
-                    <span className={`text-xs ${ping.urgent ? 'text-red-400 font-medium' : 'text-gray-400'}`}>
-                      {ping.label}
+                    <span className={`text-xs font-mono ${pingStale ? 'text-red-400 font-medium' : 'text-gray-400'}`}>
+                      {ping.display}
                     </span>
-                    {ping.urgent && (
+                    {pingStale && (
                       <span className="ml-1 text-red-400 text-xs animate-pulse">!</span>
                     )}
                   </td>
                   <td className="p-4">
-                    {g.last_ping_type ? (
-                      <span className="text-xs text-gray-500 tracking-widest">
-                        {PING_LABEL[g.last_ping_type] ?? g.last_ping_type}
-                      </span>
-                    ) : (
-                      <span className="text-gray-700 text-xs">—</span>
-                    )}
-                  </td>
-                  <td className="p-4 text-gray-600 text-xs font-mono">
-                    {g.last_lat != null && g.last_lng != null
-                      ? `${g.last_lat.toFixed(5)}, ${g.last_lng.toFixed(5)}`
-                      : '—'}
+                    <span className="text-xs text-gray-400 font-mono">
+                      {report.display}
+                    </span>
                   </td>
                   <td className="p-4 text-center">
                     {g.has_violation ? (
