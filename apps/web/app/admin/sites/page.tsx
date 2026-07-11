@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
+import Link from 'next/link';
 import { adminGet, adminPatch, adminPost } from '../../../lib/adminApi';
 import {
   centroidOf,
@@ -326,9 +327,9 @@ export default function SitesPage() {
       if (next.has(id)) next.delete(id);
       else {
         next.add(id);
-        // Session C — lazy-fetch clients on first expand.
-        if (clientsPerSite[id]  === undefined) fetchClientsForSite(id);
         // Session S6 — lazy-fetch scheduling profiles + coverage snapshot.
+        // (Session C's client lazy-fetch was removed in Session D — client
+        // management lives on /admin/clients now.)
         if (profilesPerSite[id] === undefined) fetchProfilesForSite(id);
       }
       return next;
@@ -912,39 +913,9 @@ export default function SitesPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      {/* Session C — credentials banner after CREATE or RESET-PASSWORD.
-          Doesn't auto-hide: admin must copy the temp password before
-          navigating away. */}
-      {clientBanner && (
-        <div className="bg-green-900/40 border border-green-500 text-green-300 text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <p className="text-green-200 font-medium mb-1">
-              {clientBanner.mode === 'created' ? 'Client created.' : 'New temp password ready.'} Share these credentials:
-            </p>
-            <p className="text-sm leading-6">
-              Portal: <span className="font-mono text-green-100">https://netraops.com/portal</span><br />
-              Email: <span className="font-mono text-green-100">{clientBanner.email}</span><br />
-              Password: <span className="font-mono text-green-100 font-bold">{clientBanner.temp_password}</span>
-            </p>
-            <p className="text-green-400 text-xs mt-2">Client will be prompted to change the password on first login.</p>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => copyCredentialsToClipboard(clientBanner)}
-              className="text-xs text-green-300 hover:text-green-100 tracking-widest border border-green-500/40 rounded px-3 py-1 hover:bg-green-500/10"
-            >
-              COPY
-            </button>
-            <button
-              onClick={() => setClientBanner(null)}
-              aria-label="Dismiss"
-              className="text-green-400 hover:text-green-200 text-lg leading-none"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Session D — the Session C credentials banner + ADD/EDIT CLIENT
+          modal both moved to /admin/clients along with the CLIENT PORTAL
+          controls. */}
 
       {/* Compact list */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
@@ -1058,163 +1029,40 @@ export default function SitesPage() {
                     )}
                   </div>
 
-                  {/* CLIENT ACCESS UNTIL */}
-                  <div>
-                    <p className="text-gray-500 text-xs tracking-widest mb-1">CLIENT ACCESS UNTIL</p>
-                    {site.client_star_access_until ? (
-                      <span className={`text-xs ${accessIn !== null && accessIn <= 14 ? 'text-red-400' : 'text-gray-300'}`}>
-                        {fmtDate(site.client_star_access_until)}
-                        {accessIn !== null && accessIn <= 30 && (
-                          <span className="ml-1 text-red-400">({accessIn}d)</span>
-                        )}
-                      </span>
-                    ) : (
-                      <span className="text-gray-600 text-xs">—</span>
-                    )}
-                  </div>
-
-                  {/* DATA DELETION */}
-                  <div>
-                    <p className="text-gray-500 text-xs tracking-widest mb-1">DATA DELETION</p>
-                    {site.data_delete_at ? (
-                      <span className={`text-xs ${deleteIn !== null && deleteIn <= 30 ? 'text-red-400' : 'text-gray-300'}`}>
-                        {fmtDate(site.data_delete_at)}
-                        {deleteIn !== null && deleteIn <= 30 && (
-                          <span className="ml-1">({deleteIn}d)</span>
-                        )}
-                      </span>
-                    ) : (
-                      <span className="text-gray-600 text-xs">—</span>
-                    )}
-                  </div>
-
-                  {/* CLIENT PORTAL — status pill + verb-form action button.
-                      FIX 1: pill shows ENABLED/DISABLED at a glance; the
-                      button label is a verb ("DISABLE PORTAL" / "ENABLE PORTAL")
-                      so the admin can't mistake it for the whole-site toggle. */}
-                  <div>
-                    <p className="text-gray-500 text-xs tracking-widest mb-1">CLIENT PORTAL</p>
-                    <div className="flex items-center gap-3 flex-wrap">
-                      {isDeactivated ? (
-                        <button
-                          onClick={() => reactivateSite(site.id)}
-                          disabled={activeToggling === site.id}
-                          className="text-xs tracking-widest px-3 py-1 rounded transition-colors bg-[#0B1526] text-gray-400 border border-[#1A3050] hover:border-amber-400 hover:text-amber-400 disabled:opacity-40"
-                        >
-                          {activeToggling === site.id ? '…' : 'REACTIVATE SITE'}
-                        </button>
-                      ) : (
-                        <>
-                          {clientEnabled ? (
-                            <span className="inline-flex items-center gap-1.5 text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">
-                              <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" />
-                              ENABLED
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1.5 text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded">
-                              <span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />
-                              DISABLED
-                            </span>
-                          )}
-                          <button
-                            onClick={() => toggleClientAccess(site.id, !clientEnabled)}
-                            disabled={toggling === site.id}
-                            className={`text-xs tracking-widest px-3 py-1 rounded transition-colors bg-[#0B1526] text-gray-400 border border-[#1A3050] disabled:opacity-40 ${
-                              clientEnabled
-                                ? 'hover:border-red-500 hover:text-red-400'
-                                : 'hover:border-green-500 hover:text-green-400'
-                            }`}
-                          >
-                            {toggling === site.id ? '…' : clientEnabled ? 'DISABLE PORTAL' : 'ENABLE PORTAL'}
-                          </button>
-                          <button
-                            onClick={() => previewAsClient(site.id)}
-                            title="Opens the client portal in a new tab as read-only for 30 minutes."
-                            className="text-xs tracking-widest px-3 py-1 rounded bg-[#0B1526] text-cyan-400 border border-cyan-500/40 hover:bg-cyan-500/10 hover:border-cyan-500 transition-colors"
-                          >
-                            PREVIEW AS CLIENT ↗
-                          </button>
-                        </>
-                      )}
+                  {/* Session D — CLIENT PORTAL & CLIENTS management moved to
+                      the CLIENT PORTALS tab. What used to be four separate
+                      rows (CLIENT ACCESS UNTIL / DATA DELETION / CLIENT
+                      PORTAL toggle / CLIENTS AT THIS SITE) is now a single
+                      deep-link that scrolls to this site's section on the
+                      other page. For deactivated sites we still surface the
+                      REACTIVATE SITE button — reactivation lives on the
+                      sites tab because it's a site-level operation.
+                  */}
+                  {isDeactivated ? (
+                    <div>
+                      <p className="text-gray-500 text-xs tracking-widest mb-1">SITE ACTIVATION</p>
+                      <button
+                        onClick={() => reactivateSite(site.id)}
+                        disabled={activeToggling === site.id}
+                        className="text-xs tracking-widest px-3 py-1 rounded transition-colors bg-[#0B1526] text-gray-400 border border-[#1A3050] hover:border-amber-400 hover:text-amber-400 disabled:opacity-40"
+                      >
+                        {activeToggling === site.id ? '…' : 'REACTIVATE SITE'}
+                      </button>
                     </div>
-                  </div>
-
-                  {/* Session C — CLIENTS AT THIS SITE. Lazy-fetched on
-                      expand. Empty state shows a single ADD button.
-                      Active clients render first, then inactive; within
-                      each group sort is alphabetical by email. */}
-                  <div>
-                    <p className="text-gray-500 text-xs tracking-widest mb-2">CLIENTS AT THIS SITE</p>
-                    {(() => {
-                      const list = clientsPerSite[site.id];
-                      if (list === undefined) {
-                        return <p className="text-gray-600 text-xs">Loading…</p>;
-                      }
-                      if (list.length === 0) {
-                        return (
-                          <div className="space-y-2">
-                            <p className="text-gray-600 text-xs">No clients configured for this site yet.</p>
-                            <button
-                              onClick={() => openAddClientModal(site.id)}
-                              disabled={isDeactivated}
-                              className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              + ADD CLIENT
-                            </button>
-                          </div>
-                        );
-                      }
-                      return (
-                        <div className="space-y-2">
-                          {list.map((c) => (
-                            <div key={c.id}
-                              className={`bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 flex items-center gap-3 flex-wrap ${!c.is_active ? 'opacity-60' : ''}`}>
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-gray-200 font-medium text-sm truncate">{c.email}</span>
-                                  {c.is_active ? (
-                                    <span className="text-[10px] tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-1.5 py-0.5 rounded">ACTIVE</span>
-                                  ) : (
-                                    <span className="text-[10px] tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-1.5 py-0.5 rounded">INACTIVE</span>
-                                  )}
-                                </div>
-                                <p className="text-gray-500 text-xs mt-0.5 truncate">
-                                  {c.name} <span className="text-gray-600">·</span> Last login: {relativeTime(c.last_login_at)}
-                                </p>
-                              </div>
-                              <div className="flex items-center gap-2 shrink-0">
-                                <button
-                                  onClick={() => openEditClientModal(site.id, c)}
-                                  disabled={isDeactivated}
-                                  className="text-xs text-gray-400 hover:text-amber-400 tracking-widest disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  EDIT
-                                </button>
-                                <button
-                                  onClick={() => toggleClientActive(c, site.id)}
-                                  disabled={clientToggling === c.id || isDeactivated}
-                                  className={`text-xs tracking-widest disabled:opacity-40 disabled:cursor-not-allowed ${
-                                    c.is_active
-                                      ? 'text-red-400 hover:text-red-300'
-                                      : 'text-green-400 hover:text-green-300'
-                                  }`}
-                                >
-                                  {clientToggling === c.id ? '…' : c.is_active ? 'DEACTIVATE' : 'REACTIVATE'}
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                          <button
-                            onClick={() => openAddClientModal(site.id)}
-                            disabled={isDeactivated}
-                            className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            + ADD CLIENT
-                          </button>
-                        </div>
-                      );
-                    })()}
-                  </div>
+                  ) : (
+                    <div>
+                      <p className="text-gray-500 text-xs tracking-widest mb-1">CLIENT PORTAL & CLIENTS</p>
+                      <Link
+                        href={`/admin/clients?site=${site.id}`}
+                        className="inline-flex items-center gap-2 bg-[#0B1526] text-blue-300 border border-blue-500/40 rounded px-3 py-1.5 text-xs tracking-widest hover:bg-blue-500/10 hover:border-blue-500 transition-colors"
+                      >
+                        Manage in Client Portals tab →
+                      </Link>
+                      <p className="text-gray-600 text-[10px] mt-1">
+                        Portal toggle, preview, client accounts, and retention dates all live on the Client Portals tab now.
+                      </p>
+                    </div>
+                  )}
 
                   {/* Session S6 — SCHEDULING PROFILES. Lazy-fetched with
                       clients on expand. Shows one row per profile with an
@@ -1880,109 +1728,8 @@ export default function SitesPage() {
         </div>
       )}
 
-      {/* ── Session C — Add / Edit Client Modal ─────────────────────────── */}
-      {clientModalMode !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-amber-400 font-bold tracking-widest text-lg">
-                {clientModalMode === 'add' ? 'ADD CLIENT' : 'EDIT CLIENT'}
-              </h2>
-              <button onClick={closeClientModal} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
-            </div>
-            {clientFormError && (
-              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{clientFormError}</div>
-            )}
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">FULL NAME <span className="text-amber-400">*</span></label>
-                <input
-                  type="text" placeholder="e.g. Property Manager"
-                  value={clientForm.name}
-                  onChange={(e) => setClientForm((f) => ({ ...f, name: e.target.value }))}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-                />
-              </div>
-
-              <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">EMAIL <span className="text-amber-400">*</span></label>
-                <input
-                  type="email" placeholder="e.g. owner@property.com"
-                  value={clientForm.email}
-                  onChange={(e) => setClientForm((f) => ({ ...f, email: e.target.value }))}
-                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-                />
-                {clientModalMode === 'edit' && editingClient && clientForm.email.trim().toLowerCase() !== editingClient.email && (
-                  <p className="text-amber-400/80 text-xs mt-1">
-                    Changing email will require the client to log in with the new address.
-                  </p>
-                )}
-              </div>
-
-              {clientModalMode === 'add' && (
-                <div>
-                  <label className="block text-gray-500 text-xs tracking-widest mb-1">TEMPORARY PASSWORD <span className="text-amber-400">*</span></label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      readOnly
-                      value={clientForm.password}
-                      className="flex-1 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm font-mono focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={regenerateTempPassword}
-                      title="Regenerate"
-                      aria-label="Regenerate password"
-                      className="bg-[#0B1526] border border-[#1A3050] text-gray-400 hover:border-amber-400 hover:text-amber-400 rounded-lg px-3 py-2 text-sm transition-colors"
-                    >
-                      🔄
-                    </button>
-                  </div>
-                  <p className="text-gray-500 text-xs mt-1">Client will be prompted to change on first login.</p>
-                </div>
-              )}
-
-              {clientModalMode === 'edit' && (
-                <div>
-                  <label className="block text-gray-500 text-xs tracking-widest mb-1">PASSWORD</label>
-                  <button
-                    type="button"
-                    onClick={resetClientPassword}
-                    disabled={clientSaving}
-                    className="text-xs text-cyan-400 tracking-widest border border-cyan-500/40 rounded px-3 py-1.5 hover:bg-cyan-500/10 hover:border-cyan-500 transition-colors disabled:opacity-40"
-                  >
-                    RESET PASSWORD
-                  </button>
-                  <p className="text-gray-500 text-xs mt-1">Generates a new temp password and ends the client's current session.</p>
-                </div>
-              )}
-            </div>
-
-            <p className="text-gray-500 text-xs mt-4 mb-5 leading-relaxed">
-              Portal URL: <span className="font-mono text-gray-300">https://netraops.com/portal</span><br />
-              Client uses their email address to log in.
-            </p>
-
-            <div className="flex gap-3">
-              <button
-                onClick={closeClientModal}
-                className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
-              >
-                CANCEL
-              </button>
-              <button
-                onClick={clientModalMode === 'add' ? saveNewClient : saveEditedClient}
-                disabled={clientSaving}
-                className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors"
-              >
-                {clientSaving ? 'SAVING…' : clientModalMode === 'add' ? 'ADD CLIENT' : 'SAVE'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Session D: the Session C ADD/EDIT CLIENT modal moved to
+          /admin/clients along with the CLIENT PORTAL controls. */}
 
       {/* ── Session S6 — Create / Edit Scheduling Profile Modal ─────────── */}
       {profileModalMode !== null && (
