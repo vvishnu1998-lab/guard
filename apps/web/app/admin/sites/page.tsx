@@ -115,6 +115,78 @@ interface CoverageStatus {
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+// Session E — the CREATE PROFILE modal presents each shift as
+// (start-time, end-time, guards). The stored value is (start_time,
+// length_hours). These helpers do the round-trip and drive the timeline
+// preview strip at the top of the modal.
+function parseTimeToHours(t: string): number {
+  const [h, m] = t.slice(0, 5).split(':').map(Number);
+  return (h || 0) + ((m || 0) / 60);
+}
+function formatHoursToTime(h: number): string {
+  const wrapped = ((h % 24) + 24) % 24;
+  const hh = Math.floor(wrapped);
+  const mm = Math.round((wrapped - hh) * 60);
+  const hhStr = String(mm === 60 ? hh + 1 : hh).padStart(2, '0');
+  const mmStr = String(mm === 60 ? 0 : mm).padStart(2, '0');
+  return `${hhStr}:${mmStr}`;
+}
+function computeEndTime(startTime: string, lengthH: number): string {
+  return formatHoursToTime(parseTimeToHours(startTime) + lengthH);
+}
+function computeLengthHours(startTime: string, endTime: string): number {
+  const s = parseTimeToHours(startTime);
+  const e = parseTimeToHours(endTime);
+  if (e > s) return e - s;
+  if (e < s) return 24 - s + e;   // overnight
+  return 0;                        // start === end → invalid
+}
+function isOvernight(startTime: string, endTime: string): boolean {
+  return parseTimeToHours(endTime) < parseTimeToHours(startTime);
+}
+
+interface ShiftPart {
+  key:       string;
+  dow:       number;
+  startPct:  number;
+  heightPct: number;
+  overnight: boolean;
+}
+// Break overnight shifts into two parts: (day X from start→24) and
+// (day X+1 from 00→endHour%24). Non-overnight shifts stay as one part.
+function computeShiftParts(shifts: ProfileShift[]): ShiftPart[] {
+  const parts: ShiftPart[] = [];
+  for (const s of shifts) {
+    const startH = parseTimeToHours(s.shift_start_time);
+    const length = Number(s.shift_length_hours) || 0;
+    if (length <= 0) continue;
+    const endH   = startH + length;
+    const keyBase = s.clientKey ?? s.id ?? `${s.day_of_week}-${s.shift_start_time}`;
+    if (endH <= 24) {
+      parts.push({
+        key: keyBase, dow: s.day_of_week,
+        startPct: (startH / 24) * 100,
+        heightPct: (length  / 24) * 100,
+        overnight: false,
+      });
+    } else {
+      parts.push({
+        key: `${keyBase}-a`, dow: s.day_of_week,
+        startPct: (startH / 24) * 100,
+        heightPct: ((24 - startH) / 24) * 100,
+        overnight: true,
+      });
+      parts.push({
+        key: `${keyBase}-b`, dow: (s.day_of_week + 1) % 7,
+        startPct: 0,
+        heightPct: ((endH - 24) / 24) * 100,
+        overnight: true,
+      });
+    }
+  }
+  return parts;
+}
+
 let __shiftKeyCounter = 0;
 function nextShiftKey() { return `s${++__shiftKeyCounter}`; }
 function makeShiftDraft(dow: number, prev?: ProfileShift): ProfileShift {
@@ -284,6 +356,11 @@ export default function SitesPage() {
   const [profileSaving,   setProfileSaving]   = useState(false);
   const [profileFormError, setProfileFormError] = useState('');
   const [profileToggling, setProfileToggling] = useState<string | null>(null);
+  // Session E — CREATE PROFILE modal state
+  const [selectedDay,      setSelectedDay]      = useState(1);              // 0=Sun … 6=Sat
+  const [copyDropdownOpen, setCopyDropdownOpen] = useState(false);
+  const [copyTargets,      setCopyTargets]      = useState<Set<number>>(new Set());
+  const [copyMessage,      setCopyMessage]      = useState('');              // ephemeral
 
   // Always fetch with include_inactive=1 so the chip toggle is a client-side
   // filter with no round-trip. Search across ALL sites regardless of chip.
@@ -356,6 +433,10 @@ export default function SitesPage() {
     setProfileModalSiteId(siteId);
     setEditingProfile(null);
     setProfileForm({ profile_name: '', is_active: true, shifts: [] });
+    setSelectedDay(1);
+    setCopyDropdownOpen(false);
+    setCopyTargets(new Set());
+    setCopyMessage('');
     setProfileFormError('');
   }
 
@@ -363,11 +444,20 @@ export default function SitesPage() {
     setProfileModalMode('edit');
     setProfileModalSiteId(siteId);
     setEditingProfile(profile);
+    // Session E — the per-shift `active` flag was dropped from the UI.
+    // Load only the active shifts; inactive ones get discarded on save.
+    // Backward-compat: profiles created in S6 that already had every shift
+    // marked active load through unchanged.
+    const activeShifts = profile.shifts.filter((s) => s.active);
     setProfileForm({
       profile_name: profile.profile_name,
       is_active:    profile.is_active,
-      shifts:       profile.shifts.map((s) => ({ ...s, clientKey: nextShiftKey() })),
+      shifts:       activeShifts.map((s) => ({ ...s, clientKey: nextShiftKey() })),
     });
+    setSelectedDay(activeShifts[0]?.day_of_week ?? 1);
+    setCopyDropdownOpen(false);
+    setCopyTargets(new Set());
+    setCopyMessage('');
     setProfileFormError('');
   }
 
@@ -376,6 +466,9 @@ export default function SitesPage() {
     setProfileModalSiteId(null);
     setEditingProfile(null);
     setProfileForm({ profile_name: '', is_active: true, shifts: [] });
+    setCopyDropdownOpen(false);
+    setCopyTargets(new Set());
+    setCopyMessage('');
     setProfileFormError('');
   }
 
@@ -391,38 +484,52 @@ export default function SitesPage() {
   function removeShiftAt(idx: number) {
     setProfileForm((f) => ({ ...f, shifts: f.shifts.filter((_, i) => i !== idx) }));
   }
-  function copyMondayToWeekdays() {
+  // Session E — consolidated copy dropdown. Replaces the S6 buttons
+  // (Copy to Tue-Fri / Copy from PrevDay). Target set excludes the
+  // source day. Target days' existing shifts are replaced wholesale.
+  function copyDayShifts(fromDow: number, toDows: number[]) {
+    const targets = toDows.filter((d) => d !== fromDow);
+    if (targets.length === 0) return;
+    const sourceShifts = profileForm.shifts.filter((s) => s.day_of_week === fromDow);
+    if (sourceShifts.length === 0) {
+      setCopyMessage(`No shifts on ${DAY_NAMES[fromDow]} to copy.`);
+      window.setTimeout(() => setCopyMessage(''), 3000);
+      setCopyDropdownOpen(false);
+      return;
+    }
     setProfileForm((f) => {
-      const mondayShifts = f.shifts.filter((s) => s.day_of_week === 1);
-      if (mondayShifts.length === 0) return f;
-      const keepOthers = f.shifts.filter((s) => s.day_of_week === 0 || s.day_of_week === 1 || s.day_of_week === 6);
+      const kept = f.shifts.filter((s) => !targets.includes(s.day_of_week));
       const copies: ProfileShift[] = [];
-      for (const dow of [2, 3, 4, 5]) {
-        for (const src of mondayShifts) copies.push(makeShiftDraft(dow, src));
+      for (const dow of targets) {
+        for (const src of sourceShifts) copies.push(makeShiftDraft(dow, src));
       }
-      return { ...f, shifts: [...keepOthers, ...copies] };
+      return { ...f, shifts: [...kept, ...copies] };
     });
-  }
-  function copyFromPreviousDay(dow: number) {
-    setProfileForm((f) => {
-      const src = f.shifts.filter((s) => s.day_of_week === dow - 1);
-      if (src.length === 0) return f;
-      const removed = f.shifts.filter((s) => s.day_of_week !== dow);
-      const copies  = src.map((s) => makeShiftDraft(dow, s));
-      return { ...f, shifts: [...removed, ...copies] };
-    });
+    setCopyDropdownOpen(false);
+    setCopyTargets(new Set());
+    const targetNames = targets.map((d) => DAY_SHORT[d]).join(', ');
+    setCopyMessage(`Copied ${sourceShifts.length} shift${sourceShifts.length === 1 ? '' : 's'} from ${DAY_NAMES[fromDow]} to ${targetNames}`);
+    window.setTimeout(() => setCopyMessage(''), 3500);
   }
 
   async function saveProfile() {
     const name = profileForm.profile_name.trim();
     if (name.length < 2) { setProfileFormError('Profile name must be at least 2 characters'); return; }
     if (profileForm.shifts.length === 0) { setProfileFormError('Add at least one shift somewhere in the week'); return; }
+    const zeroLength = profileForm.shifts.filter((s) => !(Number(s.shift_length_hours) > 0));
+    if (zeroLength.length > 0) {
+      setProfileFormError(`${zeroLength.length} shift${zeroLength.length === 1 ? ' has' : 's have'} zero length — start and end are the same. Fix or remove them.`);
+      return;
+    }
     const cleanShifts = profileForm.shifts.map((s) => ({
       day_of_week:        s.day_of_week,
       shift_start_time:   s.shift_start_time.length === 5 ? `${s.shift_start_time}:00` : s.shift_start_time,
       shift_length_hours: Number(s.shift_length_hours),
       guards_needed:      Number(s.guards_needed),
-      active:             s.active,
+      // Session E — active flag hidden from UI, always true on write. To
+      // disable a day/shift the admin removes it. Backward-compat with S6:
+      // the backend still stores + returns `active`.
+      active:             true,
     }));
     setProfileSaving(true); setProfileFormError('');
     try {
@@ -474,13 +581,18 @@ export default function SitesPage() {
   }
 
   // Derived — coverage summary shown in the CREATE/EDIT modal footer.
+  // Session E — the per-shift `active` flag was dropped from the UI so
+  // every draft shift counts.
   const profileFormSummary = useMemo(() => {
-    const active = profileForm.shifts.filter((s) => s.active);
-    const shiftsWeek  = active.length;
-    const hoursWeek   = active.reduce((sum, s) => sum + s.shift_length_hours, 0);
-    const guardsWeek  = active.reduce((sum, s) => sum + s.guards_needed, 0);
+    const shiftsWeek = profileForm.shifts.length;
+    const hoursWeek  = profileForm.shifts.reduce((sum, s) => sum + Number(s.shift_length_hours || 0), 0);
+    const guardsWeek = profileForm.shifts.reduce((sum, s) => sum + Number(s.guards_needed  || 0), 0);
     return { shiftsWeek, hoursWeek, guardsWeek };
   }, [profileForm.shifts]);
+
+  // Session E — timeline preview blocks. Overnight shifts render as two
+  // parts (see computeShiftParts).
+  const shiftParts = useMemo(() => computeShiftParts(profileForm.shifts), [profileForm.shifts]);
 
   // ── Session C — client management handlers ─────────────────────────────
   async function fetchClientsForSite(siteId: string) {
@@ -1731,150 +1843,280 @@ export default function SitesPage() {
       {/* Session D: the Session C ADD/EDIT CLIENT modal moved to
           /admin/clients along with the CLIENT PORTAL controls. */}
 
-      {/* ── Session S6 — Create / Edit Scheduling Profile Modal ─────────── */}
+      {/* ── Session E — Create / Edit Scheduling Profile Modal ─────────────
+          Layout: header · timeline preview · two-column editor (day list +
+          selected-day shifts) · coverage summary · footer. Modal is
+          max-w-6xl to accommodate the two-column split. */}
       {profileModalMode !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 overflow-y-auto py-8">
-          <div className="w-full max-w-3xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
-            <div className="flex items-center justify-between mb-5">
+          <div className="w-full max-w-6xl bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6 mx-4">
+            {/* Header + profile name/active */}
+            <div className="flex items-center justify-between mb-4">
               <h2 className="text-amber-400 font-bold tracking-widest text-lg">
                 {profileModalMode === 'create' ? 'CREATE PROFILE' : 'EDIT PROFILE'}
               </h2>
               <button onClick={closeProfileModal} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
             </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end mb-4">
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">PROFILE NAME <span className="text-amber-400">*</span></label>
+                <input
+                  type="text" placeholder="e.g. Regular, Holiday, Special Event"
+                  value={profileForm.profile_name}
+                  onChange={(e) => setProfileForm((f) => ({ ...f, profile_name: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <label className="flex items-center gap-2 text-xs tracking-widest text-gray-400 select-none cursor-pointer min-h-[40px]">
+                <input
+                  type="checkbox" className="accent-amber-400 w-4 h-4"
+                  checked={profileForm.is_active}
+                  onChange={(e) => setProfileForm((f) => ({ ...f, is_active: e.target.checked }))}
+                />
+                SET AS ACTIVE
+              </label>
+            </div>
+
             {profileFormError && (
               <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{profileFormError}</div>
             )}
 
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
-                <div>
-                  <label className="block text-gray-500 text-xs tracking-widest mb-1">PROFILE NAME <span className="text-amber-400">*</span></label>
-                  <input
-                    type="text" placeholder="e.g. Regular, Holiday, Special Event"
-                    value={profileForm.profile_name}
-                    onChange={(e) => setProfileForm((f) => ({ ...f, profile_name: e.target.value }))}
-                    className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-                  />
-                </div>
-                <label className="flex items-center gap-2 text-xs tracking-widest text-gray-400 select-none cursor-pointer min-h-[40px]">
-                  <input
-                    type="checkbox" className="accent-amber-400 w-4 h-4"
-                    checked={profileForm.is_active}
-                    onChange={(e) => setProfileForm((f) => ({ ...f, is_active: e.target.checked }))}
-                  />
-                  SET AS ACTIVE
-                </label>
-              </div>
-
-              <div>
-                <p className="text-gray-500 text-xs tracking-widest mb-2">WEEKLY SHIFT PATTERN</p>
-                <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-3 space-y-3">
-                  {DAY_NAMES.map((dayName, dow) => {
-                    const dayShifts = profileForm.shifts
-                      .map((s, i) => ({ s, i }))
-                      .filter(({ s }) => s.day_of_week === dow);
-                    return (
-                      <div key={dow} className="border-b border-[#1A3050] last:border-b-0 pb-3 last:pb-0">
-                        <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
-                          <span className="text-gray-300 text-xs font-bold tracking-widest w-24 shrink-0">
-                            {dayName.toUpperCase()}
-                          </span>
-                          <div className="flex items-center gap-2 flex-wrap ml-auto">
-                            <button
-                              type="button"
-                              onClick={() => addShiftToDay(dow)}
-                              className="text-[11px] text-amber-400 tracking-widest border border-amber-400/40 rounded px-2 py-0.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors"
-                            >
-                              + Add shift
-                            </button>
-                            {dow === 1 && dayShifts.length > 0 && (
-                              <button
-                                type="button"
-                                onClick={copyMondayToWeekdays}
-                                className="text-[11px] text-cyan-400 tracking-widest border border-cyan-500/40 rounded px-2 py-0.5 hover:bg-cyan-500/10 transition-colors"
-                              >
-                                Copy to Tue-Fri
-                              </button>
-                            )}
-                            {dow > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => copyFromPreviousDay(dow)}
-                                className="text-[11px] text-gray-400 tracking-widest border border-[#1A3050] rounded px-2 py-0.5 hover:border-gray-500 hover:text-gray-200 transition-colors"
-                              >
-                                Copy from {DAY_SHORT[dow - 1]}
-                              </button>
-                            )}
-                          </div>
+            {/* ── TIMELINE PREVIEW ─────────────────────────────────────── */}
+            <div className="mb-5">
+              <p className="text-gray-500 text-xs tracking-widest mb-1">TIMELINE PREVIEW</p>
+              <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 pt-8">
+                <div className="relative w-full h-[200px]">
+                  {/* Y-axis hour labels */}
+                  <div className="absolute left-0 top-0 bottom-0 w-10 text-[9px] text-gray-600 tracking-widest">
+                    {[0, 6, 12, 18].map((h) => (
+                      <span key={h} className="absolute" style={{ top: `${(h / 24) * 100}%`, transform: 'translateY(-50%)' }}>
+                        {String(h).padStart(2, '0')}:00
+                      </span>
+                    ))}
+                    <span className="absolute" style={{ top: '100%', transform: 'translateY(-100%)' }}>24:00</span>
+                  </div>
+                  {/* 7 day columns */}
+                  <div className="absolute left-10 top-0 right-0 bottom-0 flex">
+                    {DAY_SHORT.map((dayLabel, dow) => {
+                      const dayParts = shiftParts.filter((p) => p.dow === dow);
+                      const isSelected = selectedDay === dow;
+                      return (
+                        <div
+                          key={dow}
+                          onClick={() => setSelectedDay(dow)}
+                          className={`flex-1 border-l last:border-r border-[#1A3050] relative cursor-pointer transition-colors ${
+                            isSelected ? 'bg-cyan-500/5' : ''
+                          }`}
+                        >
+                          <div className={`absolute -top-6 left-0 right-0 text-center text-[10px] tracking-widest transition-colors ${
+                            isSelected ? 'text-cyan-400 font-bold' : 'text-gray-500'
+                          }`}>{dayLabel.toUpperCase()}</div>
+                          {[25, 50, 75].map((pct) => (
+                            <div key={pct} className="absolute left-0 right-0 border-t border-[#1A3050]/60" style={{ top: `${pct}%` }} />
+                          ))}
+                          {dayParts.map((p) => (
+                            <div
+                              key={p.key}
+                              className="absolute left-0.5 right-0.5 bg-cyan-500/30 border border-cyan-500 rounded-sm"
+                              style={{ top: `${p.startPct}%`, height: `${p.heightPct}%` }}
+                            />
+                          ))}
                         </div>
-                        {dayShifts.length === 0 ? (
-                          <p className="text-gray-600 text-xs italic ml-24">No shifts</p>
-                        ) : (
-                          <div className="space-y-1.5 ml-24">
-                            {dayShifts.map(({ s, i }) => (
-                              <div key={s.clientKey ?? s.id ?? i} className="flex items-center gap-2 flex-wrap">
-                                <input
-                                  type="time"
-                                  value={s.shift_start_time.slice(0, 5)}
-                                  onChange={(e) => updateShiftAt(i, { shift_start_time: e.target.value })}
-                                  className="bg-[#070F1E] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs w-24"
-                                />
-                                <span className="text-gray-500 text-xs">×</span>
-                                <input
-                                  type="number" min="0.5" max="24" step="0.25"
-                                  value={s.shift_length_hours}
-                                  onChange={(e) => updateShiftAt(i, { shift_length_hours: Number(e.target.value) })}
-                                  className="bg-[#070F1E] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs w-16"
-                                />
-                                <span className="text-gray-500 text-xs">h ·</span>
-                                <input
-                                  type="number" min="1" max="10" step="1"
-                                  value={s.guards_needed}
-                                  onChange={(e) => updateShiftAt(i, { guards_needed: Number(e.target.value) })}
-                                  className="bg-[#070F1E] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs w-12"
-                                />
-                                <span className="text-gray-500 text-xs">guard{s.guards_needed === 1 ? '' : 's'}</span>
-                                <label className="text-gray-500 text-[10px] tracking-widest inline-flex items-center gap-1 ml-1 select-none cursor-pointer">
-                                  <input
-                                    type="checkbox" className="accent-amber-400 w-3 h-3"
-                                    checked={s.active}
-                                    onChange={(e) => updateShiftAt(i, { active: e.target.checked })}
-                                  />
-                                  ACTIVE
-                                </label>
-                                <button
-                                  type="button"
-                                  onClick={() => removeShiftAt(i)}
-                                  aria-label="Remove shift"
-                                  className="ml-auto text-red-400 hover:text-red-300 text-sm px-2"
-                                >
-                                  ✕
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* ── TWO-COLUMN EDITOR ────────────────────────────────────── */}
+            <div className="grid grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)] gap-4 mb-5">
+              {/* LEFT — day list */}
+              <div>
+                <p className="text-gray-500 text-xs tracking-widest mb-1">WEEKLY PATTERN</p>
+                <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg overflow-hidden">
+                  {DAY_NAMES.map((dayName, dow) => {
+                    const count = profileForm.shifts.filter((s) => s.day_of_week === dow).length;
+                    const isSelected = selectedDay === dow;
+                    return (
+                      <button
+                        key={dow}
+                        type="button"
+                        onClick={() => setSelectedDay(dow)}
+                        className={`w-full flex items-center justify-between px-3 py-2 text-left border-b border-[#1A3050] last:border-b-0 transition-colors ${
+                          isSelected ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500' : 'hover:bg-[#0F1E35]'
+                        }`}
+                      >
+                        <span className={`text-sm ${isSelected ? 'text-cyan-300 font-bold' : 'text-gray-300'}`}>{dayName}</span>
+                        <span className={`text-xs ${count === 0 ? 'text-gray-600' : (isSelected ? 'text-cyan-400' : 'text-gray-400')}`}>
+                          {count} shift{count === 1 ? '' : 's'}
+                        </span>
+                      </button>
                     );
                   })}
                 </div>
               </div>
 
-              {/* Live coverage summary */}
-              <div className="bg-[#0B1526] border border-amber-400/30 rounded-lg p-3 text-xs">
-                <p className="text-amber-400 font-bold tracking-widest mb-1">COVERAGE SUMMARY</p>
-                <p className="text-gray-300">
-                  {profileFormSummary.shiftsWeek} shift{profileFormSummary.shiftsWeek === 1 ? '' : 's'}/week ·{' '}
-                  {profileFormSummary.hoursWeek.toFixed(profileFormSummary.hoursWeek % 1 === 0 ? 0 : 1)}h coverage ·{' '}
-                  {profileFormSummary.guardsWeek} guard{profileFormSummary.guardsWeek === 1 ? '' : 's'} needed/week
-                </p>
-                <p className="text-gray-600 mt-1">
-                  Overnight shifts (start + length crossing midnight) are supported — pattern is by start time only.
-                </p>
+              {/* RIGHT — selected day editor */}
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-gray-500 text-xs tracking-widest">{DAY_NAMES[selectedDay].toUpperCase()}</p>
+                  {profileForm.shifts.some((s) => s.day_of_week === selectedDay) && (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setCopyDropdownOpen((v) => !v)}
+                        className="text-[11px] text-cyan-400 tracking-widest border border-cyan-500/40 rounded px-2 py-0.5 hover:bg-cyan-500/10 transition-colors"
+                      >
+                        Copy to ▾
+                      </button>
+                      {copyDropdownOpen && (
+                        <div className="absolute right-0 top-full mt-1 bg-[#0F1E35] border border-[#1A3050] rounded-lg p-2 z-10 shadow-xl min-w-[220px] space-y-1">
+                          <button type="button" onClick={() => copyDayShifts(selectedDay, [1, 2, 3, 4, 5])}
+                            className="w-full text-left text-xs text-gray-300 hover:bg-cyan-500/10 hover:text-cyan-300 rounded px-2 py-1">
+                            → Weekdays (Mon–Fri)
+                          </button>
+                          <button type="button" onClick={() => copyDayShifts(selectedDay, [0, 6])}
+                            className="w-full text-left text-xs text-gray-300 hover:bg-cyan-500/10 hover:text-cyan-300 rounded px-2 py-1">
+                            → Weekend (Sat, Sun)
+                          </button>
+                          <button type="button" onClick={() => copyDayShifts(selectedDay, [0, 1, 2, 3, 4, 5, 6])}
+                            className="w-full text-left text-xs text-gray-300 hover:bg-cyan-500/10 hover:text-cyan-300 rounded px-2 py-1">
+                            → All days
+                          </button>
+                          <div className="border-t border-[#1A3050] my-1" />
+                          <p className="text-[10px] text-gray-500 tracking-widest px-2 py-1">SPECIFIC:</p>
+                          <div className="grid grid-cols-2 gap-1 px-1">
+                            {DAY_SHORT.map((dayLabel, dow) => (
+                              <label key={dow} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer select-none px-1 py-0.5 hover:bg-cyan-500/5 rounded">
+                                <input type="checkbox" className="accent-cyan-400 w-3 h-3"
+                                  checked={copyTargets.has(dow)}
+                                  onChange={(e) => setCopyTargets((prev) => {
+                                    const next = new Set(prev);
+                                    if (e.target.checked) next.add(dow); else next.delete(dow);
+                                    return next;
+                                  })}
+                                />
+                                {dayLabel}
+                              </label>
+                            ))}
+                          </div>
+                          <button type="button"
+                            onClick={() => copyDayShifts(selectedDay, Array.from(copyTargets))}
+                            disabled={copyTargets.size === 0}
+                            className="w-full text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-2 py-1 hover:bg-amber-400/10 disabled:opacity-40 disabled:cursor-not-allowed mt-1"
+                          >
+                            Apply to selected
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {copyMessage && (
+                  <p className="text-cyan-400 text-xs mb-2">✓ {copyMessage}</p>
+                )}
+
+                <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-3 space-y-3">
+                  {(() => {
+                    const dayShifts = profileForm.shifts
+                      .map((s, i) => ({ s, i }))
+                      .filter(({ s }) => s.day_of_week === selectedDay);
+                    if (dayShifts.length === 0) {
+                      return (
+                        <p className="text-gray-600 text-xs italic text-center py-4">
+                          No shifts on {DAY_NAMES[selectedDay]}. Add one below.
+                        </p>
+                      );
+                    }
+                    return dayShifts.map(({ s, i }, orderIdx) => {
+                      const endTime   = computeEndTime(s.shift_start_time, s.shift_length_hours);
+                      const overnight = isOvernight(s.shift_start_time, endTime);
+                      const zeroLen   = !(Number(s.shift_length_hours) > 0);
+                      return (
+                        <div key={s.clientKey ?? s.id ?? i} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500 text-[10px] tracking-widest">SHIFT {orderIdx + 1}</span>
+                            <button type="button" onClick={() => removeShiftAt(i)} aria-label="Remove shift"
+                              className="text-red-400 hover:text-red-300 text-sm">✕</button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-gray-600 text-[10px] tracking-widest mb-1">START</label>
+                              <input
+                                type="time"
+                                value={s.shift_start_time.slice(0, 5)}
+                                onChange={(e) => {
+                                  // Keep END constant; recompute length so a start-time move
+                                  // shrinks/expands the shift rather than sliding the end.
+                                  const oldEnd    = computeEndTime(s.shift_start_time, s.shift_length_hours);
+                                  const newStart  = `${e.target.value}:00`;
+                                  const newLength = computeLengthHours(newStart, oldEnd);
+                                  updateShiftAt(i, { shift_start_time: newStart, shift_length_hours: newLength });
+                                }}
+                                className="w-full bg-[#0B1526] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-gray-600 text-[10px] tracking-widest mb-1">END</label>
+                              <input
+                                type="time"
+                                value={endTime}
+                                onChange={(e) => {
+                                  const newLength = computeLengthHours(s.shift_start_time, e.target.value);
+                                  updateShiftAt(i, { shift_length_hours: newLength });
+                                }}
+                                className={`w-full bg-[#0B1526] border rounded px-2 py-1 text-gray-200 text-xs ${
+                                  zeroLen ? 'border-red-500' : 'border-[#1A3050]'
+                                }`}
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <label className="text-gray-500 text-[10px] tracking-widest">GUARDS</label>
+                            <input type="number" min="1" max="10" step="1" value={s.guards_needed}
+                              onChange={(e) => updateShiftAt(i, { guards_needed: Math.max(1, Math.min(10, Number(e.target.value) || 1)) })}
+                              className="bg-[#0B1526] border border-[#1A3050] rounded px-2 py-1 text-gray-200 text-xs w-14"
+                            />
+                            <span className="text-gray-500 text-xs">
+                              {s.guards_needed === 1 ? 'guard' : 'guards'} · {Number(s.shift_length_hours).toFixed(Number(s.shift_length_hours) % 1 === 0 ? 0 : 2)}h
+                            </span>
+                            {overnight && !zeroLen && (
+                              <span className="ml-auto text-[10px] text-cyan-400 tracking-widest">→ next day</span>
+                            )}
+                            {zeroLen && (
+                              <span className="ml-auto text-[10px] text-red-400 tracking-widest">start = end</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+
+                  <button type="button" onClick={() => addShiftToDay(selectedDay)}
+                    className="w-full text-xs text-amber-400 tracking-widest border border-amber-400/40 border-dashed rounded px-2 py-2 hover:bg-amber-400/10 hover:border-amber-400 hover:border-solid transition-colors"
+                  >
+                    + ADD SHIFT
+                  </button>
+                </div>
+
+                {/* Coverage summary */}
+                <div className="mt-3 bg-[#0B1526] border border-amber-400/30 rounded-lg p-3">
+                  <p className="text-amber-400 font-bold tracking-widest text-[10px] mb-1">COVERAGE SUMMARY</p>
+                  <p className="text-gray-300 text-xs">
+                    {profileFormSummary.shiftsWeek} shift{profileFormSummary.shiftsWeek === 1 ? '' : 's'}/week ·{' '}
+                    {profileFormSummary.hoursWeek.toFixed(profileFormSummary.hoursWeek % 1 === 0 ? 0 : 1)}h coverage
+                  </p>
+                  <p className="text-gray-300 text-xs">
+                    {profileFormSummary.guardsWeek} guard{profileFormSummary.guardsWeek === 1 ? '' : 's'} needed/week
+                  </p>
+                </div>
               </div>
             </div>
 
-            <div className="flex gap-3 mt-6">
+            <div className="flex gap-3">
               <button
                 onClick={closeProfileModal}
                 className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
