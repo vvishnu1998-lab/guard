@@ -3,8 +3,8 @@
  * Activity Log table — shared between the admin activity page and the
  * client portal. Driven by GET /api/activity-log.
  *
- * Redesigned columns:
- *   GUARD · STATUS · SHIFT · LOG TIME · LOG MEDIA · ACTIONS
+ * Columns:
+ *   GUARD · STATUS · LOG TIME · LOG MEDIA · ACTIONS
  *
  * ACTIONS toggles an inline accordion under the row with the full
  * detail — Reported By, Report Type, Site, Timestamp, Description,
@@ -13,13 +13,25 @@
  * the client sub-route (`/client/reports/[reportId]/photos`) is kept
  * so incident-alert emails already in inboxes still land on a page.
  *
+ * STATUS taxonomy (see statusPresentation for pill formatting):
+ *   clocked_in_on_time      → green "Clocked In at HH:MM"
+ *   clocked_in_late         → red   "Clocked In at HH:MM (+Nm late)"
+ *   missed_clock_in         → red   "Missed Clock In at HH:MM"
+ *   missed_report           → red   "Missed Report at HH:00"
+ *   on_time (ping)          → green "Ping (on time)"
+ *   late (ping)             → green "Ping (+Nm late)"    (server text
+ *                                    is the source; boundary [0, 30])
+ *   missed (ping)           → red   "Missed Ping"
+ *   activity_report         → blue  "Activity Report"
+ *   incident_report         → red   "Incident Report"
+ *   maintenance_report      → amber "Maintenance Report"
+ *
  * Filter modes:
  *   admin  → search + site + shift + range picker + DOWNLOAD PDF
  *   client → range picker only (site implicit, guard search hidden)
  *
- * Live-guard status (green/on-time, amber/late, red/missed, badge-
- * colored report types) uses computeLateness from apps/web/lib/lateness
- * for pings. Reports get their type as the badge; missed rows are red.
+ * Default date range is *today* (00:00 → 23:59 local). Widens to 30 d
+ * only when a deep-link `?report=<id>` targets an older row.
  *
  * PDF export (admin only): POSTs the current filter state to
  * /api/admin/activity-log/pdf and triggers a browser download of the
@@ -35,7 +47,11 @@ type StatusKind =
   | 'missed'
   | 'activity_report'
   | 'incident_report'
-  | 'maintenance_report';
+  | 'maintenance_report'
+  | 'clocked_in_on_time'
+  | 'clocked_in_late'
+  | 'missed_clock_in'
+  | 'missed_report';
 
 interface ActivityRow {
   id:              string;
@@ -124,11 +140,6 @@ function fmtLogTime(iso: string | null): string {
   return `${PT_TIME.format(d)} · ${PT_DAY.format(d)}`;
 }
 
-function fmtShiftWindow(start: string | null, end: string | null): string {
-  if (!start || !end) return '—';
-  return `${PT_TIME.format(new Date(start))} → ${PT_TIME.format(new Date(end))}`;
-}
-
 function fmtSessionLabel(s: AdminSession): string {
   const d = new Date(s.clocked_in_at);
   const date = PT_DAY.format(d);
@@ -154,46 +165,61 @@ interface StatusPresentation {
   pillClass: string;
 }
 
+const GREEN_PILL = 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300';
+const RED_PILL   = 'bg-rose-500/15    border-rose-500/40    text-rose-300';
+const BLUE_PILL  = 'bg-sky-500/15     border-sky-500/40     text-sky-300';
+const AMBER_PILL = 'bg-amber-500/15   border-amber-500/40   text-amber-300';
+
 function statusPresentation(r: ActivityRow): StatusPresentation {
   switch (r.status_kind) {
     case 'on_time':
     case 'late': {
       const late = computeLateness(r.log_time, [0, 30]);
       // computeLateness returns "HH:MM (on time)" or "HH:MM (+Nm late)" —
-      // we only want the parenthesized qualifier here since the LOG TIME
+      // we only want the parenthesized qualifier since the LOG TIME
       // column already shows the timestamp.
       const paren = late.display.match(/\(([^)]+)\)/)?.[1] ?? '';
       const label = paren ? `Ping (${paren})` : r.status;
-      return {
-        label,
-        textClass: 'text-emerald-400',
-        pillClass: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300',
-      };
+      return { label, textClass: 'text-emerald-400', pillClass: GREEN_PILL };
     }
     case 'missed':
+      return { label: 'Missed Ping', textClass: 'text-rose-400', pillClass: RED_PILL };
+    case 'clocked_in_on_time':
       return {
-        label:     'Missed Ping',
+        label:     `Clocked In at ${PT_TIME.format(new Date(r.log_time ?? r.event_time))}`,
+        textClass: 'text-emerald-400',
+        pillClass: GREEN_PILL,
+      };
+    case 'clocked_in_late': {
+      const late = r.log_time && r.scheduled_start
+        ? Math.max(0, Math.floor(
+            (new Date(r.log_time).getTime() - new Date(r.scheduled_start).getTime()) / 60_000,
+          ))
+        : 0;
+      return {
+        label:     `Clocked In at ${PT_TIME.format(new Date(r.log_time ?? r.event_time))} (+${late}m late)`,
         textClass: 'text-rose-400',
-        pillClass: 'bg-rose-500/15 border-rose-500/40 text-rose-300',
+        pillClass: RED_PILL,
+      };
+    }
+    case 'missed_clock_in':
+      return {
+        label:     `Missed Clock In at ${PT_TIME.format(new Date(r.scheduled_start ?? r.event_time))}`,
+        textClass: 'text-rose-400',
+        pillClass: RED_PILL,
+      };
+    case 'missed_report':
+      return {
+        label:     `Missed Report at ${PT_TIME.format(new Date(r.event_time))}`,
+        textClass: 'text-rose-400',
+        pillClass: RED_PILL,
       };
     case 'activity_report':
-      return {
-        label:     'Activity Report',
-        textClass: 'text-sky-400',
-        pillClass: 'bg-sky-500/15 border-sky-500/40 text-sky-300',
-      };
+      return { label: 'Activity Report',    textClass: 'text-sky-400',   pillClass: BLUE_PILL };
     case 'incident_report':
-      return {
-        label:     'Incident Report',
-        textClass: 'text-red-400',
-        pillClass: 'bg-red-500/15 border-red-500/40 text-red-300',
-      };
+      return { label: 'Incident Report',    textClass: 'text-red-400',   pillClass: RED_PILL };
     case 'maintenance_report':
-      return {
-        label:     'Maintenance Report',
-        textClass: 'text-amber-400',
-        pillClass: 'bg-amber-500/15 border-amber-500/40 text-amber-300',
-      };
+      return { label: 'Maintenance Report', textClass: 'text-amber-400', pillClass: AMBER_PILL };
     default:
       return {
         label:     r.status,
@@ -249,14 +275,18 @@ export default function ActivityLogTable({
   const [search,   setSearch]   = useState('');
 
   const today   = useMemo(() => new Date(), []);
-  const weekAgo = useMemo(() => new Date(today.getTime() - 7 * 86_400_000), [today]);
-  // 30d widen when a deep-link is present — an incident-alert email might
-  // land in the inbox a week later; the default 7d would silently hide it.
-  const [dateFrom, setDateFrom] = useState(() => {
-    const days = highlightReportId ? 30 : 7;
-    return isoDateOnly(new Date(today.getTime() - days * 86_400_000));
-  });
-  const [dateTo, setDateTo] = useState(isoDateOnly(today));
+  const todayStr = useMemo(() => isoDateOnly(today), [today]);
+  // Default range is *today* — audit-trail intent is "what happened
+  // during today's shifts". The old 7-day default hid low-signal rows
+  // like Clocked In and Missed Ping behind noise. 30 d widen only kicks
+  // in when a deep-link `?report=<id>` targets an older row so incident
+  // emails still land on the referenced event.
+  const [dateFrom, setDateFrom] = useState(() =>
+    highlightReportId
+      ? isoDateOnly(new Date(today.getTime() - 30 * 86_400_000))
+      : todayStr,
+  );
+  const [dateTo, setDateTo] = useState(todayStr);
 
   // Compact date-range picker popover
   const [rangeOpen,   setRangeOpen]   = useState(false);
@@ -390,16 +420,16 @@ export default function ActivityLogTable({
     setRangeOpen(false);
   }
   function resetRange() {
-    setPendingFrom(isoDateOnly(weekAgo));
-    setPendingTo(isoDateOnly(today));
+    setPendingFrom(todayStr);
+    setPendingTo(todayStr);
   }
 
   function clearFilters() {
     setSiteId('');
     setSessionId('');
     setSearch('');
-    setDateFrom(isoDateOnly(weekAgo));
-    setDateTo(isoDateOnly(today));
+    setDateFrom(todayStr);
+    setDateTo(todayStr);
   }
 
   const rangeLabel = useMemo(() => {
@@ -409,7 +439,7 @@ export default function ActivityLogTable({
   }, [dateFrom, dateTo]);
 
   const hasFilters = mode === 'admin'
-    && (siteId || sessionId || search || dateFrom !== isoDateOnly(weekAgo) || dateTo !== isoDateOnly(today));
+    && (siteId || sessionId || search || dateFrom !== todayStr || dateTo !== todayStr);
 
   async function downloadPdf() {
     if (mode !== 'admin' || pdfLoading) return;
@@ -541,7 +571,7 @@ export default function ActivityLogTable({
                     onClick={resetRange}
                     className="text-[10px] text-gray-500 tracking-widest hover:text-amber-400"
                   >
-                    RESET (7d)
+                    TODAY
                   </button>
                   <div className="flex gap-2">
                     <button
@@ -580,10 +610,9 @@ export default function ActivityLogTable({
       {/* Table */}
       <div className="bg-[#0B1526] border border-[#1A3050] rounded-xl overflow-hidden">
         {/* Header row */}
-        <div className="grid grid-cols-[1fr_180px_130px_150px_120px_60px] gap-4 px-4 py-3 border-b border-[#1A3050] bg-[#0F1E35]">
+        <div className="grid grid-cols-[1fr_220px_180px_120px_60px] gap-4 px-4 py-3 border-b border-[#1A3050] bg-[#0F1E35]">
           <span className="text-[10px] text-gray-500 tracking-widest">GUARD</span>
           <span className="text-[10px] text-gray-500 tracking-widest">STATUS</span>
-          <span className="text-[10px] text-gray-500 tracking-widest">SHIFT</span>
           <span className="text-[10px] text-gray-500 tracking-widest">LOG TIME</span>
           <span className="text-[10px] text-gray-500 tracking-widest">LOG MEDIA</span>
           <span className="text-[10px] text-gray-500 tracking-widest text-right">ACTIONS</span>
@@ -612,7 +641,7 @@ export default function ActivityLogTable({
                   if (el) rowRefs.current.set(r.id, el);
                   else    rowRefs.current.delete(r.id);
                 }}
-                className={`grid grid-cols-[1fr_180px_130px_150px_120px_60px] gap-4 px-4 py-3 border-b border-[#1A3050] items-center transition-colors ${
+                className={`grid grid-cols-[1fr_220px_180px_120px_60px] gap-4 px-4 py-3 border-b border-[#1A3050] items-center transition-colors ${
                   isOpen ? 'bg-[#0F1E35]' : 'hover:bg-[#0F1E35]'
                 } ${isFlash ? 'ring-2 ring-inset ring-amber-400 bg-amber-400/5' : ''}`}
               >
@@ -633,11 +662,6 @@ export default function ActivityLogTable({
                     {status.label.toUpperCase()}
                   </span>
                 </div>
-
-                {/* SHIFT window */}
-                <span className="text-xs text-gray-400 font-mono">
-                  {fmtShiftWindow(r.scheduled_start, r.scheduled_end)}
-                </span>
 
                 {/* LOG TIME */}
                 <span className="text-xs text-gray-400">{fmtLogTime(r.log_time)}</span>
