@@ -1,14 +1,20 @@
 /**
  * Activity Log — unified feed of pings (with missed/late synthesized rows)
  * and full reports (activity / incident / maintenance). Drives the admin
- * "Activity Log" page and the client portal's site activity view.
+ * "Activity Logs" page and the client portal's site activity view.
  *
  * GET /api/activity-log
  *   ?from=ISO  (default: now - 7 days)
  *   ?to=ISO    (default: now)
  *   ?guard_id=UUID         (company_admin only)
+ *   ?site_id=UUID          (company_admin only)
+ *   ?session_id=UUID       (company_admin only)
  *   ?page=1
  *   ?page_size=10          (max 100)
+ *
+ * POST /api/activity-log/pdf
+ *   body: { from, to, guard_id?, site_id?, session_id? }
+ *   Streams application/pdf. company_admin only.
  *
  * Scope:
  *   - company_admin → all shift_sessions within the company
@@ -28,23 +34,39 @@
  * volumes (a few hundred rows); revisit if it grows.
  */
 import { Router, Request, Response } from 'express';
+import PDFDocument from 'pdfkit';
 import { pool } from '../db/pool';
 import { requireAuth } from '../middleware/auth';
 import { urlOrPresign, presignAll } from '../services/s3';
+import {
+  NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
+  PAGE_W, PAGE_H, ML, MR, CW,
+  drawHeader, drawFooter, badge,
+} from '../services/pdf/theme';
 
 const router = Router();
 
 const WINDOW_MIN = 30;
 const LATE_THRESHOLD_MIN = 10;
 
+// Hard cap on rows the PDF export walks. 3000 events is ~150 pages
+// at ~20 rows/page — anything larger and the user should narrow their
+// filter. Cap logged in the PDF footer if it fires.
+const PDF_ROW_CAP = 3000;
+
 interface SessionRow {
-  session_id:     string;
-  guard_id:       string;
-  guard_name:     string;
-  site_id:        string;
-  site_name:      string;
-  clocked_in_at:  string;
-  clocked_out_at: string | null;
+  session_id:      string;
+  guard_id:        string;
+  guard_name:      string;
+  site_id:         string;
+  site_name:       string;
+  clocked_in_at:   string;
+  clocked_out_at:  string | null;
+  // Threaded through to every row emitted from this session so the
+  // client can render the SHIFT column and compute lateness itself.
+  shift_id:        string;
+  scheduled_start: string;
+  scheduled_end:   string;
 }
 
 interface PingRow {
@@ -62,12 +84,17 @@ interface PingRow {
 interface ReportRow {
   id:           string;
   report_type:  'activity' | 'incident' | 'maintenance';
+  severity:     'low' | 'medium' | 'high' | 'critical' | null;
+  description:  string;
   reported_at:  string;
   guard_id:     string;
   guard_name:   string;
   site_id:      string;
   site_name:    string;
   photos:       string[] | null;
+  shift_id:        string;
+  scheduled_start: string;
+  scheduled_end:   string;
 }
 
 type StatusKind = 'on_time' | 'late' | 'missed' | 'activity_report' | 'incident_report' | 'maintenance_report';
@@ -88,6 +115,18 @@ export interface ActivityRow {
   log_media_urls: string[];
   event_time:     string;        // used for sort + ordering only
   detail_id:      string | null; // ping id or report id; null for synthesized missed rows
+
+  // Parent shift + schedule window — populated for every row (pings,
+  // reports, synthesized missed rows). Enables the new SHIFT column
+  // ("HH:MM → HH:MM") and drives client-side computeLateness().
+  shift_id:        string | null;
+  scheduled_start: string | null;
+  scheduled_end:   string | null;
+
+  // Report-only fields (null on pings + missed rows).
+  report_type:  'activity' | 'incident' | 'maintenance' | null;
+  severity:     'low' | 'medium' | 'high' | 'critical' | null;
+  description:  string | null;
 
   // Ping-only fields, server-side gated to admin role. Clients receive `null`
   // across the board for these — guard movements are not exposed over the
@@ -124,32 +163,51 @@ function buildPingStatus(deltaMin: number): { text: string; kind: 'on_time' | 'l
   return { text: `Late Ping (${m} ${plural})`, kind: 'late' };
 }
 
-router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res: Response) => {
-  const { from, to, guard_id, site_id, session_id, page = '1', page_size = '10' } = req.query;
-  const pageNum  = Math.max(1, parseInt(page as string, 10) || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(page_size as string, 10) || 10));
-  const offset   = (pageNum - 1) * pageSize;
+export interface FetchOpts {
+  fromIso:    string;
+  toIso:      string;
+  guardId?:   string;
+  siteId?:    string;
+  sessionId?: string;
+}
 
-  const fromIso = (from as string) || new Date(Date.now() - 7 * 86_400_000).toISOString();
-  const toIso   = (to   as string) || new Date().toISOString();
-  const fromMs  = Date.parse(fromIso);
-  const toMs    = Date.parse(toIso);
+export interface UserScope {
+  role:        'company_admin' | 'client';
+  company_id?: string;
+  site_id?:    string;
+}
+
+/** Hard cap on rows the PDF export walks. Re-exported for admin.ts. */
+export const ACTIVITY_PDF_ROW_CAP = PDF_ROW_CAP;
+
+/**
+ * Core fetch: run the sessions/pings/reports queries and merge into a
+ * single ActivityRow[] (unsorted, unpaginated, photo URLs NOT presigned).
+ * Shared by GET / (paginate → presign → JSON) and the admin PDF endpoint
+ * (sort → render → stream). See top-of-file docblock for the window rules.
+ */
+export async function fetchActivityRows(
+  scope: UserScope,
+  opts:  FetchOpts,
+): Promise<ActivityRow[]> {
+  const { fromIso, toIso, guardId, siteId, sessionId } = opts;
+  const fromMs = Date.parse(fromIso);
+  const toMs   = Date.parse(toIso);
 
   // ── Scope filter ─────────────────────────────────────────────────────────
-  const { user } = req;
   let scopeWhere: string;
   let scopeParams: unknown[];
-  if (user!.role === 'client') {
+  if (scope.role === 'client') {
     scopeWhere  = 'ss.site_id = $1';
-    scopeParams = [user!.site_id];
+    scopeParams = [scope.site_id];
   } else {
     scopeWhere  = 'si.company_id = $1';
-    scopeParams = [user!.company_id];
+    scopeParams = [scope.company_id];
   }
 
   // Admin-only narrowing: site_id + session_id
   // (clients are already site-scoped; client-supplied site_id is ignored)
-  const isAdmin = user!.role === 'company_admin';
+  const isAdmin = scope.role === 'company_admin';
 
   // ── Pull every shift_session that overlaps [fromIso, toIso] ──────────────
   let sessionQuery = `
@@ -159,28 +217,31 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       g.name             AS guard_name,
       ss.site_id,
       si.name            AS site_name,
-      si.is_active       AS site_is_active,
       ss.clocked_in_at,
-      ss.clocked_out_at
+      ss.clocked_out_at,
+      sh.id              AS shift_id,
+      sh.scheduled_start,
+      sh.scheduled_end
     FROM shift_sessions ss
-    JOIN guards g ON g.id = ss.guard_id
+    JOIN guards g  ON g.id  = ss.guard_id
     JOIN sites  si ON si.id = ss.site_id
+    JOIN shifts sh ON sh.id = ss.shift_id
     WHERE ${scopeWhere}
       AND ss.clocked_in_at < $${scopeParams.length + 1}
       AND COALESCE(ss.clocked_out_at, NOW()) > $${scopeParams.length + 2}`;
   const sessionParams: unknown[] = [...scopeParams, toIso, fromIso];
 
-  if (guard_id && isAdmin) {
+  if (guardId && isAdmin) {
     sessionQuery += ` AND ss.guard_id = $${sessionParams.length + 1}`;
-    sessionParams.push(guard_id);
+    sessionParams.push(guardId);
   }
-  if (site_id && isAdmin) {
+  if (siteId && isAdmin) {
     sessionQuery += ` AND ss.site_id = $${sessionParams.length + 1}`;
-    sessionParams.push(site_id);
+    sessionParams.push(siteId);
   }
-  if (session_id && isAdmin) {
+  if (sessionId && isAdmin) {
     sessionQuery += ` AND ss.id = $${sessionParams.length + 1}`;
-    sessionParams.push(session_id);
+    sessionParams.push(sessionId);
   }
   const sessionsResult = await pool.query<SessionRow>(sessionQuery, sessionParams);
   const sessions = sessionsResult.rows;
@@ -207,36 +268,41 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
     SELECT
       r.id,
       r.report_type,
+      r.severity,
+      r.description,
       r.reported_at,
       ss.guard_id,
       g.name AS guard_name,
       r.site_id,
       si.name      AS site_name,
-      si.is_active AS site_is_active,
+      sh.id              AS shift_id,
+      sh.scheduled_start,
+      sh.scheduled_end,
       array_agg(rp.storage_url ORDER BY rp.photo_index) FILTER (WHERE rp.id IS NOT NULL) AS photos
     FROM reports r
     JOIN shift_sessions ss ON ss.id = r.shift_session_id
     JOIN guards g  ON g.id  = ss.guard_id
     JOIN sites  si ON si.id = r.site_id
+    JOIN shifts sh ON sh.id = ss.shift_id
     LEFT JOIN report_photos rp ON rp.report_id = r.id
     WHERE ${scopeWhere}
       AND r.reported_at >= $${scopeParams.length + 1}
       AND r.reported_at <= $${scopeParams.length + 2}`;
   const reportParams: unknown[] = [...scopeParams, fromIso, toIso];
 
-  if (guard_id && isAdmin) {
+  if (guardId && isAdmin) {
     reportQuery += ` AND ss.guard_id = $${reportParams.length + 1}`;
-    reportParams.push(guard_id);
+    reportParams.push(guardId);
   }
-  if (site_id && isAdmin) {
+  if (siteId && isAdmin) {
     reportQuery += ` AND r.site_id = $${reportParams.length + 1}`;
-    reportParams.push(site_id);
+    reportParams.push(siteId);
   }
-  if (session_id && isAdmin) {
+  if (sessionId && isAdmin) {
     reportQuery += ` AND ss.id = $${reportParams.length + 1}`;
-    reportParams.push(session_id);
+    reportParams.push(sessionId);
   }
-  reportQuery += ' GROUP BY r.id, ss.guard_id, g.name, si.name, si.is_active';
+  reportQuery += ' GROUP BY r.id, ss.guard_id, g.name, si.name, sh.id, sh.scheduled_start, sh.scheduled_end';
   const reportsResult = await pool.query<ReportRow>(reportQuery, reportParams);
 
   // ── Build merged feed ────────────────────────────────────────────────────
@@ -289,7 +355,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
             log_media_urls: ping.photo_url ? [ping.photo_url] : [],
             event_time:     ping.pinged_at,
             detail_id:      ping.id,
-            // Admin-only ping fields; nulled for client-role requests.
+            shift_id:        s.shift_id,
+            scheduled_start: s.scheduled_start,
+            scheduled_end:   s.scheduled_end,
+            report_type:  null,
+            severity:     null,
+            description:  null,
             latitude:           isAdmin ? ping.latitude           : null,
             longitude:          isAdmin ? ping.longitude          : null,
             accuracy_m:         isAdmin ? ping.accuracy_meters    : null,
@@ -311,7 +382,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
             log_media_urls: [],
             event_time:     new Date(windowStart).toISOString(),
             detail_id:      null,
-            // Missed-ping synth rows have no underlying ping; always null.
+            shift_id:        s.shift_id,
+            scheduled_start: s.scheduled_start,
+            scheduled_end:   s.scheduled_end,
+            report_type:  null,
+            severity:     null,
+            description:  null,
             latitude:           null,
             longitude:          null,
             accuracy_m:         null,
@@ -343,7 +419,12 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       log_media_urls: photos,
       event_time:     r.reported_at,
       detail_id:      r.id,
-      // Reports are not pings — always null on these fields regardless of role.
+      shift_id:        r.shift_id,
+      scheduled_start: r.scheduled_start,
+      scheduled_end:   r.scheduled_end,
+      report_type:  r.report_type,
+      severity:     r.severity,
+      description:  r.description,
       latitude:           null,
       longitude:          null,
       accuracy_m:         null,
@@ -351,6 +432,31 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
       ping_type:          null,
     });
   }
+
+  return rows;
+}
+
+router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res: Response) => {
+  const { from, to, guard_id, site_id, session_id, page = '1', page_size = '10' } = req.query;
+  const pageNum  = Math.max(1, parseInt(page as string, 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(page_size as string, 10) || 10));
+  const offset   = (pageNum - 1) * pageSize;
+
+  const fromIso = (from as string) || new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const toIso   = (to   as string) || new Date().toISOString();
+
+  const scope: UserScope = {
+    role:       req.user!.role as 'company_admin' | 'client',
+    company_id: req.user!.company_id,
+    site_id:    req.user!.site_id,
+  };
+
+  const rows = await fetchActivityRows(scope, {
+    fromIso, toIso,
+    guardId:   guard_id  as string | undefined,
+    siteId:    site_id   as string | undefined,
+    sessionId: session_id as string | undefined,
+  });
 
   // Newest first
   rows.sort((a, b) => Date.parse(b.event_time) - Date.parse(a.event_time));
@@ -374,5 +480,9 @@ router.get('/', requireAuth('company_admin', 'client'), async (req: Request, res
     total_pages: Math.max(1, Math.ceil(total / pageSize)),
   });
 });
+
+// PDF export lives at POST /api/admin/activity-log/pdf — see
+// apps/api/src/routes/admin.ts. It imports fetchActivityRows from here.
+
 
 export default router;

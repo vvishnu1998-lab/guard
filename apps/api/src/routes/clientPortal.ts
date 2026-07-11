@@ -21,6 +21,11 @@ import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
 import { presignAll } from '../services/s3';
+import {
+  NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
+  PAGE_W, PAGE_H, ML, MR, CW,
+  drawHeader, drawFooter, badge, proportionBar,
+} from '../services/pdf/theme';
 
 const router = Router();
 
@@ -218,62 +223,9 @@ router.post('/reports/pdf-link', requireAuth('client'), async (req: Request, res
 });
 
 // ── PDF export ────────────────────────────────────────────────────────────────
-
-// ── PDF constants ─────────────────────────────────────────────────────────────
-const NAVY   = '#0B1526';
-const WHITE  = '#FFFFFF';
-const BLUE   = '#2563EB';
-const RED    = '#DC2626';
-const AMBER  = '#D97706';
-const GRAY1  = '#F8FAFC';
-const GRAY2  = '#E2E8F0';
-const TEXT   = '#1E293B';
-const MUTED  = '#64748B';
-
-const PAGE_W = 595;
-const PAGE_H = 842;
-const ML = 50;
-const MR = 545;
-const CW = MR - ML;
-
-// ── PDF helper functions ──────────────────────────────────────────────────────
-
-function drawHeader(doc: InstanceType<typeof PDFDocument>, title: string, pageNum: number, totalPages: number) {
-  doc.rect(0, 0, PAGE_W, 72).fill(NAVY);
-  doc.fontSize(18).fillColor(WHITE).font('Helvetica-Bold').text('NetraOps', ML, 18, { lineBreak: false });
-  doc.fontSize(9).fillColor('#94A3B8').font('Helvetica').text('SECURITY MANAGEMENT', ML, 40);
-  doc.fontSize(13).fillColor(WHITE).font('Helvetica-Bold').text(title, 0, 26, { align: 'right', width: PAGE_W - ML });
-  doc.fontSize(8).fillColor('#64748B').font('Helvetica').text(`${pageNum} / ${totalPages}`, 0, 44, { align: 'right', width: PAGE_W - ML });
-}
-
-function drawFooter(doc: InstanceType<typeof PDFDocument>, siteName: string, period: string) {
-  doc.rect(0, PAGE_H - 30, PAGE_W, 30).fill('#F1F5F9');
-  doc.moveTo(ML, PAGE_H - 30).lineTo(MR, PAGE_H - 30).strokeColor(GRAY2).lineWidth(0.5).stroke();
-  doc.fontSize(7).fillColor(MUTED).font('Helvetica')
-     .text(`${siteName}  |  ${period}  |  Confidential — NetraOps`,
-           ML, PAGE_H - 20, { width: CW, align: 'center' });
-}
-
-function badge(doc: InstanceType<typeof PDFDocument>, x: number, y: number, label: string, color: string, textColor = WHITE) {
-  const w = label.length * 6 + 12;
-  doc.rect(x, y, w, 14).fill(color);
-  doc.fontSize(7).fillColor(textColor).font('Helvetica-Bold').text(label, x + 6, y + 3.5, { lineBreak: false });
-  return w;
-}
-
-function proportionBar(
-  doc: InstanceType<typeof PDFDocument>,
-  x: number, y: number, w: number, h: number,
-  segments: Array<{ value: number; color: string }>
-) {
-  const total = segments.reduce((s, seg) => s + seg.value, 0);
-  if (total === 0) { doc.rect(x, y, w, h).fill(GRAY2); return; }
-  let cx = x;
-  for (const seg of segments) {
-    const sw = (seg.value / total) * w;
-    if (sw > 0) { doc.rect(cx, y, sw, h).fill(seg.color); cx += sw; }
-  }
-}
+//
+// Theme constants + drawHeader/drawFooter/badge/proportionBar live in
+// ../services/pdf/theme so admin exports can share them without drifting.
 
 interface PdfDownloadPayload extends AuthPayload {
   purpose?: string;
