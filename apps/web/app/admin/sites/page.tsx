@@ -65,24 +65,6 @@ interface DeactivatePreview {
   open_assignments:   number;
 }
 
-// Session C — client account management inside expanded site row.
-interface Client {
-  id:                   string;
-  site_id:              string;
-  name:                 string;
-  email:                string;
-  is_active:            boolean;
-  must_change_password: boolean;
-  created_at:           string;
-  last_login_at:        string | null;
-}
-
-interface CredentialsBanner {
-  email:         string;
-  temp_password: string;
-  mode:          'created' | 'reset';
-}
-
 // Session S6 — site scheduling profiles.
 interface ProfileShift {
   id?:                 string;   // present when fetched from server
@@ -201,38 +183,6 @@ function makeShiftDraft(dow: number, prev?: ProfileShift): ProfileShift {
   };
 }
 
-// Cryptographically secure temp password for the ADD CLIENT modal. Same
-// alphabet as apps/api/src/utils/tempPassword.ts (no 0/O/I/l/1 confusion).
-const TEMP_PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
-function generateTempPasswordClient(length = 12): string {
-  const bytes = new Uint8Array(length);
-  if (typeof window === 'undefined' || !window.crypto?.getRandomValues) {
-    // Node/SSR fallback — Math.random is acceptable here because this path
-    // is only ever hit during server rendering of the initial form; the
-    // real value is regenerated in a useEffect once we're client-side.
-    for (let i = 0; i < length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  } else {
-    window.crypto.getRandomValues(bytes);
-  }
-  let out = '';
-  for (let i = 0; i < length; i++) out += TEMP_PW_ALPHABET[bytes[i] % TEMP_PW_ALPHABET.length];
-  return out;
-}
-
-// "3 days ago" / "Never logged in" for the client row's last-login line.
-function relativeTime(iso: string | null): string {
-  if (!iso) return 'Never logged in';
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 60_000)                return 'just now';
-  if (diff < 3_600_000)             return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000)            return `${Math.floor(diff / 3_600_000)}h ago`;
-  const days = Math.floor(diff / 86_400_000);
-  if (days < 30)                    return `${days}d ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12)                  return `${months}mo ago`;
-  return `${Math.floor(months / 12)}y ago`;
-}
-
 type GeoMode = 'radius' | 'draw';
 type StatusFilter = 'enabled' | 'disabled' | 'all';
 
@@ -311,8 +261,6 @@ export default function SitesPage() {
   const [focusPoint,      setFocusPoint]      = useState<LatLng | null>(null);
   const [polygonOffsetWarnDismissed, setPolygonOffsetWarnDismissed] = useState(false);
 
-  const [toggling,     setToggling]     = useState<string | null>(null);
-
   // deactivate flow
   const [deactivateSite,     setDeactivateSite]     = useState<Site | null>(null);
   const [deactivatePreview,  setDeactivatePreview]  = useState<DeactivatePreview | null>(null);
@@ -326,21 +274,6 @@ export default function SitesPage() {
   const [pdfSaving,    setPdfSaving]    = useState(false);
   const [pdfError,     setPdfError]     = useState('');
   const pdfInputRef                     = useRef<HTMLInputElement>(null);
-
-  // Session C — client management state.
-  //   clientsPerSite: lazy-fetched on first expand of a site row.
-  //   clientBanner: green banner shown after CREATE or RESET-PASSWORD;
-  //     dismissable, never auto-hides (admin must copy the temp password).
-  //   clientModalMode: 'add' | 'edit' | null; drives which modal renders.
-  const [clientsPerSite, setClientsPerSite] = useState<Record<string, Client[] | undefined>>({});
-  const [clientBanner,   setClientBanner]   = useState<CredentialsBanner | null>(null);
-  const [clientModalMode, setClientModalMode] = useState<'add' | 'edit' | null>(null);
-  const [clientModalSite, setClientModalSite] = useState<string | null>(null);
-  const [editingClient,   setEditingClient]   = useState<Client | null>(null);
-  const [clientForm,     setClientForm]     = useState({ name: '', email: '', password: '' });
-  const [clientSaving,   setClientSaving]   = useState(false);
-  const [clientFormError, setClientFormError] = useState('');
-  const [clientToggling, setClientToggling] = useState<string | null>(null);
 
   // Session S6 — scheduling profiles state.
   const [profilesPerSite, setProfilesPerSite] = useState<Record<string, Profile[] | undefined>>({});
@@ -594,124 +527,6 @@ export default function SitesPage() {
   // parts (see computeShiftParts).
   const shiftParts = useMemo(() => computeShiftParts(profileForm.shifts), [profileForm.shifts]);
 
-  // ── Session C — client management handlers ─────────────────────────────
-  async function fetchClientsForSite(siteId: string) {
-    try {
-      const list = await adminGet<Client[]>(`/api/clients/${siteId}`);
-      setClientsPerSite((prev) => ({ ...prev, [siteId]: list }));
-    } catch (e: any) {
-      // Set to empty so we don't retry infinitely; surface inline error.
-      setClientsPerSite((prev) => ({ ...prev, [siteId]: [] }));
-      setError(e?.message ?? 'Failed to load clients');
-    }
-  }
-
-  function openAddClientModal(siteId: string) {
-    setClientModalMode('add');
-    setClientModalSite(siteId);
-    setEditingClient(null);
-    setClientForm({ name: '', email: '', password: generateTempPasswordClient(12) });
-    setClientFormError('');
-  }
-
-  function openEditClientModal(siteId: string, client: Client) {
-    setClientModalMode('edit');
-    setClientModalSite(siteId);
-    setEditingClient(client);
-    setClientForm({ name: client.name, email: client.email, password: '' });
-    setClientFormError('');
-  }
-
-  function closeClientModal() {
-    setClientModalMode(null);
-    setClientModalSite(null);
-    setEditingClient(null);
-    setClientForm({ name: '', email: '', password: '' });
-    setClientFormError('');
-  }
-
-  function regenerateTempPassword() {
-    setClientForm((f) => ({ ...f, password: generateTempPasswordClient(12) }));
-  }
-
-  async function saveNewClient() {
-    if (!clientModalSite) return;
-    const name  = clientForm.name.trim();
-    const email = clientForm.email.trim().toLowerCase();
-    if (name.length < 2) { setClientFormError('Full name must be at least 2 characters'); return; }
-    if (!email.includes('@')) { setClientFormError('Enter a valid email address'); return; }
-    setClientSaving(true); setClientFormError('');
-    try {
-      const r = await adminPost<{ client: Client; temp_password?: string }>('/api/clients', {
-        site_id: clientModalSite,
-        name,
-        email,
-        password: clientForm.password,
-      });
-      // Client generated the password locally, so surface it in the banner
-      // rather than r.temp_password (which the server only echoes back on
-      // auto-generate).
-      setClientBanner({ email: r.client.email, temp_password: clientForm.password, mode: 'created' });
-      const targetSite = clientModalSite;
-      closeClientModal();
-      if (targetSite) fetchClientsForSite(targetSite);
-    } catch (e: any) { setClientFormError(e?.message ?? 'Failed to create client'); }
-    finally { setClientSaving(false); }
-  }
-
-  async function saveEditedClient() {
-    if (!editingClient) return;
-    const name  = clientForm.name.trim();
-    const email = clientForm.email.trim().toLowerCase();
-    const changes: Record<string, unknown> = {};
-    if (name  !== editingClient.name)  changes.name  = name;
-    if (email !== editingClient.email) changes.email = email;
-    if (Object.keys(changes).length === 0) { closeClientModal(); return; }
-    setClientSaving(true); setClientFormError('');
-    try {
-      await adminPatch(`/api/clients/${editingClient.id}`, changes);
-      const targetSite = clientModalSite;
-      closeClientModal();
-      if (targetSite) fetchClientsForSite(targetSite);
-    } catch (e: any) { setClientFormError(e?.message ?? 'Failed to save client'); }
-    finally { setClientSaving(false); }
-  }
-
-  async function resetClientPassword() {
-    if (!editingClient) return;
-    if (!confirm(`Reset password for ${editingClient.email}? Their current session ends immediately.`)) return;
-    setClientSaving(true); setClientFormError('');
-    try {
-      const r = await adminPost<{ temp_password: string; email: string }>(
-        `/api/clients/${editingClient.id}/reset-password`, {},
-      );
-      setClientBanner({ email: r.email, temp_password: r.temp_password, mode: 'reset' });
-      const targetSite = clientModalSite;
-      closeClientModal();
-      if (targetSite) fetchClientsForSite(targetSite);
-    } catch (e: any) { setClientFormError(e?.message ?? 'Failed to reset password'); }
-    finally { setClientSaving(false); }
-  }
-
-  async function toggleClientActive(client: Client, siteId: string) {
-    const msg = client.is_active
-      ? `Deactivate ${client.email}? Their session will end immediately.`
-      : `Reactivate ${client.email}? They'll need to log in again.`;
-    if (!confirm(msg)) return;
-    setClientToggling(client.id);
-    try {
-      await adminPatch(`/api/clients/${client.id}`, { is_active: !client.is_active });
-      await fetchClientsForSite(siteId);
-    } catch (e: any) {
-      setError(e?.message ?? 'Failed to update client');
-    } finally { setClientToggling(null); }
-  }
-
-  function copyCredentialsToClipboard(b: CredentialsBanner) {
-    const text = `Portal: https://netraops.com/portal\nEmail: ${b.email}\nPassword: ${b.temp_password}`;
-    navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
-  }
-
   /* ── Modal handlers (unchanged from previous version) ────────────── */
   async function openDeactivate(site: Site) {
     setDeactivateSite(site);
@@ -957,35 +772,9 @@ export default function SitesPage() {
     finally { setGeoSaving(false); }
   }
 
-  async function toggleClientAccess(id: string, enabled: boolean) {
-    setToggling(id);
-    try { await adminPatch(`/api/sites/${id}/client-access`, { enabled }); await load(); }
-    catch (e: any) { setError(e.message); }
-    finally { setToggling(null); }
-  }
-
-  // Session B — mint a 30-min read-only preview token and open /client
-  // in a new tab. clientApi.getToken() reads ?preview=<jwt>, sets the
-  // cookie, and PreviewBootstrap scrubs the URL after mount.
-  async function previewAsClient(siteId: string) {
-    try {
-      const r = await adminPost<{ access_token: string; expires_in: number }>(
-        `/api/admin/sites/${siteId}/preview-client-token`,
-        {},
-      );
-      window.open(`/client?preview=${encodeURIComponent(r.access_token)}`, '_blank', 'noopener');
-    } catch (e: any) {
-      setError(e.message ?? 'Preview failed');
-    }
-  }
-
   function fmtDate(iso: string | null) {
     if (!iso) return '—';
     return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  }
-  function daysUntil(iso: string | null) {
-    if (!iso) return null;
-    return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
   }
 
   return (
@@ -1025,10 +814,6 @@ export default function SitesPage() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      {/* Session D — the Session C credentials banner + ADD/EDIT CLIENT
-          modal both moved to /admin/clients along with the CLIENT PORTAL
-          controls. */}
-
       {/* Compact list */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         {loading && <p className="p-8 text-center text-gray-500">Loading…</p>}
@@ -1038,9 +823,6 @@ export default function SitesPage() {
         {!loading && visible.map((site) => {
           const isExpanded    = expanded.has(site.id);
           const isDeactivated = !site.is_active;
-          const clientEnabled = !site.client_access_disabled_at;
-          const accessIn      = daysUntil(site.client_star_access_until);
-          const deleteIn      = daysUntil(site.data_delete_at);
           return (
             <div key={site.id} className={`border-b border-[#1A3050] last:border-b-0 ${isDeactivated ? 'opacity-60' : ''}`}>
               {/* Collapsed row — uniform height */}
@@ -1839,9 +1621,6 @@ export default function SitesPage() {
           </div>
         </div>
       )}
-
-      {/* Session D: the Session C ADD/EDIT CLIENT modal moved to
-          /admin/clients along with the CLIENT PORTAL controls. */}
 
       {/* ── Session E — Create / Edit Scheduling Profile Modal ─────────────
           Layout: header · timeline preview · two-column editor (day list +
