@@ -1,199 +1,311 @@
 /**
- * Nightly purge — runs at 00:00 UTC (Section 11.2)
+ * Nightly retention purge — runs at 00:00 UTC.
  *
- * Five independent operations, in order:
- *  1. Delete location_ping photos older than 7 days (skip retain_as_evidence = true)
- *  2. Disable client/Star access at day 90 and update sites.client_access_disabled_at
- *  3. Send Vishnu email warning at day 140 (10 days before deletion)
- *  4. Hard-delete all operational data for sites past day 150
- *  5. Delete notification rows older than 30 days
+ * Seven independent steps, each in its own try/catch so one step
+ * failing doesn't abort the rest. Every step logs a Sentry breadcrumb
+ * with a count so a subsequent captureException (or the per-step
+ * timing summary) has attached context.
+ *
+ * Guardrail: if a step would delete > STEP_ROW_CAP rows on a single
+ * night, the step is halted and a Sentry warning is sent instead.
+ * Sized so the first time a bug or misconfigured tier would wipe
+ * many rows at once, we get an alert instead of the deletion.
+ * D3: Sentry-only alert, no SendGrid — the retention email path is
+ * being deleted this ship.
+ *
+ * Dry-run: `RETENTION_DRY_RUN` env var, code-default = TRUE. Only the
+ * literal string 'false' flips it off. During the initial 30-day
+ * observation window Vishnu keeps it TRUE and inspects Sentry
+ * breadcrumbs; flipping to 'false' in Railway env after that window
+ * is a manual toggle (deliberately not a code change).
+ *
+ * Legal hold: partial indexes (schema_v33) exclude held rows from the
+ * purge scan. All delete-eligible tables read
+ * `WHERE expires_at < NOW() AND legal_hold = false` so held rows are
+ * skipped even if the index changes. The cascade endpoint
+ * (PATCH /api/admin/reports/:id/legal-hold) walks parent + child rows
+ * so no child of a held report escapes via ON DELETE CASCADE from an
+ * expired parent.
+ *
+ * Ping photos (step 1) are a separate 7-day sweep that's independent
+ * of the retention tier — they stay unchanged from the old cron.
  */
 
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { deleteS3Object } from '../services/s3';
-import { sendVishnu140DayWarning } from '../services/email';
 import { Sentry } from '../services/sentry';
 
+const DRY_RUN = process.env.RETENTION_DRY_RUN !== 'false';
+const STEP_ROW_CAP = 10_000;
+
+interface StepResult {
+  step:      string;
+  candidate: number;   // rows the WHERE clause matched
+  deleted:   number;   // rows actually deleted (0 during dry-run / halted)
+  halted?:   boolean;
+  error?:    string;
+}
+
 cron.schedule('0 0 * * *', async () => {
-  console.log('[nightly-purge] Starting at', new Date().toISOString());
+  const start = Date.now();
+  console.log(`[retention] starting nightly purge (dry_run=${DRY_RUN})`);
+  Sentry.addBreadcrumb({
+    category: 'retention',
+    message:  `nightly purge starting`,
+    data:     { dry_run: DRY_RUN, cap: STEP_ROW_CAP },
+    level:    'info',
+  });
 
-  // ── Step 1: Delete expired ping photos ───────────────────────────────────
-  // Skips pings marked retain_as_evidence (open geofence violation evidence).
-  const expiredPings = await pool.query(
-    `SELECT id, photo_url FROM location_pings
-     WHERE photo_url IS NOT NULL
-       AND photo_delete_at < NOW()
-       AND retain_as_evidence = false`,
-  );
+  const results: StepResult[] = [];
+  results.push(await step1_pingPhotos());
+  results.push(await step2_expiredReports());
+  results.push(await step3_expiredPings());
+  results.push(await step4_expiredTaskCompletions());
+  results.push(await step5_expiredGeofenceViolations());
+  results.push(await step6_expiredShiftSessions());
+  results.push(await step7_expiredShifts());
 
-  let deletedPhotos = 0;
-  for (const ping of expiredPings.rows) {
-    try {
-      await deleteS3Object(ping.photo_url);
-      await pool.query('UPDATE location_pings SET photo_url = NULL WHERE id = $1', [ping.id]);
-      deletedPhotos++;
-    } catch (err) {
-      console.error('[nightly-purge] Failed to delete ping photo', ping.id, err);
-    }
-  }
-  console.log(`[nightly-purge] Step 1: Purged ${deletedPhotos} ping photos`);
-
-  // ── Step 2: Disable client/Star access at day 90 ─────────────────────────
-  const expiredAccess = await pool.query(
-    `UPDATE data_retention_log
-     SET client_star_access_disabled = true
-     WHERE client_star_access_until < NOW()
-       AND client_star_access_disabled = false
-     RETURNING site_id`,
-  );
-
-  for (const row of expiredAccess.rows) {
-    await Promise.all([
-      // Deactivate the client portal account + kick any live sessions.
-      // tokens_not_before mirrors the guards pattern; auth middleware
-      // rejects any client JWT whose iat predates this stamp.
-      pool.query(
-        'UPDATE clients SET is_active = false, tokens_not_before = NOW() WHERE site_id = $1',
-        [row.site_id],
-      ),
-      // Record the exact timestamp of disablement on the sites table.
-      pool.query(
-        'UPDATE sites SET client_access_disabled_at = NOW() WHERE id = $1',
-        [row.site_id],
-      ),
-    ]);
-  }
-  console.log(`[nightly-purge] Step 2: Disabled access for ${expiredAccess.rows.length} sites`);
-
-  // ── Step 3: Vishnu day-140 warning (fires 10 days before deletion) ────────
-  const approaching = await pool.query(
-    `SELECT site_id, data_delete_at
-     FROM data_retention_log
-     WHERE data_delete_at < NOW() + INTERVAL '10 days'
-       AND warning_140_sent = false
-       AND data_deleted = false`,
-  );
-
-  for (const row of approaching.rows) {
-    const daysRemaining = Math.ceil(
-      (new Date(row.data_delete_at).getTime() - Date.now()) / 86_400_000,
-    );
-    try {
-      await sendVishnu140DayWarning(row.site_id, daysRemaining);
-      await pool.query(
-        'UPDATE data_retention_log SET warning_140_sent = true WHERE site_id = $1',
-        [row.site_id],
-      );
-      console.log(`[nightly-purge] Step 3: Sent Vishnu warning for site ${row.site_id} (${daysRemaining}d)`);
-    } catch (err) {
-      console.error('[nightly-purge] Step 3: Failed to send Vishnu warning for', row.site_id, err);
-      Sentry.captureException(err, {
-        tags: { service: 'sendgrid', flow: 'vishnu_140_day_warning' },
-        extra: { site_id: row.site_id, days_remaining: daysRemaining },
-      });
-    }
-  }
-
-  // ── Step 4: Hard-delete all data for sites past day 150 ──────────────────
-  const toDelete = await pool.query(
-    `SELECT site_id FROM data_retention_log
-     WHERE data_delete_at < NOW() AND data_deleted = false`,
-  );
-
-  for (const row of toDelete.rows) {
-    await hardDeleteSiteData(row.site_id);
-  }
-  console.log(`[nightly-purge] Step 4: Hard-deleted data for ${toDelete.rows.length} sites`);
-
-  // ── Step 5: Trim notification log to 30 days ─────────────────────────────
-  const trimmed = await pool.query(
-    `DELETE FROM notifications WHERE created_at < NOW() - INTERVAL '30 days' RETURNING id`,
-  );
-  console.log(`[nightly-purge] Step 5: Trimmed ${trimmed.rowCount} old notifications`);
-
-  console.log('[nightly-purge] Complete');
+  const dur = ((Date.now() - start) / 1000).toFixed(1);
+  const totalCandidate = results.reduce((s, r) => s + r.candidate, 0);
+  const totalDeleted   = results.reduce((s, r) => s + r.deleted,   0);
+  console.log(`[retention] complete in ${dur}s — candidate=${totalCandidate} deleted=${totalDeleted}`);
+  Sentry.addBreadcrumb({
+    category: 'retention',
+    message:  `nightly purge complete`,
+    data:     { duration_s: dur, results },
+    level:    'info',
+  });
 });
 
-// ── Hard-delete helper ────────────────────────────────────────────────────────
-
-/**
- * Deletes all operational data for a site in dependency order (Section 11.2).
- * Cleans up S3 objects first, then removes DB rows in a transaction.
- * The sites/companies/guards records are kept for audit; data_retention_log
- * is updated with data_deleted = true.
- */
-async function hardDeleteSiteData(siteId: string): Promise<void> {
-  const client = await pool.connect();
+// ── Step 1 ── Ping photos at 7 days (unchanged) ──────────────────────────────
+async function step1_pingPhotos(): Promise<StepResult> {
+  const step = 'step1_ping_photos';
   try {
-    // Step A: delete S3 report photos before the DB rows disappear
-    const photos = await client.query(
+    const candidateQ = await pool.query<{ id: string; photo_url: string }>(
+      `SELECT id, photo_url FROM location_pings
+       WHERE photo_url IS NOT NULL
+         AND photo_delete_at < NOW()
+         AND retain_as_evidence = false`,
+    );
+    const candidate = candidateQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    let deleted = 0;
+    for (const row of candidateQ.rows) {
+      try {
+        await deleteS3Object(row.photo_url);
+        await pool.query('UPDATE location_pings SET photo_url = NULL WHERE id = $1', [row.id]);
+        deleted++;
+      } catch (err) {
+        console.error(`[retention.${step}] failed to delete photo for ping ${row.id}:`, err);
+      }
+    }
+    return finishStep(step, candidate, deleted);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Step 2 ── Expired reports (dependency-safe: S3 photos → cascade DELETE) ──
+async function step2_expiredReports(): Promise<StepResult> {
+  const step = 'step2_reports';
+  try {
+    const idsQ = await pool.query<{ id: string }>(
+      `SELECT id FROM reports
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = idsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    // Batch-fetch every photo URL up front, delete S3 objects, then
+    // one DELETE per report — report_photos cascades on ON DELETE CASCADE.
+    const photosQ = await pool.query<{ storage_url: string }>(
       `SELECT rp.storage_url
        FROM report_photos rp
-       JOIN reports r ON r.id = rp.report_id
-       WHERE r.site_id = $1`,
-      [siteId],
+       WHERE rp.report_id = ANY($1::uuid[])`,
+      [idsQ.rows.map((r) => r.id)],
     );
-    for (const p of photos.rows) {
+    for (const p of photosQ.rows) {
       try { await deleteS3Object(p.storage_url); } catch { /* already gone */ }
     }
 
-    // Step B: delete task completion proof photos
-    const taskPhotos = await client.query(
-      `SELECT tc.photo_url
-       FROM task_completions tc
-       JOIN task_instances ti ON ti.id = tc.task_instance_id
-       WHERE ti.site_id = $1 AND tc.photo_url IS NOT NULL`,
-      [siteId],
+    const del = await pool.query(
+      `DELETE FROM reports
+       WHERE id = ANY($1::uuid[])`,
+      [idsQ.rows.map((r) => r.id)],
     );
-    for (const p of taskPhotos.rows) {
-      try { await deleteS3Object(p.photo_url); } catch { /* already gone */ }
-    }
-
-    // Step C: delete remaining ping photos (retain_as_evidence ones skipped by purge)
-    const pingPhotos = await client.query(
-      `SELECT photo_url FROM location_pings WHERE site_id = $1 AND photo_url IS NOT NULL`,
-      [siteId],
-    );
-    for (const p of pingPhotos.rows) {
-      try { await deleteS3Object(p.photo_url); } catch { /* already gone */ }
-    }
-
-    // Step D: DB rows — delete in dependency order inside a transaction
-    await client.query('BEGIN');
-
-    await client.query(
-      `DELETE FROM task_completions
-       WHERE shift_session_id IN (SELECT id FROM shift_sessions WHERE site_id = $1)`,
-      [siteId],
-    );
-    await client.query('DELETE FROM task_instances  WHERE site_id = $1', [siteId]);
-    await client.query('DELETE FROM break_sessions  WHERE site_id = $1', [siteId]);
-    await client.query('DELETE FROM geofence_violations WHERE site_id = $1', [siteId]);
-    await client.query('DELETE FROM location_pings  WHERE site_id = $1', [siteId]);
-    await client.query('DELETE FROM clock_in_verifications WHERE site_id = $1', [siteId]);
-    await client.query(
-      `DELETE FROM report_photos
-       WHERE report_id IN (SELECT id FROM reports WHERE site_id = $1)`,
-      [siteId],
-    );
-    await client.query('DELETE FROM reports         WHERE site_id = $1', [siteId]);
-    await client.query('DELETE FROM shift_sessions  WHERE site_id = $1', [siteId]);
-    await client.query('DELETE FROM shifts          WHERE site_id = $1', [siteId]);
-    await client.query('DELETE FROM guard_site_assignments WHERE site_id = $1', [siteId]);
-
-    // Mark as deleted — keep the DRL row for audit
-    await client.query(
-      'UPDATE data_retention_log SET data_deleted = true WHERE site_id = $1',
-      [siteId],
-    );
-
-    await client.query('COMMIT');
-    console.log(`[nightly-purge] Hard-deleted data for site ${siteId}`);
+    return finishStep(step, candidate, del.rowCount ?? 0);
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(`[nightly-purge] Failed hard-delete for site ${siteId}:`, err);
-  } finally {
-    client.release();
+    return errorStep(step, err);
   }
+}
+
+// ── Step 3 ── Expired ping metadata ──────────────────────────────────────────
+async function step3_expiredPings(): Promise<StepResult> {
+  const step = 'step3_pings';
+  try {
+    const countQ = await pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM location_pings
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = Number(countQ.rows[0].n);
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      `DELETE FROM location_pings
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    return finishStep(step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Step 4 ── Expired task completions (S3 photos then DELETE) ───────────────
+async function step4_expiredTaskCompletions(): Promise<StepResult> {
+  const step = 'step4_task_completions';
+  try {
+    const rowsQ = await pool.query<{ id: string; photo_url: string | null }>(
+      `SELECT id, photo_url FROM task_completions
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = rowsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    for (const row of rowsQ.rows) {
+      if (row.photo_url) {
+        try { await deleteS3Object(row.photo_url); } catch { /* already gone */ }
+      }
+    }
+    const del = await pool.query(
+      `DELETE FROM task_completions
+       WHERE id = ANY($1::uuid[])`,
+      [rowsQ.rows.map((r) => r.id)],
+    );
+    return finishStep(step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Step 5 ── Expired geofence violations ────────────────────────────────────
+async function step5_expiredGeofenceViolations(): Promise<StepResult> {
+  const step = 'step5_geofence_violations';
+  try {
+    const countQ = await pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM geofence_violations
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = Number(countQ.rows[0].n);
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      `DELETE FROM geofence_violations
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    return finishStep(step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Step 6 ── Expired shift_sessions ─────────────────────────────────────────
+async function step6_expiredShiftSessions(): Promise<StepResult> {
+  const step = 'step6_shift_sessions';
+  try {
+    const countQ = await pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM shift_sessions
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = Number(countQ.rows[0].n);
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      `DELETE FROM shift_sessions
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    return finishStep(step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Step 7 ── Expired shifts ─────────────────────────────────────────────────
+async function step7_expiredShifts(): Promise<StepResult> {
+  const step = 'step7_shifts';
+  try {
+    const countQ = await pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM shifts
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = Number(countQ.rows[0].n);
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      `DELETE FROM shifts
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    return finishStep(step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function haltStep(step: string, candidate: number): StepResult {
+  const msg = `retention.${step}.halted count=${candidate}`;
+  console.warn(`[retention.${step}] HALT: ${candidate} rows > ${STEP_ROW_CAP} row cap`);
+  Sentry.captureMessage(msg, {
+    level: 'warning',
+    tags:  { flow: 'retention', step },
+    extra: { candidate, cap: STEP_ROW_CAP, dry_run: DRY_RUN },
+  } as unknown as Parameters<typeof Sentry.captureMessage>[1]);
+  return { step, candidate, deleted: 0, halted: true };
+}
+
+function dryRunStep(step: string, candidate: number): StepResult {
+  console.log(`[retention.${step}] DRY_RUN would delete ${candidate}`);
+  Sentry.addBreadcrumb({
+    category: 'retention',
+    message:  `${step}: DRY_RUN would delete ${candidate}`,
+    data:     { candidate },
+    level:    'info',
+  });
+  return { step, candidate, deleted: 0 };
+}
+
+function finishStep(step: string, candidate: number, deleted: number): StepResult {
+  console.log(`[retention.${step}] deleted ${deleted} rows`);
+  Sentry.addBreadcrumb({
+    category: 'retention',
+    message:  `${step}: deleted ${deleted}`,
+    data:     { candidate, deleted },
+    level:    'info',
+  });
+  return { step, candidate, deleted };
+}
+
+function errorStep(step: string, err: unknown): StepResult {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`[retention.${step}] error:`, err);
+  Sentry.captureException(err, {
+    tags: { flow: 'retention', step },
+  } as unknown as Parameters<typeof Sentry.captureException>[1]);
+  return { step, candidate: 0, deleted: 0, error: msg };
 }

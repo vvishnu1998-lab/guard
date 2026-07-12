@@ -65,13 +65,11 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
     `SELECT s.*,
             s.is_active AS site_is_active,
             c.name as company_name,
-            drl.client_star_access_until, drl.data_delete_at,
             sg.center_lat, sg.center_lng, sg.radius_meters,
             sg.polygon_coordinates,
             CASE WHEN sg.site_id IS NOT NULL THEN true ELSE false END AS has_geofence
      FROM sites s
      JOIN companies c ON c.id = s.company_id
-     LEFT JOIN data_retention_log drl ON drl.site_id = s.id
      LEFT JOIN site_geofence sg ON sg.site_id = s.id
      WHERE 1=1
        ${isVishnu ? '' : 'AND s.company_id = $1'}
@@ -88,19 +86,17 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
 
 // GET /api/sites/:id — direct fetch by id must resolve for both active and
 // deactivated sites (so the admin reactivate flow can hydrate the row).
-// Fix B (2026-07-08): dropped drl.client_star_access_disabled.
+// Retention rebuild: dropped drl.client_star_access_until + data_delete_at.
 router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const isVishnu = req.user!.role === 'vishnu';
   const result = await pool.query(
     `SELECT s.*,
             s.is_active AS site_is_active,
             c.name as company_name,
-            drl.client_star_access_until, drl.data_delete_at,
             sg.center_lat, sg.center_lng, sg.radius_meters, sg.polygon_coordinates,
             CASE WHEN sg.site_id IS NOT NULL THEN true ELSE false END AS has_geofence
      FROM sites s
      JOIN companies c ON c.id = s.company_id
-     LEFT JOIN data_retention_log drl ON drl.site_id = s.id
      LEFT JOIN site_geofence sg ON sg.site_id = s.id
      WHERE s.id = $1 ${isVishnu ? '' : 'AND s.company_id = $2'}`,
     isVishnu ? [req.params.id] : [req.params.id, req.user!.company_id]
@@ -146,13 +142,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, instructions_pdf_url || null, timezone || 'America/Los_Angeles', lat, lng]
     );
     const site = siteResult.rows[0];
-    const accessUntil = contract_end ? (() => { const d = new Date(contract_end); d.setDate(d.getDate() + 90); return d; })() : null;
-    const deleteAt    = contract_end ? (() => { const d = new Date(contract_end); d.setDate(d.getDate() + 150); return d; })() : null;
-    await client.query(
-      `INSERT INTO data_retention_log (site_id, client_star_access_until, data_delete_at)
-       VALUES ($1, $2, $3)`,
-      [site.id, accessUntil, deleteAt]
-    );
+    // Retention rebuild: no per-site retention row. Each retention-
+    // eligible child table (reports, pings, sessions, etc.) carries its
+    // own expires_at populated at INSERT via services/retention.ts.
     await client.query('COMMIT');
     res.status(201).json(site);
   } catch (err) {
@@ -232,23 +224,25 @@ router.patch('/:id/geofence', requireAuth('company_admin'), async (req, res) => 
   res.json(result.rows[0]);
 });
 
-// PATCH /api/sites/:id/client-access — admin enables/disables client portal
-// AND sets manual retention date overrides.
+// PATCH /api/sites/:id/client-access — admin enables/disables client portal.
 //
-// Session B (Option A): both branches now bump clients.tokens_not_before so
-// any live client session is kicked immediately by the auth middleware. Both
-// branches also clear data_retention_log.client_star_access_disabled so the
-// admin flag becomes the source of truth (was: the retention flag would
-// silently gate login even after admin re-enable).
-//
-// Session D: body now accepts optional { client_star_access_until,
-// data_delete_at } (ISO date strings or null) so the CLIENT PORTALS tab can
-// override the retention windows the nightly purge would otherwise compute.
-// enabled is now optional too — pass just the dates to update retention
-// without touching the portal toggle. vishnu bypass added.
+// Body: { enabled: boolean }. Retention rebuild dropped the
+// client_star_access_until + data_delete_at date-override fields; the
+// portal gate flipped to sites.client_access_disabled_at (see
+// routes/auth.ts). Kicks any live client session by bumping
+// clients.tokens_not_before so the auth middleware rejects any JWT
+// minted before the toggle flip.
 router.patch('/:id/client-access', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const isVishnu = req.user!.role === 'vishnu';
-  const { enabled, client_star_access_until, data_delete_at } = req.body ?? {};
+  const { enabled } = req.body ?? {};
+
+  // Retention rebuild: the client_star_access_until + data_delete_at
+  // date-input params are gone. The endpoint now toggles the portal
+  // enable/disable state only. Portal gating flipped to
+  // sites.client_access_disabled_at in routes/auth.ts.
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled must be boolean' });
+  }
 
   const siteRow = isVishnu
     ? await pool.query<{ is_active: boolean }>('SELECT is_active FROM sites WHERE id = $1', [req.params.id])
@@ -259,75 +253,20 @@ router.patch('/:id/client-access', requireAuth('company_admin', 'vishnu'), async
   if (!siteRow.rows[0]) return res.status(404).json({ error: 'Site not found' });
   if (!siteRow.rows[0].is_active) return res.status(409).json({ error: 'Site is deactivated. Reactivate it before making changes.' });
 
-  const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T[\d:.+Z-]+)?$/;
-  const validDateField = (v: unknown) => v === null || (typeof v === 'string' && ISO_DATE.test(v));
-  if (client_star_access_until !== undefined && !validDateField(client_star_access_until)) {
-    return res.status(400).json({ error: 'client_star_access_until must be ISO date or null' });
-  }
-  if (data_delete_at !== undefined && !validDateField(data_delete_at)) {
-    return res.status(400).json({ error: 'data_delete_at must be ISO date or null' });
-  }
-  if (enabled === undefined && client_star_access_until === undefined && data_delete_at === undefined) {
-    return res.status(400).json({ error: 'Nothing to update' });
-  }
+  await Promise.all([
+    // Kick any live client sessions when the toggle flips off; also
+    // block re-login until the admin flips it back on.
+    pool.query(
+      'UPDATE clients SET is_active = $1, tokens_not_before = NOW() WHERE site_id = $2',
+      [enabled, req.params.id],
+    ),
+    pool.query(
+      `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
+      [req.params.id],
+    ),
+  ]);
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    if (enabled !== undefined) {
-      await client.query(
-        'UPDATE clients SET is_active = $1, tokens_not_before = NOW() WHERE site_id = $2',
-        [enabled, req.params.id]
-      );
-      await client.query(
-        `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
-        [req.params.id]
-      );
-      // Clear the retention-purge flag so admin's toggle owns the state.
-      // No-op if the DRL row doesn't exist yet or the flag was already false.
-      await client.query(
-        `UPDATE data_retention_log SET client_star_access_disabled = false
-         WHERE site_id = $1 AND client_star_access_disabled = true`,
-        [req.params.id]
-      );
-    }
-
-    if (client_star_access_until !== undefined || data_delete_at !== undefined) {
-      const existing = await client.query('SELECT site_id FROM data_retention_log WHERE site_id = $1', [req.params.id]);
-      if (existing.rows[0]) {
-        const sets: string[] = [];
-        const params: unknown[] = [];
-        if (client_star_access_until !== undefined) {
-          params.push(client_star_access_until);
-          sets.push(`client_star_access_until = $${params.length}`);
-        }
-        if (data_delete_at !== undefined) {
-          params.push(data_delete_at);
-          sets.push(`data_delete_at = $${params.length}`);
-        }
-        params.push(req.params.id);
-        await client.query(
-          `UPDATE data_retention_log SET ${sets.join(', ')} WHERE site_id = $${params.length}`,
-          params
-        );
-      } else {
-        await client.query(
-          `INSERT INTO data_retention_log (site_id, client_star_access_until, data_delete_at)
-           VALUES ($1, $2, $3)`,
-          [req.params.id, client_star_access_until ?? null, data_delete_at ?? null]
-        );
-      }
-    }
-
-    await client.query('COMMIT');
-    res.json({ success: true });
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  res.json({ success: true });
 });
 
 // GET /api/sites/:id/deactivate-preview

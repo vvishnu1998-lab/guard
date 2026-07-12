@@ -64,21 +64,18 @@ router.post('/sites/:siteId/preview-client-token', requireAuth('company_admin', 
 // ── Vishnu Super Admin routes ────────────────────────────────────────────────
 
 // GET /api/admin/vishnu-kpis — platform-wide summary
+// Retention rebuild: dropped `pending_deletions` (data_retention_log
+// is gone). Frontend gracefully renders undefined as blank.
 router.get('/vishnu-kpis', requireAuth('vishnu'), async (_req, res) => {
-  const [companies, sites, guards, pending] = await Promise.all([
+  const [companies, sites, guards] = await Promise.all([
     pool.query(`SELECT COUNT(*) FROM companies WHERE is_active = true`),
     pool.query(`SELECT COUNT(*) FROM sites    WHERE is_active = true AND contract_end >= NOW()`),
     pool.query(`SELECT COUNT(*) FROM guards   WHERE is_active = true`),
-    pool.query(
-      `SELECT COUNT(*) FROM data_retention_log
-       WHERE data_deleted = false AND data_delete_at < NOW() + INTERVAL '30 days'`
-    ),
   ]);
   res.json({
     total_companies:   parseInt(companies.rows[0].count),
     active_sites:      parseInt(sites.rows[0].count),
     active_guards:     parseInt(guards.rows[0].count),
-    pending_deletions: parseInt(pending.rows[0].count),
   });
 });
 
@@ -193,28 +190,75 @@ router.get('/all-sites', requireAuth('vishnu'), async (_req, res) => {
   res.json(result.rows);
 });
 
-// GET /api/admin/retention-status — all sites in or approaching retention window
-router.get('/retention-status', requireAuth('vishnu'), async (_req, res) => {
-  const result = await pool.query(
-    `SELECT
-       s.id AS site_id, s.name AS site_name,
-       co.name AS company_name,
-       drl.client_star_access_until,
-       drl.data_delete_at,
-       drl.warning_60_sent,
-       drl.warning_89_sent,
-       drl.warning_140_sent,
-       drl.client_star_access_disabled,
-       drl.data_deleted,
-       EXTRACT(DAY FROM (drl.client_star_access_until - NOW()))::int AS days_to_access_end,
-       EXTRACT(DAY FROM (drl.data_delete_at - NOW()))::int           AS days_to_deletion
-     FROM data_retention_log drl
-     JOIN sites s    ON s.id    = drl.site_id
-     JOIN companies co ON co.id = s.company_id
-     WHERE drl.data_deleted = false
-     ORDER BY drl.data_delete_at ASC`
-  );
-  res.json(result.rows);
+// Retention rebuild: GET /api/admin/retention-status removed with
+// data_retention_log. Per-row expires_at + legal_hold on individual
+// tables replace the site-scoped countdown.
+
+// ── PATCH /api/admin/reports/:id/legal-hold ─────────────────────────────────
+//
+// Places a report on legal hold (hold=true) or releases the hold
+// (hold=false). Cascade rules:
+//   hold=true  → also flips shift_sessions, shifts, location_pings,
+//                and task_completions belonging to the report's session.
+//                Keeps the entire chain of related evidence in the DB past
+//                its normal expires_at.
+//   hold=false → releases *only* the specific report. Cascaded parents
+//                stay held. Vishnu / admin walks back through each layer
+//                manually to reduce accidental release surface (RC4).
+//
+// Auth: company_admin scoped to their company; vishnu bypasses the
+// scope check and can hold any report.
+router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { id } = req.params;
+  const { hold } = (req.body ?? {}) as { hold?: unknown };
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'invalid report id' });
+  if (typeof hold !== 'boolean') return res.status(400).json({ error: 'hold must be boolean' });
+
+  const isVishnu = req.user!.role === 'vishnu';
+
+  // Scope check + fetch the parent session/shift so the cascade knows
+  // which rows to flip.
+  const reportQ = isVishnu
+    ? await pool.query<{ shift_session_id: string; shift_id: string }>(
+        `SELECT r.shift_session_id, ss.shift_id
+         FROM reports r
+         JOIN shift_sessions ss ON ss.id = r.shift_session_id
+         WHERE r.id = $1`,
+        [id],
+      )
+    : await pool.query<{ shift_session_id: string; shift_id: string }>(
+        `SELECT r.shift_session_id, ss.shift_id
+         FROM reports r
+         JOIN shift_sessions ss ON ss.id = r.shift_session_id
+         JOIN sites si          ON si.id = r.site_id
+         WHERE r.id = $1 AND si.company_id = $2`,
+        [id, req.user!.company_id],
+      );
+  if (!reportQ.rows[0]) return res.status(404).json({ error: 'Report not found' });
+  const { shift_session_id, shift_id } = reportQ.rows[0];
+
+  const conn = await pool.connect();
+  try {
+    await conn.query('BEGIN');
+    await conn.query('UPDATE reports SET legal_hold = $1 WHERE id = $2', [hold, id]);
+
+    if (hold) {
+      // Cascade UP + across children of the same session. Release does
+      // NOT reverse the cascade (see docstring).
+      await conn.query('UPDATE shift_sessions   SET legal_hold = true WHERE id = $1',                [shift_session_id]);
+      await conn.query('UPDATE shifts           SET legal_hold = true WHERE id = $1',                [shift_id]);
+      await conn.query('UPDATE location_pings   SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
+      await conn.query('UPDATE task_completions SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
+    }
+
+    await conn.query('COMMIT');
+    res.json({ success: true, hold });
+  } catch (err) {
+    await conn.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    conn.release();
+  }
 });
 
 // Vishnu: transfer primary admin role
@@ -443,18 +487,8 @@ router.get('/violations', requireAuth('company_admin', 'vishnu'), async (req, re
 
 // GET /api/admin/dashboard-sites — site summary for dashboard table
 //
-// Cartesian fix (2026-05-17): the previous version LEFT JOINed shift_sessions,
-// reports, AND data_retention_log to sites, then summed total_hours across the
-// resulting cross-product. SUM had no DISTINCT guard, so each session's hours
-// were multiplied by (reports_count × retention_log_count) per site. Symptom:
-// William Pen Hotel showed 300.7h (real value 37.6h × 8 reports × 1 retention
-// row). guard_count and reports_today were always correct because they used
-// COUNT(DISTINCT …).
-//
-// Fix: pull guard_count and hours_this_week into scalar subqueries against
-// shift_sessions directly. The LEFT JOIN on shift_sessions is removed; reports
-// and data_retention_log remain joined (DISTINCT keeps reports_today safe,
-// data_retention_log is one row per site so days_until_deletion is unaffected).
+// Retention rebuild: dropped `days_until_deletion` and the DRL JOIN with
+// it. Per-row expires_at on child tables replaces site-scoped countdown.
 router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
   const result = await pool.query(
@@ -470,13 +504,11 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
           WHERE ss2.site_id = s.id
             AND ss2.clocked_in_at >= DATE_TRUNC('week', NOW())
        ), 0) AS hours_this_week,
-       CASE WHEN s.contract_end >= NOW() THEN 'active' ELSE 'inactive' END AS status,
-       CEIL(EXTRACT(EPOCH FROM (drl.data_delete_at - NOW())) / 86400)::INT AS days_until_deletion
+       CASE WHEN s.contract_end >= NOW() THEN 'active' ELSE 'inactive' END AS status
      FROM sites s
      LEFT JOIN reports r ON r.site_id = s.id
-     LEFT JOIN data_retention_log drl ON drl.site_id = s.id
      WHERE s.company_id = $1 AND s.is_active = true
-     GROUP BY s.id, s.name, s.contract_end, drl.data_delete_at
+     GROUP BY s.id, s.name, s.contract_end
      ORDER BY s.name`,
     [cid]
   );

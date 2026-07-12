@@ -32,7 +32,6 @@ import schedulingRoutes from './routes/scheduling';
 // Cron jobs
 import './jobs/nightlyPurge';
 import './jobs/dailyShiftEmail';
-import './jobs/monthlyRetentionNotice';
 import './jobs/missedShiftAlert';
 import './jobs/autoCompleteShifts';
 import './jobs/monthlyHoursReport';
