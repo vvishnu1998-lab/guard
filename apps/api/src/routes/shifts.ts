@@ -7,6 +7,7 @@ import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
+import { expiresAtFor } from '../services/retention';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
   pushSwapRequestToRecipient,
@@ -162,15 +163,17 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
           }
         }
         const insert = await client.query(
-          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
+          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at)
            VALUES (
              $1,
              $2,
              ($3::date + $4::time) AT TIME ZONE $8,
              ($3::date + $6::interval + $5::time) AT TIME ZONE $8,
-             $7
+             $7,
+             $9
            ) RETURNING id, guard_id, site_id, scheduled_start, scheduled_end`,
-          [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status, siteTz]
+          [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status, siteTz,
+           expiresAtFor('shift')]
         );
         const row = insert.rows[0];
         ids.push(row.id);
@@ -274,9 +277,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     const created: Array<Record<string, unknown>> = [];
     for (const p of pending) {
       const r = await pool.query(
-        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status]
+        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status, expiresAtFor('shift')]
       );
       created.push(r.rows[0]);
     }
@@ -309,9 +312,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   }
 
   const result = await pool.query(
-    `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [guard_id || null, site_id, scheduled_start, scheduled_end, status]
+    `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [guard_id || null, site_id, scheduled_start, scheduled_end, status, expiresAtFor('shift')]
   );
   res.status(201).json(result.rows[0]);
   // Aggregated per-guard push, fire-and-forget after response.
@@ -1581,9 +1584,9 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
     let newSession;
     try {
       const inserted = await client.query(
-        `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords)
-         VALUES ($1, $2, $3, NOW(), $4) RETURNING *`,
-        [id, user!.sub, hist.site_id, coords],
+        `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at)
+         VALUES ($1, $2, $3, NOW(), $4, $5) RETURNING *`,
+        [id, user!.sub, hist.site_id, coords, expiresAtFor('shift_session')],
       );
       newSession = inserted.rows[0];
     } catch (err: any) {
@@ -2044,9 +2047,9 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     }
 
     const sessionResult = await client.query(
-      `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords)
-       VALUES ($1, $2, $3, NOW(), $4) RETURNING *`,
-      [id, req.user!.sub, shift.site_id, coords]
+      `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at)
+       VALUES ($1, $2, $3, NOW(), $4, $5) RETURNING *`,
+      [id, req.user!.sub, shift.site_id, coords, expiresAtFor('shift_session')]
     );
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['active', id]);
     const session = sessionResult.rows[0];

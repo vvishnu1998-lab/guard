@@ -6,6 +6,7 @@ import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 import { validateAtSite } from '../services/geofence';
 import { presignAll } from '../services/s3';
+import { expiresAtFor, expiresAtForReport } from '../services/retention';
 import { fireBreachAlerts } from './locations';
 
 const router = Router();
@@ -255,13 +256,14 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     isWithin = fence.allowed;
   }
 
+  const expiresAt = expiresAtForReport(report_type);
   const reportResult = await pool.query(
     `INSERT INTO reports
-       (shift_session_id, site_id, report_type, description, severity, delete_at,
+       (shift_session_id, site_id, report_type, description, severity, delete_at, expires_at,
         latitude, longitude, accuracy_meters, is_within_geofence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
     [
-      shift_session_id, site_id, report_type, description, severity || null, deleteAt,
+      shift_session_id, site_id, report_type, description, severity || null, deleteAt, expiresAt,
       haveCoords ? latitude  : null,
       haveCoords ? longitude : null,
       haveCoords ? accuracy  : null,
@@ -295,11 +297,11 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     try {
       const violationInsert = await pool.query(
         `INSERT INTO geofence_violations
-           (shift_session_id, guard_id, site_id, violation_lat, violation_lng)
-         VALUES ($1, $2, $3, $4, $5)
+           (shift_session_id, guard_id, site_id, violation_lat, violation_lng, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
          RETURNING id`,
-        [shift_session_id, req.user!.sub, site_id, latitude, longitude],
+        [shift_session_id, req.user!.sub, site_id, latitude, longitude, expiresAtFor('geofence_violation')],
       );
       if (violationInsert.rows[0]) freshViolationId = violationInsert.rows[0].id;
     } catch (err) {
