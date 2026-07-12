@@ -234,11 +234,6 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   // guard has an open violation. The off-post detection below stamps
   // is_within_geofence on the report and fires the breach alert flow.
 
-  // Get site contract_end for delete_at calculation
-  const siteResult = await pool.query('SELECT contract_end FROM sites WHERE id = $1', [site_id]);
-  const deleteAt = new Date(siteResult.rows[0].contract_end);
-  deleteAt.setDate(deleteAt.getDate() + 150);
-
   // T2-D — geofence flag (do NOT block). When all of {lat, lng, accuracy}
   // are present, validateAtSite decides. Result is persisted on the report
   // row; downstream breach alert flow runs after the report INSERT.
@@ -259,11 +254,11 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   const expiresAt = expiresAtForReport(report_type);
   const reportResult = await pool.query(
     `INSERT INTO reports
-       (shift_session_id, site_id, report_type, description, severity, delete_at, expires_at,
+       (shift_session_id, site_id, report_type, description, severity, expires_at,
         latitude, longitude, accuracy_meters, is_within_geofence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
     [
-      shift_session_id, site_id, report_type, description, severity || null, deleteAt, expiresAt,
+      shift_session_id, site_id, report_type, description, severity || null, expiresAt,
       haveCoords ? latitude  : null,
       haveCoords ? longitude : null,
       haveCoords ? accuracy  : null,
@@ -276,9 +271,9 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   if (photo_urls?.length) {
     for (let i = 0; i < photo_urls.length; i++) {
       await pool.query(
-        `INSERT INTO report_photos (report_id, storage_url, file_size_kb, photo_index, delete_at)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [report.id, photo_urls[i].url, photo_urls[i].size_kb, i + 1, deleteAt]
+        `INSERT INTO report_photos (report_id, storage_url, file_size_kb, photo_index)
+         VALUES ($1, $2, $3, $4)`,
+        [report.id, photo_urls[i].url, photo_urls[i].size_kb, i + 1]
       );
     }
   }

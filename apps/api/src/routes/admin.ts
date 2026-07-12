@@ -65,17 +65,35 @@ router.post('/sites/:siteId/preview-client-token', requireAuth('company_admin', 
 
 // GET /api/admin/vishnu-kpis — platform-wide summary
 // Retention rebuild: dropped `pending_deletions` (data_retention_log
-// is gone). Frontend gracefully renders undefined as blank.
+// is gone). Vishnu Portal v2: added `legal_holds` (reports + geofence
+// violations held) and `expiring_30d` (records rolling off retention
+// in the next 30 days across the 6 retention-eligible tables).
 router.get('/vishnu-kpis', requireAuth('vishnu'), async (_req, res) => {
-  const [companies, sites, guards] = await Promise.all([
+  const [companies, sites, guards, holds, expiring] = await Promise.all([
     pool.query(`SELECT COUNT(*) FROM companies WHERE is_active = true`),
-    pool.query(`SELECT COUNT(*) FROM sites    WHERE is_active = true AND contract_end >= NOW()`),
+    pool.query(`SELECT COUNT(*) FROM sites    WHERE is_active = true AND (contract_end IS NULL OR contract_end >= NOW())`),
     pool.query(`SELECT COUNT(*) FROM guards   WHERE is_active = true`),
+    pool.query(
+      `SELECT
+         (SELECT COUNT(*) FROM reports              WHERE legal_hold) +
+         (SELECT COUNT(*) FROM geofence_violations  WHERE legal_hold) AS n`,
+    ),
+    pool.query(
+      `SELECT
+         (SELECT COUNT(*) FROM reports              WHERE NOT legal_hold AND expires_at <= NOW() + INTERVAL '30 days') +
+         (SELECT COUNT(*) FROM location_pings       WHERE NOT legal_hold AND expires_at <= NOW() + INTERVAL '30 days') +
+         (SELECT COUNT(*) FROM task_completions     WHERE NOT legal_hold AND expires_at <= NOW() + INTERVAL '30 days') +
+         (SELECT COUNT(*) FROM shift_sessions       WHERE NOT legal_hold AND expires_at <= NOW() + INTERVAL '30 days') +
+         (SELECT COUNT(*) FROM shifts               WHERE NOT legal_hold AND expires_at <= NOW() + INTERVAL '30 days') +
+         (SELECT COUNT(*) FROM geofence_violations  WHERE NOT legal_hold AND expires_at <= NOW() + INTERVAL '30 days') AS n`,
+    ),
   ]);
   res.json({
     total_companies:   parseInt(companies.rows[0].count),
     active_sites:      parseInt(sites.rows[0].count),
     active_guards:     parseInt(guards.rows[0].count),
+    legal_holds:       parseInt(holds.rows[0].n),
+    expiring_30d:      parseInt(expiring.rows[0].n),
   });
 });
 
@@ -240,7 +258,15 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
   const conn = await pool.connect();
   try {
     await conn.query('BEGIN');
-    await conn.query('UPDATE reports SET legal_hold = $1 WHERE id = $2', [hold, id]);
+    // v35: legal_hold_at stamped on hold, cleared on release. Cascade
+    // parents keep the boolean only — no *_at columns on them.
+    await conn.query(
+      `UPDATE reports
+       SET legal_hold = $1,
+           legal_hold_at = CASE WHEN $1 THEN NOW() ELSE NULL END
+       WHERE id = $2`,
+      [hold, id],
+    );
 
     if (hold) {
       // Cascade UP + across children of the same session. Release does
@@ -259,6 +285,292 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
   } finally {
     conn.release();
   }
+});
+
+// ── PATCH /api/admin/violations/:id/legal-hold ──────────────────────────────
+//
+// Mirror of the reports legal-hold endpoint for geofence_violations
+// (Vishnu Portal v2). Same cascade / release semantics:
+//   hold=true  → also flips the parent shift_session, shift, and the
+//                sibling location_pings + task_completions.
+//   hold=false → releases only the specific violation; parents stay held.
+//
+// Auth: company_admin scoped to their company; vishnu bypasses scope.
+router.patch('/violations/:id/legal-hold', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { id } = req.params;
+  const { hold } = (req.body ?? {}) as { hold?: unknown };
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'invalid violation id' });
+  if (typeof hold !== 'boolean') return res.status(400).json({ error: 'hold must be boolean' });
+
+  const isVishnu = req.user!.role === 'vishnu';
+
+  const violationQ = isVishnu
+    ? await pool.query<{ shift_session_id: string; shift_id: string }>(
+        `SELECT gv.shift_session_id, ss.shift_id
+         FROM geofence_violations gv
+         JOIN shift_sessions ss ON ss.id = gv.shift_session_id
+         WHERE gv.id = $1`,
+        [id],
+      )
+    : await pool.query<{ shift_session_id: string; shift_id: string }>(
+        `SELECT gv.shift_session_id, ss.shift_id
+         FROM geofence_violations gv
+         JOIN shift_sessions ss ON ss.id = gv.shift_session_id
+         JOIN sites si          ON si.id = gv.site_id
+         WHERE gv.id = $1 AND si.company_id = $2`,
+        [id, req.user!.company_id],
+      );
+  if (!violationQ.rows[0]) return res.status(404).json({ error: 'Violation not found' });
+  const { shift_session_id, shift_id } = violationQ.rows[0];
+
+  const conn = await pool.connect();
+  try {
+    await conn.query('BEGIN');
+    await conn.query(
+      `UPDATE geofence_violations
+       SET legal_hold = $1,
+           legal_hold_at = CASE WHEN $1 THEN NOW() ELSE NULL END
+       WHERE id = $2`,
+      [hold, id],
+    );
+
+    if (hold) {
+      await conn.query('UPDATE shift_sessions   SET legal_hold = true WHERE id = $1',                [shift_session_id]);
+      await conn.query('UPDATE shifts           SET legal_hold = true WHERE id = $1',                [shift_id]);
+      await conn.query('UPDATE location_pings   SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
+      await conn.query('UPDATE task_completions SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
+    }
+
+    await conn.query('COMMIT');
+    res.json({ success: true, hold });
+  } catch (err) {
+    await conn.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    conn.release();
+  }
+});
+
+// ── GET /api/admin/vishnu/legal-holds ───────────────────────────────────────
+//
+// UNION of reports + geofence_violations currently on legal hold, with
+// enough join context to render "COMPANY · SITE · GUARD · TYPE · REPORTED
+// AT · HELD SINCE" in the new /vishnu/compliance page. Sort: newest hold
+// first (held_since DESC). Empty result is a valid response.
+router.get('/vishnu/legal-holds', requireAuth('vishnu'), async (_req, res) => {
+  const result = await pool.query(
+    `SELECT * FROM (
+       SELECT r.id                              AS record_id,
+              CASE r.report_type
+                WHEN 'incident'    THEN 'Incident Report'
+                WHEN 'activity'    THEN 'Activity Report'
+                WHEN 'maintenance' THEN 'Maintenance Report'
+                ELSE r.report_type
+              END                               AS record_type,
+              co.id                             AS company_id,
+              co.name                           AS company_name,
+              s.id                              AS site_id,
+              s.name                            AS site_name,
+              g.id                              AS guard_id,
+              g.name                            AS guard_name,
+              r.reported_at,
+              r.legal_hold_at                   AS held_since
+         FROM reports r
+         JOIN shift_sessions ss ON ss.id = r.shift_session_id
+         JOIN guards         g  ON g.id  = ss.guard_id
+         JOIN sites          s  ON s.id  = r.site_id
+         JOIN companies      co ON co.id = s.company_id
+        WHERE r.legal_hold = true
+
+       UNION ALL
+
+       SELECT gv.id                             AS record_id,
+              'Violation'                       AS record_type,
+              co.id                             AS company_id,
+              co.name                           AS company_name,
+              s.id                              AS site_id,
+              s.name                            AS site_name,
+              g.id                              AS guard_id,
+              g.name                            AS guard_name,
+              gv.occurred_at                    AS reported_at,
+              gv.legal_hold_at                  AS held_since
+         FROM geofence_violations gv
+         JOIN guards    g  ON g.id  = gv.guard_id
+         JOIN sites     s  ON s.id  = gv.site_id
+         JOIN companies co ON co.id = s.company_id
+        WHERE gv.legal_hold = true
+     ) combined
+     ORDER BY held_since DESC NULLS LAST, reported_at DESC`,
+  );
+  res.json(result.rows);
+});
+
+// ── GET /api/admin/vishnu/upcoming-expiry?days=7|30|90&include_held=false ───
+//
+// UNION over the 6 retention-eligible tables of records whose expires_at
+// falls in the next N days. `include_held=false` (default) excludes rows
+// where legal_hold=true. Sort: expires_at ASC (soonest first). Rows are
+// returned raw — the frontend caps display at 10 with "View all N".
+router.get('/vishnu/upcoming-expiry', requireAuth('vishnu'), async (req, res) => {
+  const daysRaw = parseInt((req.query.days as string | undefined) ?? '30', 10);
+  const days = [7, 30, 90].includes(daysRaw) ? daysRaw : 30;
+  const includeHeld = String(req.query.include_held ?? 'false') === 'true';
+  const heldClause = includeHeld ? '' : 'AND NOT legal_hold';
+
+  const result = await pool.query(
+    `SELECT * FROM (
+       SELECT r.id AS record_id,
+              CASE r.report_type
+                WHEN 'incident'    THEN 'Incident Report'
+                WHEN 'activity'    THEN 'Activity Report'
+                WHEN 'maintenance' THEN 'Maintenance Report'
+                ELSE r.report_type
+              END AS record_type,
+              co.id AS company_id, co.name AS company_name,
+              s.id  AS site_id,    s.name  AS site_name,
+              r.expires_at
+         FROM reports r
+         JOIN sites     s  ON s.id  = r.site_id
+         JOIN companies co ON co.id = s.company_id
+        WHERE r.expires_at IS NOT NULL
+          AND r.expires_at <= NOW() + ($1 || ' days')::INTERVAL
+          ${heldClause}
+
+       UNION ALL
+
+       SELECT lp.id AS record_id, 'Ping' AS record_type,
+              co.id AS company_id, co.name AS company_name,
+              s.id  AS site_id,    s.name  AS site_name,
+              lp.expires_at
+         FROM location_pings lp
+         JOIN shift_sessions ss ON ss.id = lp.shift_session_id
+         JOIN sites     s  ON s.id  = ss.site_id
+         JOIN companies co ON co.id = s.company_id
+        WHERE lp.expires_at IS NOT NULL
+          AND lp.expires_at <= NOW() + ($1 || ' days')::INTERVAL
+          ${heldClause.replace('legal_hold', 'lp.legal_hold')}
+
+       UNION ALL
+
+       SELECT tc.id AS record_id, 'Task Completion' AS record_type,
+              co.id AS company_id, co.name AS company_name,
+              s.id  AS site_id,    s.name  AS site_name,
+              tc.expires_at
+         FROM task_completions tc
+         JOIN shift_sessions ss ON ss.id = tc.shift_session_id
+         JOIN sites     s  ON s.id  = ss.site_id
+         JOIN companies co ON co.id = s.company_id
+        WHERE tc.expires_at IS NOT NULL
+          AND tc.expires_at <= NOW() + ($1 || ' days')::INTERVAL
+          ${heldClause.replace('legal_hold', 'tc.legal_hold')}
+
+       UNION ALL
+
+       SELECT ss.id AS record_id, 'Session' AS record_type,
+              co.id AS company_id, co.name AS company_name,
+              s.id  AS site_id,    s.name  AS site_name,
+              ss.expires_at
+         FROM shift_sessions ss
+         JOIN sites     s  ON s.id  = ss.site_id
+         JOIN companies co ON co.id = s.company_id
+        WHERE ss.expires_at IS NOT NULL
+          AND ss.expires_at <= NOW() + ($1 || ' days')::INTERVAL
+          ${heldClause.replace('legal_hold', 'ss.legal_hold')}
+
+       UNION ALL
+
+       SELECT sh.id AS record_id, 'Shift' AS record_type,
+              co.id AS company_id, co.name AS company_name,
+              s.id  AS site_id,    s.name  AS site_name,
+              sh.expires_at
+         FROM shifts sh
+         JOIN sites     s  ON s.id  = sh.site_id
+         JOIN companies co ON co.id = s.company_id
+        WHERE sh.expires_at IS NOT NULL
+          AND sh.expires_at <= NOW() + ($1 || ' days')::INTERVAL
+          ${heldClause.replace('legal_hold', 'sh.legal_hold')}
+
+       UNION ALL
+
+       SELECT gv.id AS record_id, 'Violation' AS record_type,
+              co.id AS company_id, co.name AS company_name,
+              s.id  AS site_id,    s.name  AS site_name,
+              gv.expires_at
+         FROM geofence_violations gv
+         JOIN sites     s  ON s.id  = gv.site_id
+         JOIN companies co ON co.id = s.company_id
+        WHERE gv.expires_at IS NOT NULL
+          AND gv.expires_at <= NOW() + ($1 || ' days')::INTERVAL
+          ${heldClause.replace('legal_hold', 'gv.legal_hold')}
+     ) combined
+     ORDER BY expires_at ASC`,
+    [days],
+  );
+  res.json(result.rows);
+});
+
+// ── GET /api/admin/vishnu/audit-log?limit=20&offset=0 ───────────────────────
+//
+// Recent admin actions. v1 sources: admin_client_previews (preview-as-
+// client mints) + guard_assignment_audit (assignment lifecycle writes).
+// Vishnu is detected by the sentinel UUID prefix 00000000-aaaa-… — see
+// schema_v29 comment ("vishnu has no persistent user row").
+//
+// `target` is derived per source: previews → site name; assignment audit
+// → guard name pulled from the before/after jsonb snapshot.
+router.get('/vishnu/audit-log', requireAuth('vishnu'), async (req, res) => {
+  const limitRaw  = parseInt((req.query.limit  as string | undefined) ?? '20', 10);
+  const offsetRaw = parseInt((req.query.offset as string | undefined) ?? '0',  10);
+  const limit  = Math.min(100, Math.max(1, Number.isFinite(limitRaw)  ? limitRaw  : 20));
+  const offset = Math.max(0,           Number.isFinite(offsetRaw) ? offsetRaw : 0);
+
+  const VISHNU_PREFIX = '00000000-aaaa-%';
+
+  const result = await pool.query(
+    `SELECT * FROM (
+       SELECT acp.previewed_at            AS timestamp,
+              acp.admin_id                AS actor_id,
+              CASE WHEN acp.admin_id::text LIKE $1 THEN 'Vishnu'
+                   ELSE COALESCE(ca.name, 'Unknown admin')
+              END                         AS actor_name,
+              co.id                       AS company_id,
+              co.name                     AS company_name,
+              'Previewed client portal'   AS action,
+              s.name                      AS target
+         FROM admin_client_previews acp
+         JOIN sites     s  ON s.id  = acp.site_id
+         JOIN companies co ON co.id = s.company_id
+         LEFT JOIN company_admins ca ON ca.id = acp.admin_id
+
+       UNION ALL
+
+       SELECT gaa.changed_at              AS timestamp,
+              gaa.changed_by              AS actor_id,
+              CASE WHEN gaa.changed_by::text LIKE $1 THEN 'Vishnu'
+                   ELSE COALESCE(ca.name, 'Unknown admin')
+              END                         AS actor_name,
+              co.id                       AS company_id,
+              co.name                     AS company_name,
+              CASE gaa.action
+                WHEN 'guard_assignment_created' THEN 'Assigned guard to site'
+                WHEN 'guard_assignment_ended'   THEN 'Ended guard assignment'
+                WHEN 'guard_assignment_removed' THEN 'Removed guard assignment'
+                ELSE gaa.action
+              END                         AS action,
+              COALESCE(g.name, 'Unknown guard') AS target
+         FROM guard_assignment_audit gaa
+         LEFT JOIN company_admins ca ON ca.id = gaa.changed_by
+         LEFT JOIN guards         g  ON g.id::text = COALESCE(gaa.after ->> 'guard_id',
+                                                              gaa.before ->> 'guard_id')
+         LEFT JOIN sites          s  ON s.id::text = COALESCE(gaa.after ->> 'site_id',
+                                                              gaa.before ->> 'site_id')
+         LEFT JOIN companies      co ON co.id = s.company_id
+     ) combined
+     ORDER BY timestamp DESC
+     LIMIT $2 OFFSET $3`,
+    [VISHNU_PREFIX, limit, offset],
+  );
+  res.json(result.rows);
 });
 
 // Vishnu: transfer primary admin role
