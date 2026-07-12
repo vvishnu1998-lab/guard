@@ -1,7 +1,7 @@
 /**
  * Force password change — shown after first login OR after forgot-password
  * temp-password issuance. Guard cannot proceed to home until they set a new
- * valid password (6–8 characters).
+ * valid password (minimum 8 characters).
  */
 import { useState } from 'react';
 import {
@@ -23,8 +23,8 @@ export default function ChangePasswordScreen() {
   const { changePassword, logout } = useAuthStore();
 
   async function handleChange() {
-    if (next.length < 6 || next.length > 128) {
-      Alert.alert('Invalid', 'Minimum 6 characters.'); return;
+    if (next.length < 8 || next.length > 128) {
+      Alert.alert('Invalid', 'Minimum 8 characters.'); return;
     }
     if (next !== confirm) {
       Alert.alert('Mismatch', 'New passwords do not match.'); return;
@@ -64,7 +64,7 @@ export default function ChangePasswordScreen() {
         <Text style={styles.title}>SET YOUR PASSWORD</Text>
         <Text style={styles.subtitle}>
           Enter your current (or temporary) password,{'\n'}
-          then choose a new 6–8 character password.
+          then choose a new password of at least 8 characters.
         </Text>
 
         <View style={styles.form}>
@@ -86,7 +86,7 @@ export default function ChangePasswordScreen() {
           <View style={styles.passwordRow}>
             <TextInput
               style={[styles.input, styles.passwordInput]}
-              placeholder="6–8 characters"
+              placeholder="At least 8 characters"
               placeholderTextColor={Colors.muted}
               value={next}
               onChangeText={setNext}

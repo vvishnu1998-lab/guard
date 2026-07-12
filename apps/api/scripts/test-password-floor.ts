@@ -1,14 +1,14 @@
 /**
- * test-password-floor.ts — proves C7 fix (audit/WEEK1.md §C7).
+ * test-password-floor.ts — verifies the password-policy floor.
  *
- * Three things must hold after the fix:
+ * Four things must hold:
  *
- *   1. POST /api/guards (admin creates a guard) rejects temp_password < 12
- *      with a 400 ("Temporary password must be at least 12 characters").
- *   2. The same endpoint accepts a 12-char temp_password (201).
- *   3. POST /api/auth/guard/change-password rejects new_password < 12
- *      with a 400 ("New password must be at least 12 characters").
- *      Also accepts a 12-char new_password and clears must_change_password.
+ *   1. POST /api/guards (admin creates a guard) rejects temp_password < 8
+ *      with a 400 ("Minimum 8 characters.").
+ *   2. The same endpoint accepts an 8-char temp_password (201).
+ *   3. POST /api/auth/guard/change-password rejects new_password < 8
+ *      with a 400 ("Minimum 8 characters.").
+ *      Also accepts an 8-char new_password and clears must_change_password.
  *   4. Brand-new guard rows have must_change_password = true (forced
  *      rotation invariant — the temp credential cannot stay live).
  *
@@ -19,8 +19,6 @@
  *
  * Usage:
  *   npx ts-node apps/api/scripts/test-password-floor.ts
- *
- * Author: Week-1 audit (audit/WEEK1.md §C7)
  */
 import 'dotenv/config';
 import http from 'http';
@@ -71,38 +69,38 @@ async function run() {
       { expiresIn: '1h' }
     );
 
-    // ── 1. Temp password 11 chars (one short) → 400 ──────────────────────
+    // ── 1. Temp password 7 chars (one short) → 400 ───────────────────────
     const shortRes = await fetch(`${base}/api/guards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
       body: JSON.stringify({
-        name: `C7 Test ${tag}`,
+        name: `PW Test ${tag}`,
         email,
         badge_number: badge,
-        temp_password: 'shortpass11', // 11 chars, just under the floor
+        temp_password: 'short07', // 7 chars, just under the floor
       }),
     });
-    assert(shortRes.status === 400, `11-char temp_password returns 400 (got ${shortRes.status})`);
+    assert(shortRes.status === 400, `7-char temp_password returns 400 (got ${shortRes.status})`);
     const shortBody = (await shortRes.json()) as { error?: string };
-    assert(/at least 12/i.test(shortBody.error ?? ''), '400 body mentions 12-char floor');
+    assert(/minimum 8/i.test(shortBody.error ?? ''), '400 body mentions 8-char floor');
 
     // Confirm no row was created
     const noRow = await pool.query('SELECT id FROM guards WHERE email = $1', [email]);
     assert(noRow.rows.length === 0, 'no guard row was created on rejection');
 
-    // ── 2. Temp password exactly 12 chars → 201 ──────────────────────────
-    const tempPassword = 'TempPass1234'; // 12 chars
+    // ── 2. Temp password exactly 8 chars → 201 ───────────────────────────
+    const tempPassword = 'Temp1234'; // 8 chars
     const okRes = await fetch(`${base}/api/guards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
       body: JSON.stringify({
-        name: `C7 Test ${tag}`,
+        name: `PW Test ${tag}`,
         email,
         badge_number: badge,
         temp_password: tempPassword,
       }),
     });
-    assert(okRes.status === 201, `12-char temp_password returns 201 (got ${okRes.status})`);
+    assert(okRes.status === 201, `8-char temp_password returns 201 (got ${okRes.status})`);
     const okBody = (await okRes.json()) as { id?: string };
     if (!okBody.id) throw new Error('Missing guard id on success response');
     createdGuardId = okBody.id;
@@ -115,7 +113,7 @@ async function run() {
     assert(flag.rows[0].must_change_password === true,
       'new guard row has must_change_password = true (forced rotation)');
 
-    // ── 4. change-password with 11-char new_password → 400 ───────────────
+    // ── 4. change-password with 7-char new_password → 400 ────────────────
     const guardToken = jwt.sign(
       { sub: createdGuardId, role: 'guard', company_id: companyId, jti: uuidv4() },
       process.env.JWT_SECRET!,
@@ -124,23 +122,23 @@ async function run() {
     const shortChangeRes = await fetch(`${base}/api/auth/guard/change-password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${guardToken}` },
-      body: JSON.stringify({ current_password: tempPassword, new_password: 'shortNew111' }), // 11 chars
+      body: JSON.stringify({ current_password: tempPassword, new_password: 'shortNw' }), // 7 chars
     });
     assert(shortChangeRes.status === 400,
-      `change-password with 11-char new_password returns 400 (got ${shortChangeRes.status})`);
+      `change-password with 7-char new_password returns 400 (got ${shortChangeRes.status})`);
     const shortChangeBody = (await shortChangeRes.json()) as { error?: string };
-    assert(/at least 12/i.test(shortChangeBody.error ?? ''),
-      'change-password 400 body mentions 12-char floor');
+    assert(/minimum 8/i.test(shortChangeBody.error ?? ''),
+      'change-password 400 body mentions 8-char floor');
 
-    // ── 5. change-password with 12-char new_password → 200 + flag cleared
-    const newPassword = 'NewPass12345!'; // 13 chars, above the floor
+    // ── 5. change-password with 8-char new_password → 200 + flag cleared
+    const newPassword = 'NewPass1'; // 8 chars, at the floor
     const okChangeRes = await fetch(`${base}/api/auth/guard/change-password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${guardToken}` },
       body: JSON.stringify({ current_password: tempPassword, new_password: newPassword }),
     });
     assert(okChangeRes.status === 200,
-      `change-password with 13-char new_password returns 200 (got ${okChangeRes.status})`);
+      `change-password with 8-char new_password returns 200 (got ${okChangeRes.status})`);
 
     const flagAfter = await pool.query(
       'SELECT must_change_password FROM guards WHERE id = $1',
