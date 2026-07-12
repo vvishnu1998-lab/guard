@@ -38,7 +38,7 @@
  * streamed application/pdf response.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { adminDownloadPost } from '../lib/adminApi';
+import { adminDownloadPost, adminPatch } from '../lib/adminApi';
 import { computeLateness } from '../lib/lateness';
 
 type StatusKind =
@@ -76,6 +76,7 @@ interface ActivityRow {
   report_type:     'activity' | 'incident' | 'maintenance' | null;
   severity:        'low' | 'medium' | 'high' | 'critical' | null;
   description:     string | null;
+  legal_hold:      boolean;
   // Ping-only (server-nulled for client role).
   latitude:           number  | null;
   longitude:          number  | null;
@@ -299,6 +300,12 @@ export default function ActivityLogTable({
   // PDF button loading state (admin only)
   const [pdfLoading, setPdfLoading] = useState(false);
 
+  // Legal-hold confirmation flow (incident reports only, admin mode only).
+  // `pendingHoldAction` gates the modal — null when hidden.
+  const [pendingHoldAction, setPendingHoldAction] =
+    useState<{ reportId: string; hold: boolean } | null>(null);
+  const [holdSaving, setHoldSaving] = useState(false);
+
   // Row-ref map keyed by row id so highlightReportId can scroll into view.
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [flashId, setFlashId] = useState<string | null>(null);
@@ -463,6 +470,29 @@ export default function ActivityLogTable({
 
   function toggleExpanded(rowId: string) {
     setExpandedId((cur) => (cur === rowId ? null : rowId));
+  }
+
+  async function confirmLegalHold() {
+    if (!pendingHoldAction) return;
+    setHoldSaving(true);
+    setError('');
+    try {
+      await adminPatch(`/api/admin/reports/${pendingHoldAction.reportId}/legal-hold`,
+        { hold: pendingHoldAction.hold });
+      // Optimistic local refresh — the row stays visible with the flipped
+      // pill/button state. A full reload would work too but would collapse
+      // the accordion the user is looking at.
+      setRows((prev) => prev.map((r) =>
+        r.id === pendingHoldAction.reportId
+          ? { ...r, legal_hold: pendingHoldAction.hold }
+          : r,
+      ));
+      setPendingHoldAction(null);
+    } catch (e: any) {
+      setError(e?.message ?? 'Legal-hold update failed');
+    } finally {
+      setHoldSaving(false);
+    }
   }
 
   return (
@@ -775,6 +805,40 @@ export default function ActivityLogTable({
                         : 'No additional details.'}
                     </p>
                   )}
+
+                  {/* Legal hold — admin only, incident reports only. Defaults
+                      match RC5: activity + maintenance reports don't offer
+                      the button; adding those later is a data-cleanup + UI
+                      change together. */}
+                  {mode === 'admin' && r.report_type === 'incident' && r.detail_id && (
+                    <div className="mt-6 pt-4 border-t border-[#1A3050] flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[10px] text-gray-500 tracking-widest mb-1">LEGAL HOLD</p>
+                        {r.legal_hold ? (
+                          <span className="inline-block text-[10px] tracking-widest font-semibold px-2 py-0.5 rounded border bg-red-500/15 border-red-500/40 text-red-300">
+                            ON LEGAL HOLD
+                          </span>
+                        ) : (
+                          <span className="text-xs text-gray-500">Retention active</span>
+                        )}
+                      </div>
+                      {r.legal_hold ? (
+                        <button
+                          onClick={() => setPendingHoldAction({ reportId: r.detail_id!, hold: false })}
+                          className="text-xs tracking-widest font-semibold text-red-300 border border-red-500/40 rounded px-3 py-1.5 hover:bg-red-500/10 hover:border-red-400 transition-colors"
+                        >
+                          RELEASE HOLD
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setPendingHoldAction({ reportId: r.detail_id!, hold: true })}
+                          className="text-xs tracking-widest font-semibold text-amber-400 border border-amber-500/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors"
+                        >
+                          PLACE ON LEGAL HOLD
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -813,6 +877,58 @@ export default function ActivityLogTable({
             </div>
           </div>
         )}
+      </div>
+
+      {pendingHoldAction && (
+        <LegalHoldModal
+          hold={pendingHoldAction.hold}
+          saving={holdSaving}
+          onCancel={() => setPendingHoldAction(null)}
+          onConfirm={confirmLegalHold}
+        />
+      )}
+    </div>
+  );
+}
+
+function LegalHoldModal({
+  hold, saving, onCancel, onConfirm,
+}: {
+  hold:      boolean;
+  saving:    boolean;
+  onCancel:  () => void;
+  onConfirm: () => void;
+}) {
+  const title = hold ? 'PLACE ON LEGAL HOLD' : 'RELEASE LEGAL HOLD';
+  const body  = hold
+    ? 'Placing a legal hold prevents this report and all related session data from being deleted by the retention cron. Continue?'
+    : 'Releasing the hold restores normal retention. Related session / shift / pings / task completions will NOT be auto-released — release those individually if needed. Continue?';
+  const cta   = hold ? 'PLACE HOLD' : 'RELEASE HOLD';
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="w-full max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-6">
+        <h3 className="text-amber-400 tracking-widest font-bold text-sm mb-3">{title}</h3>
+        <p className="text-sm text-gray-300 leading-relaxed mb-6">{body}</p>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={saving}
+            className="text-xs tracking-widest text-gray-400 hover:text-gray-200 px-3 py-2 border border-[#1A3050] rounded hover:border-gray-500 transition-colors disabled:opacity-50"
+          >
+            CANCEL
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={saving}
+            className={`text-xs tracking-widest font-semibold px-3 py-2 rounded transition-colors disabled:opacity-50 disabled:cursor-wait ${
+              hold
+                ? 'bg-amber-400 text-black hover:bg-amber-300'
+                : 'bg-red-500 text-white hover:bg-red-400'
+            }`}
+          >
+            {saving ? 'WORKING…' : cta}
+          </button>
+        </div>
       </div>
     </div>
   );
