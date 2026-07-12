@@ -4,6 +4,6 @@ import ClientNav from './ClientNav';
 
 export default function ClientConditionalNav() {
   const pathname = usePathname();
-  if (pathname === '/client/login') return null;
+  if (pathname === '/client/login' || pathname === '/client/select-site') return null;
   return <ClientNav />;
 }

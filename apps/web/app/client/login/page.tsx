@@ -70,6 +70,14 @@ export default function ClientLoginPage() {
       // must_change_password forces the password flow.
       if (data.must_change_password) {
         window.location.href = '/client/change-password';
+        return;
+      }
+      // v36 multi-site: if the client covers >1 site route to the
+      // picker. Single-site keeps the pre-multisite behavior (bake-in
+      // + fromPath deep-link preservation).
+      const sites: { id: string }[] = Array.isArray(data.sites) ? data.sites : [];
+      if (sites.length > 1) {
+        window.location.href = '/client/select-site';
       } else {
         window.location.href = fromPath ?? '/client';
       }

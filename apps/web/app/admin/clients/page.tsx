@@ -18,7 +18,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { adminGet, adminPatch, adminPost } from '../../../lib/adminApi';
+import { adminGet, adminPatch, adminPost, adminDelete } from '../../../lib/adminApi';
 
 interface Site {
   id:                          string;
@@ -26,6 +26,7 @@ interface Site {
   address:                     string;
   is_active:                   boolean;
   client_access_disabled_at:   string | null;
+  company_id:                  string;
   company_name?:               string;
 }
 
@@ -38,6 +39,9 @@ interface Client {
   must_change_password: boolean;
   created_at:           string;
   last_login_at:        string | null;
+  // v36 multi-site: every OTHER site this client is linked to (junction rows).
+  // Populated by the GET /api/clients/:site_id handler via a subquery.
+  sites:                { id: string; name: string }[];
 }
 
 interface CredentialsBanner {
@@ -110,6 +114,15 @@ function ClientPortalsPageInner() {
 
   // Portal toggle in-flight indicator
   const [portalToggling,  setPortalToggling]  = useState<string | null>(null);
+
+  // v36 multi-site — ADD SITE modal + inline REMOVE FROM SITE state.
+  // linkModalClient is set when the admin clicks "+ SITE" on a client row;
+  // it opens a picker of the company's remaining active sites.
+  const [linkModalClient, setLinkModalClient] = useState<Client | null>(null);
+  const [linkModalCompanyId, setLinkModalCompanyId] = useState<string | null>(null);
+  const [linkSaving,      setLinkSaving]      = useState<string | null>(null);
+  const [siteLinkError,   setSiteLinkError]   = useState('');
+  const [unlinkingKey,    setUnlinkingKey]    = useState<string | null>(null);
 
   // Scrolling to ?site=<id> after data loads.
   const scrollAppliedRef = useRef(false);
@@ -315,6 +328,77 @@ function ClientPortalsPageInner() {
     } catch (e: any) { setError(e?.message ?? 'Preview failed'); }
   }
 
+  // v36 multi-site — pull a client's sites row after a link/unlink and
+  // patch every site-section that shows it (a client may appear in >1
+  // section now). Cheaper than a full page reload and keeps the
+  // section-scoped state model.
+  async function refreshClientAcrossSites(client: Client) {
+    // Union of: sections the client is currently in + sections they were
+    // in before the mutation (both site_id + every entry from client.sites).
+    const impacted = new Set<string>([client.site_id, ...client.sites.map((s) => s.id)]);
+    const updates = await Promise.all(
+      Array.from(impacted).map(async (siteId) => {
+        try {
+          const list = await adminGet<Client[]>(`/api/clients/${siteId}`);
+          return [siteId, list] as const;
+        } catch {
+          return [siteId, clientsPerSite[siteId] ?? []] as const;
+        }
+      }),
+    );
+    setClientsPerSite((prev) => {
+      const next = { ...prev };
+      for (const [siteId, list] of updates) next[siteId] = list;
+      return next;
+    });
+  }
+
+  function openLinkSiteModal(client: Client) {
+    const currentSite = sites.find((s) => s.id === client.site_id);
+    setLinkModalClient(client);
+    setLinkModalCompanyId(currentSite?.company_id ?? null);
+    setSiteLinkError('');
+  }
+  function closeLinkSiteModal() {
+    setLinkModalClient(null);
+    setLinkModalCompanyId(null);
+    setSiteLinkError('');
+  }
+
+  async function linkClientToSite(client: Client, siteId: string) {
+    setLinkSaving(siteId);
+    setSiteLinkError('');
+    try {
+      await adminPost(`/api/clients/${client.id}/sites`, { site_id: siteId });
+      closeLinkSiteModal();
+      await refreshClientAcrossSites({ ...client, sites: [...client.sites, { id: siteId, name: '' }] });
+    } catch (e: any) {
+      setSiteLinkError(e?.message ?? 'Could not link site');
+    } finally {
+      setLinkSaving(null);
+    }
+  }
+
+  async function unlinkClientFromSite(client: Client, siteId: string) {
+    const linkedCount = client.sites.length;
+    if (linkedCount <= 1) {
+      setError('Cannot remove the client\'s last site. Deactivate the client or add another site first.');
+      return;
+    }
+    const siteName = client.sites.find((s) => s.id === siteId)?.name ?? 'this site';
+    if (!confirm(`Remove ${client.email} from ${siteName}? Their session will end and they'll lose access to this site.`)) return;
+    const key = `${client.id}::${siteId}`;
+    setUnlinkingKey(key);
+    try {
+      await adminDelete(`/api/clients/${client.id}/sites/${siteId}`);
+      await refreshClientAcrossSites(client);
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not unlink site');
+    } finally {
+      setUnlinkingKey(null);
+    }
+  }
+
   function copyCredentialsToClipboard(b: CredentialsBanner) {
     const text = `Portal: https://netraops.com/portal\nEmail: ${b.email}\nPassword: ${b.temp_password}`;
     navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
@@ -473,6 +557,41 @@ function ClientPortalsPageInner() {
                       <p className="text-gray-500 text-xs mt-0.5 truncate">
                         {c.name} <span className="text-gray-600">·</span> Last login: {relativeTime(c.last_login_at)}
                       </p>
+                      {/* v36 multi-site: chip row of every site this client is linked to,
+                          with an inline × per chip and a + SITE button that opens the picker. */}
+                      <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+                        <span className="text-[10px] tracking-widest text-gray-600">SITES:</span>
+                        {c.sites.map((s) => {
+                          const key = `${c.id}::${s.id}`;
+                          const isOnlySite = c.sites.length <= 1;
+                          return (
+                            <span
+                              key={s.id}
+                              className="inline-flex items-center gap-1 text-[10px] tracking-widest text-gray-300 bg-[#1A3050]/40 border border-[#1A3050] rounded px-1.5 py-0.5"
+                            >
+                              {s.name || s.id.slice(0, 6)}
+                              <button
+                                type="button"
+                                onClick={() => unlinkClientFromSite(c, s.id)}
+                                disabled={isOnlySite || unlinkingKey === key || !site.is_active}
+                                title={isOnlySite ? 'Client must have at least one site' : `Remove from ${s.name}`}
+                                aria-label={`Remove ${c.email} from ${s.name}`}
+                                className="text-gray-500 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
+                              >
+                                {unlinkingKey === key ? '…' : '×'}
+                              </button>
+                            </span>
+                          );
+                        })}
+                        <button
+                          type="button"
+                          onClick={() => openLinkSiteModal(c)}
+                          disabled={!site.is_active}
+                          className="text-[10px] tracking-widest text-amber-400 hover:text-amber-300 border border-amber-400/30 rounded px-1.5 py-0.5 hover:bg-amber-400/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          + SITE
+                        </button>
+                      </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <button
@@ -607,6 +726,65 @@ function ClientPortalsPageInner() {
                 className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors"
               >
                 {clientSaving ? 'SAVING…' : clientModalMode === 'add' ? 'ADD CLIENT' : 'SAVE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── v36 Link Client to Additional Site Modal ─────────────────── */}
+      {linkModalClient && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60">
+          <div className="w-full sm:max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-t-2xl sm:rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">ADD SITE</h2>
+              <button onClick={closeLinkSiteModal} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            <p className="text-gray-400 text-sm mb-4">
+              Link <span className="text-gray-200 font-medium">{linkModalClient.email}</span> to another active site.
+              They&apos;ll be able to switch between their linked sites from the client portal.
+            </p>
+            {siteLinkError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{siteLinkError}</div>
+            )}
+            {(() => {
+              const alreadyLinkedIds = new Set(linkModalClient.sites.map((s) => s.id));
+              const candidateSites = sites
+                .filter((s) => s.is_active)
+                .filter((s) => !linkModalCompanyId || s.company_id === linkModalCompanyId)
+                .filter((s) => !alreadyLinkedIds.has(s.id))
+                .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+              if (candidateSites.length === 0) {
+                return (
+                  <p className="text-gray-500 text-sm">
+                    No other active sites to link. Reactivate a site or ask Vishnu to add one.
+                  </p>
+                );
+              }
+              return (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                  {candidateSites.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => linkClientToSite(linkModalClient, s.id)}
+                      disabled={linkSaving !== null}
+                      className="w-full text-left bg-[#0B1526] border border-[#1A3050] hover:border-amber-400/60 rounded-lg px-3 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <p className="text-gray-200 text-sm font-medium truncate">{s.name}</p>
+                      {s.address && <p className="text-gray-500 text-xs mt-0.5 truncate">{s.address}</p>}
+                      {linkSaving === s.id && <p className="text-amber-400 text-[10px] tracking-widest mt-1">LINKING…</p>}
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
+            <div className="mt-6">
+              <button
+                onClick={closeLinkSiteModal}
+                className="w-full border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+              >
+                CANCEL
               </button>
             </div>
           </div>

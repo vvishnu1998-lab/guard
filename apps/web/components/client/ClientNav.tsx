@@ -3,6 +3,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
+import { clientGet } from '../../lib/clientApi';
 
 const NAV_ITEMS = [
   { href: '/client',                 label: 'REPORTS'          },
@@ -11,12 +12,40 @@ const NAV_ITEMS = [
   { href: '/client/download',        label: 'DOWNLOADS'        },
 ];
 
+interface SitesResponse {
+  sites:          { id: string; name: string }[];
+  active_site_id: string;
+}
+
 export default function ClientNav() {
   const pathname = usePathname();
   const router   = useRouter();
   const [open, setOpen] = useState(false);
 
+  // v36 multi-site: pull the accessible-sites list once so we can (a)
+  // show the current site name in the header and (b) render "Switch
+  // Site" only when the client covers >1 site. A 401/network error
+  // here shouldn't block the nav from rendering — the pages behind
+  // it handle their own auth redirects.
+  const [sites,         setSites]         = useState<{ id: string; name: string }[]>([]);
+  const [activeSiteId,  setActiveSiteId]  = useState<string | null>(null);
+
   useEffect(() => { setOpen(false); }, [pathname]);
+
+  useEffect(() => {
+    let cancelled = false;
+    clientGet<SitesResponse>('/api/client/sites')
+      .then((r) => {
+        if (cancelled) return;
+        setSites(r.sites ?? []);
+        setActiveSiteId(r.active_site_id ?? null);
+      })
+      .catch(() => { /* nav renders without site chip; pages handle 401 */ });
+    return () => { cancelled = true; };
+  }, [pathname]);
+
+  const activeSite    = sites.find((s) => s.id === activeSiteId) ?? null;
+  const showSwitchBtn = sites.length > 1;
 
   function logout() {
     document.cookie = 'guard_client_access=; path=/; max-age=0';
@@ -64,6 +93,22 @@ export default function ClientNav() {
       </div>
 
       <div className="px-5 py-5 border-t border-white/[0.06]">
+        {activeSite && (
+          <>
+            <p className="text-[9px] text-white/25 tracking-[0.2em] font-semibold mb-1">CURRENT SITE</p>
+            <p className="text-[12px] text-white/80 font-semibold mb-3 truncate" title={activeSite.name}>
+              {activeSite.name}
+            </p>
+          </>
+        )}
+        {showSwitchBtn && (
+          <Link
+            href="/client/select-site"
+            className="block text-left text-[10px] tracking-[0.2em] text-blue-400 hover:text-blue-300 transition-colors font-semibold py-2"
+          >
+            SWITCH SITE
+          </Link>
+        )}
         <p className="text-[10px] text-white/20 tracking-wide leading-relaxed mb-3">Read-only access.</p>
         <button
           onClick={logout}
