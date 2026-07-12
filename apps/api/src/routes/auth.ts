@@ -32,7 +32,7 @@ function generateTempPassword(): string { return _generateTempPassword(12); }
 
 // ── Token helpers ────────────────────────────────────────────────────────────
 
-export function signTokens(payload: Omit<AuthPayload, 'iat' | 'exp' | 'jti'>) {
+function signTokens(payload: Omit<AuthPayload, 'iat' | 'exp' | 'jti'>) {
   const accessJti  = uuidv4();
   const refreshJti = uuidv4();
   const accessSecret = secretForRole(payload.role);
@@ -258,22 +258,18 @@ router.post('/admin/change-password', requireAuth('company_admin'), async (req: 
 });
 
 // ── Client portal login ──────────────────────────────────────────────────────
-//
-// v36 multi-site: a client can be linked to N sites via client_sites.
-// Login returns the filtered site list (active + portal-enabled) so the
-// frontend can render a site picker when >1. The initial JWT bakes in
-// sites[0].id as the default; the frontend can call POST /api/client/
-// switch-site to mint a new token when the user picks a different one.
 
 router.post('/client/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
   const result = await pool.query(
-    `SELECT cl.id, cl.password_hash, cl.is_active, cl.must_change_password,
-            co.is_active AS company_active
+    `SELECT cl.id, cl.site_id, cl.password_hash, cl.is_active, cl.must_change_password,
+            co.is_active AS company_active,
+            s.is_active AS site_active
      FROM clients cl
-     JOIN companies co ON co.id = cl.company_id
+     JOIN sites s ON s.id = cl.site_id
+     JOIN companies co ON co.id = s.company_id
      WHERE cl.email = $1`,
     [email.toLowerCase().trim()]
   );
@@ -289,43 +285,32 @@ router.post('/client/login', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your administrator.' });
   }
 
-  // Filter to sites the client can actually enter right now: linked via
-  // junction, site is_active, portal not toggled off. If the intersection
-  // is empty we reject the login — same "no portal access" surface the
-  // single-site flow used.
-  const linkedSites = await pool.query(
-    `SELECT s.id, s.name, s.address
-       FROM client_sites cs
-       JOIN sites s ON s.id = cs.site_id
-      WHERE cs.client_id = $1
-        AND s.is_active = true
-        AND s.client_access_disabled_at IS NULL
-      ORDER BY s.name ASC`,
-    [client.id],
-  );
-  const sites = linkedSites.rows;
-
-  if (sites.length === 0) {
-    return res.status(401).json({ error: 'No portal access. Contact your security provider.' });
+  if (client.site_active === false) {
+    return res.status(403).json({ error: 'Your site access has been deactivated. Please contact your administrator.' });
   }
 
-  // Default the initial token to the alphabetically-first accessible
-  // site. If the user has >1 site, the frontend routes to /select-site
-  // and calls /switch-site to swap the site_id into a fresh JWT.
-  const defaultSiteId = sites[0].id;
-  const tokens = signTokens({ sub: client.id, role: 'client', site_id: defaultSiteId });
+  // Portal-access gate: admin toggles sites.client_access_disabled_at
+  // via the ENABLE/DISABLE PORTAL button on /admin/clients. When set,
+  // block the login. (Retention rebuild: replaces the DRL day-90
+  // auto-disable check with a manual admin-controlled gate.)
+  const portalGate = await pool.query(
+    'SELECT client_access_disabled_at FROM sites WHERE id = $1',
+    [client.site_id],
+  );
+  if (portalGate.rows[0]?.client_access_disabled_at) {
+    return res.status(403).json({
+      error: 'Access to this site has been disabled. Contact your security provider.',
+    });
+  }
 
+  const tokens = signTokens({ sub: client.id, role: 'client', site_id: client.site_id });
   // Session C — stamp last_login_at so admins can see "last login: 3 days ago"
   // on the CLIENTS AT THIS SITE list. Fire-and-forget: a DB hiccup here
   // shouldn't fail the login itself.
   pool.query('UPDATE clients SET last_login_at = NOW() WHERE id = $1', [client.id])
     .catch((err) => console.error('[client/login] last_login_at update failed:', err));
   await logEvent(client.id, 'client', 'login_success', req);
-  res.json({
-    ...tokens,
-    must_change_password: client.must_change_password,
-    sites,
-  });
+  res.json({ ...tokens, must_change_password: client.must_change_password });
 });
 
 // ── Client portal: change password ───────────────────────────────────────────

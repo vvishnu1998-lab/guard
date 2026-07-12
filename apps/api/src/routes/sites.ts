@@ -254,16 +254,11 @@ router.patch('/:id/client-access', requireAuth('company_admin', 'vishnu'), async
   if (!siteRow.rows[0].is_active) return res.status(409).json({ error: 'Site is deactivated. Reactivate it before making changes.' });
 
   await Promise.all([
-    // v36 multi-site: don't touch clients.is_active (that's a per-client
-    // global) — just kick any live JWT whose baked-in site_id was this
-    // site by bumping tokens_not_before. Filter to clients actually
-    // linked to this site via the junction; login re-derives access
-    // from the client_sites + sites.client_access_disabled_at gate.
+    // Kick any live client sessions when the toggle flips off; also
+    // block re-login until the admin flips it back on.
     pool.query(
-      `UPDATE clients
-          SET tokens_not_before = NOW()
-        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
-      [req.params.id],
+      'UPDATE clients SET is_active = $1, tokens_not_before = NOW() WHERE site_id = $2',
+      [enabled, req.params.id],
     ),
     pool.query(
       `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
@@ -317,9 +312,7 @@ router.get('/:id/deactivate-preview', requireAuth('company_admin'), async (req, 
 //   Single transaction —
 //     sites.is_active = false
 //     sites.client_access_disabled_at = NOW()
-//     clients.tokens_not_before = NOW() (only for clients LINKED to this
-//       site via client_sites — the client row itself stays is_active=true
-//       so a multi-site client keeps access to their other sites)
+//     clients.is_active = false (where site_id matches)
 //     shifts.status = 'cancelled' + cancellation_reason = 'site_deactivated'
 //       for FUTURE scheduled shifts only (scheduled_start > NOW()
 //       AND status = 'scheduled'). NEVER touches active/completed/missed.
@@ -369,15 +362,9 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
       'UPDATE sites SET is_active = false, client_access_disabled_at = NOW() WHERE id = $1',
       [req.params.id],
     );
-    // v36 multi-site: kick any live client session whose JWT baked in
-    // this site_id. Don't touch clients.is_active — a client covering
-    // sites A, B, C shouldn't lose global access just because B was
-    // deactivated. Login re-derives access from client_sites + the
-    // site's is_active flag.
+    // Session B — kick any active client session when the site is deactivated.
     await client.query(
-      `UPDATE clients
-          SET tokens_not_before = NOW()
-        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
+      'UPDATE clients SET is_active = false, tokens_not_before = NOW() WHERE site_id = $1',
       [req.params.id],
     );
     const cancelled = await client.query<{ id: string; guard_id: string | null }>(

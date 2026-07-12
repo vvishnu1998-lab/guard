@@ -21,7 +21,6 @@ import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
 import { presignAll } from '../services/s3';
-import { signTokens } from './auth';
 import {
   NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
   PAGE_W, PAGE_H, ML, MR, CW,
@@ -29,77 +28,6 @@ import {
 } from '../services/pdf/theme';
 
 const router = Router();
-
-// ── v36 multi-site: list this client's accessible sites ─────────────────────
-//
-// GET /api/client/sites — returns sites the current client is linked to and
-// can enter right now (same filter as the login handler: junction linked +
-// site is_active + portal not toggled off). Frontend uses this to render
-// the /select-site picker + "Switch Site" nav item when >1 site.
-//
-// Preview tokens (admin-generated read-only tokens with scope='preview')
-// don't sit on a real clients row, so we return just the previewed site.
-
-router.get('/sites', requireAuth('client'), async (req: Request, res: Response) => {
-  if (req.user!.scope === 'preview') {
-    const previewed = await pool.query(
-      'SELECT id, name, address FROM sites WHERE id = $1',
-      [req.user!.site_id],
-    );
-    return res.json({ sites: previewed.rows, active_site_id: req.user!.site_id });
-  }
-
-  const result = await pool.query(
-    `SELECT s.id, s.name, s.address
-       FROM client_sites cs
-       JOIN sites s ON s.id = cs.site_id
-      WHERE cs.client_id = $1
-        AND s.is_active = true
-        AND s.client_access_disabled_at IS NULL
-      ORDER BY s.name ASC`,
-    [req.user!.sub],
-  );
-  res.json({ sites: result.rows, active_site_id: req.user!.site_id });
-});
-
-// ── v36 multi-site: switch active site ──────────────────────────────────────
-//
-// POST /api/client/switch-site — body { site_id }. Verifies the target
-// site is in the caller's linked sites AND still accessible (site active +
-// portal not disabled), then mints a fresh JWT pair with the new site_id
-// baked in. The old token stays valid until natural expiry; the frontend
-// swaps the cookies immediately on the response.
-//
-// Preview tokens can't switch — they're pinned to whatever the admin
-// generated them for.
-
-router.post('/switch-site', requireAuth('client'), async (req: Request, res: Response) => {
-  if (req.user!.scope === 'preview') {
-    return res.status(403).json({ error: 'Preview tokens are pinned to one site' });
-  }
-
-  const { site_id } = req.body ?? {};
-  if (typeof site_id !== 'string' || !site_id) {
-    return res.status(400).json({ error: 'site_id is required' });
-  }
-
-  const check = await pool.query(
-    `SELECT s.id
-       FROM client_sites cs
-       JOIN sites s ON s.id = cs.site_id
-      WHERE cs.client_id = $1
-        AND cs.site_id   = $2
-        AND s.is_active  = true
-        AND s.client_access_disabled_at IS NULL`,
-    [req.user!.sub, site_id],
-  );
-  if (!check.rows[0]) {
-    return res.status(403).json({ error: 'You do not have access to that site' });
-  }
-
-  const tokens = signTokens({ sub: req.user!.sub, role: 'client', site_id });
-  res.json(tokens);
-});
 
 // ── Site info ─────────────────────────────────────────────────────────────────
 
