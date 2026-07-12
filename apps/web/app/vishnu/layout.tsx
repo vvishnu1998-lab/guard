@@ -5,10 +5,9 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
 
 const NAV = [
-  { href: '/vishnu',           label: 'OVERVIEW'  },
-  { href: '/vishnu/companies', label: 'COMPANIES' },
-  { href: '/vishnu/sites',     label: 'ALL SITES' },
-  { href: '/vishnu/retention', label: 'RETENTION' },
+  { href: '/vishnu',            label: 'OVERVIEW'         },
+  { href: '/vishnu/companies',  label: 'COMPANIES'        },
+  { href: '/vishnu/compliance', label: 'DATA & COMPLIANCE'},
 ];
 
 export default function VishnuLayout({ children }: { children: React.ReactNode }) {
