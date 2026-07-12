@@ -123,9 +123,34 @@ const PT_DATE_LONG = new Intl.DateTimeFormat('en-GB', {
   day: '2-digit', month: 'short', year: 'numeric',
   hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
 });
-const RANGE_LABEL = new Intl.DateTimeFormat('en-US', {
-  month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles',
-});
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/**
+ * Format a YYYY-MM-DD string as "Mon D" without any Date roundtrip.
+ * The old `RANGE_LABEL` formatter went through
+ * `new Date("2026-07-10T00:00:00.000Z")` which is UTC midnight, then
+ * displayed in Pacific — that came out a day early (Pacific 17:00 the
+ * previous day). Parsing the string field-by-field sidesteps the whole
+ * timezone dance.
+ */
+function fmtRangeSegment(yyyymmdd: string): string {
+  const [, m, d] = yyyymmdd.split('-').map(Number);
+  return `${MONTH_ABBR[m - 1]} ${d}`;
+}
+
+/**
+ * Turn a YYYY-MM-DD picked in the range picker into an ISO string that
+ * represents browser-local midnight (start) or 23:59:59.999 (end).
+ * Admin users are US-Pacific-based, so browser-local = Pacific and the
+ * OS handles DST. Documenting the timezone assumption inline because
+ * this is easy to break if the base drifts.
+ */
+function localDayStart(yyyymmdd: string): string {
+  return new Date(`${yyyymmdd}T00:00:00`).toISOString();
+}
+function localDayEnd(yyyymmdd: string): string {
+  return new Date(`${yyyymmdd}T23:59:59.999`).toISOString();
+}
 
 function isoDateOnly(d: Date): string {
   // Local YYYY-MM-DD, safe for the browser <input type="date"> element.
@@ -335,8 +360,8 @@ export default function ActivityLogTable({
   // client-side when SITE changes.
   useEffect(() => {
     if (mode !== 'admin') return;
-    const from = `${dateFrom}T00:00:00.000Z`;
-    const to   = `${dateTo}T23:59:59.999Z`;
+    const from = localDayStart(dateFrom);
+    const to   = localDayEnd(dateTo);
     fetcher<AdminSession[]>(`/api/admin/sessions?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
       .then(setSessions)
       .catch(() => setSessions([]));
@@ -362,8 +387,8 @@ export default function ActivityLogTable({
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      params.set('from',      `${dateFrom}T00:00:00.000Z`);
-      params.set('to',        `${dateTo}T23:59:59.999Z`);
+      params.set('from',      localDayStart(dateFrom));
+      params.set('to',        localDayEnd(dateTo));
       params.set('page',      String(page));
       params.set('page_size', String(PAGE_SIZE));
       if (mode === 'admin' && siteId)    params.set('site_id',    siteId);
@@ -439,11 +464,10 @@ export default function ActivityLogTable({
     setDateTo(todayStr);
   }
 
-  const rangeLabel = useMemo(() => {
-    const from = new Date(`${dateFrom}T00:00:00.000Z`);
-    const to   = new Date(`${dateTo}T00:00:00.000Z`);
-    return `${RANGE_LABEL.format(from)} → ${RANGE_LABEL.format(to)}`;
-  }, [dateFrom, dateTo]);
+  const rangeLabel = useMemo(
+    () => `${fmtRangeSegment(dateFrom)} → ${fmtRangeSegment(dateTo)}`,
+    [dateFrom, dateTo],
+  );
 
   const hasFilters = mode === 'admin'
     && (siteId || sessionId || search || dateFrom !== todayStr || dateTo !== todayStr);
@@ -454,8 +478,8 @@ export default function ActivityLogTable({
     setError('');
     try {
       const body: Record<string, string> = {
-        from: `${dateFrom}T00:00:00.000Z`,
-        to:   `${dateTo}T23:59:59.999Z`,
+        from: localDayStart(dateFrom),
+        to:   localDayEnd(dateTo),
       };
       if (siteId)    body.site_id    = siteId;
       if (sessionId) body.session_id = sessionId;
