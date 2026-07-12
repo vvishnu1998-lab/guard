@@ -2,17 +2,18 @@
 /**
  * Admin — CLIENT PORTALS (/admin/clients)
  *
- * Session D — this is now the single management surface for everything
- * client-portal-adjacent per site:
+ * Single management surface for everything client-portal-adjacent per site:
  *   * client accounts (list + add + edit + reset password + deactivate)
- *   * per-site PREVIEW AS CLIENT (30-min read-only JWT via Session B)
- *   * portal enable/disable (bumps clients.tokens_not_before)
- *   * retention date overrides (client_star_access_until + data_delete_at)
+ *   * per-site PREVIEW AS CLIENT (30-min read-only JWT)
+ *   * portal enable/disable (bumps clients.tokens_not_before + toggles
+ *     sites.client_access_disabled_at)
  *
- * The /admin/sites expanded panel has been trimmed accordingly — CLIENT
- * PORTAL / CLIENTS AT THIS SITE / retention rows were removed and replaced
- * with a "Manage in Client Portals →" link that deep-links here via
- * ?site=<siteId> (scrolls to the site's section on mount).
+ * Retention rebuild removed the CLIENT ACCESS UNTIL + DATA DELETION date
+ * overrides (per-row expires_at on the child tables owns that now). What
+ * remains is a lean PORTAL ACCESS section wrapping the enable/disable
+ * toggle.
+ *
+ * The /admin/sites expanded panel deep-links here via ?site=<siteId>.
  */
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -25,8 +26,6 @@ interface Site {
   address:                     string;
   is_active:                   boolean;
   client_access_disabled_at:   string | null;
-  client_star_access_until:    string | null;
-  data_delete_at:              string | null;
   company_name?:               string;
 }
 
@@ -78,16 +77,6 @@ function relativeTime(iso: string | null): string {
   return `${Math.floor(months / 12)}y ago`;
 }
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-}
-
-function daysUntil(iso: string | null): number | null {
-  if (!iso) return null;
-  return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
-}
-
 export default function ClientPortalsPage() {
   return (
     <Suspense fallback={<p className="text-gray-500 text-sm">Loading…</p>}>
@@ -118,10 +107,6 @@ function ClientPortalsPageInner() {
   const [clientSaving,    setClientSaving]    = useState(false);
   const [clientFormError, setClientFormError] = useState('');
   const [clientToggling,  setClientToggling]  = useState<string | null>(null);
-
-  // Per-site retention date editors (draft state before save).
-  const [retentionDraft, setRetentionDraft] = useState<Record<string, { access_until: string; delete_at: string }>>({});
-  const [retentionSaving, setRetentionSaving] = useState<Record<string, boolean>>({});
 
   // Portal toggle in-flight indicator
   const [portalToggling,  setPortalToggling]  = useState<string | null>(null);
@@ -330,40 +315,6 @@ function ClientPortalsPageInner() {
     } catch (e: any) { setError(e?.message ?? 'Preview failed'); }
   }
 
-  function toDateInput(iso: string | null): string {
-    if (!iso) return '';
-    return iso.slice(0, 10);
-  }
-  function retentionValue(site: Site, key: 'access_until' | 'delete_at'): string {
-    const draft = retentionDraft[site.id];
-    if (draft) return draft[key];
-    return key === 'access_until' ? toDateInput(site.client_star_access_until) : toDateInput(site.data_delete_at);
-  }
-  function updateRetention(siteId: string, key: 'access_until' | 'delete_at', value: string) {
-    setRetentionDraft((prev) => {
-      const cur = prev[siteId] ?? { access_until: '', delete_at: '' };
-      return { ...prev, [siteId]: { ...cur, [key]: value } };
-    });
-  }
-  async function saveRetention(site: Site) {
-    const draft = retentionDraft[site.id];
-    if (!draft) return;
-    const cur = { access_until: toDateInput(site.client_star_access_until), delete_at: toDateInput(site.data_delete_at) };
-    const patch: Record<string, string | null> = {};
-    if (draft.access_until !== cur.access_until) patch.client_star_access_until = draft.access_until || null;
-    if (draft.delete_at    !== cur.delete_at)    patch.data_delete_at            = draft.delete_at    || null;
-    if (Object.keys(patch).length === 0) return;
-    setRetentionSaving((prev) => ({ ...prev, [site.id]: true }));
-    try {
-      await adminPatch(`/api/sites/${site.id}/client-access`, patch);
-      setRetentionDraft((prev) => {
-        const next = { ...prev }; delete next[site.id]; return next;
-      });
-      await load();
-    } catch (e: any) { setError(e?.message ?? 'Failed to save dates'); }
-    finally { setRetentionSaving((prev) => ({ ...prev, [site.id]: false })); }
-  }
-
   function copyCredentialsToClipboard(b: CredentialsBanner) {
     const text = `Portal: https://netraops.com/portal\nEmail: ${b.email}\nPassword: ${b.temp_password}`;
     navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
@@ -441,9 +392,6 @@ function ClientPortalsPageInner() {
       {!loading && visibleSites.map((site) => {
         const siteClients = clientsForSite(site.id);
         const portalEnabled = !site.client_access_disabled_at;
-        const accessIn = daysUntil(site.client_star_access_until);
-        const deleteIn = daysUntil(site.data_delete_at);
-        const draftDirty = Boolean(retentionDraft[site.id]);
         const siteSearchMatch = matchesSite(site, search.trim());
         return (
           <section
@@ -479,56 +427,27 @@ function ClientPortalsPageInner() {
               </div>
             </div>
 
-            {/* CLIENT ACCESS SETTINGS */}
-            <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 space-y-3">
-              <p className="text-gray-500 text-xs tracking-widest">CLIENT ACCESS SETTINGS</p>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-gray-500 text-[10px] tracking-widest mb-1">CLIENT ACCESS UNTIL</label>
-                  <input
-                    type="date"
-                    value={retentionValue(site, 'access_until')}
-                    onChange={(e) => updateRetention(site.id, 'access_until', e.target.value)}
-                    className="w-full bg-[#0F1E35] border border-[#1A3050] rounded px-2 py-1.5 text-gray-200 text-xs"
-                  />
-                  {accessIn !== null && accessIn <= 30 && !draftDirty && (
-                    <p className={`text-[10px] mt-1 ${accessIn <= 14 ? 'text-red-400' : 'text-amber-400'}`}>
-                      {fmtDate(site.client_star_access_until)} · {accessIn}d
-                    </p>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-gray-500 text-[10px] tracking-widest mb-1">DATA DELETION</label>
-                  <input
-                    type="date"
-                    value={retentionValue(site, 'delete_at')}
-                    onChange={(e) => updateRetention(site.id, 'delete_at', e.target.value)}
-                    className="w-full bg-[#0F1E35] border border-[#1A3050] rounded px-2 py-1.5 text-gray-200 text-xs"
-                  />
-                  {deleteIn !== null && deleteIn <= 30 && !draftDirty && (
-                    <p className={`text-[10px] mt-1 ${deleteIn <= 14 ? 'text-red-400' : 'text-amber-400'}`}>
-                      {fmtDate(site.data_delete_at)} · {deleteIn}d
-                    </p>
-                  )}
-                </div>
+            {/* PORTAL ACCESS */}
+            <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <p className="text-gray-500 text-xs tracking-widest mb-1">PORTAL ACCESS</p>
+                <p className="text-gray-400 text-[11px]">
+                  {portalEnabled
+                    ? 'Client portal is enabled. Clients at this site can log in.'
+                    : 'Client portal is disabled. Logins are blocked until re-enabled.'}
+                </p>
               </div>
-              {draftDirty && (
-                <div className="flex items-center justify-end gap-2">
-                  <button
-                    onClick={() => setRetentionDraft((prev) => { const n = { ...prev }; delete n[site.id]; return n; })}
-                    className="text-xs text-gray-500 hover:text-gray-300 tracking-widest px-2 py-1"
-                  >
-                    CANCEL
-                  </button>
-                  <button
-                    onClick={() => saveRetention(site)}
-                    disabled={retentionSaving[site.id]}
-                    className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40"
-                  >
-                    {retentionSaving[site.id] ? 'SAVING…' : 'SAVE DATES'}
-                  </button>
-                </div>
-              )}
+              <button
+                onClick={() => togglePortal(site)}
+                disabled={portalToggling === site.id || !site.is_active}
+                className={`text-xs tracking-widest px-3 py-1.5 rounded transition-colors border disabled:opacity-40 ${
+                  portalEnabled
+                    ? 'text-red-400 border-red-500/40 hover:bg-red-500/10 hover:border-red-400'
+                    : 'text-green-400 border-green-500/40 hover:bg-green-500/10 hover:border-green-400'
+                }`}
+              >
+                {portalToggling === site.id ? '…' : portalEnabled ? 'DISABLE PORTAL' : 'ENABLE PORTAL'}
+              </button>
             </div>
 
             {/* CLIENTS AT THIS SITE */}
@@ -592,18 +511,6 @@ function ClientPortalsPageInner() {
                 >
                   + ADD CLIENT
                 </button>
-                <div className="ml-auto flex items-center gap-2 flex-wrap">
-                  <span className="text-gray-500 text-[10px] tracking-widest">PORTAL ACTIONS</span>
-                  <button
-                    onClick={() => togglePortal(site)}
-                    disabled={portalToggling === site.id || !site.is_active}
-                    className={`text-xs tracking-widest px-3 py-1 rounded transition-colors bg-[#0B1526] text-gray-400 border border-[#1A3050] disabled:opacity-40 ${
-                      portalEnabled ? 'hover:border-red-500 hover:text-red-400' : 'hover:border-green-500 hover:text-green-400'
-                    }`}
-                  >
-                    {portalToggling === site.id ? '…' : portalEnabled ? 'DISABLE PORTAL' : 'ENABLE PORTAL'}
-                  </button>
-                </div>
               </div>
             </div>
             {/* If the search matched only the site (not any client), leave a hint. */}

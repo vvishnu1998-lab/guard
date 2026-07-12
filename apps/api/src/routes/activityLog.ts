@@ -96,6 +96,7 @@ interface ReportRow {
   shift_id:        string;
   scheduled_start: string;
   scheduled_end:   string;
+  legal_hold:      boolean;
 }
 
 type StatusKind =
@@ -138,6 +139,8 @@ export interface ActivityRow {
   report_type:  'activity' | 'incident' | 'maintenance' | null;
   severity:     'low' | 'medium' | 'high' | 'critical' | null;
   description:  string | null;
+  /** Report-only, always false on pings + missed rows. */
+  legal_hold:   boolean;
 
   // Ping-only fields, server-side gated to admin role. Clients receive `null`
   // across the board for these — guard movements are not exposed over the
@@ -294,6 +297,7 @@ export async function fetchActivityRows(
       r.report_type,
       r.severity,
       r.description,
+      r.legal_hold,
       r.reported_at,
       ss.guard_id,
       g.name AS guard_name,
@@ -327,7 +331,7 @@ export async function fetchActivityRows(
     reportQuery += ` AND ss.id = $${reportParams.length + 1}`;
     reportParams.push(sessionId);
   }
-  reportQuery += ' GROUP BY r.id, ss.id, ss.guard_id, g.name, si.name, sh.id, sh.scheduled_start, sh.scheduled_end';
+  reportQuery += ' GROUP BY r.id, r.legal_hold, ss.id, ss.guard_id, g.name, si.name, sh.id, sh.scheduled_start, sh.scheduled_end';
   const reportsResult = await pool.query<ReportRow>(reportQuery, reportParams);
 
   // ── Build merged feed ────────────────────────────────────────────────────
@@ -389,6 +393,7 @@ export async function fetchActivityRows(
         report_type:     null,
         severity:        null,
         description:     null,
+        legal_hold:      false,
         latitude:        null,
         longitude:       null,
         accuracy_m:      null,
@@ -435,6 +440,7 @@ export async function fetchActivityRows(
             report_type:  null,
             severity:     null,
             description:  null,
+            legal_hold:   false,
             latitude:           isAdmin ? ping.latitude           : null,
             longitude:          isAdmin ? ping.longitude          : null,
             accuracy_m:         isAdmin ? ping.accuracy_meters    : null,
@@ -462,6 +468,7 @@ export async function fetchActivityRows(
             report_type:  null,
             severity:     null,
             description:  null,
+            legal_hold:   false,
             latitude:           null,
             longitude:          null,
             accuracy_m:         null,
@@ -506,6 +513,7 @@ export async function fetchActivityRows(
             report_type:     null,
             severity:        null,
             description:     null,
+            legal_hold:      false,
             latitude:        null,
             longitude:       null,
             accuracy_m:      null,
@@ -595,6 +603,7 @@ export async function fetchActivityRows(
         report_type:     null,
         severity:        null,
         description:     null,
+        legal_hold:      false,
         latitude:        null,
         longitude:       null,
         accuracy_m:      null,
@@ -628,6 +637,7 @@ export async function fetchActivityRows(
       report_type:  r.report_type,
       severity:     r.severity,
       description:  r.description,
+      legal_hold:   r.legal_hold,
       latitude:           null,
       longitude:          null,
       accuracy_m:         null,

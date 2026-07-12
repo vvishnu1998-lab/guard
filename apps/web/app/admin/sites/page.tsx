@@ -46,8 +46,6 @@ interface Site {
   timezone:                    string;
   is_active:                   boolean;
   client_access_disabled_at:   string | null;
-  client_star_access_until:    string | null;
-  data_delete_at:              string | null;
   has_geofence:                boolean;
   center_lat:                  number | null;
   center_lng:                  number | null;
