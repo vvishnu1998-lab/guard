@@ -289,13 +289,17 @@ router.post('/client/login', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Your site access has been deactivated. Please contact your administrator.' });
   }
 
-  const retentionResult = await pool.query(
-    'SELECT client_star_access_disabled FROM data_retention_log WHERE site_id = $1',
-    [client.site_id]
+  // Portal-access gate: admin toggles sites.client_access_disabled_at
+  // via the ENABLE/DISABLE PORTAL button on /admin/clients. When set,
+  // block the login. (Retention rebuild: replaces the DRL day-90
+  // auto-disable check with a manual admin-controlled gate.)
+  const portalGate = await pool.query(
+    'SELECT client_access_disabled_at FROM sites WHERE id = $1',
+    [client.site_id],
   );
-  if (retentionResult.rows[0]?.client_star_access_disabled) {
+  if (portalGate.rows[0]?.client_access_disabled_at) {
     return res.status(403).json({
-      error: 'Access to this site has expired. Contact your security provider.',
+      error: 'Access to this site has been disabled. Contact your security provider.',
     });
   }
 
