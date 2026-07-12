@@ -221,8 +221,8 @@ export default function CompaniesPage() {
     if (!adminForm.name.trim() || !adminForm.email.trim() || !adminForm.password) {
       setAdminError('All fields are required'); return;
     }
-    if (adminForm.password.length < 6 || adminForm.password.length > 128) {
-      setAdminError('Minimum 6 characters.'); return;
+    if (adminForm.password.length < 8 || adminForm.password.length > 128) {
+      setAdminError('Minimum 8 characters.'); return;
     }
     setAdminSaving(true); setAdminError('');
     try {

@@ -38,7 +38,7 @@ export default function AdminChangePasswordPage() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError('');
-    if (next.length < 6 || next.length > 8) { setError('New password must be 6–8 characters'); return; }
+    if (next.length < 8 || next.length > 128) { setError('Minimum 8 characters.'); return; }
     if (next !== confirm) { setError('New passwords do not match'); return; }
 
     setLoading(true);
@@ -78,7 +78,7 @@ export default function AdminChangePasswordPage() {
           <p className="text-amber-500 text-[11px] tracking-[0.3em] font-semibold mb-3">SET PASSWORD</p>
           <h1 className="text-white font-black text-3xl tracking-tight mb-2">Choose a new password</h1>
           <p className="text-white/35 text-sm tracking-wide">
-            Enter your current (or temporary) password, then choose a new 6–8 character password.
+            Enter your current (or temporary) password, then choose a new password of at least 8 characters.
           </p>
         </div>
 
@@ -111,7 +111,7 @@ export default function AdminChangePasswordPage() {
                 required
                 value={next}
                 onChange={(e) => setNext(e.target.value)}
-                placeholder="6–8 characters"
+                placeholder="At least 8 characters"
                 className="w-full bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3.5 pr-11 text-white text-sm placeholder-white/20 focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/40 focus:bg-white/[0.06] focus:outline-none transition-all"
               />
               {renderEye(showNext, () => setShowNext((p) => !p))}

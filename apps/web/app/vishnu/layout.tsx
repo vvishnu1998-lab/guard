@@ -17,7 +17,7 @@ export default function VishnuLayout({ children }: { children: React.ReactNode }
 
   useEffect(() => { setOpen(false); }, [pathname]);
 
-  const isAuthPage = pathname === '/vishnu/login' || pathname === '/vishnu/reset-password';
+  const isAuthPage = pathname === '/vishnu/login';
 
   function logout() {
     document.cookie = 'guard_vishnu_access=; path=/; max-age=0';

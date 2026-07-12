@@ -13,22 +13,22 @@ const MAX_FAILED_ATTEMPTS = 5;
 const ACCESS_TOKEN_TTL  = '8h';   // web sessions; mobile app refreshes automatically
 const REFRESH_TOKEN_TTL = '30d';
 
-// Password policy: minimum 6 characters, max 128 (well above bcrypt's 72-byte
+// Password policy: minimum 8 characters, max 128 (well above bcrypt's 72-byte
 // effective limit — the library truncates silently, which is fine for us).
-const PASSWORD_MIN = 6;
+// Existing shorter passwords are grandfathered — login accepts any length;
+// this floor only gates change-password / set-new-password / admin-create.
+const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 128;
 export function validatePassword(p: unknown): string | null {
   if (typeof p !== 'string') return 'Password is required';
   if (p.length < PASSWORD_MIN || p.length > PASSWORD_MAX) {
-    return 'Minimum 6 characters.';
+    return 'Minimum 8 characters.';
   }
   return null;
 }
 
-// Session C — shared temp-password generator lives in utils; call with 8
-// here to preserve the existing guard/admin email-template format.
 import { generateTempPassword as _generateTempPassword } from '../utils/tempPassword';
-function generateTempPassword(): string { return _generateTempPassword(8); }
+function generateTempPassword(): string { return _generateTempPassword(12); }
 
 // ── Token helpers ────────────────────────────────────────────────────────────
 

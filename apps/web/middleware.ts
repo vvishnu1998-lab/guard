@@ -9,7 +9,9 @@ import { jwtVerify } from 'jose';
  *   /client/*  → guard_client_access  → /client/login
  *   /vishnu/*  → guard_vishnu_access  → /vishnu/login
  *
- * Public paths (login + reset-password) are always let through without a cookie.
+ * Public paths (login) are always let through without a cookie. The
+ * forgot-password flow is a panel on the login page + email-delivered
+ * temp password, so there is no separate public reset URL.
  *
  * Verifies HS256 signature with the portal's own signing key (must match the
  * API's signing key for the corresponding role) via `jose`, which is
@@ -26,21 +28,18 @@ const ROUTES = [
   {
     prefix:             '/admin',
     loginPath:          '/admin/login',
-    resetPasswordPath:  '/admin/reset-password',
     cookieName:         'guard_admin_access',
     secretEnvVar:       'JWT_SECRET',
   },
   {
     prefix:             '/client',
     loginPath:          '/client/login',
-    resetPasswordPath:  '/client/reset-password',
     cookieName:         'guard_client_access',
     secretEnvVar:       'JWT_SECRET',
   },
   {
     prefix:             '/vishnu',
     loginPath:          '/vishnu/login',
-    resetPasswordPath:  '/vishnu/reset-password',
     cookieName:         'guard_vishnu_access',
     secretEnvVar:       'VISHNU_JWT_SECRET',
   },
@@ -59,12 +58,10 @@ export async function middleware(req: NextRequest) {
   for (const route of ROUTES) {
     if (!pathname.startsWith(route.prefix)) continue;
 
-    // Let login and reset-password pages through without a valid session
+    // Let login page through without a valid session
     if (
       pathname === route.loginPath ||
-      pathname.startsWith(route.loginPath + '/') ||
-      pathname === route.resetPasswordPath ||
-      pathname.startsWith(route.resetPasswordPath + '/')
+      pathname.startsWith(route.loginPath + '/')
     ) {
       return NextResponse.next();
     }

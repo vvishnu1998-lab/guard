@@ -500,15 +500,15 @@ export default function GuardsPage() {
               {([
                 ['name',          'FULL NAME',          'text',     'e.g. James Wilson'],
                 ['email',         'EMAIL',              'email',    'guard@company.com'],
-                ['temp_password', 'TEMPORARY PASSWORD', 'password', 'Min 6 characters'],
+                ['temp_password', 'TEMPORARY PASSWORD', 'password', 'Min 8 characters'],
               ] as const).map(([key, label, type, ph]) => (
                 <div key={key}>
                   <label className="block text-gray-500 text-xs tracking-widest mb-1">{label} <span className="text-amber-400">*</span></label>
                   <input type={type} placeholder={ph} value={(form as any)[key]}
                     onChange={(e) => {
                       setForm((f) => ({ ...f, [key]: e.target.value }));
-                      if (key === 'temp_password' && (e.target.value.length < 6 || e.target.value.length > 128)) {
-                        setFormError('Minimum 6 characters.');
+                      if (key === 'temp_password' && (e.target.value.length < 8 || e.target.value.length > 128)) {
+                        setFormError('Minimum 8 characters.');
                       } else if (key === 'temp_password') {
                         setFormError('');
                       }
