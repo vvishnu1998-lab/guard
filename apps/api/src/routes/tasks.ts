@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { validateAtSite } from '../services/geofence';
+import { expiresAtFor } from '../services/retention';
 
 const router = Router();
 
@@ -109,14 +110,15 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
       `INSERT INTO task_completions
          (task_instance_id, shift_session_id, guard_id,
           completion_lat, completion_lng, completion_accuracy_meters,
-          completion_within_geofence, photo_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          completion_within_geofence, photo_url, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         req.params.id, shift_session_id, req.user!.sub,
         completion_lat ?? null, completion_lng ?? null,
         haveCoords ? accuracy : null,
         within,
         photo_url || null,
+        expiresAtFor('task_completion'),
       ]
     );
     await client.query("UPDATE task_instances SET status = 'completed' WHERE id = $1", [req.params.id]);

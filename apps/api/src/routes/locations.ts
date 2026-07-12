@@ -7,6 +7,7 @@ import { isAllowedContentType, magicMatches, describeMagic } from '../services/i
 import { insertNotification } from '../services/notifications';
 import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
 import { sendPushNotification } from '../services/firebase';
+import { expiresAtFor } from '../services/retention';
 
 /**
  * Fire guard notification row + admin email for a fresh geofence violation.
@@ -313,21 +314,23 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     const pingInsert = await client.query(
       `INSERT INTO location_pings
          (shift_session_id, guard_id, site_id, latitude, longitude, accuracy_meters,
-          is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+          is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
       [shift_session_id, req.user!.sub, site_id, latitude, longitude, accuracyM,
-       isWithin, ping_type, photo_url || null, photoDeleteAt, throttle_reason ?? null],
+       isWithin, ping_type, photo_url || null, photoDeleteAt, throttle_reason ?? null,
+       expiresAtFor('ping_metadata')],
     );
     pingRow = pingInsert.rows[0];
 
     if (!isWithin) {
       const violationInsert = await client.query(
         `INSERT INTO geofence_violations
-           (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url)
-         VALUES ($1, $2, $3, $4, $5, $6)
+           (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
          RETURNING id`,
-        [shift_session_id, req.user!.sub, site_id, latitude, longitude, photo_url || null],
+        [shift_session_id, req.user!.sub, site_id, latitude, longitude, photo_url || null,
+         expiresAtFor('geofence_violation')],
       );
       if (violationInsert.rows[0]) {
         freshViolationId = violationInsert.rows[0].id;
@@ -399,11 +402,12 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
 
   const result = await pool.query(
     `INSERT INTO geofence_violations
-       (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
      RETURNING *`,
-    [shift_session_id, guardId, siteId, latitude, longitude, photo_url || null]
+    [shift_session_id, guardId, siteId, latitude, longitude, photo_url || null,
+     expiresAtFor('geofence_violation')]
   );
 
   // Fresh violation → fire alerts. Duplicate (open violation already exists) →
