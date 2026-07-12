@@ -8,10 +8,11 @@ import Link from 'next/link';
 import { vishnuGet, vishnuPatch } from '../../lib/vishnuApi';
 
 interface KPIs {
-  total_companies:   number;
-  active_sites:      number;
-  active_guards:     number;
-  pending_deletions: number;
+  total_companies: number;
+  active_sites:    number;
+  active_guards:   number;
+  legal_holds:     number;
+  expiring_30d:    number;
 }
 
 interface Company {
@@ -77,12 +78,21 @@ export default function VishnuOverview() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      {/* KPI row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard label="COMPANIES"        value={kpis?.total_companies   ?? '—'} />
-        <KpiCard label="ACTIVE SITES"     value={kpis?.active_sites      ?? '—'} accent="text-green-400" />
-        <KpiCard label="ACTIVE GUARDS"    value={kpis?.active_guards     ?? '—'} />
-        <KpiCard label="PENDING DELETIONS" value={kpis?.pending_deletions ?? '—'} accent={kpis?.pending_deletions ? 'text-red-400' : 'text-gray-200'} />
+      {/* KPI row — 5 cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+        <KpiCard label="COMPANIES"     value={kpis?.total_companies ?? '—'} />
+        <KpiCard label="ACTIVE SITES"  value={kpis?.active_sites    ?? '—'} accent="text-green-400" />
+        <KpiCard label="ACTIVE GUARDS" value={kpis?.active_guards   ?? '—'} />
+        <KpiCard
+          label="LEGAL HOLDS"
+          value={kpis?.legal_holds ?? '—'}
+          accent={kpis?.legal_holds ? 'text-orange-400' : 'text-gray-200'}
+        />
+        <KpiCard
+          label="EXPIRING 30D"
+          value={kpis?.expiring_30d ?? '—'}
+          accent={kpis?.expiring_30d ? 'text-yellow-400' : 'text-gray-200'}
+        />
       </div>
 
       {/* Companies table */}
