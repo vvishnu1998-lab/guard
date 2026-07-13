@@ -10,40 +10,76 @@ import { sendPushNotification } from '../services/firebase';
 import { expiresAtFor } from '../services/retention';
 
 /**
- * Fire guard notification row + admin email for a fresh geofence violation.
- * Shared by POST /ping (audit Tier 1-A), POST /violation (background-task
- * self-report), and POST /reports off-post flag (T2-D).
+ * Fire guard notification row + admin email for a geofence violation.
+ * Shared by POST /violation (bg-task self-report / mobile geofencing
+ * enter-exit) and POST /reports off-post flag (INCIDENT-only per Q8).
  *
- * Three channels, each with its own error catch so one failure can't block
- * the others:
- *   (1) Guard notification — insertNotification (Notifications tab record)
- *   (2) Guard FCM push     — sendPushNotification (foreground alert)
- *   (3) Admin email        — sendGeofenceBreachAlert (T1-D)
+ * (Phase 1A rewrite, 2026-07-12 walk-test rebuild)
  *
- * Context switches the text on all channels:
- *   kind='ping'   — guard ping fired off-post (Wave A default)
- *   kind='report' — guard filed a {reportType} report from off-post (T2-D)
+ * Change from Wave A:
+ *   * Callers no longer condition on "did the INSERT return a row?" —
+ *     they call this ALWAYS. The ON CONFLICT DO NOTHING skip that made
+ *     the second offsite event silent (walk-test bug #5) is gone.
+ *     Dedup now lives inside this function as a per-session, per-type
+ *     5-minute rate limit against the notifications table.
+ *   * eventType is required and drives:
+ *       (a) the notification row `type` (geofence_breach for bg
+ *           boundary events; off_post_report for incident-from-offsite)
+ *       (b) the rate-limit key — off_post_report and geofence_breach
+ *           are SEPARATE 5-min windows, so an incident report while a
+ *           ping-breach is open STILL alerts (Q3).
+ *   * insertNotification always fires. FCM push + admin email skip
+ *     when rate-limited so the Alerts feed reflects every event even
+ *     when we suppress the noisy channels (SD-C).
  *
- * Admin FCM mobile push is intentionally NOT wired: company_admins has no
- * fcm_token column and no admin mobile auth flow exists. The original SQL
- * here (and in the pre-Wave-A POST /violation handler) referenced
- * `ca.fcm_token` from `company_admins` and threw "column does not exist"
- * on every call — the .catch() at the call site swallowed the error so
- * the dead channel looked alive in code review but never delivered to a
- * real device. Discovered during the Wave A walk-test (2026-05-17).
- * See project memory: project_admin_notification_surfaces.md.
+ * Admin FCM mobile push is intentionally NOT wired: company_admins has
+ * no fcm_token column and no admin mobile auth flow. See project
+ * memory: project_admin_notification_surfaces.md.
  *
- * Exported (Wave A this was file-local) so routes/reports.ts T2-D flag
- * path can call it without duplicating the dispatch logic.
- *
- * The function as a whole is non-blocking from the caller's perspective:
+ * Non-blocking from the caller's perspective:
  * `fireBreachAlerts(...).catch(console.error)`.
  */
+
+type BreachEventType = 'geofence_breach' | 'off_post_report' | 'off_post_task';
+
+const RATE_LIMIT_MINUTES = 5;
+
+/** Look up whether we've fired this exact (session, eventType) inside the
+ *  rate-limit window. Used to short-circuit push + email without blocking
+ *  the notification row insert. */
+async function isRateLimited(
+  shiftSessionId: string,
+  guardId: string,
+  eventType: BreachEventType,
+): Promise<boolean> {
+  const { rows } = await pool.query<{ recent: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM notifications
+       WHERE guard_id = $1
+         AND shift_session_id = $2
+         AND type = $3
+         AND created_at > NOW() - ($4 || ' minutes')::interval
+     ) AS recent`,
+    [guardId, shiftSessionId, eventType, String(RATE_LIMIT_MINUTES)],
+  );
+  return rows[0]?.recent === true;
+}
+
 export async function fireBreachAlerts(params: {
   shiftSessionId: string;
   guardId: string;
   violationId: string;
+  /** Optional context — passed through to the admin email renderer.
+   *  For off_post_report, include the reportType so the email subject
+   *  renders "…filed activity …". Defaults to `{kind:'ping'}` for
+   *  bg-task boundary events. */
   context?: BreachAlertContext;
+  /** Drives the notification row `type` AND the per-type rate-limit
+   *  bucket. Different event types don't rate-limit each other. */
+  eventType: BreachEventType;
+  /** Extra deep-link metadata folded into the notification row `data`.
+   *  reportId for off_post_report, taskInstanceId for off_post_task. */
+  extraData?: Record<string, unknown>;
 }): Promise<void> {
   const ctx: BreachAlertContext = params.context ?? { kind: 'ping' };
   const { rows } = await pool.query(
@@ -57,24 +93,46 @@ export async function fireBreachAlerts(params: {
   const r = rows[0];
   if (!r) return;
 
-  const notif = ctx.kind === 'report'
+  const notif = params.eventType === 'off_post_report'
     ? {
         title: 'Off-post report saved',
         body:  `Your ${ctx.reportType ?? 'report'} was filed while outside ${r.site_name}. Admin notified.`,
+      }
+    : params.eventType === 'off_post_task'
+    ? {
+        title: 'Off-post task saved',
+        body:  `Your task completion was recorded while outside ${r.site_name}. Admin notified.`,
       }
     : {
         title: 'Outside post boundary',
         body:  `You're outside the permitted radius at ${r.site_name}. Return to the post.`,
       };
 
+  // Rate-limit check — done BEFORE the notification insert so the row
+  // we're inserting doesn't itself count as "recent".
+  const rateLimited = await isRateLimited(params.shiftSessionId, params.guardId, params.eventType);
+
   await insertNotification({
     guardId:        params.guardId,
-    type:           'geofence_breach',
+    type:           params.eventType,
     title:          notif.title,
     body:           notif.body,
-    data:           { violationId: params.violationId, siteName: r.site_name, kind: ctx.kind },
+    data:           {
+      violationId: params.violationId,
+      siteName:    r.site_name,
+      kind:        ctx.kind,
+      ...(params.extraData ?? {}),
+    },
     shiftSessionId: params.shiftSessionId,
   });
+
+  if (rateLimited) {
+    console.log(
+      `[breach.rateLimit] skip push+email — session=${params.shiftSessionId} ` +
+      `type=${params.eventType} (last fired within ${RATE_LIMIT_MINUTES}m)`,
+    );
+    return;
+  }
 
   // Channel (2) — guard FCM push. Same title/body as the in-app record so a
   // guard whose screen is off still gets the alert. `data` payload matches
@@ -93,10 +151,13 @@ export async function fireBreachAlerts(params: {
         title: notif.title,
         body:  notif.body,
         data:  {
-          type:        'geofence_breach',
+          type:        params.eventType,
           violationId: params.violationId,
           siteName:    r.site_name,
           kind:        ctx.kind,
+          ...(Object.fromEntries(
+            Object.entries(params.extraData ?? {}).map(([k, v]) => [k, String(v)]),
+          )),
         },
       });
       if (staleToken) {
@@ -112,8 +173,7 @@ export async function fireBreachAlerts(params: {
 
   // Channel (3) — durable email channel for admin breach alerts. Best-effort —
   // its own .catch() so an email send failure can't block the guard
-  // notification insert (the order here doesn't matter for that anymore,
-  // but keep the pattern explicit in case channels are reordered later).
+  // notification insert.
   await sendGeofenceBreachAlert(params.violationId, ctx).catch((err) =>
     console.error('[email] breach alert failed:', err),
   );
@@ -231,47 +291,58 @@ router.get('/violations', requireAuth('guard'), async (req, res) => {
 
 // POST /api/locations/ping — guard submits a location ping (audit record)
 //
-// Audit Tier 1 wiring (2026-05-17 location-services audit):
-//   T1-C-server: reject malformed coords + (0,0) before any other processing
-//   T1-B:        accept optional `accuracy`, persist to accuracy_meters,
-//                feed into the shared validateAtSite helper
-//   T1-A:        on off-site (is_within_geofence=false), INSERT a
-//                geofence_violations row INSIDE the same transaction
-//                (with ON CONFLICT DO NOTHING via the partial unique index
-//                from schema_v18), then fire admin push + guard notification
-//                via fireBreachAlerts. Same end-user UX (201 + "Ping
-//                Submitted") — the breach alert lands separately.
+// Phase 1A rewrite (2026-07-12 walk-test rebuild):
+//   * Pings PROVE presence. Q8 lifts them out of the "flag and continue"
+//     bucket into "reject-if-offsite". Offsite pings return 422 without
+//     inserting a location_pings row or a violation. A guard whose GPS
+//     drifts them 30m outside sees an error toast and can retake.
+//   * Boundary detection now belongs to the mobile-side native
+//     geofencing API (Phase 1B) which POSTs to /api/locations/violation.
+//     The old ping-inserts-violation code path is gone.
+//   * Optional body param `window_label` (e.g. "18:30") backfills a
+//     missed_pings row. When set AND the corresponding window has
+//     already closed, submitted_late is stamped true on the ping row
+//     and the matching missed_pings row is UPDATEd with resolved_at +
+//     resolved_by_ping_id.
+//   * Onsite ping still auto-resolves any open geofence_violations for
+//     this session (2026-07-09 BUG I fix, preserved).
 const ALLOWED_THROTTLE_REASONS = new Set(['low_battery', 'low_power_mode']);
 
 router.post('/ping', requireAuth('guard'), async (req, res) => {
-  const { shift_session_id, latitude, longitude, ping_type, photo_url, throttle_reason, accuracy } = req.body;
+  const {
+    shift_session_id,
+    latitude,
+    longitude,
+    ping_type,
+    photo_url,
+    throttle_reason,
+    accuracy,
+    window_label,
+  } = req.body;
 
-  // T1-C-server (1/2) — type + sanity. Pre-existing handler destructured
-  // coords without checks; a payload sending strings would skate past.
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return res.status(400).json({ error: 'Invalid coordinates.' });
   }
-  // T1-C-server (2/2) — reject the GPS-timeout fallback the old mobile
-  // submitted ((0,0) lives in the Gulf of Guinea, ~9000km from any site).
   if (Math.abs(latitude) < 1e-6 && Math.abs(longitude) < 1e-6) {
     return res.status(400).json({ error: 'Invalid coordinates. GPS lock required.' });
   }
 
-  // T1-B — accuracy is optional. Null when missing → validateAtSite
-  // receives accuracy_m=0 below, so the only slack is the helper's hardcoded
-  // 50m SAFETY_MARGIN. New clients that send a real accuracy get a tighter,
-  // accuracy-aware check.
   const accuracyM: number | null =
     typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0
       ? accuracy
       : null;
 
-  // Item 7 — validate throttle_reason against the schema_v14 CHECK enum.
   if (throttle_reason != null && !ALLOWED_THROTTLE_REASONS.has(throttle_reason)) {
     return res.status(400).json({
       error: `throttle_reason must be one of: low_battery, low_power_mode (got: ${throttle_reason})`,
     });
   }
+
+  // window_label sanity: HH:MM 24-hour. Cheap regex before we query the DB.
+  const windowLabel: string | null =
+    typeof window_label === 'string' && /^\d{2}:\d{2}$/.test(window_label)
+      ? window_label
+      : null;
 
   const sessionResult = await pool.query(
     'SELECT site_id, clocked_in_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
@@ -280,7 +351,6 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Session not found' });
   const { site_id } = sessionResult.rows[0];
 
-  // Item 6 — magic-byte validation for the (optional) photo.
   const photoValidation = await validatePhotoOrQuarantine(photo_url, {
     guardId: req.user!.sub,
     companyId: req.user!.company_id,
@@ -290,66 +360,98 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     return res.status(photoValidation.status).json(photoValidation.body);
   }
 
-  // T1-A — transactional ping + (conditional) violation. The partial unique
-  // index idx_geofence_violations_one_open_per_session enforces de-dup at the
-  // DB layer; ON CONFLICT DO NOTHING + RETURNING id lets us branch the
-  // alert-firing on whether a fresh violation actually landed.
+  // Server-side geofence decision. Pings are onsite-only per Q8 — reject
+  // 422 with the same shape as the clock-in-verification and task-completion
+  // paths so mobile error handling stays uniform.
+  const fence = await validateAtSite(
+    { lat: latitude, lng: longitude, accuracy_m: accuracyM ?? 0 },
+    site_id,
+    pool,
+  );
+  if (!fence.allowed) {
+    console.log(
+      `[ping.reject] session=${shift_session_id} distance=${fence.distance_m?.toFixed(1) ?? 'null'}m ` +
+      `accuracy=${accuracyM ?? 'null'}m reason=${fence.reason}`,
+    );
+    return res.status(422).json({
+      error: 'PING_OFF_POST',
+      message: 'You appear to be outside the post. Return to the site and try again.',
+      distance_m: fence.distance_m,
+      accuracy_m: accuracyM,
+      reason: fence.reason,
+    });
+  }
+
+  // Transactional ping insert + missed-ping resolve + violation auto-resolve.
+  // The auto-resolve mirrors the 2026-07-09 BUG I fix: an onsite ping is
+  // proof the guard returned, so any open violations for this session close
+  // immediately (server-recomputed fence.allowed above, so the client can't
+  // spoof a fake resolve).
   const client = await pool.connect();
   let pingRow: any;
-  let freshViolationId: string | null = null;
-  let fence: GeofenceValidationResult;
+  let resolvedMissedPingId: string | null = null;
   try {
     await client.query('BEGIN');
-
-    fence = await validateAtSite(
-      { lat: latitude, lng: longitude, accuracy_m: accuracyM ?? 0 },
-      site_id,
-      client,
-    );
-    const isWithin = fence.allowed;
 
     const photoDeleteAt = new Date();
     photoDeleteAt.setDate(photoDeleteAt.getDate() + 7);
 
+    // If window_label matches an open missed_pings row AND that window
+    // has already ended, this ping is a late backfill. submitted_late
+    // is stamped denorm on the ping row so the activity feed's
+    // "late ping" filter is a trivial index scan.
+    let submittedLate = false;
+    if (windowLabel) {
+      const mp = await client.query<{ id: string; window_end: Date }>(
+        `SELECT id, window_end FROM missed_pings
+          WHERE shift_session_id = $1
+            AND window_label = $2
+            AND resolved_at IS NULL
+          ORDER BY window_start ASC
+          LIMIT 1`,
+        [shift_session_id, windowLabel],
+      );
+      const mpRow = mp.rows[0];
+      if (mpRow) {
+        submittedLate = new Date(mpRow.window_end).getTime() < Date.now();
+        resolvedMissedPingId = mpRow.id;
+      }
+    }
+
     const pingInsert = await client.query(
       `INSERT INTO location_pings
          (shift_session_id, guard_id, site_id, latitude, longitude, accuracy_meters,
-          is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+          is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason, expires_at,
+          window_label, submitted_late)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [shift_session_id, req.user!.sub, site_id, latitude, longitude, accuracyM,
-       isWithin, ping_type, photo_url || null, photoDeleteAt, throttle_reason ?? null,
-       expiresAtFor('ping_metadata')],
+       true, ping_type, photo_url || null, photoDeleteAt, throttle_reason ?? null,
+       expiresAtFor('ping_metadata'),
+       windowLabel, submittedLate],
     );
     pingRow = pingInsert.rows[0];
 
-    if (!isWithin) {
-      const violationInsert = await client.query(
-        `INSERT INTO geofence_violations
-           (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
-         RETURNING id`,
-        [shift_session_id, req.user!.sub, site_id, latitude, longitude, photo_url || null,
-         expiresAtFor('geofence_violation')],
-      );
-      if (violationInsert.rows[0]) {
-        freshViolationId = violationInsert.rows[0].id;
-      }
-    } else {
-      // Walk-test 2026-07-09 BUG I: guard is back inside the boundary; if
-      // this session has any open violations, resolve them here so the
-      // alerts feed reflects reality within one ping cadence (typically
-      // 30 min). Server-side re-computed isWithin per Item 3, so the
-      // client can't spoof a fake resolve.
+    // Resolve the matching missed_pings row now that we have the ping's id.
+    if (resolvedMissedPingId) {
       await client.query(
-        `UPDATE geofence_violations
+        `UPDATE missed_pings
             SET resolved_at = NOW(),
-                duration_minutes = ROUND(EXTRACT(EPOCH FROM (NOW() - occurred_at)) / 60)::INT
-          WHERE shift_session_id = $1
+                resolved_by_ping_id = $1
+          WHERE id = $2
             AND resolved_at IS NULL`,
-        [shift_session_id],
+        [pingRow.id, resolvedMissedPingId],
       );
     }
+
+    // Onsite ping auto-resolves open violations for this session (BUG I).
+    await client.query(
+      `UPDATE geofence_violations
+          SET resolved_at = NOW(),
+              duration_minutes = ROUND(EXTRACT(EPOCH FROM (NOW() - occurred_at)) / 60)::INT
+        WHERE shift_session_id = $1
+          AND resolved_at IS NULL`,
+      [shift_session_id],
+    );
 
     await client.query('COMMIT');
   } catch (err) {
@@ -359,35 +461,25 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     client.release();
   }
 
-  // Structured log on breach so T2 follow-ups (accuracy thresholds, mock-loc,
-  // etc.) have data. Only on breach to keep the happy-path quiet.
-  if (!fence!.allowed) {
-    console.log(
-      `[ping.breach] session=${shift_session_id} distance=${fence!.distance_m?.toFixed(1) ?? 'null'}m ` +
-      `accuracy=${accuracyM ?? 'null'}m photo_present=${!!photo_url} fresh_violation=${!!freshViolationId}`,
-    );
-  }
-
-  // Fire admin push + guard notification — only on a FRESH violation (de-dup
-  // already handled by the unique-index conflict). Non-blocking.
-  if (freshViolationId) {
-    fireBreachAlerts({
-      shiftSessionId: shift_session_id,
-      guardId:        req.user!.sub,
-      violationId:    freshViolationId,
-    }).catch((err) => console.error('[ping.breach] alert dispatch failed:', err));
-  }
-
   res.status(201).json(pingRow);
 });
 
-// POST /api/locations/violation — guard device (background task) reports a breach.
+// POST /api/locations/violation — guard device reports a boundary breach.
 //
-// Same de-dup + alert plumbing as POST /ping. The partial unique index
-// idx_geofence_violations_one_open_per_session (schema_v18) prevents two
-// concurrent INSERTs from racing past a SELECT-then-INSERT check; the ON
-// CONFLICT DO NOTHING returns no row when an open violation already exists,
-// and we skip the duplicate push.
+// Phase 1B mobile will drive this from the native iOS/Android geofencing
+// API's enter/exit events (startGeofencingAsync); Build 33 still uses the
+// periodic-updates bg-task.
+//
+// Phase 1A rewrite (2026-07-12):
+//   * The DB constraint idx_geofence_violations_one_open_per_session still
+//     enforces "one open row per session" via ON CONFLICT DO NOTHING —
+//     that's the source of truth for the violations model.
+//   * BUT we no longer skip fireBreachAlerts when the conflict fires.
+//     Every boundary event calls fireBreachAlerts; rate-limiting per Q3
+//     (5-min bucket per session per type) now lives inside that function
+//     and decides whether to actually push+email. insertNotification
+//     always runs so the Alerts feed reflects every event even when we
+//     suppress the noisy channels.
 router.post('/violation', requireAuth('guard'), async (req, res) => {
   const { shift_session_id, latitude, longitude, photo_url } = req.body;
 
@@ -400,7 +492,7 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
   const siteId   = sessionResult.rows[0].site_id;
   const guardId  = req.user!.sub;
 
-  const result = await pool.query(
+  const insertResult = await pool.query(
     `INSERT INTO geofence_violations
        (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -410,24 +502,30 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
      expiresAtFor('geofence_violation')]
   );
 
-  // Fresh violation → fire alerts. Duplicate (open violation already exists) →
-  // return the existing row, skip the second push.
-  if (result.rows[0]) {
+  // Resolve the row we'll return + the violationId we'll pass to the
+  // alert dispatcher. Fresh INSERT → RETURNING row. ON CONFLICT skip →
+  // fetch the existing open row.
+  let violationRow = insertResult.rows[0];
+  if (!violationRow) {
+    const existing = await pool.query(
+      `SELECT * FROM geofence_violations
+       WHERE shift_session_id = $1 AND resolved_at IS NULL
+       ORDER BY occurred_at DESC LIMIT 1`,
+      [shift_session_id]
+    );
+    violationRow = existing.rows[0];
+  }
+
+  if (violationRow) {
     fireBreachAlerts({
       shiftSessionId: shift_session_id,
       guardId,
-      violationId:    result.rows[0].id,
-    }).catch((err) => console.error('[fcm] violation alert dispatch failed:', err));
-    return res.status(201).json(result.rows[0]);
+      violationId:    violationRow.id,
+      eventType:      'geofence_breach',
+    }).catch((err) => console.error('[violation] alert dispatch failed:', err));
   }
 
-  const existing = await pool.query(
-    `SELECT * FROM geofence_violations
-     WHERE shift_session_id = $1 AND resolved_at IS NULL
-     ORDER BY occurred_at DESC LIMIT 1`,
-    [shift_session_id]
-  );
-  return res.status(201).json(existing.rows[0]);
+  return res.status(201).json(violationRow);
 });
 
 // PATCH /api/locations/violation/:id/resolve

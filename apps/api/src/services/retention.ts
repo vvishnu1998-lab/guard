@@ -27,6 +27,7 @@ export const RETENTION = {
   TASK_COMPLETION_DAYS:    365,
   SHIFT_SESSION_DAYS:      1460,
   SHIFT_DAYS:              1460,
+  MISSED_PING_DAYS:        365,   // parity with ping metadata (audit trail)
 } as const;
 
 /**
@@ -42,7 +43,8 @@ export type RetentionKind =
   | 'ping_metadata'
   | 'task_completion'
   | 'shift_session'
-  | 'shift';
+  | 'shift'
+  | 'missed_ping';
 
 const KIND_DAYS: Record<RetentionKind, number> = {
   activity_report:    RETENTION.ACTIVITY_REPORT_DAYS,
@@ -53,6 +55,7 @@ const KIND_DAYS: Record<RetentionKind, number> = {
   task_completion:    RETENTION.TASK_COMPLETION_DAYS,
   shift_session:      RETENTION.SHIFT_SESSION_DAYS,
   shift:              RETENTION.SHIFT_DAYS,
+  missed_ping:        RETENTION.MISSED_PING_DAYS,
 };
 
 /**

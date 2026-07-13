@@ -20,6 +20,10 @@ const VALID_TYPES: NotificationType[] = [
   'task_reminder',
   'chat',
   'geofence_breach',
+  'off_post_report',
+  'off_post_task',
+  'missed_ping',
+  'late_clock_in',
 ];
 
 // Shared WHERE fragment for the Notifications tab (GET /) and its badge
@@ -34,7 +38,11 @@ const VALID_TYPES: NotificationType[] = [
 const SHIFT_SCOPED_AND_NOT_COMPLETED = `
   notifications.guard_id = $1
   AND (
-    notifications.type = 'chat'
+    -- chat is always shown across sessions.
+    -- late_clock_in fires BEFORE clock-in exists, so it can't link to an
+    -- active shift_session_id — allow it through the scope gate and let
+    -- the CASE below auto-erase it the moment the guard clocks in.
+    notifications.type IN ('chat', 'late_clock_in')
     OR notifications.shift_session_id = (
       SELECT id FROM shift_sessions
       WHERE guard_id = $1 AND clocked_out_at IS NULL
@@ -64,6 +72,35 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
         SELECT 1 FROM geofence_violations gv
         WHERE gv.id = (notifications.data->>'violationId')::uuid
           AND gv.resolved_at IS NOT NULL
+      )
+    )
+    -- Phase 1A auto-erase rules:
+    --   missed_ping — hides once the guard submits a late ping that
+    --     resolves the referenced missed_pings row (resolved_at set by
+    --     POST /api/locations/ping when a window_label body param
+    --     matches an open row). Per Q5 the alert STAYS visible until
+    --     resolved even when the next window arrives — that's why the
+    --     erase is tied to resolved_at, not window_end.
+    --   late_clock_in — hides once the guard actually clocks in
+    --     (shift_sessions row appears against the referenced shiftId).
+    --     The clock-in ends the "you're late" situation regardless of
+    --     which of the T+10/T+15 rungs originally fired.
+    --   off_post_report / off_post_task — never auto-erase. They are
+    --     records of a completed off-post submission, not standing
+    --     asks; the guard's Alerts feed keeps them for the shift's
+    --     duration for accountability.
+    WHEN 'missed_ping' THEN NOT (
+      notifications.data ? 'missedPingId' AND EXISTS (
+        SELECT 1 FROM missed_pings mp
+        WHERE mp.id = (notifications.data->>'missedPingId')::uuid
+          AND mp.resolved_at IS NOT NULL
+      )
+    )
+    WHEN 'late_clock_in' THEN NOT (
+      notifications.data ? 'shiftId' AND EXISTS (
+        SELECT 1 FROM shift_sessions ss
+        WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid
+          AND ss.clocked_in_at IS NOT NULL
       )
     )
     ELSE TRUE

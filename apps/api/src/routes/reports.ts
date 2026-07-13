@@ -130,17 +130,22 @@ router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, 
 
 // POST /api/reports — guard submits a report
 //
-// T2-D geofence flagging (2026-05-17 audit Wave A): when all of
-// {latitude, longitude, accuracy} are present, validateAtSite decides.
-// Off-post → INSERT geofence_violations + fire admin email + guard
-// notification (via fireBreachAlerts with context kind='report').
-// Does NOT reject — emergency reports must always go through. The
-// flag is_within_geofence stamps the row for admin filtering.
+// Phase 1A hybrid policy (2026-07-12 walk-test rebuild, Q8):
+//   * INCIDENT report from offsite → 201 accept + is_within_geofence=false
+//     flag + off_post_report alert (guard notification + admin email).
+//     Rationale: emergencies must never be blocked; the flag makes the
+//     off-post nature auditable.
+//   * ACTIVITY report from offsite → 422 reject (activity is routine, has
+//     to happen at the post to be meaningful).
+//   * MAINTENANCE report from offsite → 422 reject (same reasoning).
 //
-// (Note: the existing line-204 block on already-open violations is a
-// SEPARATE pre-existing rule and stays in place. If you also want
-// emergency reports to bypass that block, a follow-up commit can drop
-// it; the T2-D policy doesn't strictly require it.)
+// The alert dispatch always calls fireBreachAlerts even when the
+// ON CONFLICT DO NOTHING skips the geofence_violations INSERT — Phase 1A
+// moves dedup from "skip alert on conflict" to a 5-min per-session,
+// per-eventType rate limit inside fireBreachAlerts (Q3, SD-C). An
+// incident report while a ping-boundary breach is already open still
+// fires the off_post_report alert because they're different event
+// types with independent 5-min buckets.
 router.post('/', requireAuth('guard'), async (req, res) => {
   const { shift_session_id, report_type, description, severity, photo_urls, latitude, longitude, accuracy } = req.body;
 
@@ -228,20 +233,18 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     }
   }
 
-  // (T2-D — 2026-05-17 audit) Removed the pre-existing "cannot submit
-  // while violation unresolved" block. The T2-D policy is FLAG, do not
-  // block — emergency reports must always go through, even when the
-  // guard has an open violation. The off-post detection below stamps
-  // is_within_geofence on the report and fires the breach alert flow.
-
-  // T2-D — geofence flag (do NOT block). When all of {lat, lng, accuracy}
-  // are present, validateAtSite decides. Result is persisted on the report
-  // row; downstream breach alert flow runs after the report INSERT.
+  // Q8 hybrid policy — compute the fence result before INSERT, then
+  // decide accept-or-reject by report_type. When coords are missing we
+  // can't decide; per Wave A convention we allow the report through
+  // with is_within_geofence NULL (older clients did this and we don't
+  // want a silent regression for a client that stops sending coords).
   const haveCoords =
     typeof latitude === 'number' && Number.isFinite(latitude) &&
     typeof longitude === 'number' && Number.isFinite(longitude) &&
     typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0;
   let isWithin: boolean | null = null;
+  let fenceDistance: number | null = null;
+  let fenceReason: string | null = null;
   if (haveCoords) {
     const fence = await validateAtSite(
       { lat: latitude, lng: longitude, accuracy_m: accuracy },
@@ -249,6 +252,25 @@ router.post('/', requireAuth('guard'), async (req, res) => {
       pool,
     );
     isWithin = fence.allowed;
+    fenceDistance = fence.distance_m;
+    fenceReason = fence.reason;
+  }
+
+  // Non-incident reports MUST be at the post. Incidents are always
+  // accepted (with the off-post flag if applicable) — emergencies
+  // trump the routine-report rule.
+  if (isWithin === false && report_type !== 'incident') {
+    console.log(
+      `[report.reject] session=${shift_session_id} type=${report_type} ` +
+      `distance=${fenceDistance?.toFixed(1) ?? 'null'}m accuracy=${accuracy}m reason=${fenceReason}`,
+    );
+    return res.status(422).json({
+      error: 'REPORT_OFF_POST',
+      message: `${report_type.charAt(0).toUpperCase() + report_type.slice(1)} reports must be filed from the post. Return to the site and try again.`,
+      distance_m: fenceDistance,
+      accuracy_m: accuracy,
+      reason: fenceReason,
+    });
   }
 
   const expiresAt = expiresAtForReport(report_type);
@@ -267,7 +289,6 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   );
   const report = reportResult.rows[0];
 
-  // Insert photos (pre-signed S3 upload URLs already processed by client)
   if (photo_urls?.length) {
     for (let i = 0; i < photo_urls.length; i++) {
       await pool.query(
@@ -278,17 +299,20 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     }
   }
 
-  // Email: only incident reports trigger immediate alert (Section 4)
+  // Email: only incident reports trigger the client-facing incident alert.
   if (report_type === 'incident') {
     sendIncidentAlert(report, site_id).catch(console.error);
   }
 
-  // T2-D — off-post flag flow. INSERT a violation row (ON CONFLICT against
-  // schema_v18's partial unique index, same de-dup pattern as ping) and
-  // fire the breach alerts in 'report' context. Best-effort: the report
-  // is already 201; any failure here logs but doesn't surface to the user.
-  if (isWithin === false) {
-    let freshViolationId: string | null = null;
+  // Off-post incident report — INSERT a violation row (still guarded by
+  // schema_v18's partial unique index) and ALWAYS fire the off_post_report
+  // alert. Even if the INSERT conflicts (an open ping-boundary violation
+  // is already on the session), we resolve the existing row and pass its
+  // id to fireBreachAlerts — the 5-min per-type rate limiter inside will
+  // decide whether to push+email, and different eventTypes have separate
+  // buckets so this ALWAYS wakes the admin even during an active breach.
+  if (isWithin === false && report_type === 'incident') {
+    let violationId: string | null = null;
     try {
       const violationInsert = await pool.query(
         `INSERT INTO geofence_violations
@@ -298,20 +322,32 @@ router.post('/', requireAuth('guard'), async (req, res) => {
          RETURNING id`,
         [shift_session_id, req.user!.sub, site_id, latitude, longitude, expiresAtFor('geofence_violation')],
       );
-      if (violationInsert.rows[0]) freshViolationId = violationInsert.rows[0].id;
+      if (violationInsert.rows[0]) {
+        violationId = violationInsert.rows[0].id;
+      } else {
+        const existing = await pool.query<{ id: string }>(
+          `SELECT id FROM geofence_violations
+           WHERE shift_session_id = $1 AND resolved_at IS NULL
+           ORDER BY occurred_at DESC LIMIT 1`,
+          [shift_session_id],
+        );
+        violationId = existing.rows[0]?.id ?? null;
+      }
     } catch (err) {
       console.error('[report.flag] violation INSERT failed:', err);
     }
     console.log(
       `[report.flag] report=${report.id} session=${shift_session_id} ` +
-      `type=${report_type} fresh_violation=${!!freshViolationId}`,
+      `type=incident violation=${violationId ?? 'none'}`,
     );
-    if (freshViolationId) {
+    if (violationId) {
       fireBreachAlerts({
         shiftSessionId: shift_session_id,
         guardId:        req.user!.sub,
-        violationId:    freshViolationId,
+        violationId,
+        eventType:      'off_post_report',
         context:        { kind: 'report', reportType: report_type },
+        extraData:      { reportId: report.id },
       }).catch((err) => console.error('[report.flag] alert dispatch failed:', err));
     }
   }

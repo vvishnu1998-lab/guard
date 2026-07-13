@@ -71,7 +71,13 @@ type Queryable = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 };
 
-const SAFETY_MARGIN_M = 50;
+// Reduced from 50 m → 20 m (Phase 1A, Q1). The old 50 m stack made a 30 m
+// fence effectively ~95 m once a typical 15 m accuracy reading landed:
+// 30 + 15 + 50 = 95. During the 2026-07-12 walk-test the guard read as
+// "within" while standing 73 m from a 30 m post. 20 m keeps a small
+// safety cushion for GPS jitter without turning the fence into a
+// three-times-bigger virtual one.
+const SAFETY_MARGIN_M = 20;
 
 export async function validateAtSite(
   point: GeofenceValidationInput,
