@@ -24,6 +24,7 @@ const VALID_TYPES: NotificationType[] = [
   'off_post_task',
   'missed_ping',
   'late_clock_in',
+  'missed_report',
 ];
 
 // Shared WHERE fragment for the Notifications tab (GET /) and its badge
@@ -101,6 +102,16 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
         SELECT 1 FROM shift_sessions ss
         WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid
           AND ss.clocked_in_at IS NOT NULL
+      )
+    )
+    -- Commit A2: mirror of the missed_ping auto-erase — hide the
+    -- alert once a late report submission carrying the matching
+    -- window_label resolves the missed_reports row.
+    WHEN 'missed_report' THEN NOT (
+      notifications.data ? 'missedReportId' AND EXISTS (
+        SELECT 1 FROM missed_reports mr
+        WHERE mr.id = (notifications.data->>'missedReportId')::uuid
+          AND mr.resolved_at IS NOT NULL
       )
     )
     ELSE TRUE

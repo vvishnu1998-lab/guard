@@ -32,7 +32,14 @@ export type NotificationType =
   | 'off_post_report'
   | 'off_post_task'
   | 'missed_ping'
-  | 'late_clock_in';
+  | 'late_clock_in'
+  // Commit A2 addition:
+  //   missed_report — hourly report window closed with no report
+  //     submitted. Emitted by jobs/missedReportCron.ts. Data payload:
+  //     { missedReportId, windowLabel, windowStart, windowEnd,
+  //       siteName }. Deep-link → create-report screen with
+  //     window_label pre-filled (mobile-side, Build 34).
+  | 'missed_report';
 
 export interface NotificationRow {
   id: string;
