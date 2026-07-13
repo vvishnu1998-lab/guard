@@ -140,17 +140,21 @@ export default function RootLayout() {
   }, [bumpChat, bumpNotifications, refreshUnread]);
 
   // Background geofence monitoring — start when a shift goes active with a
-  // known geofence, stop on clock-out. The background task reads the
-  // persisted geofence + session id from SecureStore.
+  // known geofence, stop on clock-out. Build 34: native geofencing via
+  // Location.startGeofencingAsync (event-driven Enter/Exit; near-zero
+  // battery). The task itself reads only sessionId + accessToken from
+  // SecureStore now — the geofence region is passed in as an argument
+  // to startBackgroundLocation, no longer needs a SecureStore round-trip.
   const activeSession = useShiftStore((s) => s.activeSession);
   const activeShift   = useShiftStore((s) => s.activeShift);
   useEffect(() => {
     let cancelled = false;
 
     if (!activeSession || !activeShift?.geofence) {
-      // No active shift, or shift has no geofence configured → stop monitoring
       stopBackgroundLocation().catch((err) => console.warn('[bg-loc] stop failed:', err));
       SecureStore.deleteItemAsync('active_session_id').catch(() => {});
+      // Legacy keys — safe to delete even when unused so a downgrade to
+      // an older build doesn't rehydrate stale state.
       SecureStore.deleteItemAsync('active_geofence').catch(() => {});
       SecureStore.deleteItemAsync('geofence_state').catch(() => {});
       return;
@@ -158,12 +162,9 @@ export default function RootLayout() {
 
     (async () => {
       try {
-        await Promise.all([
-          SecureStore.setItemAsync('active_session_id', activeSession.id),
-          SecureStore.setItemAsync('active_geofence',   JSON.stringify(activeShift.geofence)),
-        ]);
+        await SecureStore.setItemAsync('active_session_id', activeSession.id);
         if (cancelled) return;
-        await startBackgroundLocation();
+        await startBackgroundLocation(activeShift.geofence);
       } catch (err) {
         console.warn('[bg-loc] start failed:', err);
       }

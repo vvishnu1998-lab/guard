@@ -9,7 +9,8 @@
  *   longer drive the countdown — the server fires every aligned tick
  *   regardless — but the battery hook still runs so its `throttleReason`
  *   continues to stamp ping rows for the client portal.
- * - Action grid: Ping Now / Report / Tasks / Break
+ * - Action grid: Report / Tasks / Break (Build 34 removed PING NOW —
+ *   pings are notification-driven now; the client can't initiate one).
  * - Clock-Out button (amber, bottom of scroll)
  */
 import { useEffect, useRef, useState } from 'react';
@@ -20,7 +21,6 @@ import {
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
-import { pingState }     from '../../lib/pingState';
 import { useBatteryThrottle } from '../../lib/batteryThrottle';
 import { nextPingAt, remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
@@ -78,9 +78,8 @@ export default function ActiveShiftScreen() {
 
   // ── Ping countdown ─────────────────────────────────────────────────────
   // Aligned to wall-clock :00 / :30 via shared helper in lib/pingSchedule.ts.
-  // Detect rollover by watching the target slot timestamp — when the next
-  // slot changes, the previous one just fired.
-  const pingSnoozedUntilRef = useRef(0); // epoch ms — suppress re-alert until this time
+  // Informational-only readout; the server's schedule-anchored
+  // ping_reminder push is what actually prompts the guard to submit.
   const trackedSlotRef = useRef<number>(0);
 
   useEffect(() => {
@@ -94,27 +93,12 @@ export default function ActiveShiftScreen() {
       const now = new Date();
       const slot = nextPingAt(clockedInDate, now).getTime();
       setNextPingMs(Math.max(0, slot - now.getTime()));
-
-      // Slot changed → the previous aligned tick just passed → ping due
-      if (trackedSlotRef.current !== 0 && slot !== trackedSlotRef.current) {
-        trackedSlotRef.current = slot;
-        const snoozed = Date.now() < pingSnoozedUntilRef.current || Date.now() < pingState.suppressAlertUntil;
-        if (!snoozed) {
-          Alert.alert(
-            'PING DUE',
-            'Your check-in is due. Submit your location now.',
-            [
-              { text: 'Later', style: 'cancel', onPress: () => {
-                pingSnoozedUntilRef.current = Date.now() + 5 * 60 * 1000;
-              }},
-              { text: 'PING NOW', onPress: () => router.push('/ping') },
-            ],
-            { cancelable: false }
-          );
-        }
-      } else {
-        trackedSlotRef.current = slot;
-      }
+      // Build 34: no in-app "PING DUE" prompt on rollover. The server
+      // ping_reminder push (Commit A pingReminder.ts, schedule-anchored)
+      // is the trigger now; guards submit by tapping the notification
+      // and are deep-linked to /ping. The countdown display stays as
+      // an informational readout.
+      trackedSlotRef.current = slot;
     }, 1000);
 
     return () => { if (pingRef.current) clearInterval(pingRef.current); };
@@ -186,12 +170,9 @@ export default function ActiveShiftScreen() {
       </View>
 
       {/* ── Action grid ─────────────────────────────────────────────── */}
+      {/* Build 34: PING NOW removed. Pings are notification-driven
+          (schedule-anchored ping_reminder or missed_ping deep-links). */}
       <View style={styles.grid}>
-        <ActionTile
-          icon="📍"
-          label="PING NOW"
-          onPress={() => router.push('/ping')}
-        />
         <ActionTile
           icon="📋"
           label="REPORT"
