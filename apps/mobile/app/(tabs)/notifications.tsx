@@ -24,7 +24,13 @@ type NotificationType =
   | 'activity_report_reminder'
   | 'task_reminder'
   | 'chat'
-  | 'geofence_breach';
+  | 'geofence_breach'
+  // Phase 1A / A2 additions.
+  | 'off_post_report'
+  | 'off_post_task'
+  | 'missed_ping'
+  | 'missed_report'
+  | 'late_clock_in';
 
 interface NotificationRow {
   id:         string;
@@ -42,12 +48,23 @@ interface VisualSpec {
   borderColor: string;
 }
 
+// Amber = user needs to know but nothing is on fire (off-post accepted,
+// late clock-in reminder). Red = an obligation is UNMET RIGHT NOW
+// (active breach, missed ping/report window).
+const AMBER = Colors.action;
+const RED   = Colors.danger;
+
 const VISUAL_BY_TYPE: Record<NotificationType, VisualSpec> = {
-  ping_reminder:            { icon: '📍', titleColor: Colors.action,  borderColor: Colors.action },
-  activity_report_reminder: { icon: '📝', titleColor: Colors.action,  borderColor: Colors.action },
-  task_reminder:            { icon: '✅', titleColor: Colors.action,  borderColor: Colors.action },
-  chat:                     { icon: '💬', titleColor: Colors.action,  borderColor: Colors.action },
-  geofence_breach:          { icon: '🔴', titleColor: Colors.danger,  borderColor: Colors.danger },
+  ping_reminder:            { icon: '📍', titleColor: AMBER, borderColor: AMBER },
+  activity_report_reminder: { icon: '📝', titleColor: AMBER, borderColor: AMBER },
+  task_reminder:            { icon: '✅', titleColor: AMBER, borderColor: AMBER },
+  chat:                     { icon: '💬', titleColor: AMBER, borderColor: AMBER },
+  geofence_breach:          { icon: '🚨', titleColor: RED,   borderColor: RED   },
+  off_post_report:          { icon: '⚠️', titleColor: AMBER, borderColor: AMBER },
+  off_post_task:            { icon: '⚠️', titleColor: AMBER, borderColor: AMBER },
+  missed_ping:              { icon: '📍', titleColor: RED,   borderColor: RED   },
+  missed_report:            { icon: '📝', titleColor: RED,   borderColor: RED   },
+  late_clock_in:            { icon: '⏰', titleColor: AMBER, borderColor: AMBER },
 };
 
 function timeAgo(iso: string) {

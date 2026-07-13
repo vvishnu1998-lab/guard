@@ -19,7 +19,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import * as Sentry from '@sentry/react-native';
@@ -48,6 +48,12 @@ export default function PhotoPing() {
   const [capturing, setCapturing]       = useState(false);
 
   const { activeSession } = useShiftStore();
+  // Missed-ping backfill window — set via deep-link from a missed_ping
+  // notification tap (navigateForNotification.ts). When present, the
+  // server sets submitted_late + resolves the matching missed_pings
+  // row on 201. Falsy when the guard opened the screen manually.
+  const { window_label } = useLocalSearchParams<{ window_label?: string }>();
+  const windowLabel = typeof window_label === 'string' && window_label ? window_label : null;
 
   // Android often never fires onCameraReady — force-enable after 3s so the
   // shutter doesn't sit disabled indefinitely.
@@ -152,6 +158,14 @@ export default function PhotoPing() {
       //    offline-queue fallback is unsafe for ping-with-photo: a queued
       //    payload referencing a no-longer-existing local URI can't sync.
       console.log('[ping] submitting…');
+      if (windowLabel) {
+        Sentry.addBreadcrumb({
+          category: 'ping',
+          message: 'late ping submit (missed_ping backfill)',
+          level: 'info',
+          data: { window_label: windowLabel },
+        });
+      }
       await apiClient.post('/locations/ping', {
         shift_session_id: activeSession.id,
         latitude:         lat,
@@ -159,6 +173,7 @@ export default function PhotoPing() {
         ping_type:        'gps_photo',
         photo_url:        public_url,
         throttle_reason:  getCurrentThrottleReason() ?? undefined,
+        window_label:     windowLabel ?? undefined,
       });
       console.log('[ping] submit complete');
 

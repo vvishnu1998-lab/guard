@@ -43,11 +43,16 @@ const TYPES: { value: ReportType; label: string; icon: string; color: string; de
 ];
 
 export default function CreateReport() {
-  const params = useLocalSearchParams<{ type?: string }>();
+  const params = useLocalSearchParams<{ type?: string; window_label?: string }>();
   const initialType =
     params.type === 'incident' || params.type === 'maintenance'
       ? (params.type as ReportType)
       : 'activity';
+  // Missed-report backfill window — set via deep-link from a missed_report
+  // notification tap (navigateForNotification.ts). When present, the
+  // server sets submitted_late + resolves the matching missed_reports
+  // row on 201. Falsy when the guard opened the screen manually.
+  const windowLabel = typeof params.window_label === 'string' && params.window_label ? params.window_label : null;
 
   const [reportType,   setReportType]   = useState<ReportType>(initialType);
   const [typePickerOpen, setTypePickerOpen] = useState(false);
@@ -132,6 +137,15 @@ export default function CreateReport() {
         accuracy  = loc.coords.accuracy ?? undefined;
       } catch { /* GPS failure — still submit; server treats missing coords as unknown */ }
 
+      if (windowLabel) {
+        Sentry.addBreadcrumb({
+          category: 'reports',
+          message: 'late report submit (missed_report backfill)',
+          level: 'info',
+          data: { window_label: windowLabel, report_type: reportType },
+        });
+      }
+
       const result = await submitReport({
         shift_session_id: activeSession.id,
         report_type:      reportType,
@@ -140,6 +154,7 @@ export default function CreateReport() {
         latitude,
         longitude,
         accuracy,
+        window_label:     windowLabel ?? undefined,
       });
 
       // Off-post incident policy (Q8 hybrid): server 201's an off-post

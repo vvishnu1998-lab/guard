@@ -90,7 +90,6 @@ export default function TabLayout() {
         {/* Hidden — accessible via router.push but not shown in tab bar */}
         <Tabs.Screen name="reports"  options={{ href: null }} />
         <Tabs.Screen name="tasks"    options={{ href: null }} />
-        <Tabs.Screen name="alerts"   options={{ href: null }} />
         <Tabs.Screen name="profile"  options={{ href: null }} />
       </Tabs>
 

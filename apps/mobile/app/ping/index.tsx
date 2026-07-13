@@ -6,19 +6,26 @@
  */
 import { useEffect } from 'react';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { Colors } from '../../constants/theme';
 
 export default function PingRouter() {
   const { activeSession } = useShiftStore();
+  const { window_label } = useLocalSearchParams<{ window_label?: string }>();
 
   useEffect(() => {
     if (!activeSession?.clocked_in_at) {
       router.replace('/(tabs)/home');
       return;
     }
-    router.replace('/ping/photo');
+    // Forward the missed-ping backfill window into the capture screen so
+    // the submit body carries it through to the server (server sets
+    // submitted_late + resolves the matching missed_pings row).
+    const target = window_label
+      ? `/ping/photo?window_label=${encodeURIComponent(window_label)}`
+      : '/ping/photo';
+    router.replace(target);
   }, []);
 
   return (
