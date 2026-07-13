@@ -35,9 +35,9 @@ export interface SubmitReportRequest {
   photo_urls?: { url: string; size_kb: number }[];
   latitude?: number;
   longitude?: number;
-  /** Feeds validateAtSite for the Q8 hybrid off-post policy. Older
-   *  builds without accuracy get the fence's SAFETY_MARGIN as their
-   *  only slack; new builds get an accuracy-aware check. */
+  /** GPS horizontal accuracy in meters (T2-D C3, Q8 hybrid off-post).
+   *  Older builds without accuracy get the fence's SAFETY_MARGIN as
+   *  their only slack; new builds get an accuracy-aware check. */
   accuracy?: number;
   /** Site-local HH:MM label of a missed_reports window the guard is
    *  backfilling (set via a missed_report notification deep-link).

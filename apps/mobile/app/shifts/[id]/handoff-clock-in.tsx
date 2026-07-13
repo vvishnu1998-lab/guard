@@ -1,0 +1,627 @@
+/**
+ * Handoff clock-in wizard — /shifts/[id]/handoff-clock-in
+ *
+ * Recipient side of a mid-shift handoff. Single-file wizard with internal
+ * step state (chosen over a nested Stack because the whole flow completes
+ * in one screen lifetime; no push accumulation surface, no per-step back
+ * gesture to defend against). Entry via router.push from shift detail;
+ * completion via router.replace so back gesture doesn't dump the user
+ * back into the wizard.
+ *
+ * Wizard shape mirrors regular clock-in but is shorter:
+ *   step 1 — GPS Verification (same isPointInPolygon + haversine logic
+ *            as clock-in step1, feeds off Bug 1's hydrated geofence)
+ *   step 2 — Selfie capture via components/SelfieCapture (extracted
+ *            2026-07-10; regular clock-in step2 uses the same component)
+ *   step 3 — Submit: uploadToS3 → POST /handoff-clock-in → POST
+ *            /locations/clock-in-verification. Idempotency key generated
+ *            once per mount so a network-blip retry replays the same
+ *            transaction.
+ *
+ * Preconditions (all enforced BEFORE step 1 renders):
+ *   - GET /shifts/:id succeeds (server tenancy already allows accepted-
+ *     handoff recipients per Phase 2a)
+ *   - Shift is active
+ *   - swap_history has an accepted-handoff row addressed to me
+ *   - Shift geofence hydrated (Bug 1 fix)
+ * On any precondition failure we bail with a clear error and the guard
+ * returns to the shift-detail page.
+ */
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
+  ScrollView,
+} from 'react-native';
+import { router, useLocalSearchParams } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
+import { apiClient } from '../../../lib/apiClient';
+import { uploadToS3 } from '../../../lib/uploadToS3';
+import { uuidv4 } from '../../../lib/uuid';
+import { useAuthStore } from '../../../store/authStore';
+import { isPointInPolygon, haversineDistance } from '../../../utils/geofence';
+import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
+import SelfieCapture, { SelfieProof } from '../../../components/SelfieCapture';
+
+type Step = 'loading' | 'gps' | 'selfie' | 'submit' | 'error';
+
+interface Geofence {
+  polygon_coordinates: { lat: number; lng: number }[];
+  center_lat:          number;
+  center_lng:          number;
+  radius_meters:       number;
+}
+
+interface SwapHistoryRow {
+  id:              string;
+  status:          'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled';
+  initiated_by:    'admin' | 'guard_pre_shift' | 'guard_handoff';
+  to_guard_id:     string | null;
+  from_guard_id:   string | null;
+  from_guard_name: string | null;
+}
+
+interface ShiftDetail {
+  id:              string;
+  guard_id:        string | null;
+  site_id:         string;
+  site_name:       string;
+  status:          'scheduled' | 'active' | 'completed' | 'missed' | 'cancelled';
+  geofence:        Geofence | null;
+  swap_history:    SwapHistoryRow[];
+}
+
+const SUBMIT_STAGES = ['Uploading selfie…', 'Handing off…', 'Saving verification…'];
+
+export default function HandoffClockInWizard() {
+  const { id: shiftId } = useLocalSearchParams<{ id: string }>();
+  const { guardId } = useAuthStore();
+
+  const [step,      setStep]      = useState<Step>('loading');
+  const [errMsg,    setErrMsg]    = useState<string | null>(null);
+  const [shift,     setShift]     = useState<ShiftDetail | null>(null);
+  const [historyId, setHistoryId] = useState<string | null>(null);
+
+  // GPS state
+  const [verifiedCoords, setVerifiedCoords] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
+  const [gpsCoords,      setGpsCoords]      = useState<{ lat: number; lng: number } | null>(null);
+  const [gpsState,       setGpsState]       = useState<'checking' | 'inside' | 'outside' | 'perm_denied' | 'error'>('checking');
+
+  // Selfie state — SelfieCapture manages the camera + preview internally;
+  // this holds the confirmed proof for the submit step.
+  const [selfie, setSelfie] = useState<SelfieProof | null>(null);
+
+  // Submit state
+  const [submitStage, setSubmitStage] = useState(0);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [idempotencyKey] = useState(() => uuidv4());
+
+  // ── Load + validate the shift ────────────────────────────────────────────
+  useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'handoff_clock_in',
+      message: 'wizard mounted',
+      level: 'info',
+      data: { shift_id: shiftId },
+    });
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiClient.get<ShiftDetail>(`/shifts/${shiftId}`);
+        if (cancelled) return;
+
+        // Precondition: shift is active
+        if (data.status !== 'active') {
+          setErrMsg(`This shift is ${data.status}. Handoff is only available for active shifts.`);
+          setStep('error');
+          return;
+        }
+        // Precondition: there's an accepted handoff for me on this shift
+        const my = data.swap_history.find(
+          (r) => r.initiated_by === 'guard_handoff'
+              && r.status === 'accepted'
+              && r.to_guard_id === guardId,
+        );
+        if (!my) {
+          setErrMsg('No pending handoff for this shift.');
+          setStep('error');
+          return;
+        }
+        // Precondition: geofence hydrated (Bug 1)
+        if (!data.geofence) {
+          Sentry.captureMessage('handoff-clock-in: geofence null on active shift', {
+            level: 'error',
+            extra: { shift_id: shiftId },
+          });
+          setErrMsg('Site boundary not configured. Please contact your supervisor.');
+          setStep('error');
+          return;
+        }
+        setShift(data);
+        setHistoryId(my.id);
+        setStep('gps');
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'preconditions ok → step gps',
+          level: 'info',
+          data: { history_id: my.id, from_guard: my.from_guard_name },
+        });
+      } catch (err: any) {
+        if (cancelled) return;
+        Sentry.captureException(err, { extra: { where: 'handoff-clock-in.load' } });
+        setErrMsg(err?.message ?? 'Could not load shift.');
+        setStep('error');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [shiftId, guardId]);
+
+  // ── Step 1: GPS check (live watcher) ────────────────────────────────────
+  // Walk-test 2026-07-10 BUG J — same fix applied symmetrically to
+  // clock-in/step1.tsx. iOS's Balanced accuracy returns whatever
+  // CoreLocation last cached; a one-shot getCurrentPositionAsync after
+  // the guard walked onto site returned the same OFFSITE coords from
+  // when they first opened the wizard. Force-quit was the only workaround.
+  // A running watcher keeps CLLocationManager warm so the boundary
+  // crossing auto-flips gpsState to 'inside' without a RETRY tap.
+  const watcherRef      = useRef<Location.LocationSubscription | null>(null);
+  const lastInsideRef   = useRef<boolean | null>(null);
+
+  async function stopWatcher() {
+    watcherRef.current?.remove();
+    watcherRef.current = null;
+  }
+
+  const evaluatePoint = useCallback(
+    (point: { lat: number; lng: number }, accuracy: number) => {
+      const geofence = shift?.geofence;
+      if (!geofence) return;
+      setGpsCoords(point);
+      const distance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
+      if (distance > geofence.radius_meters * 1.5) {
+        if (lastInsideRef.current !== false) {
+          Sentry.addBreadcrumb({
+            category: 'handoff_clock_in',
+            message: 'step gps: watcher emitted → outside (radius pre-check)',
+            level: 'info',
+            data: { distance_m: Math.round(distance), radius_m: geofence.radius_meters },
+          });
+        }
+        lastInsideRef.current = false;
+        setGpsState('outside');
+        return;
+      }
+      const inside = isPointInPolygon(point, geofence.polygon_coordinates);
+      if (inside && lastInsideRef.current !== true) {
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'step gps: watcher emitted → inside',
+          level: 'info',
+          data: { distance_m: Math.round(distance), accuracy_m: Math.round(accuracy) },
+        });
+        setVerifiedCoords({ lat: point.lat, lng: point.lng, accuracy });
+      } else if (!inside && lastInsideRef.current !== false) {
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'step gps: watcher emitted → outside (polygon)',
+          level: 'info',
+          data: { distance_m: Math.round(distance) },
+        });
+      }
+      lastInsideRef.current = inside;
+      setGpsState(inside ? 'inside' : 'outside');
+    },
+    [shift?.geofence],
+  );
+
+  const startWatcher = useCallback(async () => {
+    if (!shift?.geofence) return;
+    await stopWatcher();
+    lastInsideRef.current = null;
+    setGpsState('checking');
+    try {
+      const perm = await Location.requestForegroundPermissionsAsync();
+      if (perm.status !== 'granted') {
+        setGpsState('perm_denied');
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'step gps: permission denied',
+          level: 'warning',
+        });
+        return;
+      }
+
+      // Fast first fix — unblocks the UI while the watcher warms up.
+      // Silent failure fall-through; watcher is source of truth.
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+        .then((loc) => {
+          const acc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
+          Sentry.addBreadcrumb({
+            category: 'handoff_clock_in',
+            message: 'step gps: first fix acquired',
+            level: 'info',
+            data: { accuracy_m: Math.round(acc) },
+          });
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+        })
+        .catch(() => {});
+
+      // Continuous watcher — 5m or 3s Balanced, same knobs as regular
+      // clock-in step1 so both flows behave identically when the guard
+      // walks onto site mid-wizard.
+      watcherRef.current = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.Balanced, distanceInterval: 5, timeInterval: 3000 },
+        (loc) => {
+          const acc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+        },
+      );
+    } catch (err) {
+      Sentry.captureException(err, { extra: { where: 'handoff-clock-in.startWatcher' } });
+      setGpsState('error');
+    }
+  }, [shift?.geofence, evaluatePoint]);
+
+  // Start the watcher when the guard reaches the GPS step; teardown on
+  // step transition (selfie/submit/error) AND on component unmount. If a
+  // submit-time 422 bounces the guard back to gps, this same effect
+  // re-starts the watcher.
+  useEffect(() => {
+    if (step === 'gps') {
+      startWatcher();
+      return () => { stopWatcher(); };
+    }
+  }, [step, startWatcher]);
+
+  // ── Step 2: Selfie capture (delegated to SelfieCapture) ───────────────
+  // The camera + preview flow is provided by components/SelfieCapture
+  // (shared with regular clock-in step2). When it fires onSelfieCaptured
+  // we record the proof and jump straight into the submit txn.
+  function handleSelfieCaptured(proof: SelfieProof) {
+    setSelfie(proof);
+    // setSelfie hasn't landed on state by the time we call startSubmit,
+    // so pass the proof through directly rather than reading it back.
+    startSubmit(proof);
+  }
+
+  // ── Step 3: Submit ───────────────────────────────────────────────────────
+  async function startSubmit(proofOverride?: SelfieProof) {
+    const proof = proofOverride ?? selfie;
+    if (!verifiedCoords || !proof || !shift) return;
+    setStep('submit');
+    setSubmitError(null);
+    setSubmitStage(0);
+    Sentry.addBreadcrumb({
+      category: 'handoff_clock_in',
+      message: 'submit initiated',
+      level: 'info',
+      data: { history_id: historyId, idempotency_key: idempotencyKey },
+    });
+    try {
+      // 1) Upload selfie
+      let selfieUrl = 'pending';
+      try {
+        const up = await uploadToS3(proof.uri, 'clock_in');
+        selfieUrl = up.public_url;
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'submit: selfie uploaded',
+          level: 'info',
+        });
+      } catch (err) {
+        // Non-fatal — fall through with 'pending' like regular clock-in.
+        Sentry.addBreadcrumb({
+          category: 'handoff_clock_in',
+          message: 'submit: selfie upload failed (falling back to "pending")',
+          level: 'warning',
+          data: { error: (err as any)?.message ?? String(err) },
+        });
+      }
+
+      // 2) Handoff clock-in — rotates the session + shift.guard_id atomically.
+      setSubmitStage(1);
+      Sentry.addBreadcrumb({
+        category: 'handoff_clock_in',
+        message: 'submit: POST /handoff-clock-in',
+        level: 'info',
+      });
+      const session = await apiClient.post<{ id: string; site_id: string; clocked_in_at: string }>(
+        `/shifts/${shift.id}/handoff-clock-in`,
+        {
+          lat:      verifiedCoords.lat,
+          lng:      verifiedCoords.lng,
+          accuracy: verifiedCoords.accuracy,
+        },
+        { headers: { 'Idempotency-Key': idempotencyKey } },
+      );
+
+      // 3) Verification row — same downstream table regular clock-in writes to.
+      setSubmitStage(2);
+      Sentry.addBreadcrumb({
+        category: 'handoff_clock_in',
+        message: 'submit: POST /locations/clock-in-verification',
+        level: 'info',
+        data: { session_id: session.id },
+      });
+      await apiClient.post('/locations/clock-in-verification', {
+        shift_session_id:   session.id,
+        selfie_url:         selfieUrl,
+        site_photo_url:     null,
+        verified_lat:       verifiedCoords.lat,
+        verified_lng:       verifiedCoords.lng,
+        accuracy:           verifiedCoords.accuracy,
+        is_within_geofence: true,
+      });
+
+      Sentry.addBreadcrumb({
+        category: 'handoff_clock_in',
+        message: 'submit complete',
+        level: 'info',
+      });
+      // Land on the schedule tab; the guard's shift-list will refetch on
+      // focus and show the newly-active shift.
+      router.replace('/(tabs)/schedule');
+    } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'handoff_clock_in',
+        message: 'submit failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'handoff-clock-in.submit' } });
+      // 422 → geofence failed on server; bounce to gps step to re-check.
+      if (err?.message === 'GEOFENCE_FAILED') {
+        Alert.alert(
+          'Outside Site',
+          'You appear to be outside the site post. Move to the entrance and try again.',
+          [{ text: 'OK', onPress: () => setStep('gps') }],
+          { cancelable: false },
+        );
+        return;
+      }
+      setSubmitError(err?.message ?? 'Could not complete handoff.');
+    }
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────────
+
+  function goBack() {
+    if (router.canGoBack()) router.back();
+    else router.replace(`/shifts/${shiftId}`);
+  }
+
+  const header = (
+    <View style={styles.header}>
+      <TouchableOpacity onPress={goBack} style={styles.backBtn} hitSlop={8}>
+        <Ionicons name="chevron-back" size={22} color={Colors.warning} />
+        <Text style={styles.backText}>SHIFT</Text>
+      </TouchableOpacity>
+      <Text style={styles.title}>HANDOFF CLOCK IN</Text>
+    </View>
+  );
+
+  if (step === 'loading') {
+    return (
+      <View style={styles.container}>
+        {header}
+        <View style={styles.center}><ActivityIndicator color={Colors.warning} size="large" /></View>
+      </View>
+    );
+  }
+  if (step === 'error') {
+    return (
+      <View style={styles.container}>
+        {header}
+        <View style={styles.center}>
+          <Text style={styles.errorText}>{errMsg}</Text>
+          <TouchableOpacity style={styles.secondaryBtn} onPress={goBack}>
+            <Text style={styles.secondaryBtnText}>BACK TO SHIFT</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  if (step === 'gps') {
+    const distance = gpsCoords && shift?.geofence
+      ? haversineDistance(gpsCoords.lat, gpsCoords.lng, shift.geofence.center_lat, shift.geofence.center_lng)
+      : null;
+    return (
+      <View style={styles.container}>
+        {header}
+        <View style={styles.body}>
+          <Text style={styles.stepLabel}>STEP 1 OF 3 · GPS VERIFICATION</Text>
+          <Text style={styles.stepTitle}>
+            {gpsState === 'checking' ? 'Checking location…'
+              : gpsState === 'inside' ? 'You are on-site'
+              : gpsState === 'outside' ? 'Move to the site'
+              : gpsState === 'perm_denied' ? 'Location permission needed'
+              : 'Could not verify location'}
+          </Text>
+          <View style={styles.infoCard}>
+            <InfoRow label="Site" value={shift?.site_name ?? '—'} />
+            {gpsCoords && (
+              <InfoRow label="Your GPS" value={`${gpsCoords.lat.toFixed(5)}, ${gpsCoords.lng.toFixed(5)}`} />
+            )}
+            {distance != null && (
+              <InfoRow label="Distance to site" value={`${Math.round(distance)} m`} />
+            )}
+            <InfoRow
+              label="Status"
+              value={gpsState === 'checking' ? 'Checking…'
+                : gpsState === 'inside' ? 'Inside boundary'
+                : gpsState === 'outside' ? 'Outside boundary'
+                : gpsState === 'perm_denied' ? 'Permission denied'
+                : 'Error'}
+              valueColor={gpsState === 'inside' ? Colors.success
+                : gpsState === 'checking' ? Colors.muted : Colors.danger}
+            />
+          </View>
+
+          {gpsState === 'outside' && (
+            <Text style={styles.hint}>You must be at {shift?.site_name} to clock in.</Text>
+          )}
+
+          <View style={{ flex: 1 }} />
+
+          <TouchableOpacity
+            style={[styles.primaryBtn, gpsState !== 'inside' && styles.disabled]}
+            disabled={gpsState !== 'inside'}
+            onPress={() => {
+              // Explicit watcher stop before advancing the wizard. The
+              // step-driven useEffect cleanup will also fire when step
+              // transitions off 'gps', but stopping here guarantees no
+              // stray callback lands between setStep('selfie') and the
+              // next render's teardown.
+              stopWatcher();
+              Sentry.addBreadcrumb({
+                category: 'handoff_clock_in',
+                message: 'gps → selfie (watcher stopped)',
+                level: 'info',
+              });
+              setStep('selfie');
+            }}
+          >
+            <Text style={styles.primaryBtnText}>NEXT: TAKE SELFIE</Text>
+          </TouchableOpacity>
+          {(gpsState === 'outside' || gpsState === 'error' || gpsState === 'perm_denied') && (
+            <TouchableOpacity style={styles.retryLink} onPress={startWatcher}>
+              <Text style={styles.retryText}>Retry GPS check</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    );
+  }
+
+  if (step === 'selfie') {
+    // SelfieCapture is a full-screen component; the wizard header renders
+    // above it. Preview + retake handled internally by the component;
+    // primary button "COMPLETE HANDOFF" advances directly into submit via
+    // handleSelfieCaptured (skipping the separate 'preview' step the
+    // wizard used to own).
+    return (
+      <View style={styles.container}>
+        {header}
+        <SelfieCapture
+          uploadContext="handoff_clock_in"
+          stepLabel="STEP 2 OF 3 · SELFIE"
+          instruction="Take a clear photo of yourself"
+          primaryButtonLabel="COMPLETE HANDOFF"
+          onSelfieCaptured={handleSelfieCaptured}
+        />
+      </View>
+    );
+  }
+
+  // step === 'submit'
+  return (
+    <View style={styles.container}>
+      {header}
+      <View style={styles.body}>
+        <Text style={styles.stepLabel}>STEP 3 OF 3 · CLOCKING IN</Text>
+        {submitError ? (
+          <ScrollView contentContainerStyle={styles.center}>
+            <Text style={styles.errorText}>{submitError}</Text>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => startSubmit()}>
+              <Text style={styles.primaryBtnText}>RETRY</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={goBack}>
+              <Text style={styles.secondaryBtnText}>BACK TO SHIFT</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        ) : (
+          <View style={styles.center}>
+            <ActivityIndicator color={Colors.warning} size="large" />
+            {SUBMIT_STAGES.map((s, i) => (
+              <Text
+                key={s}
+                style={[
+                  styles.hint,
+                  i === submitStage && { color: Colors.textPrimary, fontWeight: '700' },
+                  i < submitStage  && { color: Colors.success },
+                ]}
+              >
+                {i < submitStage ? '✓' : i === submitStage ? '·' : '·'} {s}
+              </Text>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
+function InfoRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
+  return (
+    <View style={styles.infoRow}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={[styles.infoValue, valueColor ? { color: valueColor } : undefined]}>{value}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: Colors.bg },
+
+  header: {
+    paddingHorizontal: Spacing.lg,
+    paddingTop: 60,
+    paddingBottom: Spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    gap: Spacing.xs,
+  },
+  backBtn: { flexDirection: 'row', alignItems: 'center', marginBottom: 2 },
+  backText: { color: Colors.warning, fontFamily: Fonts.heading, fontSize: 12, letterSpacing: 2, marginLeft: 2 },
+  title: { fontFamily: Fonts.heading, color: Colors.textPrimary, fontSize: 22, letterSpacing: 3 },
+
+  body: { flex: 1, padding: Spacing.md },
+  stepLabel: { color: Colors.warning, fontFamily: Fonts.heading, fontSize: 11, letterSpacing: 2, marginBottom: Spacing.sm },
+  stepTitle: { fontFamily: Fonts.heading, color: Colors.textPrimary, fontSize: 22, letterSpacing: 2, marginBottom: Spacing.lg },
+
+  infoCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.border,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: Spacing.sm },
+  infoLabel: { color: Colors.muted, fontSize: 13 },
+  infoValue: { color: Colors.textPrimary, fontSize: 13, fontFamily: 'monospace' },
+  hint: { color: Colors.muted, fontSize: 13, textAlign: 'center', marginBottom: Spacing.sm },
+
+  disabled: { opacity: 0.35 },
+
+  // Walk-test 2026-07-09 BUG G: primaryBtn used to carry `flex: 1` for the
+  // preview row's 50/50 layout, but the same style was applied on the step
+  // 1 confirm, camera-permission gate, and submit-error screens (all
+  // column layouts). `flex: 1` in a column stretches the button vertically
+  // — combined with a sibling <View flex:1 /> spacer on step 1, the button
+  // ate ~50% of the screen. Fix: base style stretches horizontally only
+  // (alignSelf: 'stretch'); the preview row applies `flex: 1` inline so
+  // its two buttons split 50/50.
+  primaryBtn: {
+    backgroundColor: Colors.warning,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.md,
+    alignItems: 'center',
+    alignSelf: 'stretch',
+  },
+  primaryBtnText: { fontFamily: Fonts.heading, color: '#070D1A', fontSize: 14, letterSpacing: 2 },
+  secondaryBtn: {
+    borderRadius: Radius.md,
+    borderWidth: 1.5, borderColor: Colors.muted,
+    paddingVertical: Spacing.md,
+    alignItems: 'center',
+    alignSelf: 'stretch',
+  },
+  secondaryBtnText: { fontFamily: Fonts.heading, color: Colors.textPrimary, fontSize: 14, letterSpacing: 2 },
+  retryLink: { alignSelf: 'center', paddingVertical: Spacing.sm },
+  retryText: { color: Colors.warning, fontSize: 13 },
+
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.lg, gap: Spacing.md },
+  errorText: { color: Colors.textPrimary, fontSize: 15, textAlign: 'center' },
+});

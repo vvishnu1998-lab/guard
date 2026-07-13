@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setUserTags } from '../lib/sentry';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
@@ -25,6 +26,24 @@ const KEYS = {
   GUARD_ID: 'guard_id',
   COMPANY_ID: 'guard_company_id',
 };
+
+// Walk-test bug #2: on iOS, expo-secure-store persists across app uninstall
+// by Apple design — Keychain items with the default accessibility survive
+// (a "feature" for keeping subscriptions active across reinstall). Effect:
+// uninstall + reinstall left the previous guard silently signed in.
+//
+// AsyncStorage does NOT persist across uninstall. So we use it as a
+// fresh-install probe: on cold start, if the marker is missing, this is a
+// fresh install → wipe every SecureStore auth key before loadSession touches
+// them. First launch after a real install always lands on the login screen.
+const FRESH_INSTALL_KEY = 'guard_fresh_install_marker';
+
+async function nukeSecureStoreOnFreshInstall(): Promise<void> {
+  const marker = await AsyncStorage.getItem(FRESH_INSTALL_KEY);
+  if (marker) return; // not a fresh install
+  await Promise.all(Object.values(KEYS).map((k) => SecureStore.deleteItemAsync(k).catch(() => {})));
+  await AsyncStorage.setItem(FRESH_INSTALL_KEY, '1');
+}
 
 export const useAuthStore = create<AuthState>((set) => ({
   status: 'unknown',
@@ -118,6 +137,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   loadSession: async () => {
+    // Must run BEFORE reading tokens: on a fresh install this wipes any
+    // stale Keychain state left behind by the previous install.
+    await nukeSecureStoreOnFreshInstall();
     const access = await SecureStore.getItemAsync(KEYS.ACCESS);
     if (!access) { set({ status: 'unauthenticated' }); return; }
 

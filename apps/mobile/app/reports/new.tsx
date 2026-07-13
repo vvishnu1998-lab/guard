@@ -14,24 +14,29 @@
  *    routed to. Activity-report-reminder push notifications now open this
  *    screen with the type pre-selected.
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Modal,
 } from 'react-native';
 import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useOfflineStore } from '../../store/offlineStore';
 import { usePhotoAttachments } from '../../hooks/usePhotoAttachments';
 import { PhotoStrip } from '../../components/reports/PhotoStrip';
 import { apiClient, ApiError } from '../../lib/apiClient';
-import * as Sentry from '@sentry/react-native';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
 
-const MIN_ENHANCE_WORDS = 75;
+// P2 UX bundle 2026-07-10 — lowered from 75 → 25. Field feedback:
+// guards were getting stranded on the write-more-then-enhance loop for
+// short, valid observations (e.g. "vehicle parked in fire lane, plate
+// 8XY123, informed driver"). 25 gives the model enough substrate to
+// enhance without gatekeeping legitimate short reports.
+const MIN_ENHANCE_WORDS = 25;
 function countWords(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
@@ -69,14 +74,35 @@ export default function CreateReport() {
   const typeMeta = TYPES.find((t) => t.value === reportType)!;
   const photoRequired = reportType === 'incident';
 
+  useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'entered new',
+      level: 'info',
+      data: { initial_type: initialType },
+    });
+  }, [initialType]);
+
   function pickType(t: ReportType) {
     setReportType(t);
     setTypePickerOpen(false);
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'type picked',
+      level: 'info',
+      data: { type: t },
+    });
   }
 
   async function handleEnhance() {
     if (countWords(description) < MIN_ENHANCE_WORDS) return;
     setEnhancing(true);
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'AI enhance triggered',
+      level: 'info',
+      data: { word_count: countWords(description), report_type: reportType },
+    });
     try {
       setOriginalDesc(description);
       const { enhanced: result } = await apiClient.post<{ enhanced: string }>(
@@ -84,7 +110,19 @@ export default function CreateReport() {
         { text: description, report_type: reportType },
       );
       setEnhanced(result);
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'AI enhance succeeded',
+        level: 'info',
+      });
     } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'AI enhance failed',
+        level: 'warning',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'reports.new.handleEnhance' } });
       Alert.alert('Enhancement Failed', err?.message ?? 'Could not enhance description. Try again.');
     } finally {
       setEnhancing(false);
@@ -126,16 +164,38 @@ export default function CreateReport() {
     }
 
     setSubmitting(true);
+    Sentry.addBreadcrumb({
+      category: 'reports_wizard',
+      message: 'submit initiated',
+      level: 'info',
+      data: {
+        report_type:  reportType,
+        word_count:   countWords(description),
+        photo_count:  photos.attachments.length,
+      },
+    });
     try {
-      let latitude: number | undefined;
-      let longitude: number | undefined;
-      let accuracy: number | undefined;
+      // C3 (T2-D) — GPS hard-fail on no lock (mirrors T1-C-client
+      // photo.tsx pattern). Post-Commit-A, Q8 hybrid policy in the
+      // server: activity/maintenance offsite → 422; incident offsite
+      // → 201 + is_within_geofence=false flag + admin alert.
+      // Capturing accuracy is required to actually trigger validation
+      // server-side; without all three of {lat,lng,accuracy} the server
+      // skips the fence check.
+      let latitude:  number | null = null;
+      let longitude: number | null = null;
+      let accuracy:  number | null = null;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         latitude  = loc.coords.latitude;
         longitude = loc.coords.longitude;
-        accuracy  = loc.coords.accuracy ?? undefined;
-      } catch { /* GPS failure — still submit; server treats missing coords as unknown */ }
+        accuracy  = loc.coords.accuracy;
+      } catch (err) {
+        console.warn('[report] GPS read threw:', err);
+      }
+      if (latitude === null || longitude === null) {
+        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+      }
 
       if (windowLabel) {
         Sentry.addBreadcrumb({
@@ -153,8 +213,14 @@ export default function CreateReport() {
         photo_urls:       photos.toPayload(),
         latitude,
         longitude,
-        accuracy,
+        accuracy:         accuracy ?? undefined,
         window_label:     windowLabel ?? undefined,
+      });
+
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'submit succeeded',
+        level: 'info',
       });
 
       // Off-post incident policy (Q8 hybrid): server 201's an off-post
@@ -192,16 +258,17 @@ export default function CreateReport() {
       // REPORT_OFF_POST is expected under the Commit A hybrid policy for
       // activity + maintenance reports (Q8). Show the reason clearly and
       // keep the form state intact so the guard can walk back onsite and
-      // hit Submit again without re-typing.
+      // hit Submit again without re-typing. Breadcrumb only — NOT a
+      // Sentry captureException (this is expected server behaviour).
       if (err instanceof ApiError && err.code === 'REPORT_OFF_POST') {
         Sentry.addBreadcrumb({
-          category: 'reports',
+          category: 'reports_wizard',
           message: 'REPORT_OFF_POST surfaced',
           level: 'warning',
           data: {
             report_type: reportType,
-            distance_m: err.details.distance_m,
-            accuracy_m: err.details.accuracy_m,
+            distance_m:  err.details.distance_m,
+            accuracy_m:  err.details.accuracy_m,
           },
         });
         Alert.alert(
@@ -209,7 +276,14 @@ export default function CreateReport() {
           `You must be inside the site boundary to submit ${reportType} reports.`,
         );
       } else {
-        Alert.alert('Submit Failed', err?.message ?? 'Could not submit report.');
+        Sentry.addBreadcrumb({
+          category: 'reports_wizard',
+          message: 'submit failed',
+          level: 'error',
+          data: { error: err?.message ?? String(err) },
+        });
+        Sentry.captureException(err, { extra: { where: 'reports.new.submit' } });
+        Alert.alert('Report Submission Failed', err?.message ?? 'Could not submit report.');
       }
     } finally {
       setSubmitting(false);

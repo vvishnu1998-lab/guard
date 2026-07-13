@@ -20,9 +20,9 @@ import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
+import * as Sentry from '@sentry/react-native';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
-import * as Sentry from '@sentry/react-native';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
 import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
@@ -58,9 +58,15 @@ export default function PhotoPing() {
   // Android often never fires onCameraReady — force-enable after 3s so the
   // shutter doesn't sit disabled indefinitely.
   useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'ping_wizard',
+      message: 'entered photo capture',
+      level: 'info',
+      data: { session_id: activeSession?.id },
+    });
     const t = setTimeout(() => setCameraReady(true), CAMERA_READY_FALLBACK_MS);
     return () => clearTimeout(t);
-  }, []);
+  }, [activeSession?.id]);
 
   if (!permission) return null;
   if (!permission.granted) {
@@ -105,6 +111,11 @@ export default function PhotoPing() {
       );
       if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
       console.log('[ping] picture taken:', photo.uri);
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: 'photo captured',
+        level: 'info',
+      });
 
       // 2) Compress (best-effort)
       let compressed: { uri: string } = { uri: photo.uri };
@@ -123,13 +134,20 @@ export default function PhotoPing() {
 
       // 3) GPS with a 3s race — never block the submit on a slow GPS fix.
       //    Prefer the cached last-known position; fall back to a live read.
-      let lat = 0;
-      let lng = 0;
+      //    On total GPS failure → throw so the outer catch surfaces the
+      //    user-facing message. DO NOT submit (0,0) — the API rejects it
+      //    with 400 anyway (audit T1-C-server, schema_v18 era), but the
+      //    wasted S3 upload + round-trip + generic 400 are a worse UX
+      //    than failing here.
+      let lat: number | null = null;
+      let lng: number | null = null;
+      let acc: number | null = null;
       try {
         const last = await Location.getLastKnownPositionAsync();
         if (last) {
           lat = last.coords.latitude;
           lng = last.coords.longitude;
+          acc = last.coords.accuracy;
         } else {
           const live = await Promise.race([
             Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
@@ -138,12 +156,14 @@ export default function PhotoPing() {
           if (live) {
             lat = (live as Location.LocationObject).coords.latitude;
             lng = (live as Location.LocationObject).coords.longitude;
-          } else {
-            console.warn('[ping] GPS timed out — submitting with 0,0');
+            acc = (live as Location.LocationObject).coords.accuracy;
           }
         }
       } catch (err) {
-        console.warn('[ping] GPS read failed — submitting with 0,0:', err);
+        console.warn('[ping] GPS read threw:', err);
+      }
+      if (lat === null || lng === null) {
+        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
       }
 
       // 4) Upload the photo to S3. Hard-fail on error — the API rejects
@@ -158,24 +178,32 @@ export default function PhotoPing() {
       //    offline-queue fallback is unsafe for ping-with-photo: a queued
       //    payload referencing a no-longer-existing local URI can't sync.
       console.log('[ping] submitting…');
-      if (windowLabel) {
-        Sentry.addBreadcrumb({
-          category: 'ping',
-          message: 'late ping submit (missed_ping backfill)',
-          level: 'info',
-          data: { window_label: windowLabel },
-        });
-      }
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: windowLabel ? 'late ping submit (missed_ping backfill)' : 'submit initiated',
+        level: 'info',
+        data: {
+          session_id:   activeSession.id,
+          accuracy_m:   acc ? Math.round(acc) : null,
+          window_label: windowLabel ?? null,
+        },
+      });
       await apiClient.post('/locations/ping', {
         shift_session_id: activeSession.id,
         latitude:         lat,
         longitude:        lng,
+        accuracy:         acc ?? 30, // T2-H — server expands fence by (radius + accuracy + 50m safety)
         ping_type:        'gps_photo',
         photo_url:        public_url,
         throttle_reason:  getCurrentThrottleReason() ?? undefined,
         window_label:     windowLabel ?? undefined,
       });
       console.log('[ping] submit complete');
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: 'submit succeeded',
+        level: 'info',
+      });
 
       pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
       // Confirmation to the guard (was missing — submit used to silently
@@ -191,10 +219,11 @@ export default function PhotoPing() {
       // pings prove presence, so the server 422s any offsite submission.
       // Show the user-readable copy instead of the raw enum string, and
       // leave the camera screen mounted so the guard can walk back onsite
-      // and retry without re-navigating.
+      // and retry without re-navigating. NOT a Sentry captureException
+      // (this is expected behaviour, not a bug — just a breadcrumb).
       if (err instanceof ApiError && err.code === 'PING_OFF_POST') {
         Sentry.addBreadcrumb({
-          category: 'ping',
+          category: 'ping_wizard',
           message: 'PING_OFF_POST surfaced',
           level: 'warning',
           data: { distance_m: err.details.distance_m, accuracy_m: err.details.accuracy_m },
@@ -204,6 +233,13 @@ export default function PhotoPing() {
           'Cannot ping while off-post. Return to site to submit.',
         );
       } else {
+        Sentry.addBreadcrumb({
+          category: 'ping_wizard',
+          message: 'submit / capture failed',
+          level: 'error',
+          data: { error: err?.message ?? String(err) },
+        });
+        Sentry.captureException(err, { extra: { where: 'ping.photo.capture' } });
         Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
       }
     } finally {

@@ -2,9 +2,10 @@
  * Clock-In Flow — Step 1: GPS Verification (Section 5.2)
  * Animated GPS check with pulsing rings. Button disabled until inside geofence.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import * as Location from 'expo-location';
+import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
@@ -19,43 +20,152 @@ export default function ClockInStep1() {
   const { pendingShift } = useShiftStore();
   const { setGpsVerified } = useClockInStore();
 
-  useEffect(() => {
-    checkGeofence();
-  }, []);
+  // Walk-test 2026-07-10 BUG J — a live watcher instead of one-shot polling.
+  // The prior version called Location.getCurrentPositionAsync({Balanced}) on
+  // mount and again on RETRY. On iOS, Balanced accuracy uses wifi/cell
+  // triangulation and returns whatever CLLocationManager last cached — which
+  // is up to several minutes old and does NOT refresh just because the
+  // guard has physically walked to the site. James's Build-30 walk-test:
+  // opened wizard outside geofence, walked ~200m onto site, tapped RETRY,
+  // still saw OFFSITE. Force-quit + relaunch worked because a fresh process
+  // starts CoreLocation from empty. Fix: start watchPositionAsync on mount
+  // so the sensor stays warm during the walk; each emission re-runs the
+  // boundary check and auto-flips state to 'inside' when the guard crosses
+  // in. The RETRY button is retained as a fallback in case the watcher
+  // stalls (permission revocation mid-session, hard OS quirks).
+  const watcherRef = useRef<Location.LocationSubscription | null>(null);
+  // Tracks the last boundary-check outcome so we log a Sentry breadcrumb
+  // ONLY on crossing (not every 3s emission while inside/outside is stable).
+  // Starts null so the first evaluation is treated as a crossing.
+  const lastInsideRef = useRef<boolean | null>(null);
 
-  async function checkGeofence() {
+  async function stopWatcher() {
+    watcherRef.current?.remove();
+    watcherRef.current = null;
+  }
+
+  function evaluatePoint(point: { lat: number; lng: number }, accuracy: number) {
+    const geofence = pendingShift?.geofence;
+    if (!geofence) {
+      // Walk-test bug #1: previously we silently allowed clock-in when
+      // pendingShift.geofence was missing (which was always, because the
+      // /shifts list endpoint didn't return geofence). Home.tsx now
+      // fetches /shifts/:id and hydrates geofence before entering the
+      // wizard, so a missing geofence here means either the site has no
+      // geofence configured or something is very wrong. Hard-fail.
+      setState('error');
+      return;
+    }
+    setCoords(point);
+    const approxDistance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
+    if (approxDistance > geofence.radius_meters * 1.5) {
+      if (lastInsideRef.current !== false) {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step1: watcher emitted → outside (radius pre-check)',
+          level: 'info',
+          data: { distance_m: Math.round(approxDistance), radius_m: geofence.radius_meters },
+        });
+      }
+      lastInsideRef.current = false;
+      setState('outside');
+      return;
+    }
+    const inside = isPointInPolygon(point, geofence.polygon_coordinates);
+    if (inside && lastInsideRef.current !== true) {
+      // Boundary crossing from outside/unknown to inside — the key
+      // observability point for this bug.
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step1: watcher emitted → inside',
+        level: 'info',
+        data: { distance_m: Math.round(approxDistance), accuracy_m: Math.round(accuracy) },
+      });
+      setGpsVerified(point.lat, point.lng, accuracy);
+    } else if (!inside && lastInsideRef.current !== false) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step1: watcher emitted → outside (polygon)',
+        level: 'info',
+        data: { distance_m: Math.round(approxDistance) },
+      });
+    }
+    lastInsideRef.current = inside;
+    setState(inside ? 'inside' : 'outside');
+  }
+
+  async function startWatcher() {
+    await stopWatcher();
+    lastInsideRef.current = null;
     setState('checking');
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') { setState('error'); return; }
-
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      const point = { lat: loc.coords.latitude, lng: loc.coords.longitude };
-      // expo-location may return null accuracy on iOS simulator / coarse-grant devices.
-      // Default to a conservative 30m so the server-side check still has SOME tolerance.
-      const accuracy = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
-      setCoords(point);
-
-      const geofence = pendingShift?.geofence;
-      if (!geofence) {
-        setGpsVerified(point.lat, point.lng, accuracy);
-        setState('inside');
-        return;
-      } // no geofence = always allow
-
-      // Fast radius pre-check (Haversine) then precise polygon check (ray casting)
-      const approxDistance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
-      if (approxDistance > geofence.radius_meters * 1.5) {
-        setState('outside');
+      if (status !== 'granted') {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step1: location permission not granted',
+          level: 'warning',
+          data: { permission_status: status },
+        });
+        setState('error');
         return;
       }
-      const inside = isPointInPolygon(point, geofence.polygon_coordinates);
-      if (inside) setGpsVerified(point.lat, point.lng, accuracy);
-      setState(inside ? 'inside' : 'outside');
-    } catch {
+
+      // Fast first fix — Balanced usually lands in 1-3s. Runs in parallel
+      // with the watcher below so the UI unblocks even if the watcher
+      // takes a beat to emit. Failures here are silent — the watcher is
+      // the source of truth.
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+        .then((loc) => {
+          const acc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
+          Sentry.addBreadcrumb({
+            category: 'clock_in_wizard',
+            message: 'step1: first fix acquired',
+            level: 'info',
+            data: { accuracy_m: Math.round(acc) },
+          });
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+        })
+        .catch(() => {});
+
+      // Continuous watcher — 5m or 3s cadence, Balanced accuracy. Keeps
+      // CLLocationManager warm so the guard crossing into the polygon
+      // auto-transitions to 'inside' without needing a RETRY tap. The
+      // retained retry link handles the pathological case where the
+      // watcher never emits (permission changed mid-session, etc.).
+      watcherRef.current = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.Balanced, distanceInterval: 5, timeInterval: 3000 },
+        (loc) => {
+          const acc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+        },
+      );
+    } catch (err) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step1: watcher start threw',
+        level: 'error',
+      });
+      Sentry.captureException(err, { extra: { where: 'clockin.step1.startWatcher' } });
       setState('error');
     }
   }
+
+  useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'entered step1 (GPS Verification)',
+      level: 'info',
+      data: { shift_id: pendingShift?.id, site_id: pendingShift?.site_id },
+    });
+    startWatcher();
+    return () => {
+      // Effect cleanup — covers unmount from back-nav, route swap, JS
+      // error boundary, etc.
+      stopWatcher();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <View style={styles.container}>
@@ -91,13 +201,25 @@ export default function ClockInStep1() {
       <TouchableOpacity
         style={[styles.button, state !== 'inside' && styles.buttonDisabled]}
         disabled={state !== 'inside'}
-        onPress={() => router.push('/clock-in/step2')}
+        onPress={() => {
+          // Explicit stop before navigation. Effect-cleanup will run on
+          // unmount anyway, but stopping here removes any race where a
+          // watcher callback lands after router.replace and setState on
+          // an unmounted component throws a warning.
+          stopWatcher();
+          Sentry.addBreadcrumb({
+            category: 'clock_in_wizard',
+            message: 'step1 → step2 (watcher stopped)',
+            level: 'info',
+          });
+          router.replace('/clock-in/step2');
+        }}
       >
         <Text style={styles.buttonText}>NEXT: TAKE SELFIE</Text>
       </TouchableOpacity>
 
       {(state === 'outside' || state === 'error') && (
-        <TouchableOpacity onPress={checkGeofence} style={styles.retryButton}>
+        <TouchableOpacity onPress={startWatcher} style={styles.retryButton}>
           <Text style={styles.retryText}>Retry GPS Check</Text>
         </TouchableOpacity>
       )}

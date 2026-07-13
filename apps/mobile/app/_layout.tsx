@@ -11,7 +11,8 @@
  *
  * Guards stay logged in until they explicitly log out (no auto-lock).
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { AppState, AppStateStatus } from 'react-native';
 import { Stack, router, useSegments } from 'expo-router';
 import { useFonts, BarlowCondensed_500Medium, BarlowCondensed_700Bold } from '@expo-google-fonts/barlow-condensed';
 import * as Notifications from 'expo-notifications';
@@ -147,16 +148,101 @@ export default function RootLayout() {
   useEffect(() => {
     const sub = Notifications.addNotificationReceivedListener((notif) => {
       const data = notif.request.content.data as Record<string, any> | undefined;
+      // Walk-test 2026-07-09 BUG C: swap/handoff request pushes should
+      // bump the ALERTS badge (they route to the alerts tab, and the
+      // pending row shows up there). unreadStore.refresh() also counts
+      // inbound-swap-requests, so the server-side reconciliation lands
+      // the exact count on the followup fetch below. Explicit branch
+      // exists so a Sentry crumb can capture the routing.
+      const swapType = data?.type === 'swap_request_received'
+                    || data?.type === 'handoff_request_received';
       if (data?.type === 'chat') {
         bumpChat(1);
       } else if (data?.type) {
         bumpNotifications(1);
       }
-      // Re-sync from server shortly after — the new notification row should be visible.
+      if (data?.type) {
+        Sentry.addBreadcrumb({
+          category: 'push_foreground',
+          message: `received type=${data.type}`,
+          level: 'info',
+          data: { type: data.type, swap_related: swapType },
+        });
+      }
+      // Walk-test 2026-07-09 BUG H: when the recipient physically clocks
+      // in via handoff-clock-in, the server closes A's session and rotates
+      // shifts.guard_id. Without this, A's app still shows SHIFT ACTIVE +
+      // CLOCK OUT from cached state and the guard hits "Active session
+      // not found" on their next tap. Nuking the store forces home's
+      // existing useEffect(!isOnShift → restoreOrFetchShift) to fire and
+      // the app naturally transitions to NEXT SHIFT / empty state.
+      // The OS push notification already told the guard, so no extra
+      // Alert is fired here.
+      if (data?.type === 'handoff_complete') {
+        useShiftStore.getState().clearSession();
+      }
+      // Requester-side outbound handoff refresh — accepted/declined/
+      // cancelled arriving in the foreground should update the home
+      // PENDING HANDOFF card faster than its 30s poll. Home reads from
+      // /shifts/outbound-swap-requests which we can't invalidate directly,
+      // but the refreshUnread below already re-fetches
+      // /shifts/inbound-swap-requests; a companion outbound refresh would
+      // require a store or event bus. For now the 30s tick + useFocusEffect
+      // are the guarantees. Sentry crumb makes the drift diagnosable.
+      // Re-sync from server shortly after — the new notification row
+      // should be visible, and (BUG C) any pending swap/handoff should
+      // land in the inbound-swap-requests count too.
       setTimeout(() => refreshUnread(), 500);
     });
     return () => sub.remove();
   }, [bumpChat, bumpNotifications, refreshUnread]);
+
+  // Walk-test 2026-07-10 BUG H tail — foreground reconciliation on
+  // AppState 'active' transition. Covers the drift path the Build-30 fix
+  // missed: handoff_complete push arrived while backgrounded → banner
+  // dismissed or ignored → user opens app via icon → neither the receive
+  // listener nor the tap listener fires → cached activeSession stays true
+  // → home shows SHIFT ACTIVE + CLOCK OUT for a session that no longer
+  // exists.
+  //
+  // useRef instead of state so mutating the last-fire timestamp doesn't
+  // trigger a re-render. AppState.currentState starts as 'active' on
+  // cold start; the first transition into 'active' is guarded on
+  // prevAppState !== 'active' so we don't false-fire during initial
+  // launch (loadSession + home's mount effect already fetch state at
+  // T=0). 2s throttle absorbs iOS Control Center swipes / Notification
+  // Center swipes that fire background↔active transitions on every pane
+  // change — without it we'd hammer /shifts/active-session and
+  // /shifts/inbound-swap-requests on trivial gestures.
+  const prevAppState = useRef<AppStateStatus>(AppState.currentState);
+  const lastRefreshAt = useRef<number>(0);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      const from = prevAppState.current;
+      prevAppState.current = next;
+      if (next !== 'active' || from === 'active') return;
+      if (useAuthStore.getState().status !== 'authenticated') return;
+      const now = Date.now();
+      if (now - lastRefreshAt.current < 2000) {
+        Sentry.addBreadcrumb({
+          category: 'session_refresh',
+          message: 'AppState active — throttled (<2s since last)',
+          level: 'info',
+          data: { from, gap_ms: now - lastRefreshAt.current },
+        });
+        return;
+      }
+      lastRefreshAt.current = now;
+      Sentry.addBreadcrumb({
+        category: 'session_refresh',
+        message: 'AppState active — refetching',
+        level: 'info',
+        data: { from },
+      });
+      useShiftStore.getState().refreshFromServer();
+    });
+    return () => sub.remove();
+  }, []);
 
   // Background geofence monitoring — start when a shift goes active with a
   // known geofence, stop on clock-out. Build 34: native geofencing via

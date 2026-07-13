@@ -44,7 +44,12 @@ export default function TabLayout() {
           },
         }}
       >
-        {/* Visible tabs */}
+        {/* Visible tabs — Build 34 unified feed (option B).
+            The visible "ALERTS" tab now points at notifications.tsx which
+            renders EVERY notification type (reminders, geofence breach,
+            off-post reports, missed pings/reports, late clock-in, swap +
+            handoff invites). alerts.tsx was deleted in the merge — its
+            swap/handoff card rendering moved into the unified feed. */}
         <Tabs.Screen
           name="home"
           options={{
@@ -72,7 +77,6 @@ export default function TabLayout() {
             },
           }}
         />
-
         <Tabs.Screen
           name="chat"
           options={{

@@ -4,19 +4,15 @@
  *   - addNotificationResponseReceivedListener (push tap from OS)
  *   - In-app tap inside the Notifications tab list
  *
- * Build 34 M3 — extended to cover all 6 notification types emitted by
- * the Phase 1A/A2 server (Commit A + A2). Each type routes to the
- * screen that lets the guard TAKE THE NEXT ACTION for the alert;
- * geofence_breach and off_post_* land on the relevant detail/list
- * screens; missed_ping / missed_report / late_clock_in deep-link
- * into the submission or clock-in flow with the window pre-filled.
- *
- * Every route emits a Sentry breadcrumb tagged with the notification
- * type so we can trace "guard tapped alert X → landed on screen Y"
- * in the crash-free session context.
+ * Merged 2026-07-13: batch/mobile-3 handoff + swap + release-push
+ * routes grafted into the Build 34 M3 rewrite for the 6 Phase 1A/A2
+ * notification types. Every route emits a Sentry breadcrumb tagged
+ * with the notification type so we can trace "guard tapped alert X →
+ * landed on screen Y" in the crash-free session context.
  */
 import { router } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
+import { useShiftStore } from '../store/shiftStore';
 
 type NotificationData = Record<string, any> | undefined;
 
@@ -29,8 +25,32 @@ function breadcrumb(type: string, target: string, data?: NotificationData): void
   });
 }
 
+/** Shared "route to shift detail, fall back to schedule" helper for the
+ *  swap/handoff family — every one of them carries shift_id in the
+ *  server push data payload (swapPush.ts). */
+function shiftDetailOrSchedule(type: string, data: NotificationData): void {
+  if (typeof data?.shift_id === 'string' && data.shift_id.length > 0) {
+    const target = `/shifts/${data.shift_id}`;
+    breadcrumb(type, target, data);
+    router.push(target);
+  } else {
+    breadcrumb(type, '/(tabs)/schedule', data);
+    router.push('/(tabs)/schedule');
+  }
+}
+
 export function navigateForNotification(type: string | undefined, data: NotificationData): void {
+  // Walk-test 2026-07-09 BUG H — tap-from-background handoff_complete
+  // needs to clear the cached activeSession too. The foreground handler
+  // in _layout.tsx already does this on receive; this covers the case
+  // where the guard's device delivered the push in the background and
+  // they tapped the notification.
+  if (type === 'handoff_complete') {
+    useShiftStore.getState().clearSession();
+  }
+
   switch (type) {
+    // ── Core reminders (M3 unchanged) ────────────────────────────────
     case 'ping_reminder': {
       const window = typeof data?.window_label === 'string' ? data.window_label : undefined;
       const target = window ? `/ping?window_label=${encodeURIComponent(window)}` : '/ping';
@@ -53,23 +73,26 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       }
       break;
 
-    // ── Phase 1A / A2 additions ───────────────────────────────────────────
+    // ── Phase 1A / A2 additions (M3) ─────────────────────────────────
     case 'geofence_breach':
-      // The existing /violation screen already polls GPS every 10s and
-      // clears when the guard is back inside — it's the correct
-      // "here's what's active right now" surface. No dynamic id
-      // scaffold is needed on the mobile side (server-side
-      // notifications.data.violationId is used by the tab feed's
-      // auto-erase, not the deep-link target).
-      breadcrumb(type, '/violation', data);
-      router.push('/violation');
+      // Takeover screen at /violation/[violationId] (T1-E, batch/mobile-3).
+      // The server (fireBreachAlerts) puts violationId in the data payload.
+      // Without the id we can't deep-link to the specific violation; fall
+      // back to the notifications tab in that case.
+      if (typeof data?.violationId === 'string' && data.violationId.length > 0) {
+        const target = `/violation/${data.violationId}`;
+        breadcrumb(type, target, data);
+        router.push(target);
+      } else {
+        breadcrumb(type, '/(tabs)/notifications', data);
+        router.push('/(tabs)/notifications');
+      }
       break;
 
     case 'off_post_report':
       // No /report/[id] detail screen exists on mobile (only admin +
-      // client portal have one). Land on the guard reports list so
-      // they can see the row they just filed. Adding a detail screen
-      // is tracked as a follow-up.
+      // client portal have one). Land on the guard reports list so the
+      // guard can see the row they just filed.
       breadcrumb(type, '/(tabs)/reports', data);
       router.push('/(tabs)/reports');
       break;
@@ -98,9 +121,6 @@ export function navigateForNotification(type: string | undefined, data: Notifica
     case 'missed_report': {
       // Reuses the create-report form; window_label + report_type=activity
       // pre-fill it as a "here's the window you missed" backfill flow.
-      // report_type defaults to activity because the missed_report cron
-      // is looking for ANY report type (activity/incident/maintenance);
-      // activity is the most common and safest default.
       const params = new URLSearchParams();
       if (typeof data?.windowLabel === 'string') params.set('window_label', data.windowLabel);
       params.set('type', 'activity');
@@ -113,6 +133,58 @@ export function navigateForNotification(type: string | undefined, data: Notifica
     case 'late_clock_in':
       breadcrumb(type, '/clock-in/step1', data);
       router.push('/clock-in/step1');
+      break;
+
+    // ── Schedule pushes (batch/mobile-3) ─────────────────────────────
+    case 'pre_shift_reminder':
+    case 'shift_start_reminder':
+      // Home tab renders the upcoming-shift card with the CLOCK IN
+      // button. Clock-in flow isn't deep-linkable — it reads
+      // pendingShift from useShiftStore which home.tsx populates via
+      // handleClockIn().
+      breadcrumb(type, '/(tabs)/home', data);
+      router.push('/(tabs)/home');
+      break;
+
+    case 'shifts_assigned':
+    case 'shift_cancelled':
+      breadcrumb(type, '/(tabs)/schedule', data);
+      router.push('/(tabs)/schedule');
+      break;
+
+    // ── Swap family (batch/mobile-3) ─────────────────────────────────
+    // Unified-feed model (Build 34 option B): the swap invite row now
+    // lives in the notifications feed with a 🔄 icon; tap routes to
+    // shift detail where the guard's accept/decline card renders.
+    case 'swap_request_received':
+    case 'swap_request_sent':
+    case 'swap_accepted':
+    case 'swap_declined':
+    case 'swap_expired':
+      shiftDetailOrSchedule(type, data);
+      break;
+
+    // ── Handoff family (batch/mobile-3 Phase 2b) ─────────────────────
+    // Same unified-feed model as swap. HandoffRequestModal is invoked
+    // by the guard INITIATING the handoff (from home.tsx or shift
+    // detail) — the RECEIVER guard tap here lands on shift detail
+    // which renders the pending-invite state with accept/decline.
+    case 'handoff_request_received':
+    case 'handoff_request_sent':
+    case 'handoff_accepted':
+    case 'handoff_declined':
+    case 'handoff_cancelled':
+    case 'handoff_nudge':
+    case 'handoff_expired':
+      shiftDetailOrSchedule(type, data);
+      break;
+
+    case 'handoff_complete':
+      // Ownership just flipped. Schedule tab shows the transferred
+      // shift under B (from A's view: gone from active). activeSession
+      // was already cleared above.
+      breadcrumb(type, '/(tabs)/schedule', data);
+      router.push('/(tabs)/schedule');
       break;
   }
 }

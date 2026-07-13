@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   ActivityIndicator, Dimensions, Linking,
 } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { router } from 'expo-router';
+import * as Sentry from '@sentry/react-native';
+import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
@@ -15,6 +16,7 @@ import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
 import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import HandoffRequestModal from '../../components/HandoffRequestModal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -74,11 +76,102 @@ export default function HomeScreen() {
   const [currentTime, setCurrentTime] = useState(getCurrentTimeStr());
   const [elapsed, setElapsed] = useState(0);
 
+  // Walk-test 2026-07-09 BUG D: outbound handoff visibility. After the
+  // requester (Deepak/James) sends a handoff, they had no way to see the
+  // pending state without navigating into the shift detail's HISTORY.
+  // Home surfaces it directly.
+  interface OutboundHandoff {
+    history_id:      string;
+    shift_id:        string;
+    requested_at:    string;
+    accepted_at:     string | null;
+    status:          'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled';
+    initiated_by:    'admin' | 'guard_pre_shift' | 'guard_handoff';
+    to_session_id:   string | null;
+    to_guard_id:     string;
+    to_guard_name:   string | null;
+    site_name:       string;
+    site_tz:         string | null;
+    scheduled_end:   string;
+  }
+  const [outboundHandoff, setOutboundHandoff] = useState<OutboundHandoff | null>(null);
+  const [cancellingHandoff, setCancellingHandoff] = useState(false);
+  const outboundFetchRef = useRef<AbortController | null>(null);
+
+  // P2 UX bundle 2026-07-10 — HAND OFF SHIFT is available on the shift-
+  // detail screen; adding it here saves a tap for guards on the primary
+  // "clocked-in" surface. Same modal, same submission path.
+  const [handoffModalOpen, setHandoffModalOpen] = useState(false);
+
+  async function fetchOutboundHandoff() {
+    outboundFetchRef.current?.abort();
+    const ctrl = new AbortController();
+    outboundFetchRef.current = ctrl;
+    try {
+      const rows = await apiClient.get<OutboundHandoff[]>('/shifts/outbound-swap-requests');
+      if (ctrl.signal.aborted) return;
+      // Home only cares about handoffs, not pre-shift swaps.
+      const handoff = rows.find((r) => r.initiated_by === 'guard_handoff') ?? null;
+      setOutboundHandoff(handoff);
+      Sentry.addBreadcrumb({
+        category: 'home_tab',
+        message: 'outbound_swap_requests_loaded',
+        level: 'info',
+        data: {
+          total_rows:      rows.length,
+          handoff_present: !!handoff,
+          handoff_status:  handoff?.status ?? null,
+        },
+      });
+    } catch (err: any) {
+      if (!ctrl.signal.aborted) {
+        Sentry.captureException(err, { extra: { where: 'home.fetchOutboundHandoff' } });
+      }
+    }
+  }
+
+  async function cancelOutboundHandoff() {
+    if (!outboundHandoff || cancellingHandoff) return;
+    setCancellingHandoff(true);
+    try {
+      await apiClient.post(`/shifts/${outboundHandoff.shift_id}/handoff-cancel`, {
+        history_id: outboundHandoff.history_id,
+      });
+      setOutboundHandoff(null);
+    } catch (err: any) {
+      Sentry.captureException(err, { extra: { where: 'home.cancelOutboundHandoff' } });
+      // eslint-disable-next-line no-alert
+      alert(err?.message ?? 'Could not cancel handoff.');
+    } finally {
+      setCancellingHandoff(false);
+    }
+  }
+
   // Clock tick every minute
   useEffect(() => {
     const id = setInterval(() => setCurrentTime(getCurrentTimeStr()), 60000);
     return () => clearInterval(id);
   }, []);
+
+  // BUG D — fetch outbound handoffs on focus AND every 30s so the card
+  // stays fresh without the user needing to pull-to-refresh. Push
+  // handler in _layout.tsx bumps the unread badge; here we refresh the
+  // visible card independently.
+  //
+  // Walk-test 2026-07-10 BUG H tail — same trigger also runs the shift-
+  // store's server reconciliation so the intra-app "user was on alerts
+  // tab when the handoff completed and switched to home" path picks up
+  // the drift without needing a background trip. The _layout.tsx
+  // AppState listener covers the background-then-icon-open case; this
+  // covers the tab-switch case.
+  useFocusEffect(
+    useCallback(() => {
+      fetchOutboundHandoff();
+      useShiftStore.getState().refreshFromServer();
+      const id = setInterval(fetchOutboundHandoff, 30_000);
+      return () => clearInterval(id);
+    }, []),
+  );
 
   // Working hours ticker.
   // Option C: pay starts at MAX(clocked_in_at, scheduled_start) — early
@@ -98,14 +191,76 @@ export default function HomeScreen() {
     return () => clearInterval(id);
   }, [activeSession?.clocked_in_at, activeShift?.scheduled_start]);
 
-  useEffect(() => {
-    Location.getLastKnownPositionAsync()
-      .then((pos) => { if (pos) setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }); })
+  // ── Live Map location acquisition ─────────────────────────────────────────
+  // Walk-test bug #4 remediation. Previously this effect fired watchPosition
+  // *without* requesting foreground permission first, so on cold starts it
+  // silently didn't emit until the root layout's permission-request effect
+  // won a race. With no initialRegion on the MapView either, the placeholder
+  // ("Acquiring location…") could sit for minutes.
+  //
+  // Fix:
+  //   1. Request foreground permission explicitly and surface failure state.
+  //   2. Kick a Low-accuracy first-fix in parallel with the Balanced watcher
+  //      so the map gets *some* dot fast, then refines.
+  //   3. 15-second first-fix timeout → Sentry breadcrumb + user-visible retry.
+  //   4. Sentry.captureMessage on permission-denied so we can distinguish
+  //      "user tapped Deny" from cold-start latency in production traces.
+  const [locError, setLocError] = useState<'denied' | 'timeout' | null>(null);
+  const watcherRef  = useRef<Location.LocationSubscription | null>(null);
+  const timeoutRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  async function acquireLocation() {
+    setLocError(null);
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    watcherRef.current?.remove();
+    watcherRef.current = null;
+
+    const perm = await Location.requestForegroundPermissionsAsync();
+    if (perm.status !== 'granted') {
+      setLocError('denied');
+      Sentry.captureMessage('home.map location permission denied', {
+        level: 'warning',
+        extra: { status: perm.status, canAskAgain: perm.canAskAgain },
+      });
+      return;
+    }
+
+    // Fire-and-forget: first fix at Low accuracy — usually < 2s. If getCurrent
+    // errors (rare, e.g. Location Services disabled at OS level), silently
+    // fall through to the watcher.
+    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low })
+      .then((pos) => setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }))
       .catch(() => {});
-    Location.watchPositionAsync(
+
+    // 15-sec timeout — if the watcher hasn't emitted by then, show retry.
+    // Cleared by the watcher's first emit below.
+    timeoutRef.current = setTimeout(() => {
+      // If we already have a fix from getCurrentPositionAsync above, skip.
+      if (userLocation) return;
+      setLocError('timeout');
+      Sentry.captureMessage('home.map first fix timed out (15s)', {
+        level: 'warning',
+      });
+    }, 15_000);
+
+    watcherRef.current = await Location.watchPositionAsync(
       { accuracy: Location.Accuracy.Balanced, timeInterval: 30000, distanceInterval: 10 },
-      (pos) => setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude })
+      (pos) => {
+        setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+        if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+        setLocError(null);
+      },
     );
+  }
+
+  useEffect(() => {
+    acquireLocation();
+    return () => {
+      watcherRef.current?.remove();
+      watcherRef.current = null;
+      if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -146,19 +301,78 @@ export default function HomeScreen() {
     }
   }
 
-  function handleClockIn() {
+  // Walk-test bug #1 — hydrate the site geofence into pendingShift BEFORE
+  // entering the wizard. The list endpoint (/shifts) doesn't return
+  // geofence, so we hit /shifts/:id (Phase 2a — guard-callable for own
+  // shift) which now includes it. Step1 hard-fails when geofence is null,
+  // so we surface the fetch failure here (alert + no route push) instead
+  // of letting the guard walk into a broken screen.
+  async function handleClockIn() {
     if (!upcomingShift) return;
     resetClockIn();
-    setPendingShift({
-      id: upcomingShift.id,
-      site_id: upcomingShift.site_id,
-      site_name: upcomingShift.site_name,
-      scheduled_start: upcomingShift.scheduled_start,
-      scheduled_end: upcomingShift.scheduled_end,
-      instructions_pdf_url: upcomingShift.instructions_pdf_url ?? null,
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'handleClockIn: hydrating shift',
+      level: 'info',
+      data: { shift_id: upcomingShift.id, site_id: upcomingShift.site_id, from_screen: 'home' },
     });
-    setClockInPendingShift(upcomingShift.id);
-    router.push('/clock-in/step1');
+    try {
+      const detail = await apiClient.get<{
+        id: string;
+        site_id: string;
+        site_name: string;
+        scheduled_start: string;
+        scheduled_end: string;
+        instructions_pdf_url?: string | null;
+        geofence: {
+          polygon_coordinates: { lat: number; lng: number }[];
+          center_lat:     number;
+          center_lng:     number;
+          radius_meters:  number;
+        } | null;
+      }>(`/shifts/${upcomingShift.id}`);
+      if (!detail.geofence) {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'handleClockIn: geofence null (server response)',
+          level: 'error',
+          data: { shift_id: upcomingShift.id, site_id: upcomingShift.site_id },
+        });
+        Sentry.captureMessage('home.handleClockIn geofence missing', {
+          level: 'error',
+          extra: { shift_id: upcomingShift.id, site_id: upcomingShift.site_id },
+        });
+        // eslint-disable-next-line no-alert
+        alert('Site boundary not configured. Please contact your supervisor.');
+        return;
+      }
+      setPendingShift({
+        id: detail.id,
+        site_id: detail.site_id,
+        site_name: detail.site_name,
+        scheduled_start: detail.scheduled_start,
+        scheduled_end: detail.scheduled_end,
+        instructions_pdf_url: detail.instructions_pdf_url ?? null,
+        geofence: detail.geofence,
+      });
+      setClockInPendingShift(detail.id);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'handleClockIn: geofence hydrated, → step1',
+        level: 'info',
+      });
+      router.push('/clock-in/step1');
+    } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'handleClockIn: /shifts/:id fetch failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'home.handleClockIn' } });
+      // eslint-disable-next-line no-alert
+      alert('Could not load shift details. Check your connection and try again.');
+    }
   }
 
   const initials = guardId ? guardId.slice(0, 1).toUpperCase() : 'G';
@@ -184,33 +398,104 @@ export default function HomeScreen() {
       </View>
 
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-        {/* Map */}
-        {userLocation ? (
-          <MapView
-            style={styles.map}
-            region={{
-              latitude: userLocation.latitude,
-              longitude: userLocation.longitude,
-              latitudeDelta: 0.005,
-              longitudeDelta: 0.005,
-            }}
-            showsUserLocation
-            showsMyLocationButton={false}
-          >
-            <Marker coordinate={userLocation} title="You are here" pinColor={Colors.warning} />
-            <Circle
-              center={userLocation}
-              radius={100}
-              strokeColor="rgba(245,158,11,0.6)"
-              fillColor="rgba(245,158,11,0.1)"
-            />
-          </MapView>
-        ) : (
-          <View style={styles.mapPlaceholder}>
-            <Ionicons name="location-outline" size={32} color={Colors.muted} />
-            <Text style={styles.mapText}>LIVE MAP</Text>
-            <Text style={styles.mapSub}>Acquiring location…</Text>
+        {/* Map — MapView always mounts with a default initialRegion
+            (SF Bay Area) so tiles render immediately. Once we have a real
+            fix it re-centers via `region`. This is walk-test bug #4:
+            previously the placeholder blocked the tab for minutes. */}
+        <MapView
+          style={styles.map}
+          initialRegion={{
+            latitude: 37.7749, longitude: -122.4194,   // SF fallback
+            latitudeDelta: 0.05, longitudeDelta: 0.05, // wider so a real fix noticeably zooms in
+          }}
+          region={userLocation ? {
+            latitude:  userLocation.latitude,
+            longitude: userLocation.longitude,
+            latitudeDelta:  0.005,
+            longitudeDelta: 0.005,
+          } : undefined}
+          showsUserLocation
+          showsMyLocationButton={false}
+        >
+          {userLocation && (
+            <>
+              <Marker coordinate={userLocation} title="You are here" pinColor={Colors.warning} />
+              <Circle
+                center={userLocation}
+                radius={100}
+                strokeColor="rgba(245,158,11,0.6)"
+                fillColor="rgba(245,158,11,0.1)"
+              />
+            </>
+          )}
+        </MapView>
+        {/* Overlays sit above the map. Only one shows at a time — no location
+            fix yet: acquiring / timeout / denied. */}
+        {!userLocation && locError === null && (
+          <View style={styles.mapOverlay}>
+            <ActivityIndicator color={Colors.action} />
+            <Text style={styles.mapOverlaySub}>Acquiring location…</Text>
           </View>
+        )}
+        {!userLocation && locError === 'timeout' && (
+          <View style={styles.mapOverlay}>
+            <Text style={styles.mapOverlayText}>Location is taking longer than usual</Text>
+            <TouchableOpacity style={styles.mapRetryBtn} onPress={acquireLocation}>
+              <Text style={styles.mapRetryText}>RETRY</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {locError === 'denied' && (
+          <View style={styles.mapOverlay}>
+            <Text style={styles.mapOverlayText}>Location permission is required for shift tracking</Text>
+            <TouchableOpacity style={styles.mapRetryBtn} onPress={() => Linking.openSettings()}>
+              <Text style={styles.mapRetryText}>OPEN SETTINGS</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* BUG D — outbound pending-handoff card. Renders between the Live
+            Map overlay and the shift-state block. Both pending (waiting
+            for reply) and accepted-not-arrived (waiting for arrival)
+            variants render here, differentiated by copy. Tap on the card
+            body routes to shift detail; explicit Cancel button POSTs
+            /handoff-cancel. */}
+        {outboundHandoff && (
+          <TouchableOpacity
+            style={styles.pendingOutboundCard}
+            onPress={() => router.push(`/shifts/${outboundHandoff.shift_id}`)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.pendingOutboundHeaderRow}>
+              <View style={styles.pendingOutboundBadge}>
+                <Text style={styles.pendingOutboundBadgeText}>
+                  {outboundHandoff.status === 'accepted' ? 'AWAITING ARRIVAL' : 'PENDING HANDOFF'}
+                </Text>
+              </View>
+              <Text style={styles.pendingOutboundElapsed}>
+                {(() => {
+                  const anchor = outboundHandoff.accepted_at ?? outboundHandoff.requested_at;
+                  const mins = Math.max(0, Math.floor((Date.now() - new Date(anchor).getTime()) / 60_000));
+                  return mins < 1 ? 'just now' : `${mins}m ago`;
+                })()}
+              </Text>
+            </View>
+            <Text style={styles.pendingOutboundBody}>
+              {outboundHandoff.status === 'accepted'
+                ? `${outboundHandoff.to_guard_name ?? 'They'} accepted — waiting for them to clock in.`
+                : `Waiting for ${outboundHandoff.to_guard_name ?? 'a guard'} to respond.`}
+            </Text>
+            <TouchableOpacity
+              style={[styles.pendingOutboundCancelBtn, cancellingHandoff && styles.pendingOutboundCancelBtnDisabled]}
+              onPress={cancelOutboundHandoff}
+              disabled={cancellingHandoff}
+              hitSlop={8}
+            >
+              <Text style={styles.pendingOutboundCancelText}>
+                {cancellingHandoff ? 'Cancelling…' : 'CANCEL HANDOFF'}
+              </Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
         )}
 
         {isOnShift ? (
@@ -240,7 +525,7 @@ export default function HomeScreen() {
                 onPress={() => router.push('/reports/new')}
               >
                 <Text style={styles.actionIcon}>📋</Text>
-                <Text style={styles.actionLabel}>ADD REPORT</Text>
+                <Text style={styles.actionLabel}>REPORTS</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.actionBtn}
@@ -284,6 +569,24 @@ export default function HomeScreen() {
               <PingCountdownBanner clockedInAt={activeSession?.clocked_in_at} />
             </TouchableOpacity>
 
+            {/* P2 UX bundle 2026-07-10 — HAND OFF SHIFT reachability.
+                Placed ABOVE the CLOCK OUT button so it sits in the same
+                thumb-reach zone as the primary action but doesn't compete
+                for the red destructive slot. Amber/warning styling
+                mirrors the version on the shift-detail screen so guards
+                who learned the affordance there recognize it here. Only
+                rendered when there IS an active shift (isOnShift branch)
+                — guard-id-match is implicit because the active session is
+                populated from /shifts/active-session, which is scoped to
+                req.user.sub server-side. */}
+            <TouchableOpacity
+              style={styles.handoffBtn}
+              onPress={() => setHandoffModalOpen(true)}
+            >
+              <Ionicons name="hand-right-outline" size={18} color="#070D1A" />
+              <Text style={styles.handoffBtnText}>HAND OFF SHIFT</Text>
+            </TouchableOpacity>
+
             {/* Clock out button */}
             <TouchableOpacity
               style={styles.clockOutBtn}
@@ -324,6 +627,22 @@ export default function HomeScreen() {
 
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      {/* P2 UX bundle — HAND OFF SHIFT modal, twin of the shift-detail
+          invocation. siteTz is null because the store doesn't hydrate
+          site timezone into activeShift; the modal falls back to local
+          time formatting via fmtInTz which is what home guards see
+          elsewhere on this screen. */}
+      {handoffModalOpen && activeShift && (
+        <HandoffRequestModal
+          shiftId={activeShift.id}
+          siteName={activeShift.site_name}
+          scheduledEnd={activeShift.scheduled_end}
+          siteTz={null}
+          onClose={() => setHandoffModalOpen(false)}
+          onSubmitted={() => { setHandoffModalOpen(false); fetchOutboundHandoff(); }}
+        />
+      )}
     </View>
   );
 }
@@ -409,6 +728,90 @@ const styles = StyleSheet.create({
   },
   mapText: { fontFamily: Fonts.heading, color: Colors.muted, fontSize: 20, letterSpacing: 4 },
   mapSub: { color: Colors.muted, fontSize: 13 },
+  // Overlays sit on top of the map — semi-transparent scrim + centered
+  // content — used when location isn't available yet or user has denied.
+  mapOverlay: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
+    height: 220,
+    backgroundColor: 'rgba(15, 25, 41, 0.88)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+  },
+  mapOverlayText: {
+    color: Colors.textPrimary,
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  mapOverlaySub: {
+    color: Colors.muted,
+    fontSize: 13,
+  },
+  mapRetryBtn: {
+    marginTop: Spacing.sm,
+    backgroundColor: Colors.action,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    borderRadius: Radius.md,
+  },
+  mapRetryText: {
+    fontFamily: Fonts.heading,
+    color: '#070D1A',
+    fontSize: 13,
+    letterSpacing: 2,
+  },
+
+  // Pending outbound handoff card (BUG D — walk-test 2026-07-09)
+  pendingOutboundCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1.5,
+    borderColor: Colors.warning,
+    marginTop: Spacing.md,
+    marginHorizontal: Spacing.md,
+    padding: Spacing.md,
+  },
+  pendingOutboundHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.sm,
+  },
+  pendingOutboundBadge: {
+    backgroundColor: Colors.warning,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 2,
+    borderRadius: Radius.xs,
+  },
+  pendingOutboundBadgeText: {
+    color: '#070D1A',
+    fontFamily: Fonts.heading,
+    fontSize: 10,
+    letterSpacing: 1,
+  },
+  pendingOutboundElapsed: {
+    color: Colors.muted,
+    fontSize: 11,
+  },
+  pendingOutboundBody: {
+    color: Colors.textPrimary,
+    fontSize: 13,
+    marginBottom: Spacing.sm,
+  },
+  pendingOutboundCancelBtn: {
+    alignSelf: 'flex-start',
+    paddingVertical: 4,
+  },
+  pendingOutboundCancelBtnDisabled: { opacity: 0.5 },
+  pendingOutboundCancelText: {
+    color: Colors.danger,
+    fontFamily: Fonts.heading,
+    fontSize: 11,
+    letterSpacing: 1.5,
+    textDecorationLine: 'underline',
+  },
 
   // Stat bar
   statBar: {
@@ -511,6 +914,27 @@ const styles = StyleSheet.create({
     borderLeftColor: Colors.action,
   },
   pingText: { color: Colors.action, fontSize: 13, letterSpacing: 0.5 },
+
+  // P2 UX bundle — HAND OFF SHIFT twin of the shift-detail button. Amber
+  // to match the warning color the alerts + shift-detail buttons use,
+  // and horizontal padding matches CLOCK OUT so the two stack cleanly.
+  handoffBtn: {
+    marginHorizontal: Spacing.md,
+    marginBottom: Spacing.sm,
+    backgroundColor: Colors.warning,
+    borderRadius: Radius.md,
+    height: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+  },
+  handoffBtnText: {
+    fontFamily: Fonts.heading,
+    color: '#070D1A',
+    fontSize: 18,
+    letterSpacing: 3,
+  },
 
   // Clock out
   clockOutBtn: {

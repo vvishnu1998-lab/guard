@@ -30,7 +30,23 @@ type NotificationType =
   | 'off_post_task'
   | 'missed_ping'
   | 'missed_report'
-  | 'late_clock_in';
+  | 'late_clock_in'
+  // Merged from batch/mobile-3 for the unified-feed model (option B).
+  // Swap family — pre-shift guard-to-guard swap invites + outcomes.
+  | 'swap_request_received'
+  | 'swap_request_sent'
+  | 'swap_accepted'
+  | 'swap_declined'
+  | 'swap_expired'
+  // Handoff family — mid-shift transfer.
+  | 'handoff_request_received'
+  | 'handoff_request_sent'
+  | 'handoff_accepted'
+  | 'handoff_declined'
+  | 'handoff_cancelled'
+  | 'handoff_complete'
+  | 'handoff_nudge'
+  | 'handoff_expired';
 
 interface NotificationRow {
   id:         string;
@@ -65,6 +81,22 @@ const VISUAL_BY_TYPE: Record<NotificationType, VisualSpec> = {
   missed_ping:              { icon: '📍', titleColor: RED,   borderColor: RED   },
   missed_report:            { icon: '📝', titleColor: RED,   borderColor: RED   },
   late_clock_in:            { icon: '⏰', titleColor: AMBER, borderColor: AMBER },
+  // Swap family — 🔄 amber. All variants share the icon so the row
+  // header can still say the actual status (title comes from server).
+  swap_request_received:    { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_request_sent:        { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_accepted:            { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_declined:            { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_expired:             { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  // Handoff family — 🤝 amber. Same convention.
+  handoff_request_received: { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_request_sent:     { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_accepted:         { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_declined:         { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_cancelled:        { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_complete:         { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_nudge:            { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_expired:          { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
 };
 
 function timeAgo(iso: string) {
