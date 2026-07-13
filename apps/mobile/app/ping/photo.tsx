@@ -21,7 +21,8 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useShiftStore }   from '../../store/shiftStore';
-import { apiClient }       from '../../lib/apiClient';
+import { apiClient, ApiError } from '../../lib/apiClient';
+import * as Sentry from '@sentry/react-native';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
 import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
@@ -171,7 +172,25 @@ export default function PhotoPing() {
       );
     } catch (err: any) {
       console.error('[ping] capture failed:', err);
-      Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
+      // PING_OFF_POST is expected under the Commit A hybrid policy (Q8) —
+      // pings prove presence, so the server 422s any offsite submission.
+      // Show the user-readable copy instead of the raw enum string, and
+      // leave the camera screen mounted so the guard can walk back onsite
+      // and retry without re-navigating.
+      if (err instanceof ApiError && err.code === 'PING_OFF_POST') {
+        Sentry.addBreadcrumb({
+          category: 'ping',
+          message: 'PING_OFF_POST surfaced',
+          level: 'warning',
+          data: { distance_m: err.details.distance_m, accuracy_m: err.details.accuracy_m },
+        });
+        Alert.alert(
+          'Off-post',
+          'Cannot ping while off-post. Return to site to submit.',
+        );
+      } else {
+        Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
+      }
     } finally {
       setCapturing(false);
     }

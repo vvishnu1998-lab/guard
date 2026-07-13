@@ -25,7 +25,8 @@ import { useShiftStore } from '../../store/shiftStore';
 import { useOfflineStore } from '../../store/offlineStore';
 import { usePhotoAttachments } from '../../hooks/usePhotoAttachments';
 import { PhotoStrip } from '../../components/reports/PhotoStrip';
-import { apiClient } from '../../lib/apiClient';
+import { apiClient, ApiError } from '../../lib/apiClient';
+import * as Sentry from '@sentry/react-native';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
@@ -123,22 +124,47 @@ export default function CreateReport() {
     try {
       let latitude: number | undefined;
       let longitude: number | undefined;
+      let accuracy: number | undefined;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         latitude  = loc.coords.latitude;
         longitude = loc.coords.longitude;
-      } catch { /* GPS failure — still submit */ }
+        accuracy  = loc.coords.accuracy ?? undefined;
+      } catch { /* GPS failure — still submit; server treats missing coords as unknown */ }
 
-      await submitReport({
+      const result = await submitReport({
         shift_session_id: activeSession.id,
         report_type:      reportType,
         description:      description.trim(),
         photo_urls:       photos.toPayload(),
         latitude,
         longitude,
+        accuracy,
       });
 
-      if (reportType === 'incident') {
+      // Off-post incident policy (Q8 hybrid): server 201's an off-post
+      // incident with is_within_geofence=false. Surface an amber-toned
+      // Alert so the guard knows the report went through AND that admin
+      // was notified. Non-incident off-post reports are 422'd by the
+      // server and handled in the catch below.
+      const offPostIncident =
+        result.synced === true &&
+        reportType === 'incident' &&
+        result.data?.is_within_geofence === false;
+
+      if (offPostIncident) {
+        Sentry.addBreadcrumb({
+          category: 'reports',
+          message: 'off-post incident accepted',
+          level: 'warning',
+          data: { report_id: result.data?.id },
+        });
+        Alert.alert(
+          'Report saved OFF-POST',
+          'Admin has been notified. Report was accepted because it is an incident.',
+          [{ text: 'OK', onPress: () => router.replace('/(tabs)/reports') }],
+        );
+      } else if (reportType === 'incident') {
         Alert.alert(
           'Incident Reported',
           'Report submitted. The client has been notified by email.',
@@ -148,7 +174,28 @@ export default function CreateReport() {
         router.replace('/(tabs)/reports');
       }
     } catch (err: any) {
-      Alert.alert('Submit Failed', err?.message ?? 'Could not submit report.');
+      // REPORT_OFF_POST is expected under the Commit A hybrid policy for
+      // activity + maintenance reports (Q8). Show the reason clearly and
+      // keep the form state intact so the guard can walk back onsite and
+      // hit Submit again without re-typing.
+      if (err instanceof ApiError && err.code === 'REPORT_OFF_POST') {
+        Sentry.addBreadcrumb({
+          category: 'reports',
+          message: 'REPORT_OFF_POST surfaced',
+          level: 'warning',
+          data: {
+            report_type: reportType,
+            distance_m: err.details.distance_m,
+            accuracy_m: err.details.accuracy_m,
+          },
+        });
+        Alert.alert(
+          'Off-post',
+          `You must be inside the site boundary to submit ${reportType} reports.`,
+        );
+      } else {
+        Alert.alert('Submit Failed', err?.message ?? 'Could not submit report.');
+      }
     } finally {
       setSubmitting(false);
     }

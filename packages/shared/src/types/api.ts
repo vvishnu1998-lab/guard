@@ -35,6 +35,10 @@ export interface SubmitReportRequest {
   photo_urls?: { url: string; size_kb: number }[];
   latitude?: number;
   longitude?: number;
+  /** Feeds validateAtSite for the Q8 hybrid off-post policy. Older
+   *  builds without accuracy get the fence's SAFETY_MARGIN as their
+   *  only slack; new builds get an accuracy-aware check. */
+  accuracy?: number;
 }
 
 export interface LocationPingRequest {

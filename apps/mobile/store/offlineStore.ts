@@ -13,9 +13,32 @@
  */
 
 import { create } from 'zustand';
-import { apiClient } from '../lib/apiClient';
+import * as Sentry from '@sentry/react-native';
+import { apiClient, ApiError } from '../lib/apiClient';
 import { enqueue, pendingCount, startQueueSync, stopQueueSync, syncQueue } from '../lib/offlineQueue';
 import type { SubmitReportRequest, LocationPingRequest, GeofenceViolationRequest } from '@guard/shared';
+
+/**
+ * Only network / DNS / 5xx failures should fall into the offline queue.
+ * A 4xx from the server means the request is invalid AS-SENT (off-post,
+ * bad payload, expired session) — queueing it would just spin retries
+ * forever against a payload the server will always reject.
+ *
+ * ApiError with status < 500 → re-throw so the UI can react.
+ * Anything else (native fetch reject, 5xx, timeout) → fall through to
+ * the caller's enqueue path.
+ */
+function shouldSurfaceInsteadOfQueue(err: unknown): boolean {
+  if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+    Sentry.addBreadcrumb({
+      category: 'offlineStore',
+      message: `4xx surfaced — not queued (status=${err.status} code=${err.code ?? 'none'})`,
+      level: 'info',
+    });
+    return true;
+  }
+  return false;
+}
 
 interface OfflineState {
   pendingCount: number;
@@ -23,7 +46,7 @@ interface OfflineState {
   startSync: () => void;
   stopSync:  () => void;
 
-  submitReport:   (payload: SubmitReportRequest)      => Promise<string>; // returns localId or 'synced'
+  submitReport:   (payload: SubmitReportRequest)      => Promise<{ synced: true; data: any } | { synced: false; localId: string }>;
   submitPing:     (payload: LocationPingRequest)       => Promise<string>;
   completeTask:   (taskInstanceId: string, payload: Record<string, unknown>) => Promise<string>;
   postViolation:  (payload: GeofenceViolationRequest)  => Promise<string>;
@@ -41,27 +64,28 @@ export const useOfflineStore = create<OfflineState>((set) => ({
   stopSync:  () => stopQueueSync(),
 
   submitReport: async (payload) => {
-    // Always try online first — NetInfo.isConnected is unreliable on iOS simulator
     try {
-      await apiClient.post('/reports', payload);
-      return 'synced';
+      const data = await apiClient.post<any>('/reports', payload);
+      return { synced: true, data };
     } catch (err: any) {
+      if (shouldSurfaceInsteadOfQueue(err)) throw err;
       console.error('[submitReport] Direct submit failed, queuing:', err?.message, JSON.stringify(payload).slice(0, 150));
     }
 
     const localId = await enqueue('report_submit', payload as unknown as Record<string, unknown>);
     const count = await pendingCount();
     set({ pendingCount: count });
-    // Immediately flush the queue so it doesn't sit waiting for the sync interval
     syncQueue().catch(console.error);
-    return localId;
+    return { synced: false, localId };
   },
 
   submitPing: async (payload) => {
     try {
       await apiClient.post('/locations/ping', payload);
       return 'synced';
-    } catch { /* fall through to queue */ }
+    } catch (err) {
+      if (shouldSurfaceInsteadOfQueue(err)) throw err;
+    }
 
     const localId = await enqueue('location_ping', payload as unknown as Record<string, unknown>);
     const count = await pendingCount();
@@ -75,7 +99,9 @@ export const useOfflineStore = create<OfflineState>((set) => ({
     try {
       await apiClient.post(`/tasks/instances/${taskInstanceId}/complete`, payload);
       return 'synced';
-    } catch { /* fall through to queue */ }
+    } catch (err) {
+      if (shouldSurfaceInsteadOfQueue(err)) throw err;
+    }
 
     const localId = await enqueue('task_complete', body);
     const count = await pendingCount();
@@ -88,7 +114,9 @@ export const useOfflineStore = create<OfflineState>((set) => ({
     try {
       await apiClient.post('/locations/violation', payload);
       return 'synced';
-    } catch { /* fall through to queue */ }
+    } catch (err) {
+      if (shouldSurfaceInsteadOfQueue(err)) throw err;
+    }
 
     const localId = await enqueue('violation_post', payload as unknown as Record<string, unknown>);
     const count = await pendingCount();
