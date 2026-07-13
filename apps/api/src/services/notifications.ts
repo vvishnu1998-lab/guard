@@ -39,7 +39,29 @@ export type NotificationType =
   //     { missedReportId, windowLabel, windowStart, windowEnd,
   //       siteName }. Deep-link → create-report screen with
   //     window_label pre-filled (mobile-side, Build 34).
-  | 'missed_report';
+  | 'missed_report'
+  // Commit A3 addition — swap + handoff family. Emitted by
+  // services/swapPush.ts's 13 helpers (each fires one push + one
+  // notification row via the always-paired fireOne). Types match
+  // the mobile side's VISUAL_BY_TYPE 13 variants exactly (merge
+  // commit bd7e4e2). All carry data { shift_id, history_id }; the
+  // handoff_nudge variant additionally carries { role: 'from' | 'to' }.
+  //
+  // Swap family — pre-shift guard-to-guard invitation lifecycle.
+  | 'swap_request_received'
+  | 'swap_request_sent'
+  | 'swap_accepted'
+  | 'swap_declined'
+  | 'swap_expired'
+  // Handoff family — mid-shift transfer lifecycle.
+  | 'handoff_request_received'
+  | 'handoff_request_sent'
+  | 'handoff_accepted'
+  | 'handoff_declined'
+  | 'handoff_cancelled'
+  | 'handoff_complete'
+  | 'handoff_nudge'
+  | 'handoff_expired';
 
 export interface NotificationRow {
   id: string;

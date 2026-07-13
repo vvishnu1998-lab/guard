@@ -25,6 +25,20 @@ const VALID_TYPES: NotificationType[] = [
   'missed_ping',
   'late_clock_in',
   'missed_report',
+  // A3 additions — swap + handoff family.
+  'swap_request_received',
+  'swap_request_sent',
+  'swap_accepted',
+  'swap_declined',
+  'swap_expired',
+  'handoff_request_received',
+  'handoff_request_sent',
+  'handoff_accepted',
+  'handoff_declined',
+  'handoff_cancelled',
+  'handoff_complete',
+  'handoff_nudge',
+  'handoff_expired',
 ];
 
 // Shared WHERE fragment for the Notifications tab (GET /) and its badge
@@ -43,7 +57,19 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
     -- late_clock_in fires BEFORE clock-in exists, so it can't link to an
     -- active shift_session_id — allow it through the scope gate and let
     -- the CASE below auto-erase it the moment the guard clocks in.
-    notifications.type IN ('chat', 'late_clock_in')
+    -- swap/handoff types (A3) also bypass — recipients typically have
+    -- no active session at receive time, and outcome pushes can fire
+    -- after the original session ended. Insert-time shift_session_id
+    -- is null on these rows by design (see services/swapPush.ts).
+    notifications.type IN (
+      'chat',
+      'late_clock_in',
+      'swap_request_received', 'swap_request_sent',
+      'swap_accepted', 'swap_declined', 'swap_expired',
+      'handoff_request_received', 'handoff_request_sent',
+      'handoff_accepted', 'handoff_declined', 'handoff_cancelled',
+      'handoff_complete', 'handoff_nudge', 'handoff_expired'
+    )
     OR notifications.shift_session_id = (
       SELECT id FROM shift_sessions
       WHERE guard_id = $1 AND clocked_out_at IS NULL

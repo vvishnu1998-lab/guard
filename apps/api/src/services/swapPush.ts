@@ -11,6 +11,8 @@
  */
 import { pool } from '../db/pool';
 import { sendPushNotification } from './firebase';
+import { insertNotification, NotificationType } from './notifications';
+import { Sentry } from './sentry';
 
 const PACIFIC = 'America/Los_Angeles';
 
@@ -20,13 +22,59 @@ function fmtDayAt(dt: Date | string, tz: string): string {
   }).format(new Date(dt));
 }
 
+/**
+ * Commit A3 — every swap/handoff push is now paired 1:1 with an
+ * insertNotification row so the mobile unified feed (Build 34
+ * option B) can render it. Push + row are ALWAYS coupled by
+ * contract — no optional param, no branches — so a future 14th
+ * helper can't accidentally skip the DB row.
+ *
+ * The Promise.allSettled pattern matches jobs/pingReminder.ts:
+ * sendReminder — one channel failing doesn't block the other, and
+ * insertNotification runs even when fcm_token is null (so the guard
+ * still sees the alert next time they open the app).
+ *
+ * shift_session_id is intentionally NULL on these rows:
+ *   - swap_request_received etc. fire BEFORE B has accepted, so B
+ *     has no active session tied to this shift yet.
+ *   - swap_expired / handoff_* may fire after A's original session
+ *     ended.
+ * The outer scope filter in routes/notifications.ts bypasses the
+ * "must link to active session" gate for all 13 types (mirrors the
+ * chat / late_clock_in pattern) so these rows still surface.
+ *
+ * TODO(retention): the notifications table has no retention path
+ * yet — rows accumulate forever. Separate follow-up ticket needed
+ * to audit consumers + pick an approach (aggressive DELETE vs
+ * per-type expires_at). Flagged in the A3 dispatch.
+ */
 async function fireOne(
   guardId: string,
   title: string,
   body: string,
   data: Record<string, string>,
 ): Promise<void> {
-  try {
+  const type = data.type as NotificationType;
+
+  Sentry.addBreadcrumb({
+    category: 'swap-push',
+    message: `fireOne ${type}`,
+    level: 'info',
+    data: {
+      type,
+      guard_id:  guardId,
+      shift_id:  data.shift_id,
+      // shift_session_id is null on these rows by design (see
+      // block comment). Recording explicitly so walk-test diagnostics
+      // can tell "the row was inserted with null" vs "we forgot to
+      // set it". The handoff_cancelled path especially needs this
+      // (recipient is variable — either party — and confirming the
+      // right guardId was resolved matters).
+      shift_session_id: null,
+    },
+  });
+
+  const pushPromise = (async () => {
     const tokRow = await pool.query<{ fcm_token: string | null }>(
       'SELECT fcm_token FROM guards WHERE id = $1',
       [guardId],
@@ -40,8 +88,26 @@ async function fireOne(
         [guardId, token],
       );
     }
-  } catch (err) {
-    console.error('[swap-push] failed for guard', guardId, err);
+  })();
+
+  const notifPromise = insertNotification({
+    guardId,
+    type,
+    title,
+    body,
+    // Store the same payload the push carried so mobile deep-linking
+    // (navigateForNotification) reads from `data` regardless of which
+    // surface — push tap or in-app tap — triggered the route.
+    data:            { ...data },
+    shiftSessionId:  null,
+  });
+
+  const results = await Promise.allSettled([pushPromise, notifPromise]);
+  for (const [i, r] of results.entries()) {
+    if (r.status === 'rejected') {
+      const channel = i === 0 ? 'push' : 'notification-row';
+      console.error(`[swap-push] ${channel} failed for guard ${guardId} type=${type}:`, r.reason);
+    }
   }
 }
 
