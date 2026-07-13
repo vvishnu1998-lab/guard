@@ -43,6 +43,7 @@ import './jobs/expireSwapRequests';
 import './jobs/handoffNudge';
 import './jobs/lateClockInReminder';
 import './jobs/missedPingCron';
+import './jobs/missedReportCron';
 
 const app = express();
 app.set('trust proxy', 1);

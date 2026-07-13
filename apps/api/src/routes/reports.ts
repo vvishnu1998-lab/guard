@@ -8,6 +8,7 @@ import { validateAtSite } from '../services/geofence';
 import { presignAll } from '../services/s3';
 import { expiresAtFor, expiresAtForReport } from '../services/retention';
 import { fireBreachAlerts } from './locations';
+import { Sentry } from '../services/sentry';
 
 const router = Router();
 
@@ -147,11 +148,20 @@ router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, 
 // fires the off_post_report alert because they're different event
 // types with independent 5-min buckets.
 router.post('/', requireAuth('guard'), async (req, res) => {
-  const { shift_session_id, report_type, description, severity, photo_urls, latitude, longitude, accuracy } = req.body;
+  const { shift_session_id, report_type, description, severity, photo_urls, latitude, longitude, accuracy, window_label } = req.body;
 
   if (!['activity', 'incident', 'maintenance'].includes(report_type)) {
     return res.status(400).json({ error: 'report_type must be activity, incident, or maintenance' });
   }
+
+  // Commit A2 — optional late-report backfill. Same shape and semantics
+  // as POST /api/locations/ping's window_label param: cheap HH:MM regex
+  // guard now, matched against an open missed_reports row inside the
+  // insert transaction below.
+  const windowLabel: string | null =
+    typeof window_label === 'string' && /^\d{2}:\d{2}$/.test(window_label)
+      ? window_label
+      : null;
   if (!description?.trim()) {
     return res.status(400).json({ error: 'description is required' });
   }
@@ -274,20 +284,81 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   }
 
   const expiresAt = expiresAtForReport(report_type);
+
+  // Late-report resolution: look up the matching open missed_reports
+  // row BEFORE the report INSERT so we know whether to stamp
+  // submitted_late = true and which row to resolve. Same match rule
+  // as POST /ping — (shift_session_id, window_label), earliest row
+  // if multiple exist (window_label is site-local HH:MM and unique
+  // per session in practice).
+  let missedReportId: string | null = null;
+  let submittedLate = false;
+  if (windowLabel) {
+    const mr = await pool.query<{ id: string; window_end: Date }>(
+      `SELECT id, window_end FROM missed_reports
+        WHERE shift_session_id = $1
+          AND window_label = $2
+          AND resolved_at IS NULL
+        ORDER BY window_start ASC
+        LIMIT 1`,
+      [shift_session_id, windowLabel],
+    );
+    if (mr.rows[0]) {
+      missedReportId = mr.rows[0].id;
+      submittedLate  = new Date(mr.rows[0].window_end).getTime() < Date.now();
+    }
+  }
+
   const reportResult = await pool.query(
     `INSERT INTO reports
        (shift_session_id, site_id, report_type, description, severity, expires_at,
-        latitude, longitude, accuracy_meters, is_within_geofence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        latitude, longitude, accuracy_meters, is_within_geofence,
+        window_label, submitted_late)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
     [
       shift_session_id, site_id, report_type, description, severity || null, expiresAt,
       haveCoords ? latitude  : null,
       haveCoords ? longitude : null,
       haveCoords ? accuracy  : null,
       isWithin,
+      windowLabel, submittedLate,
     ]
   );
   const report = reportResult.rows[0];
+
+  // Resolve the matched missed_reports row now that we have the new
+  // report id. Best-effort — a failure here shouldn't roll back an
+  // otherwise-successful 201, but we log to Sentry so ops can catch
+  // an imbalanced resolve/insert ratio.
+  if (missedReportId) {
+    try {
+      await pool.query(
+        `UPDATE missed_reports
+            SET resolved_at = NOW(),
+                resolved_by_report_id = $1
+          WHERE id = $2
+            AND resolved_at IS NULL`,
+        [report.id, missedReportId],
+      );
+      Sentry.addBreadcrumb({
+        category: 'reports',
+        message: 'late report resolved missed_reports row',
+        level: 'info',
+        data: {
+          report_id:         report.id,
+          missed_report_id:  missedReportId,
+          window_label:      windowLabel,
+          submitted_late:    submittedLate,
+        },
+      });
+    } catch (err) {
+      console.error('[reports] missed_reports resolve failed:', err);
+      Sentry.captureException(err, {
+        tags: { flow: 'missed_report_resolve' },
+        extra: { report_id: report.id, missed_report_id: missedReportId },
+      });
+    }
+  }
 
   if (photo_urls?.length) {
     for (let i = 0; i < photo_urls.length; i++) {
