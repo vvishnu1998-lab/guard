@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthPayload, requireAuth, secretForRole } from '../middleware/auth';
 import { sendTempPasswordEmail } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 const router = Router();
 
@@ -209,10 +210,18 @@ router.post('/guard/fcm-token', requireAuth('guard'), async (req: Request, res: 
     [clearing ? null : fcm_token, req.user!.sub],
   );
   if (clearing) {
-    // Not an error — expected on logout. Kept as a log line rather than
-    // a Sentry captureMessage so we can tail Railway logs during a
-    // walk-test without ballooning Sentry counts.
+    // Not an error — expected on logout. Console.log so we can tail
+    // Railway logs during a walk-test; a Sentry breadcrumb (info level,
+    // free — only surfaces if a later exception fires in this request
+    // context) so a null-clear paired with a subsequent crash has a
+    // linkable trail. NOT captureMessage — those balloon Sentry counts.
     console.log(`[fcm-token] cleared for guard ${req.user!.sub}`);
+    Sentry.addBreadcrumb({
+      category: 'auth',
+      message: 'fcm-token cleared (null received)',
+      level: 'info',
+      data: { guard_id: req.user!.sub },
+    });
   }
   res.json({ ok: true });
 });
