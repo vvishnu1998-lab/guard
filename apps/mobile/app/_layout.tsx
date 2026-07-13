@@ -17,6 +17,7 @@ import { useFonts, BarlowCondensed_500Medium, BarlowCondensed_700Bold } from '@e
 import * as Notifications from 'expo-notifications';
 import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
+import * as Sentry from '@sentry/react-native';
 import { useAuthStore } from '../store/authStore';
 import { useUnreadStore } from '../store/unreadStore';
 import { useShiftStore } from '../store/shiftStore';
@@ -84,9 +85,27 @@ export default function RootLayout() {
         if (permStatus === 'granted') {
           const t = await Notifications.getExpoPushTokenAsync({ projectId: EAS_PROJECT_ID });
           await apiClient.post('/auth/guard/fcm-token', { fcm_token: t.data });
+          Sentry.addBreadcrumb({
+            category: 'auth',
+            message: 'fcm-token register success',
+            level: 'info',
+          });
+        } else {
+          Sentry.addBreadcrumb({
+            category: 'auth',
+            message: 'fcm-token register skipped — permission not granted',
+            level: 'info',
+            data: { perm_status: permStatus },
+          });
         }
       } catch (err) {
         console.warn('[push] Failed to register push token:', err);
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'fcm-token register failed',
+          level: 'warning',
+          data: { message: (err as Error)?.message },
+        });
       }
       // Always pull the latest unread counts so the badge isn't stale on launch.
       refreshUnread();

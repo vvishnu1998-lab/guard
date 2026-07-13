@@ -175,8 +175,15 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
   if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
 
   const newHash = await bcrypt.hash(new_password, 12);
+  // Bug X (Interpretation A): a password change is a session-invalidating
+  // event. Stamp tokens_not_before = NOW() alongside the hash update so
+  // any JWT issued before this instant is rejected by the auth
+  // middleware. The current request's token was ALSO issued before the
+  // stamp, so mobile must re-login after change-password (which the
+  // existing "must_change_password=false → route back to home" flow
+  // already does via the login handler once the guard re-auths).
   await pool.query(
-    'UPDATE guards SET password_hash = $1, must_change_password = false WHERE id = $2',
+    'UPDATE guards SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
     [newHash, req.user!.sub]
   );
   await logEvent(req.user!.sub, 'guard', 'password_changed', req);
@@ -189,10 +196,24 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
 // the same flow; this endpoint covers the case where login isn't re-run.
 router.post('/guard/fcm-token', requireAuth('guard'), async (req: Request, res: Response) => {
   const { fcm_token } = req.body;
-  if (typeof fcm_token !== 'string' || !fcm_token.trim()) {
-    return res.status(400).json({ error: 'fcm_token is required' });
+  // Bug Y — accept null to clear the token on mobile logout. Mobile
+  // sends {fcm_token: null} BEFORE clearing local auth state so this
+  // request is still authenticated. Any other shape (empty string,
+  // wrong type) still 400s.
+  const clearing = fcm_token === null;
+  if (!clearing && (typeof fcm_token !== 'string' || !fcm_token.trim())) {
+    return res.status(400).json({ error: 'fcm_token must be a non-empty string or explicit null' });
   }
-  await pool.query('UPDATE guards SET fcm_token = $1 WHERE id = $2', [fcm_token, req.user!.sub]);
+  await pool.query(
+    'UPDATE guards SET fcm_token = $1 WHERE id = $2',
+    [clearing ? null : fcm_token, req.user!.sub],
+  );
+  if (clearing) {
+    // Not an error — expected on logout. Kept as a log line rather than
+    // a Sentry captureMessage so we can tail Railway logs during a
+    // walk-test without ballooning Sentry counts.
+    console.log(`[fcm-token] cleared for guard ${req.user!.sub}`);
+  }
   res.json({ ok: true });
 });
 

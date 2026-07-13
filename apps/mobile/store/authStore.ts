@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
+import * as Sentry from '@sentry/react-native';
 import { setUserTags } from '../lib/sentry';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
@@ -76,7 +77,38 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: async () => {
+    const access  = await SecureStore.getItemAsync(KEYS.ACCESS);
     const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
+
+    // Bug Y — null the guard's fcm_token BEFORE clearing local auth
+    // state so this request is still authenticated. The server
+    // relaxed /auth/guard/fcm-token to accept explicit null; without
+    // this, a logged-out phone keeps receiving pushes because the DB
+    // still holds its Expo token. Best-effort — a network failure
+    // here shouldn't block logout, but we breadcrumb it so we can
+    // tell in Sentry whether the null-write landed.
+    if (access) {
+      try {
+        await fetch(`${process.env.EXPO_PUBLIC_API_URL}/api/auth/guard/fcm-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
+          body: JSON.stringify({ fcm_token: null }),
+        });
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'fcm-token null-on-logout sent',
+          level: 'info',
+        });
+      } catch (err) {
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'fcm-token null-on-logout failed',
+          level: 'warning',
+          data: { message: (err as Error)?.message },
+        });
+      }
+    }
+
     try {
       await _request('/auth/logout', { refresh_token: refresh });
     } catch { /* best-effort */ }
