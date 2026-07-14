@@ -57,7 +57,7 @@ function buildInstructionsUrl(
     );
     return null;
   }
-  return `${base.replace(/\/$/, '')}/shifts/${shiftId}/instructions.pdf`;
+  return `${base.replace(/\/$/, '')}/api/shifts/${shiftId}/instructions.pdf`;
 }
 
 /**
