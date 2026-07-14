@@ -129,6 +129,7 @@ export default function RootLayout() {
         }
       } catch (err) {
         console.warn('[location] permission request failed:', err);
+        Sentry.captureException(err, { tags: { flow: 'geofence_perm_request' } });
       }
     })();
   }, [status, mustChangePassword]);
@@ -308,6 +309,7 @@ export default function RootLayout() {
         await startBackgroundLocation(activeShift.geofence);
       } catch (err) {
         console.warn('[bg-loc] start failed:', err);
+        Sentry.captureException(err, { tags: { flow: 'geofence_register' } });
       }
     })();
 

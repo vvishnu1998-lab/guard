@@ -164,6 +164,20 @@ export async function startBackgroundLocation(region?: StartGeofenceRegion): Pro
     category: 'geofence', message: 'registered', level: 'info',
     data: { center_lat: region.center_lat, center_lng: region.center_lng, radius: region.radius_meters },
   });
+  // Standalone event so registration success is greppable in Sentry
+  // even when no error is captured on the session. Breadcrumbs only
+  // surface attached to a captured event, which meant Build 34 walk-
+  // tests could not confirm registration ran without a downstream throw.
+  Sentry.captureMessage('geofence registered', {
+    level: 'info',
+    tags: { flow: 'geofence_register' },
+    extra: {
+      identifier:    'active_post',
+      center_lat:    region.center_lat,
+      center_lng:    region.center_lng,
+      radius_meters: region.radius_meters,
+    },
+  });
 }
 
 export async function stopBackgroundLocation(): Promise<void> {
@@ -171,5 +185,9 @@ export async function stopBackgroundLocation(): Promise<void> {
   if (running) {
     await Location.stopGeofencingAsync(GEOFENCE_TASK);
     Sentry.addBreadcrumb({ category: 'geofence', message: 'unregistered', level: 'info' });
+    Sentry.captureMessage('geofence unregistered', {
+      level: 'info',
+      tags: { flow: 'geofence_unregister' },
+    });
   }
 }
