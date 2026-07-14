@@ -8,26 +8,10 @@ import { useEffect, useState } from 'react';
 export interface TemplateFormData {
   title:          string;
   description:    string;
-  scheduled_time: string;     // HH:MM — stored as UTC, displayed as local in the form
+  scheduled_time: string;     // HH:MM — site-local wall-clock (never UTC)
   recurrence:     string;
   requires_photo: boolean;
   is_active:      boolean;
-}
-
-/** Convert "HH:MM" UTC string → "HH:MM" local string for the time input */
-function utcTimeToLocal(utcHHMM: string): string {
-  const [h, m] = utcHHMM.split(':').map(Number);
-  const d = new Date();
-  d.setUTCHours(h, m, 0, 0);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
-/** Convert "HH:MM" local string → "HH:MM" UTC string for API storage */
-function localTimeToUtc(localHHMM: string): string {
-  const [h, m] = localHHMM.split(':').map(Number);
-  const d = new Date();
-  d.setHours(h, m, 0, 0);
-  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 }
 
 interface Props {
@@ -67,9 +51,12 @@ export default function TaskTemplateModal({ open, initial, siteId, midShiftActiv
   useEffect(() => {
     if (open) {
       if (initial) {
-        // scheduled_time from DB is UTC — convert to local for the time input
-        const localTime = initial.scheduled_time ? utcTimeToLocal(initial.scheduled_time) : EMPTY.scheduled_time;
-        setForm({ ...EMPTY, ...initial, scheduled_time: localTime });
+        // scheduled_time is site-local wall-clock (post-v40). Slice to
+        // HH:MM in case Postgres returned HH:MM:SS.
+        const timeValue = initial.scheduled_time
+          ? initial.scheduled_time.slice(0, 5)
+          : EMPTY.scheduled_time;
+        setForm({ ...EMPTY, ...initial, scheduled_time: timeValue });
       } else {
         setForm(EMPTY);
       }
@@ -89,9 +76,7 @@ export default function TaskTemplateModal({ open, initial, siteId, midShiftActiv
     setSaving(true);
     setError('');
     try {
-      // Convert local time → UTC before sending to API
-      const payload: TemplateFormData = { ...form, scheduled_time: localTimeToUtc(form.scheduled_time) };
-      await onSave(payload, initial?.id);
+      await onSave(form, initial?.id);
       onClose();
     } catch (err: any) {
       setError(err?.message ?? 'Save failed');

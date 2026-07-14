@@ -212,11 +212,14 @@ export default function TaskTemplatesPage() {
                     )}
                   </td>
                   <td className="p-4 text-gray-400 font-mono">
-                    {/* scheduled_time stored as UTC — convert to local for display */}
+                    {/* scheduled_time is site-local wall-clock (post-v40). Render as
+                        12-hour without a TZ round-trip so the digits displayed are
+                        the digits stored. */}
                     {(() => {
-                      const [h, m] = t.scheduled_time.split(':').map(Number);
-                      const d = new Date(); d.setUTCHours(h, m, 0, 0);
-                      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                      const hhmm = t.scheduled_time.slice(0, 5);
+                      return new Date(`2000-01-01T${hhmm}`).toLocaleTimeString([], {
+                        hour: 'numeric', minute: '2-digit'
+                      });
                     })()}
                   </td>
                   <td className="p-4 text-gray-400">

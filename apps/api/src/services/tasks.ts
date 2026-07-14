@@ -16,14 +16,16 @@ export async function generateTaskInstancesForShift(
   const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
 
   const templates = await pool.query(
-    // Build 38 #4: recurrence_days added to the SELECT so custom-recurrence
-    // templates actually match on their configured days. The generator's
-    // recurrence check at line ~31 references tpl.recurrence_days but the
-    // column had never been fetched (and until v39 didn't exist on the
-    // table), so 'custom' templates silently generated zero instances.
-    `SELECT id, title, scheduled_time, recurrence, recurrence_days
-     FROM task_templates
-     WHERE site_id = $1 AND is_active = true`,
+    // v40: JOIN sites for timezone. scheduled_time is stored as site-local
+    // wall-clock (naive TIME) post-migration; due_at is computed in Postgres
+    // using sites.timezone so day-boundary + DST are correct. Prior version
+    // stored scheduled_time as UTC HH:MM and computed due_at with
+    // setUTCHours(), which kept the UTC date and produced due_at values up
+    // to 24 hours in the past.
+    `SELECT tt.id, tt.title, tt.scheduled_time, tt.recurrence, tt.recurrence_days, s.timezone
+       FROM task_templates tt
+       JOIN sites s ON s.id = tt.site_id
+      WHERE tt.site_id = $1 AND tt.is_active = true`,
     [siteId]
   );
 
@@ -36,17 +38,14 @@ export async function generateTaskInstancesForShift(
 
     if (!matches) continue;
 
-    // due_at = clock-in date + template.scheduled_time (UTC).
-    // scheduled_time is stored as UTC HH:MM (converted from local on save in the admin portal).
-    const [hours, minutes] = (tpl.scheduled_time as string).split(':').map(Number);
-    const dueAt = new Date(clockInAt);
-    dueAt.setUTCHours(hours, minutes, 0, 0);
-
     await pool.query(
       `INSERT INTO task_instances (template_id, shift_id, site_id, title, due_at)
-       VALUES ($1, $2, $3, $4, $5)
+       VALUES (
+         $1, $2, $3, $4,
+         (( ($5::TIMESTAMPTZ AT TIME ZONE $6)::DATE + $7::TIME )::TIMESTAMP AT TIME ZONE $6)
+       )
        ON CONFLICT DO NOTHING`,
-      [tpl.id, shiftId, siteId, tpl.title, dueAt]
+      [tpl.id, shiftId, siteId, tpl.title, clockInAt, tpl.timezone, tpl.scheduled_time]
     );
   }
 }
