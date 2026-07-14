@@ -255,7 +255,20 @@ export default function RootLayout() {
   useEffect(() => {
     let cancelled = false;
 
-    if (!activeSession || !activeShift?.geofence) {
+    // Build 37 defense-in-depth against the Build 34 cold-restart bug.
+    // The bug: /shifts/active-session used to omit the geofence field,
+    // so on app cold-start with an in-progress shift, activeShift.geofence
+    // was undefined and this gate unregistered the native region silently.
+    // Server fix (cb4cbb4 on main) adds the field back, but keep this
+    // guard so a future regression in the API — or a transient store
+    // rehydration — cannot kill offsite detection mid-shift.
+    if (!activeSession) {
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message: 'gate: stop (no active session)',
+        level: 'info',
+        data: { hasGeofence: !!activeShift?.geofence, hasActiveShift: !!activeShift },
+      });
       stopBackgroundLocation().catch((err) => console.warn('[bg-loc] stop failed:', err));
       SecureStore.deleteItemAsync('active_session_id').catch(() => {});
       // Legacy keys — safe to delete even when unused so a downgrade to
@@ -264,7 +277,30 @@ export default function RootLayout() {
       SecureStore.deleteItemAsync('geofence_state').catch(() => {});
       return;
     }
+    if (!activeShift?.geofence) {
+      // Active shift but geofence data is missing (server omitted it or
+      // store hasn't hydrated yet). Do NOT stop the existing region —
+      // that would silently kill offsite detection until clock-out.
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message: 'gate: skip (no geofence on active shift)',
+        level: 'warning',
+        data: { hasActiveShift: !!activeShift, shiftId: activeShift?.id ?? null },
+      });
+      return;
+    }
 
+    Sentry.addBreadcrumb({
+      category: 'geofence',
+      message: 'gate: register',
+      level: 'info',
+      data: {
+        hasGeofence: true,
+        hasActiveShift: true,
+        center_lat: activeShift.geofence.center_lat,
+        radius_meters: activeShift.geofence.radius_meters,
+      },
+    });
     (async () => {
       try {
         await SecureStore.setItemAsync('active_session_id', activeSession.id);
