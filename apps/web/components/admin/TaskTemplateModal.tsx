@@ -34,6 +34,12 @@ interface Props {
   open:     boolean;
   initial?: Partial<TemplateFormData> & { id?: string };
   siteId:   string;
+  /** True when the selected site has an active shift right now. The
+   *  template generator only fires at clock-in, so any template
+   *  created/edited during an active shift does NOT affect that shift —
+   *  it applies from the next clock-in onward. Purely informational; the
+   *  form remains fully editable. */
+  midShiftActive?: boolean;
   onSave:   (data: TemplateFormData, id?: string) => Promise<void>;
   onClose:  () => void;
 }
@@ -53,7 +59,7 @@ const EMPTY: TemplateFormData = {
   is_active:      true,
 };
 
-export default function TaskTemplateModal({ open, initial, siteId, onSave, onClose }: Props) {
+export default function TaskTemplateModal({ open, initial, siteId, midShiftActive, onSave, onClose }: Props) {
   const [form,    setForm]    = useState<TemplateFormData>(EMPTY);
   const [saving,  setSaving]  = useState(false);
   const [error,   setError]   = useState('');
@@ -193,6 +199,18 @@ export default function TaskTemplateModal({ open, initial, siteId, onSave, onClo
               </label>
             )}
           </div>
+
+          {/* Mid-shift hint — informational only, no form disable. */}
+          {midShiftActive && (
+            <div
+              role="note"
+              className="bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs tracking-wide rounded-lg px-3 py-2 leading-relaxed"
+            >
+              <span className="font-bold">⚠ </span>
+              A shift is currently active at this site. This template will
+              apply from the next clock-in — not the current shift.
+            </div>
+          )}
         </div>
 
         {/* Actions */}

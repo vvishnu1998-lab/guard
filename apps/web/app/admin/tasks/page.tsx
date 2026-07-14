@@ -32,6 +32,8 @@ const RECURRENCE_LABELS: Record<string, string> = {
   custom:   'Custom',
 };
 
+interface ActiveShiftSummary { id: string; site_id: string; status: string }
+
 export default function TaskTemplatesPage() {
   const [sites,        setSites]        = useState<Site[]>([]);
   const [selectedSite, setSelectedSite] = useState('');
@@ -40,6 +42,11 @@ export default function TaskTemplatesPage() {
   const [modalOpen,    setModalOpen]    = useState(false);
   const [editing,      setEditing]      = useState<Template | null>(null);
   const [error,        setError]        = useState('');
+  // Non-null when the currently-selected site has an active shift. Drives
+  // the mid-shift hint inside TaskTemplateModal — new templates don't
+  // apply until the next clock-in, so an admin editing during a shift
+  // would otherwise assume their new template is live.
+  const [activeAtSelectedSite, setActiveAtSelectedSite] = useState<ActiveShiftSummary | null>(null);
 
   // Load sites once
   useEffect(() => {
@@ -69,6 +76,39 @@ export default function TaskTemplatesPage() {
   }, [selectedSite]);
 
   useEffect(() => { loadTemplates(); }, [loadTemplates]);
+
+  // Detect whether the selected site has an active shift right now.
+  // No dedicated /shifts?site_id=X endpoint exists; GET /api/shifts as
+  // admin returns up to 100 company shifts with s.status included, so
+  // we filter client-side. Runs on every site-select change — the site
+  // dropdown is a discrete click (no rapid firing) so no debounce.
+  useEffect(() => {
+    if (!selectedSite) { setActiveAtSelectedSite(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const shifts = await adminGet<ActiveShiftSummary[]>('/api/shifts');
+        if (cancelled) return;
+        const match = shifts.find(
+          (s) => s.status === 'active' && s.site_id === selectedSite,
+        ) ?? null;
+        setActiveAtSelectedSite(match);
+        if (match) {
+          // Observability parity with Sentry breadcrumbs used elsewhere —
+          // web has no @sentry SDK, so a structured console.info stands in.
+          console.info('[admin.template.mid_shift_hint_shown]', {
+            site_id: selectedSite,
+            active_shift_id: match.id,
+          });
+        }
+      } catch {
+        // Non-fatal: hint suppresses on error. Templates page continues to
+        // function; admin just doesn't get the "shift active" warning.
+        if (!cancelled) setActiveAtSelectedSite(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedSite]);
 
   async function handleSave(data: TemplateFormData, id?: string) {
     const method = id ? 'PATCH' : 'POST';
@@ -233,6 +273,7 @@ export default function TaskTemplatesPage() {
         open={modalOpen}
         initial={editing ? { id: editing.id, title: editing.title, description: editing.description ?? '', scheduled_time: editing.scheduled_time, recurrence: editing.recurrence, requires_photo: editing.requires_photo, is_active: editing.is_active } : undefined}
         siteId={selectedSite}
+        midShiftActive={!!activeAtSelectedSite}
         onSave={handleSave}
         onClose={() => setModalOpen(false)}
       />
