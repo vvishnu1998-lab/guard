@@ -148,9 +148,23 @@ router.post('/guard/login', async (req: Request, res: Response) => {
      ON CONFLICT (guard_id) DO UPDATE SET failed_count = 0, locked_at = NULL, updated_at = NOW()`,
     [guard.id]
   );
-  if (fcm_token) {
-    await pool.query('UPDATE guards SET fcm_token = $1 WHERE id = $2', [fcm_token, guard.id]);
-  }
+  // Session hijack fix (Interpretation B): a successful guard login
+  // is a session-invalidating event. Bump tokens_not_before so any
+  // JWT issued to a prior device (same guard, different phone) is
+  // rejected on next request. fcm_token write is now unconditional
+  // — an omitted body field coerces to NULL, which fails safe (no
+  // routing to the prior device) if this login's phone declined the
+  // notification permission prompt.
+  await pool.query(
+    'UPDATE guards SET tokens_not_before = NOW(), fcm_token = $1 WHERE id = $2',
+    [fcm_token ?? null, guard.id]
+  );
+  Sentry.addBreadcrumb({
+    category: 'auth',
+    message: 'guard login: session invalidated + fcm rewritten',
+    level: 'info',
+    data: { guard_id: guard.id, has_new_fcm: !!fcm_token },
+  });
 
   const tokens = signTokens({ sub: guard.id, role: 'guard', company_id: guard.company_id });
   await logEvent(guard.id, 'guard', 'login_success', req);
@@ -183,10 +197,21 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
   // stamp, so mobile must re-login after change-password (which the
   // existing "must_change_password=false → route back to home" flow
   // already does via the login handler once the guard re-auths).
+  // Phase C: also NULL fcm_token — matches admin/revoke-guard and the
+  // new /guard/login pattern. Defensive: closes the small window
+  // between change-password succeeding and re-login re-registering
+  // the token, so a push in that window fails safe rather than
+  // routing to whatever device last wrote fcm_token.
   await pool.query(
-    'UPDATE guards SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
+    'UPDATE guards SET password_hash = $1, must_change_password = false, tokens_not_before = NOW(), fcm_token = NULL WHERE id = $2',
     [newHash, req.user!.sub]
   );
+  Sentry.addBreadcrumb({
+    category: 'auth',
+    message: 'guard change-password: session invalidated + fcm cleared',
+    level: 'info',
+    data: { guard_id: req.user!.sub },
+  });
   await logEvent(req.user!.sub, 'guard', 'password_changed', req);
   res.json({ success: true });
 });
