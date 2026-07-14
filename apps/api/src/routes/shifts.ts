@@ -1,9 +1,10 @@
 import { Router } from 'express';
+import * as Sentry from '@sentry/node';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateAtSite } from '../services/geofence';
-import { urlOrPresign } from '../services/s3';
+import { streamS3Object, extractS3Key } from '../services/s3';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
@@ -29,6 +30,35 @@ import {
 } from '../services/email';
 
 const router = Router();
+
+/**
+ * Build the JWT-scoped streaming URL for a shift's site instructions PDF.
+ *
+ * Replaces the S3 presigned URL previously returned in shifts responses
+ * (commit 3f667f6). Presigned URLs leak the storage location + expire in
+ * 15 min, which forced mobile to reload constantly. The streaming
+ * endpoint keeps the S3 URL server-side and gates each fetch on JWT.
+ *
+ * Returns null when the site has no PDF (parity with sites.instructions_
+ * pdf_url = null) OR when API_BASE_URL isn't set — the latter is an infra
+ * misconfig that we log to Sentry but never propagate to the client as a
+ * 500. Guard's clock-in wizard simply won't show the modal in that case.
+ */
+function buildInstructionsUrl(
+  shiftId: string,
+  dbUrl: string | null | undefined,
+): string | null {
+  if (!dbUrl) return null;
+  const base = process.env.API_BASE_URL;
+  if (!base) {
+    Sentry.captureMessage(
+      'API_BASE_URL not set — instructions URL cannot be built',
+      { level: 'error' },
+    );
+    return null;
+  }
+  return `${base.replace(/\/$/, '')}/shifts/${shiftId}/instructions.pdf`;
+}
 
 /**
  * Phase A enforcement: for a guard + site combo, scan a list of Pacific
@@ -1771,9 +1801,11 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
       isVishnu ? [] : [user!.company_id]
     );
   }
-  // S3 lockdown: re-sign the stored PDF URLs so mobile/web can fetch them.
+  // Build 38: swap raw / presigned S3 URL for the JWT-scoped streaming
+  // endpoint so mobile fetches PDFs through our auth layer, not directly
+  // from S3. Field name unchanged.
   for (const row of result.rows) {
-    row.instructions_pdf_url = await urlOrPresign(row.instructions_pdf_url);
+    row.instructions_pdf_url = buildInstructionsUrl(row.id, row.instructions_pdf_url);
   }
   res.json(result.rows);
 });
@@ -1822,7 +1854,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       site_name: r.site_name,
       scheduled_start: r.scheduled_start,
       scheduled_end: r.scheduled_end,
-      instructions_pdf_url: await urlOrPresign(r.instructions_pdf_url),
+      instructions_pdf_url: buildInstructionsUrl(r.shift_id, r.instructions_pdf_url),
       effective_photo_limit: effectivePhotoLimit,
       ping_interval_minutes: r.ping_interval_minutes,
       geofence,
@@ -1934,7 +1966,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
       }
     : null;
 
-  shift.instructions_pdf_url = await urlOrPresign(shift.instructions_pdf_url);
+  shift.instructions_pdf_url = buildInstructionsUrl(shift.id, shift.instructions_pdf_url);
 
   res.json({
     ...shift,
@@ -1942,6 +1974,84 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
     reassignment_history: historyResult.rows,
     swap_history:         swapResult.rows,
   });
+});
+
+// GET /api/shifts/:id/instructions.pdf — stream the site's instructions
+// PDF server-side, JWT-scoped. Replaces the S3 presigned URL that mobile
+// used to open directly with Linking.openURL (which leaks the storage
+// location + expires in 15 min).
+//
+// Tenancy mirrors GET /:id's guard branch: own shift OR pending handoff
+// arrival. Admin surfaces don't consume this endpoint — company_admin
+// and vishnu manage PDFs via /sites/:id/instructions.
+router.get('/:id/instructions.pdf', requireAuth('guard'), async (req, res) => {
+  const { id } = req.params;
+  const guardId = req.user!.sub;
+
+  const shiftResult = await pool.query<{
+    site_id: string;
+    guard_id: string | null;
+    instructions_pdf_url: string | null;
+  }>(
+    `SELECT sh.site_id, sh.guard_id, si.instructions_pdf_url
+       FROM shifts sh
+       JOIN sites  si ON si.id = sh.site_id
+      WHERE sh.id = $1`,
+    [id],
+  );
+  if (!shiftResult.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+  const shift = shiftResult.rows[0];
+
+  if (shift.guard_id !== guardId) {
+    // Pending-handoff guard: shift not yet reassigned but the accept has
+    // landed, so they need to see the PDF before clock-in. Mirrors the
+    // same pattern in GET /:id.
+    const pendingArrival = await pool.query(
+      `SELECT 1 FROM shift_swap_requests
+        WHERE shift_id      = $1
+          AND to_guard_id   = $2
+          AND initiated_by  = 'guard_handoff'
+          AND status        = 'accepted'
+          AND to_session_id IS NULL
+        LIMIT 1`,
+      [id, guardId],
+    );
+    if (!pendingArrival.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+  }
+
+  if (!shift.instructions_pdf_url) {
+    return res.status(404).json({ error: 'NO_INSTRUCTIONS' });
+  }
+
+  const key = extractS3Key(shift.instructions_pdf_url);
+
+  Sentry.addBreadcrumb({
+    category: 'site_instructions.stream',
+    message: 'streaming site instructions PDF',
+    level: 'info',
+    data: { shift_id: id, site_id: shift.site_id, guard_id: guardId },
+  });
+
+  const stream = streamS3Object(key);
+  stream.on('error', (err) => {
+    // Never leak the S3 URL — Sentry capture holds the shift/site ids,
+    // the client sees a generic 502.
+    Sentry.captureException(err, {
+      tags: { context: 'site_instructions.stream' },
+      extra: { shift_id: id, site_id: shift.site_id, guard_id: guardId },
+    });
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'S3_FETCH_FAILED' });
+    } else {
+      res.destroy();
+    }
+  });
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="site-instructions.pdf"');
+  res.setHeader('Cache-Control', 'private, no-store');
+
+  stream.pipe(res);
 });
 
 // POST /api/shifts/break-start — guard starts a break

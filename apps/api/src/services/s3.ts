@@ -104,6 +104,22 @@ export async function getS3ObjectHead(key: string, n = 16): Promise<Buffer> {
 }
 
 /**
+ * Streaming GetObject — returns a Node Readable that emits body chunks
+ * as they arrive from S3. Callers pipe directly to an Express response
+ * to avoid buffering the whole object in memory (matters for PDFs,
+ * which can be several MB).
+ *
+ * Error handling contract: the stream emits 'error' on any S3 failure
+ * (NoSuchKey, AccessDenied, transient 5xx). Callers MUST attach an
+ * 'error' listener before piping; failing to do so crashes the process.
+ * See Build 38 shifts.ts GET /:id/instructions.pdf for the response
+ * pattern (502 if headers un-sent, res.destroy otherwise).
+ */
+export function streamS3Object(key: string): NodeJS.ReadableStream {
+  return s3.getObject({ Bucket: BUCKET, Key: key }).createReadStream();
+}
+
+/**
  * D2 — extract the S3 key from a public URL of the form
  *   https://<bucket>.s3.<region>.amazonaws.com/<key>
  * Returns null if the URL doesn't match (e.g. external URL, malformed).
