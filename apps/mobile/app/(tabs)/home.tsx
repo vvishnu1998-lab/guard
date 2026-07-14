@@ -478,16 +478,24 @@ export default function HomeScreen() {
                 ? `${outboundHandoff.to_guard_name ?? 'They'} accepted — waiting for them to clock in.`
                 : `Waiting for ${outboundHandoff.to_guard_name ?? 'a guard'} to respond.`}
             </Text>
-            <TouchableOpacity
-              style={[styles.pendingOutboundCancelBtn, cancellingHandoff && styles.pendingOutboundCancelBtnDisabled]}
-              onPress={cancelOutboundHandoff}
-              disabled={cancellingHandoff}
-              hitSlop={8}
-            >
-              <Text style={styles.pendingOutboundCancelText}>
-                {cancellingHandoff ? 'Cancelling…' : 'CANCEL HANDOFF'}
-              </Text>
-            </TouchableOpacity>
+            {/* Server (shifts.ts POST /:id/handoff-cancel) allows cancel
+                only for pre-arrival accepted handoffs. Rendering the
+                button for status==='pending' or an arrived handoff put
+                the guard on a path that always 409'd — see Sentry
+                NETRAOPS-MOBILE-6. Hide (don't disable) the affordance
+                when it wouldn't succeed. */}
+            {outboundHandoff.status === 'accepted' && outboundHandoff.to_session_id === null && (
+              <TouchableOpacity
+                style={[styles.pendingOutboundCancelBtn, cancellingHandoff && styles.pendingOutboundCancelBtnDisabled]}
+                onPress={cancelOutboundHandoff}
+                disabled={cancellingHandoff}
+                hitSlop={8}
+              >
+                <Text style={styles.pendingOutboundCancelText}>
+                  {cancellingHandoff ? 'Cancelling…' : 'CANCEL HANDOFF'}
+                </Text>
+              </TouchableOpacity>
+            )}
           </TouchableOpacity>
         )}
 
