@@ -1787,11 +1787,13 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
             si.photo_limit_override,
             si.ping_interval_minutes,
             co.default_photo_limit,
-            ss.id as session_id, ss.clocked_in_at
+            ss.id as session_id, ss.clocked_in_at,
+            sg.polygon_coordinates, sg.center_lat, sg.center_lng, sg.radius_meters
      FROM shifts s
      JOIN sites si ON si.id = s.site_id
      JOIN companies co ON co.id = si.company_id
      JOIN shift_sessions ss ON ss.shift_id = s.id AND ss.guard_id = $1 AND ss.clocked_out_at IS NULL
+     LEFT JOIN site_geofence sg ON sg.site_id = s.site_id
      WHERE s.guard_id = $1 AND s.status = 'active'
        AND s.scheduled_end > NOW() - INTERVAL '2 hours'
      ORDER BY ss.clocked_in_at DESC LIMIT 1`,
@@ -1800,6 +1802,14 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
   if (!result.rows[0]) return res.json(null);
   const r = result.rows[0];
   const effectivePhotoLimit = r.photo_limit_override ?? r.default_photo_limit ?? 5;
+  const geofence = r.center_lat !== null
+    ? {
+        polygon_coordinates: r.polygon_coordinates,
+        center_lat:          r.center_lat,
+        center_lng:          r.center_lng,
+        radius_meters:       r.radius_meters,
+      }
+    : null;
   res.json({
     shift:   {
       id: r.shift_id,
@@ -1810,6 +1820,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       instructions_pdf_url: r.instructions_pdf_url ?? null,
       effective_photo_limit: effectivePhotoLimit,
       ping_interval_minutes: r.ping_interval_minutes,
+      geofence,
     },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
   });
