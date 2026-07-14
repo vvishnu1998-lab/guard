@@ -38,6 +38,16 @@ const KEYS = {
 // them. First launch after a real install always lands on the login screen.
 const FRESH_INSTALL_KEY = 'guard_fresh_install_marker';
 
+// Phase B — Keychain accessibility migration for installs predating
+// the Build 37 KEYCHAIN_OPTS hardening (AFTER_FIRST_UNLOCK). Existing
+// items were written under the SecureStore default
+// (WHEN_UNLOCKED_THIS_DEVICE_ONLY), which throws
+// errSecInteractionNotAllowed when the geofence-Exit background task
+// reads them from a locked phone (tasks/locationBackground.ts:80-94).
+// The check + rewrite runs once per install; the marker persists in
+// AsyncStorage so subsequent launches skip.
+const KEYCHAIN_MIGRATION_KEY = 'keychain_migrated_v40';
+
 async function nukeSecureStoreOnFreshInstall(): Promise<void> {
   const marker = await AsyncStorage.getItem(FRESH_INSTALL_KEY);
   if (marker) return; // not a fresh install
@@ -142,6 +152,27 @@ export const useAuthStore = create<AuthState>((set) => ({
     await nukeSecureStoreOnFreshInstall();
     const access = await SecureStore.getItemAsync(KEYS.ACCESS);
     if (!access) { set({ status: 'unauthenticated' }); return; }
+
+    // One-shot Keychain rewrite for pre-Build-37 installs. If the marker
+    // is unset AND both tokens are readable, _saveSession them back so
+    // KEYCHAIN_OPTS (AFTER_FIRST_UNLOCK) sticks. A failure here must not
+    // block loadSession — leave the marker unset so the next launch
+    // retries.
+    try {
+      const migrated = await AsyncStorage.getItem(KEYCHAIN_MIGRATION_KEY);
+      if (!migrated) {
+        const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
+        if (refresh) {
+          await _saveSession({ access, refresh });
+          await AsyncStorage.setItem(KEYCHAIN_MIGRATION_KEY, '1');
+          Sentry.captureMessage('keychain migrated', 'info');
+        } else {
+          Sentry.captureMessage('keychain migration skipped: no refresh', 'warning');
+        }
+      }
+    } catch (err) {
+      Sentry.captureException(err, { tags: { flow: 'keychain_migration' } });
+    }
 
     const payload = _decodeJwt(access);
     if (payload.exp * 1000 < Date.now()) {

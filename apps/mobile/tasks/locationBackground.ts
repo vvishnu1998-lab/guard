@@ -92,7 +92,10 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
     });
     return;
   }
-  if (!sessionId || !accessToken) return;
+  if (!sessionId || !accessToken) {
+    Sentry.captureMessage('geofence exit: no session/token', 'warning');
+    return;
+  }
 
   if (isExit) {
     await Notifications.scheduleNotificationAsync({
