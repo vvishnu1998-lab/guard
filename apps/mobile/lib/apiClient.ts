@@ -8,6 +8,11 @@ import * as SecureStore from 'expo-secure-store';
 
 const BASE = process.env.EXPO_PUBLIC_API_URL;
 
+// Build 37: AFTER_FIRST_UNLOCK lets the background geofence-Exit task
+// read guard_access_token while the phone is screen-locked (post-boot-
+// unlock). See authStore.ts KEYCHAIN_OPTS for the full rationale.
+const KEYCHAIN_OPTS = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
+
 async function getAccessToken(): Promise<string | null> {
   return SecureStore.getItemAsync('guard_access_token');
 }
@@ -24,8 +29,8 @@ async function refreshAccessToken(): Promise<string> {
   if (!res.ok) throw new Error('Session expired — please log in again');
 
   const data = await res.json();
-  await SecureStore.setItemAsync('guard_access_token', data.access);
-  await SecureStore.setItemAsync('guard_refresh_token', data.refresh);
+  await SecureStore.setItemAsync('guard_access_token', data.access, KEYCHAIN_OPTS);
+  await SecureStore.setItemAsync('guard_refresh_token', data.refresh, KEYCHAIN_OPTS);
   return data.access;
 }
 

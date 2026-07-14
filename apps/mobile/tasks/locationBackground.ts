@@ -68,10 +68,30 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
     data: { identifier: region?.identifier, lat: region?.latitude, lng: region?.longitude },
   });
 
-  const [sessionId, accessToken] = await Promise.all([
-    SecureStore.getItemAsync('active_session_id'),
-    SecureStore.getItemAsync('guard_access_token'),
-  ]);
+  // Build 37: guard the SecureStore reads. Default keychainAccessible
+  // is WHEN_UNLOCKED — reads while the phone is locked throw
+  // "User interaction not allowed", and the throw would previously
+  // propagate up unhandled, silently skipping BOTH the local push AND
+  // the /violation POST. AFTER_FIRST_UNLOCK is applied to future writes
+  // (M4), but this catch is defense-in-depth for existing installs and
+  // for any read that predates the migration.
+  let sessionId: string | null;
+  let accessToken: string | null;
+  try {
+    [sessionId, accessToken] = await Promise.all([
+      SecureStore.getItemAsync('active_session_id'),
+      SecureStore.getItemAsync('guard_access_token'),
+    ]);
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { flow: 'geofence_exit_securestore' },
+      extra: {
+        eventType: isExit ? 'exit' : isEnter ? 'enter' : `type_${eventType}`,
+        region_identifier: region?.identifier,
+      },
+    });
+    return;
+  }
   if (!sessionId || !accessToken) return;
 
   if (isExit) {

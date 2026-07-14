@@ -304,7 +304,9 @@ export default function RootLayout() {
     });
     (async () => {
       try {
-        await SecureStore.setItemAsync('active_session_id', activeSession.id);
+        await SecureStore.setItemAsync('active_session_id', activeSession.id, {
+          keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+        });
         if (cancelled) return;
         await startBackgroundLocation(activeShift.geofence);
       } catch (err) {

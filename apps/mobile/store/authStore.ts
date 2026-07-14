@@ -177,12 +177,27 @@ async function _request(path: string, body: unknown) {
   return res.json();
 }
 
+// Build 37: AFTER_FIRST_UNLOCK lets background tasks (native geofencing
+// Exit handler in tasks/locationBackground.ts) read these items while
+// the phone is screen-locked but has been unlocked at least once since
+// boot. The default WHEN_UNLOCKED threw "User interaction not allowed"
+// on Vishnu's July walk-test, silently killing the geofence-Exit POST.
+// Only affects FUTURE writes — existing entries retain their old
+// accessibility until the guard logs out and back in.
+const KEYCHAIN_OPTS = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
+
 async function _saveSession(data: { access: string; refresh: string }) {
-  await SecureStore.setItemAsync(KEYS.ACCESS, data.access);
-  await SecureStore.setItemAsync(KEYS.REFRESH, data.refresh);
+  await SecureStore.setItemAsync(KEYS.ACCESS, data.access, KEYCHAIN_OPTS);
+  await SecureStore.setItemAsync(KEYS.REFRESH, data.refresh, KEYCHAIN_OPTS);
   const p = _decodeJwt(data.access);
-  await SecureStore.setItemAsync(KEYS.GUARD_ID, p.sub);
-  if (p.company_id) await SecureStore.setItemAsync(KEYS.COMPANY_ID, p.company_id);
+  await SecureStore.setItemAsync(KEYS.GUARD_ID, p.sub, KEYCHAIN_OPTS);
+  if (p.company_id) await SecureStore.setItemAsync(KEYS.COMPANY_ID, p.company_id, KEYCHAIN_OPTS);
+  Sentry.addBreadcrumb({
+    category: 'auth',
+    message: 'keychain: AFTER_FIRST_UNLOCK applied',
+    level: 'info',
+    data: { keys_written: p.company_id ? 4 : 3 },
+  });
 }
 
 async function _refreshTokens() {
