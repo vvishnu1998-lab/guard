@@ -62,10 +62,18 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       breadcrumb(type, '/(tabs)/reports', data);
       router.push('/(tabs)/reports');
       break;
-    case 'task_reminder':
-      breadcrumb(type, '/(tabs)/tasks', data);
-      router.push('/(tabs)/tasks');
+    case 'task_reminder': {
+      // Build 38: task_reminder is now cron-emitted (jobs/taskDueCron.ts)
+      // with data.task_instance_id in the payload. Deep-link to the
+      // completion form when the id is present; older payloads that
+      // predate the cron fall through to the tab list.
+      const taskInstanceId =
+        typeof data?.task_instance_id === 'string' ? data.task_instance_id : null;
+      const target = taskInstanceId ? `/tasks/complete/${taskInstanceId}` : '/(tabs)/tasks';
+      breadcrumb(type, target, data);
+      router.push(target);
       break;
+    }
     case 'chat':
       if (typeof data?.roomId === 'string') {
         breadcrumb(type, `/chat/${data.roomId}`, data);

@@ -14,6 +14,7 @@ import { useDrawerStore } from '../../store/drawerStore';
 import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
 import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
+import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -73,6 +74,7 @@ export default function HomeScreen() {
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [currentTime, setCurrentTime] = useState(getCurrentTimeStr());
   const [elapsed, setElapsed] = useState(0);
+  const [showInstructions, setShowInstructions] = useState(false);
 
   // Walk-test 2026-07-09 BUG D: outbound handoff visibility. After the
   // requester (Deepak/James) sends a handoff, they had no way to see the
@@ -538,7 +540,7 @@ export default function HomeScreen() {
               {!!activeShift?.instructions_pdf_url && (
                 <TouchableOpacity
                   style={styles.actionBtn}
-                  onPress={() => Linking.openURL(activeShift.instructions_pdf_url!)}
+                  onPress={() => setShowInstructions(true)}
                 >
                   <Text style={styles.actionIcon}>📄</Text>
                   <Text style={styles.actionLabel}>INSTRUCTIONS</Text>
@@ -603,6 +605,13 @@ export default function HomeScreen() {
 
         <View style={{ height: 32 }} />
       </ScrollView>
+      {activeShift?.id ? (
+        <SiteInstructionsModal
+          shiftId={activeShift.id}
+          visible={showInstructions}
+          onClose={() => setShowInstructions(false)}
+        />
+      ) : null}
     </View>
   );
 }
