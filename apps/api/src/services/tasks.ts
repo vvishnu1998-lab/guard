@@ -16,7 +16,12 @@ export async function generateTaskInstancesForShift(
   const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
 
   const templates = await pool.query(
-    `SELECT id, title, scheduled_time, recurrence
+    // Build 38 #4: recurrence_days added to the SELECT so custom-recurrence
+    // templates actually match on their configured days. The generator's
+    // recurrence check at line ~31 references tpl.recurrence_days but the
+    // column had never been fetched (and until v39 didn't exist on the
+    // table), so 'custom' templates silently generated zero instances.
+    `SELECT id, title, scheduled_time, recurrence, recurrence_days
      FROM task_templates
      WHERE site_id = $1 AND is_active = true`,
     [siteId]

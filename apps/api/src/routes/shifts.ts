@@ -2183,8 +2183,19 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['active', id]);
     const session = sessionResult.rows[0];
     await client.query('COMMIT');
-    // Generate task instances outside transaction (non-critical)
-    generateTaskInstancesForShift(id, shift.site_id, session.clocked_in_at).catch(console.error);
+    // Generate task instances outside transaction (non-critical).
+    // Build 38 #3: surface async failures to Sentry — the fire-and-forget
+    // .catch(console.error) previously swallowed template-fetch and
+    // INSERT errors to stdout only. A dropped tick here presents as an
+    // empty Tasks tab post-clock-in and looks identical to "site has no
+    // templates" (audit findings from the July mosser walk-test).
+    generateTaskInstancesForShift(id, shift.site_id, session.clocked_in_at).catch((err) => {
+      Sentry.captureException(err, {
+        tags: { context: 'generateTaskInstancesForShift' },
+        extra: { shift_id: id, site_id: shift.site_id },
+      });
+      console.error('generateTaskInstancesForShift failed:', err);
+    });
     res.status(201).json(session);
   } catch (err: any) {
     await client.query('ROLLBACK');
