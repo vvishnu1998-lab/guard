@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateAtSite } from '../services/geofence';
+import { urlOrPresign } from '../services/s3';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
@@ -1770,6 +1771,10 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
       isVishnu ? [] : [user!.company_id]
     );
   }
+  // S3 lockdown: re-sign the stored PDF URLs so mobile/web can fetch them.
+  for (const row of result.rows) {
+    row.instructions_pdf_url = await urlOrPresign(row.instructions_pdf_url);
+  }
   res.json(result.rows);
 });
 
@@ -1817,7 +1822,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       site_name: r.site_name,
       scheduled_start: r.scheduled_start,
       scheduled_end: r.scheduled_end,
-      instructions_pdf_url: r.instructions_pdf_url ?? null,
+      instructions_pdf_url: await urlOrPresign(r.instructions_pdf_url),
       effective_photo_limit: effectivePhotoLimit,
       ping_interval_minutes: r.ping_interval_minutes,
       geofence,
@@ -1843,6 +1848,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
             sh.status, sh.missed_alert_sent_at, sh.created_at,
             si.name AS site_name, si.is_active AS site_is_active,
             si.address AS site_address, si.timezone AS site_tz, si.company_id,
+            si.instructions_pdf_url,
             g.name AS guard_name, g.badge_number, g.phone_number AS guard_phone
        FROM shifts sh
        JOIN sites  si ON si.id = sh.site_id
@@ -1927,6 +1933,8 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
         radius_meters:       fence.radius_meters,
       }
     : null;
+
+  shift.instructions_pdf_url = await urlOrPresign(shift.instructions_pdf_url);
 
   res.json({
     ...shift,
