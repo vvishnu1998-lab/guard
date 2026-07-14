@@ -4,11 +4,11 @@
  * the guard off to the OS browser with a public S3 URL (bucket went
  * private post-lockdown, so those URLs now 403).
  *
- * Fetches the PDF over the guard's JWT-scoped
- * GET /api/shifts/:id/instructions.pdf endpoint (Build 38 API #1).
- * react-native-pdf streams the response via react-native-blob-util;
- * we pass the Bearer token in headers so the server auth layer
- * accepts the request.
+ * The pdfUrl prop comes straight from the server's
+ * shifts.instructions_pdf_url wire field, which now points at the
+ * JWT-scoped GET /api/shifts/:id/instructions.pdf endpoint (Build 38
+ * API #1 + followup). We attach the guard's Bearer token in the Pdf
+ * source headers so the server auth layer accepts the request.
  *
  * Errors surfaced to the guard as a retry-or-close panel with the
  * short server-side reason. The full failure — including native
@@ -26,12 +26,12 @@ import * as Sentry from '@sentry/react-native';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
 
 interface Props {
-  shiftId: string;
+  pdfUrl: string;
   visible: boolean;
   onClose: () => void;
 }
 
-export function SiteInstructionsModal({ shiftId, visible, onClose }: Props) {
+export function SiteInstructionsModal({ pdfUrl, visible, onClose }: Props) {
   const [token, setToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -46,7 +46,7 @@ export function SiteInstructionsModal({ shiftId, visible, onClose }: Props) {
       category: 'site_instructions',
       message: 'open',
       level: 'info',
-      data: { shift_id: shiftId },
+      data: { pdf_url: pdfUrl },
     });
 
     setError(null);
@@ -59,7 +59,7 @@ export function SiteInstructionsModal({ shiftId, visible, onClose }: Props) {
           category: 'site_instructions',
           message: 'error',
           level: 'error',
-          data: { shift_id: shiftId, reason: 'no_token' },
+          data: { pdf_url: pdfUrl, reason: 'no_token' },
         });
         setError('Not authenticated');
         setLoading(false);
@@ -73,15 +73,14 @@ export function SiteInstructionsModal({ shiftId, visible, onClose }: Props) {
         category: 'site_instructions',
         message: 'close',
         level: 'info',
-        data: { shift_id: shiftId },
+        data: { pdf_url: pdfUrl },
       });
     };
-  }, [visible, shiftId, reloadKey]);
+  }, [visible, pdfUrl, reloadKey]);
 
-  const base = process.env.EXPO_PUBLIC_API_URL;
   const source = token
     ? {
-        uri: `${base}/api/shifts/${shiftId}/instructions.pdf`,
+        uri: pdfUrl,
         headers: { Authorization: `Bearer ${token}` },
         cache: true,
       }
@@ -93,11 +92,11 @@ export function SiteInstructionsModal({ shiftId, visible, onClose }: Props) {
       category: 'site_instructions',
       message: 'error',
       level: 'error',
-      data: { shift_id: shiftId, message },
+      data: { pdf_url: pdfUrl, message },
     });
     Sentry.captureMessage('site_instructions: PDF load failed', {
       level: 'error',
-      extra: { shift_id: shiftId, message },
+      extra: { pdf_url: pdfUrl, message },
     });
     setError(message);
     setLoading(false);

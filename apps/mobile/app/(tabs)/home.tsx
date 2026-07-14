@@ -605,9 +605,9 @@ export default function HomeScreen() {
 
         <View style={{ height: 32 }} />
       </ScrollView>
-      {activeShift?.id ? (
+      {activeShift?.instructions_pdf_url ? (
         <SiteInstructionsModal
-          shiftId={activeShift.id}
+          pdfUrl={activeShift.instructions_pdf_url}
           visible={showInstructions}
           onClose={() => setShowInstructions(false)}
         />

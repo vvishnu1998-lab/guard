@@ -24,9 +24,10 @@ export default function ClockInStep4() {
   const [submitting,  setSubmitting]  = useState(false);
   const [statusStep,  setStatusStep]  = useState(0);
   const [showInstructions, setShowInstructions] = useState(false);
-  // shiftId captured at clock-in success — pendingShift is cleared by
-  // setActiveSession, so we can't read pendingShift.id at modal render time.
-  const [instructionsShiftId, setInstructionsShiftId] = useState<string | null>(null);
+  // pdfUrl captured at clock-in success — pendingShift is cleared by
+  // setActiveSession, so we can't read pendingShift.instructions_pdf_url
+  // at modal render time.
+  const [instructionsPdfUrl, setInstructionsPdfUrl] = useState<string | null>(null);
 
   // Idempotency key for the clock-in POST. Generated once per mount via
   // lazy useState — stable across re-renders, regenerated when the user
@@ -171,11 +172,13 @@ export default function ClockInStep4() {
       setActiveSession(shiftForStore, { ...session, shift_id: pendingShiftId });
       resetClockIn();
 
-      // Field is truthy when the site has a PDF configured (server sets
-      // it to a JWT-scoped streaming URL post-Build-38 API #1); the URL
-      // value is no longer consumed here — the modal fetches by shift id.
-      if (pendingShift?.instructions_pdf_url) {
-        setInstructionsShiftId(pendingShiftId);
+      // Field is populated with the JWT-scoped streaming URL when the
+      // site has a PDF configured (Build 38 API #1 + followup). Pass it
+      // through to the modal — no client-side URL construction, so there
+      // is a single source of truth for the endpoint path.
+      const pdfUrl = pendingShift?.instructions_pdf_url ?? null;
+      if (pdfUrl) {
+        setInstructionsPdfUrl(pdfUrl);
         setShowInstructions(true);
       } else {
         router.replace('/(tabs)/home');
@@ -215,9 +218,9 @@ export default function ClockInStep4() {
 
   return (
     <>
-    {instructionsShiftId ? (
+    {instructionsPdfUrl ? (
       <SiteInstructionsModal
-        shiftId={instructionsShiftId}
+        pdfUrl={instructionsPdfUrl}
         visible={showInstructions}
         onClose={dismissInstructions}
       />
