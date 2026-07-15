@@ -3,6 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setUserTags } from '../lib/sentry';
+import { apiClient } from '../lib/apiClient';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -77,18 +78,17 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   changePassword: async (current, next) => {
-    const access = await SecureStore.getItemAsync(KEYS.ACCESS);
-    if (!access) throw new Error('Not authenticated');
-    const API_URL = process.env.EXPO_PUBLIC_API_URL;
-    const res = await fetch(`${API_URL}/api/auth/guard/change-password`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
-      body: JSON.stringify({ current_password: current, new_password: next }),
+    // Route through apiClient so a 401 triggers the standard
+    // refresh-and-retry path (matches every other authenticated call).
+    // Prior raw-fetch implementation surfaced the JWT iat / tokens_not_before
+    // precision race (server fix 2760d4b) directly to the user as
+    // "Session revoked by administrator" on tap of SET PASSWORD & CONTINUE.
+    // ApiError.message inherits from Error, so the change-password screen's
+    // existing `err?.message` alert renders the server's message unchanged.
+    await apiClient.post('/auth/guard/change-password', {
+      current_password: current,
+      new_password: next,
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Change password failed' }));
-      throw new Error(err.error ?? 'Change password failed');
-    }
     set({ mustChangePassword: false });
   },
 
