@@ -108,10 +108,20 @@ export function requireAuth(...roles: UserRole[]) {
       }
 
       // Per-guard session nuke: any access token minted before the
-      // revocation stamp is rejected.  `iat` is seconds since epoch.
+      // revocation stamp is rejected. `iat` is seconds since epoch
+      // (jsonwebtoken uses Math.floor(Date.now()/1000)); tokens_not_before
+      // is TIMESTAMPTZ with ms precision. Comparing them naively with
+      // strict < fails deterministically when both are set in the same
+      // second (login writes NOW() then immediately signs a JWT whose
+      // iat truncates to the start of that second, so iat*1000 <
+      // notBeforeMs is always true for the sub-second fraction). The
+      // +1s / <= form gives a one-second grace that fixes the precision
+      // mismatch without weakening the revocation model: any explicit
+      // admin revocation strictly after the token was minted is still
+      // in the future by ≥1s and rejected.
       if (guardRow.tokens_not_before) {
         const notBeforeMs = new Date(guardRow.tokens_not_before).getTime();
-        if (payload.iat * 1000 < notBeforeMs) {
+        if ((payload.iat + 1) * 1000 <= notBeforeMs) {
           return res.status(401).json({ error: 'Session revoked by administrator' });
         }
       }
@@ -139,7 +149,9 @@ export function requireAuth(...roles: UserRole[]) {
         }
         if (clientRow.tokens_not_before) {
           const notBeforeMs = new Date(clientRow.tokens_not_before).getTime();
-          if (payload.iat * 1000 < notBeforeMs) {
+          // See guard branch above for the +1s / <= rationale (iat is
+          // second-precision, tokens_not_before is ms-precision).
+          if ((payload.iat + 1) * 1000 <= notBeforeMs) {
             return res.status(401).json({ error: 'Session revoked by administrator' });
           }
         }
