@@ -10,6 +10,7 @@ import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { expiresAtFor } from '../services/retention';
+import { BREAK_DURATIONS, isBreakType } from '../constants/breakDurations';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
   pushSwapRequestToRecipient,
@@ -1847,6 +1848,28 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
         radius_meters:       r.radius_meters,
       }
     : null;
+
+  // Phase D — surface any open break for this session so the mobile break
+  // screen can hydrate on cold-start / foreground without a separate call.
+  // Mobile derives remaining = (break_start + duration) - now; if the guard
+  // reopens the app after backgrounding through a break, this call gets the
+  // truthful state without a pure setInterval countdown that the OS froze.
+  const breakResult = await pool.query(
+    `SELECT id, break_start, break_type, planned_duration_minutes
+       FROM break_sessions
+      WHERE shift_session_id = $1 AND break_end IS NULL
+      ORDER BY break_start DESC LIMIT 1`,
+    [r.session_id]
+  );
+  const currentBreak = breakResult.rows[0]
+    ? {
+        break_id: breakResult.rows[0].id,
+        break_start: breakResult.rows[0].break_start,
+        break_type: breakResult.rows[0].break_type,
+        planned_duration_minutes: breakResult.rows[0].planned_duration_minutes,
+      }
+    : null;
+
   res.json({
     shift:   {
       id: r.shift_id,
@@ -1860,6 +1883,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       geofence,
     },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
+    current_break: currentBreak,
   });
 });
 
@@ -2055,10 +2079,22 @@ router.get('/:id/instructions.pdf', requireAuth('guard'), async (req, res) => {
 });
 
 // POST /api/shifts/break-start — guard starts a break
+//
+// Server-driven timer (Phase D Bug A). Client sends {session_id, break_type}
+// only; server derives planned_duration_minutes from BREAK_DURATIONS. If an
+// open break (break_end IS NULL) already exists for the session, we return
+// the existing row's fields idempotently instead of inserting a new one —
+// the mobile screen re-mounts on foreground/nav and would otherwise fan out
+// duplicate open breaks. A requested break_type that differs from the open
+// row's type is a Sentry warning (visibility into UI double-taps hitting
+// different buttons) but still returns the existing row.
 router.post('/break-start', requireAuth('guard'), async (req, res) => {
   const { session_id, break_type } = req.body;
   if (!session_id || !break_type) {
     return res.status(400).json({ error: 'session_id and break_type are required' });
+  }
+  if (!isBreakType(break_type)) {
+    return res.status(400).json({ error: 'break_type must be one of meal, rest, other' });
   }
   try {
     // Verify session belongs to this guard and is open
@@ -2069,12 +2105,48 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
     if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
     const { site_id } = sessionResult.rows[0];
 
-    const result = await pool.query(
-      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type)
-       VALUES ($1, $2, $3, NOW(), $4) RETURNING id`,
-      [session_id, req.user!.sub, site_id, break_type]
+    // Idempotency: return the existing open row instead of inserting a
+    // duplicate. Race-safe enough for the mobile double-tap case — no
+    // UNIQUE constraint on the table today, but the mobile client is the
+    // sole writer per guard and this SELECT + INSERT window is O(1ms).
+    const existing = await pool.query(
+      `SELECT id, break_start, break_type, planned_duration_minutes
+         FROM break_sessions
+        WHERE shift_session_id = $1 AND break_end IS NULL
+        ORDER BY break_start DESC LIMIT 1`,
+      [session_id]
     );
-    res.status(201).json({ break_id: result.rows[0].id });
+    if (existing.rows[0]) {
+      const row = existing.rows[0];
+      if (row.break_type !== break_type) {
+        Sentry.addBreadcrumb({
+          category: 'break',
+          message: 'break-start type mismatch',
+          level: 'warning',
+          data: { requested: break_type, existing: row.break_type, break_id: row.id },
+        });
+      }
+      return res.status(200).json({
+        break_id: row.id,
+        break_start: row.break_start,
+        break_type: row.break_type,
+        planned_duration_minutes: row.planned_duration_minutes,
+      });
+    }
+
+    const planned = BREAK_DURATIONS[break_type];
+    const result = await pool.query(
+      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes)
+       VALUES ($1, $2, $3, NOW(), $4, $5) RETURNING id, break_start, break_type, planned_duration_minutes`,
+      [session_id, req.user!.sub, site_id, break_type, planned]
+    );
+    const row = result.rows[0];
+    res.status(201).json({
+      break_id: row.id,
+      break_start: row.break_start,
+      break_type: row.break_type,
+      planned_duration_minutes: row.planned_duration_minutes,
+    });
   } catch (err: any) {
     console.error('break-start error:', err);
     res.status(500).json({ error: err.message ?? 'Failed to start break' });
