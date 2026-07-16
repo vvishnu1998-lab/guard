@@ -486,11 +486,29 @@ router.post('/refresh', async (req: Request, res: Response) => {
     if (revoked.rows.length > 0) {
       return res.status(401).json({ error: 'Token has been revoked' });
     }
+    // Serialize rotation via the UNIQUE(jti) constraint: when N concurrent
+    // callers pass the SELECT with the same jti, only one INSERT wins; the
+    // rest hit 23505 and 401 BEFORE any tokens are minted below. Prior
+    // `ON CONFLICT DO NOTHING` silently no-oped losers and still minted new
+    // tokens for them — one refresh token could produce N access tokens.
     const exp = new Date(payload.exp * 1000);
-    await pool.query(
-      'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [payload.jti, exp]
-    );
+    try {
+      await pool.query(
+        'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2)',
+        [payload.jti, exp]
+      );
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'refresh race lost: jti already revoked',
+          level: 'info',
+          data: { sub: payload.sub, role: payload.role, jti: payload.jti },
+        });
+        return res.status(401).json({ error: 'Session revoked' });
+      }
+      throw err;
+    }
   }
 
   const { iat: _iat, exp: _exp, jti: _jti, ...rest } = payload;
