@@ -441,6 +441,46 @@ router.post('/refresh', async (req: Request, res: Response) => {
     return res.status(401).json({ error: 'Invalid or expired refresh token' });
   }
 
+  // Mirror the access-token nbf check the middleware runs on every
+  // authenticated request. Without this, apiClient's silent-refresh-on-401
+  // loop transparently masks a session revocation: middleware 401s the
+  // access token, refresh mints a fresh one, and the caller never notices.
+  // Same `(iat + 1) * 1000 <= notBeforeMs` form as middleware/auth.ts:124 /
+  // :154 (added in 2760d4b to absorb the iat-second / NOW()-millisecond
+  // precision mismatch on same-second logins). Preview-scope client tokens
+  // skip the check to match middleware behaviour.
+  if (payload.role === 'guard') {
+    const g = await pool.query(
+      'SELECT tokens_not_before FROM guards WHERE id = $1',
+      [payload.sub],
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = g.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  } else if (payload.role === 'client' && payload.scope !== 'preview') {
+    const c = await pool.query(
+      'SELECT tokens_not_before FROM clients WHERE id = $1',
+      [payload.sub],
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = c.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  }
+
   if (payload.jti) {
     const revoked = await pool.query('SELECT id FROM revoked_tokens WHERE jti = $1', [payload.jti]);
     if (revoked.rows.length > 0) {
