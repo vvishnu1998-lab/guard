@@ -33,13 +33,29 @@ interface ShiftSession {
   clocked_in_at: string;
 }
 
+/** Phase D — open break_sessions row for the currently active shift.
+ *  Populated from /shifts/active-session on refreshFromServer (cold start +
+ *  every AppState 'active') and mutated locally by /break-start / /break-end.
+ *  The break screen and home banner derive remaining from
+ *  break_start + planned_duration_minutes and Date.now() on every tick, so
+ *  a JS-thread suspension during backgrounding no longer freezes the timer. */
+interface CurrentBreak {
+  break_id: string;
+  /** Server timestamptz — parseable via new Date(). */
+  break_start: string;
+  break_type: 'meal' | 'rest' | 'other';
+  planned_duration_minutes: number;
+}
+
 interface ShiftState {
   pendingShift: Shift | null;
   activeShift: Shift | null;
   activeSession: ShiftSession | null;
+  currentBreak: CurrentBreak | null;
   setPendingShift: (shift: Shift) => void;
   setActiveSession: (shift: Shift, session: ShiftSession) => void;
   clearSession: () => void;
+  setCurrentBreak: (b: CurrentBreak | null) => void;
   /** Reconcile cached server-derived state with the server. Non-throwing:
    *  see the body comment for the drift scenarios and the silent-fail
    *  semantics. */
@@ -50,6 +66,7 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   pendingShift: null,
   activeShift: null,
   activeSession: null,
+  currentBreak: null,
 
   setPendingShift: (shift) => set({ pendingShift: shift }),
 
@@ -59,9 +76,11 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   },
 
   clearSession: () => {
-    set({ activeShift: null, activeSession: null, pendingShift: null });
+    set({ activeShift: null, activeSession: null, pendingShift: null, currentBreak: null });
     setShiftTag(null);
   },
+
+  setCurrentBreak: (b) => set({ currentBreak: b }),
 
   // Walk-test 2026-07-10 BUG H tail. Build 30 wired clearSession() into
   // both the foreground push receiver (_layout.tsx addNotificationReceived
@@ -107,10 +126,13 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   // update until they did something else that triggered a refresh).
   refreshFromServer: async () => {
     try {
-      const active = await apiClient.get<{ session: { id: string } } | null>('/shifts/active-session');
+      const active = await apiClient.get<{
+        session: { id: string };
+        current_break?: CurrentBreak | null;
+      } | null>('/shifts/active-session');
       const state = get();
       if (!active && state.activeSession) {
-        set({ activeShift: null, activeSession: null, pendingShift: null });
+        set({ activeShift: null, activeSession: null, pendingShift: null, currentBreak: null });
         setShiftTag(null);
         Sentry.addBreadcrumb({
           category: 'session_refresh',
@@ -118,6 +140,17 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
           level: 'info',
           data: { had_session_id: state.activeSession.id },
         });
+      } else if (active) {
+        // Reconcile the open break specifically. We deliberately do NOT
+        // overwrite activeShift here (see the "why we don't setActiveSession"
+        // block above — /active-session lacks the site geofence). currentBreak
+        // has no such coupling: it's a pure derived server-truth string of
+        // fields, safe to overwrite on every refresh. Null means "no open
+        // break" and should clear a cached one.
+        const nextBreak = active.current_break ?? null;
+        if (JSON.stringify(state.currentBreak) !== JSON.stringify(nextBreak)) {
+          set({ currentBreak: nextBreak });
+        }
       }
     } catch (err: any) {
       Sentry.addBreadcrumb({

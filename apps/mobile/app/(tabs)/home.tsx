@@ -16,6 +16,7 @@ import { apiClient } from '../../lib/apiClient';
 import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { BreakType } from '../../constants/breakDurations';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -62,7 +63,7 @@ function getCurrentTimeStr() {
 }
 
 export default function HomeScreen() {
-  const { activeSession, activeShift, setPendingShift, setActiveSession } = useShiftStore();
+  const { activeSession, activeShift, setPendingShift, setActiveSession, currentBreak } = useShiftStore();
   const { setPendingShift: setClockInPendingShift, reset: resetClockIn } = useClockInStore();
   const { startSync, stopSync } = useOfflineStore();
   const { open: openDrawer } = useDrawerStore();
@@ -503,6 +504,18 @@ export default function HomeScreen() {
 
         {isOnShift ? (
           <>
+            {/* Phase D — active break strip. Renders only when the store
+                has an open currentBreak (populated from /active-session on
+                refresh). Derived remaining from break_start + duration so
+                the banner stays truthful even after a background trip. */}
+            {currentBreak && (
+              <BreakBanner
+                breakType={currentBreak.break_type}
+                breakStartMs={new Date(currentBreak.break_start).getTime()}
+                durationMs={currentBreak.planned_duration_minutes * 60_000}
+              />
+            )}
+
             {/* Stat bar */}
             <View style={styles.statBar}>
               <View style={styles.statCol}>
@@ -613,6 +626,40 @@ export default function HomeScreen() {
         />
       ) : null}
     </View>
+  );
+}
+
+const BREAK_ICONS: Record<BreakType, string> = { meal: '🍱', rest: '☕', other: '⏸' };
+const BREAK_LABELS: Record<BreakType, string> = { meal: 'MEAL BREAK', rest: 'REST BREAK', other: 'BREAK' };
+
+function BreakBanner({ breakType, breakStartMs, durationMs }: {
+  breakType: BreakType; breakStartMs: number; durationMs: number;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const remainingMs = Math.max(0, breakStartMs + durationMs - now);
+  const mins = Math.floor(remainingMs / 60000);
+  const secs = Math.floor((remainingMs % 60000) / 1000);
+  const expired = remainingMs === 0;
+  const label = expired
+    ? 'BREAK EXPIRED — TAP TO END'
+    : `${mins}:${String(secs).padStart(2, '0')} REMAINING`;
+  return (
+    <TouchableOpacity
+      style={[styles.breakBanner, expired && styles.breakBannerExpired]}
+      onPress={() => router.push('/break')}
+      activeOpacity={0.85}
+    >
+      <Text style={styles.breakBannerIcon}>{BREAK_ICONS[breakType]}</Text>
+      <Text style={styles.breakBannerLabel}>{BREAK_LABELS[breakType]}</Text>
+      <Text style={styles.breakBannerSpacer}>·</Text>
+      <Text style={[styles.breakBannerRemaining, expired && styles.breakBannerRemainingExpired]}>
+        {label}
+      </Text>
+    </TouchableOpacity>
   );
 }
 
@@ -883,6 +930,42 @@ const styles = StyleSheet.create({
     borderLeftColor: Colors.action,
   },
   pingText: { color: Colors.action, fontSize: 13, letterSpacing: 0.5 },
+
+  breakBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+    marginBottom: 0,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radius.md,
+    borderLeftWidth: 3,
+    borderLeftColor: Colors.action,
+    gap: Spacing.sm,
+  },
+  breakBannerExpired: { borderLeftColor: Colors.danger },
+  breakBannerIcon: { fontSize: 18 },
+  breakBannerLabel: {
+    fontFamily: Fonts.heading,
+    color: Colors.textPrimary,
+    fontSize: 12,
+    letterSpacing: 2,
+  },
+  breakBannerSpacer: { color: Colors.muted, fontSize: 12 },
+  breakBannerRemaining: {
+    flex: 1,
+    fontFamily: 'monospace',
+    color: Colors.action,
+    fontSize: 13,
+    letterSpacing: 1,
+  },
+  breakBannerRemainingExpired: {
+    fontFamily: Fonts.heading,
+    color: Colors.danger,
+    letterSpacing: 1.5,
+  },
 
   // Clock out
   clockOutBtn: {
