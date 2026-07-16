@@ -520,11 +520,28 @@ router.post('/refresh', async (req: Request, res: Response) => {
 // ── Logout ───────────────────────────────────────────────────────────────────
 
 router.post('/logout', requireAuth('guard', 'company_admin', 'client', 'vishnu'), async (req: Request, res: Response) => {
+  // Both INSERTs drop ON CONFLICT DO NOTHING and let the UNIQUE(jti)
+  // index serialize concurrent double-taps. Logout stays idempotent —
+  // 23505 means someone (or this same caller) already revoked the jti,
+  // which is still a valid end state — so we breadcrumb and continue to
+  // 200. Other DB errors keep the pre-existing swallow behaviour: logout
+  // must not fail the user out of the sign-out flow because of a DB blip.
   if (req.user?.jti) {
-    await pool.query(
-      'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [req.user.jti, new Date(req.user.exp * 1000)]
-    ).catch(() => {});
+    try {
+      await pool.query(
+        'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2)',
+        [req.user.jti, new Date(req.user.exp * 1000)]
+      );
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'logout race: jti already revoked',
+          level: 'info',
+          data: { sub: req.user.sub, role: req.user.role, jti: req.user.jti, token: 'access' },
+        });
+      }
+    }
   }
 
   const { refresh_token } = req.body;
@@ -532,10 +549,21 @@ router.post('/logout', requireAuth('guard', 'company_admin', 'client', 'vishnu')
     try {
       const payload = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET!) as AuthPayload & { jti?: string };
       if (payload.jti) {
-        await pool.query(
-          'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-          [payload.jti, new Date(payload.exp * 1000)]
-        );
+        try {
+          await pool.query(
+            'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2)',
+            [payload.jti, new Date(payload.exp * 1000)]
+          );
+        } catch (err: any) {
+          if (err?.code === '23505') {
+            Sentry.addBreadcrumb({
+              category: 'auth',
+              message: 'logout race: jti already revoked',
+              level: 'info',
+              data: { sub: payload.sub, role: payload.role, jti: payload.jti, token: 'refresh' },
+            });
+          }
+        }
       }
     } catch {}
   }
