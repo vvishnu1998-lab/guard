@@ -4,6 +4,7 @@ import * as Sentry from '@sentry/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setUserTags } from '../lib/sentry';
 import { apiClient } from '../lib/apiClient';
+import { refreshTokens } from '../lib/refreshManager';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -177,7 +178,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     const payload = _decodeJwt(access);
     if (payload.exp * 1000 < Date.now()) {
       try {
-        await _refreshTokens();
+        await refreshTokens();
         const fresh = await SecureStore.getItemAsync(KEYS.ACCESS);
         const freshPayload = _decodeJwt(fresh!);
         set({ status: 'authenticated', guardId: freshPayload.sub, companyId: freshPayload.company_id });
@@ -229,20 +230,6 @@ async function _saveSession(data: { access: string; refresh: string }) {
     level: 'info',
     data: { keys_written: p.company_id ? 4 : 3 },
   });
-}
-
-async function _refreshTokens() {
-  const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
-  if (!refresh) throw new Error('No refresh token');
-  const API_URL = process.env.EXPO_PUBLIC_API_URL;
-  const res = await fetch(`${API_URL}/api/auth/refresh`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refresh_token: refresh }),
-  });
-  if (!res.ok) throw new Error('Refresh failed');
-  const data = await res.json();
-  await _saveSession(data);
 }
 
 function _decodeJwt(token: string): Record<string, any> {
