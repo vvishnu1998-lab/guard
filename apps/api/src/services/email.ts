@@ -1,11 +1,13 @@
 /**
  * Email service — all outbound emails via SendGrid.
  *
- * Email types (Section 4):
- *  1. Incident Alert       — immediate, to client on incident report
- *  2. Daily Shift Report   — 9:00 AM next morning, to client + primary admin
- *  3. Retention Notice     — monthly / milestone, to client + primary admin
- *  4. Vishnu Day-140 Warn  — 10 days before hard-delete, to VISHNU_EMAIL
+ * Flows implemented in this file:
+ *  - Incident Alert          — to active client on incident report
+ *  - Daily Shift Report      — 9:00 AM Pacific cron, to active client
+ *  - Missed Shift Alert      — primary company admin, T+10 and T+30 rungs
+ *  - Geofence Breach Alert   — primary company admin, per fresh violation
+ *  - Temporary Password      — forgot-password recipient's own email
+ *  - Swap / Handoff FYIs     — primary company admin, fire-and-forget
  */
 
 import sgMail from '@sendgrid/mail';
@@ -25,7 +27,13 @@ function reportSendgridFailure(flow: string, err: any, extra?: Record<string, un
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
 
-const FROM   = process.env.SENDGRID_FROM_EMAIL ?? 'alerts@netraops.com';
+const _sendgridFromEmail = process.env.SENDGRID_FROM_EMAIL;
+if (!_sendgridFromEmail) {
+  throw new Error(
+    'SENDGRID_FROM_EMAIL env var is required — no fallback allowed (fallback sender would not be domain-authenticated and SendGrid would reject sends silently)',
+  );
+}
+const FROM: string = _sendgridFromEmail;
 const PORTAL = process.env.CLIENT_PORTAL_URL ?? '';
 // Base URL for admin-portal deep links in operator alerts. CLIENT_PORTAL_URL
 // historically pointed at a stale Vercel preview; this is the canonical
@@ -474,9 +482,6 @@ export function renderDailyShiftReport(data: {
   return { subject, html };
 }
 
-// ── Email Type 3 — Data Retention Notice ─────────────────────────────────────
-
-
 // ── Email Type 5 — Missed Shift Alert ────────────────────────────────────────
 
 export async function sendMissedShiftAlert(shiftId: string) {
@@ -695,66 +700,6 @@ export async function sendTempPasswordEmail(
     throw err;
   }
 }
-
-// ── Email Type 6 — Password Reset (legacy reset-link flow, kept for back-compat) ─
-
-export async function sendPasswordResetEmail(
-  email: string,
-  resetUrl: string,
-  portal: 'admin' | 'client' | 'vishnu',
-) {
-  const portalLabels: Record<string, string> = {
-    admin: 'Admin Dashboard',
-    client: 'Client Portal',
-    vishnu: 'Super Admin',
-  };
-  const accentColors: Record<string, string> = {
-    admin: '#F59E0B',
-    client: '#6699FF',
-    vishnu: '#FFFFFF',
-  };
-  const label  = portalLabels[portal] ?? 'Portal';
-  const accent = accentColors[portal] ?? '#F59E0B';
-
-  try {
-    await sgMail.send({
-    to: email,
-    from: FROM,
-    subject: `Reset your Netra ${label} password`,
-    html: `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>PASSWORD RESET</h1>
-        <p>${label.toUpperCase()}</p>
-      </div>
-      <div class="body">
-        <p style="font-size:15px;color:#333;margin-bottom:20px">
-          We received a request to reset the password for your Netra <strong>${label}</strong> account.
-        </p>
-        <p style="color:#555;font-size:13px;margin-bottom:20px">
-          Click the button below to set a new password. This link expires in <strong>1 hour</strong>.
-        </p>
-        <a href="${resetUrl}" style="display:inline-block;background:${accent};color:${portal === 'vishnu' ? '#0B1526' : '#0B1526'};font-weight:700;padding:12px 28px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:14px;margin-bottom:24px">
-          RESET PASSWORD
-        </a>
-        <p style="color:#999;font-size:12px;margin-top:16px">
-          If you didn't request this, you can safely ignore this email. Your password will not change.
-        </p>
-        <p style="color:#bbb;font-size:11px;margin-top:8px;word-break:break-all">
-          Or copy this link: ${resetUrl}
-        </p>
-      </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`,
-    });
-  } catch (err: any) {
-    console.error(`[email] sendPasswordResetEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('password_reset', err, { portal });
-    throw err;
-  }
-}
-
 
 // ── Email Type 5 — Geofence Breach Alert (T1-D, 2026-05-17 audit) ────────────
 //
