@@ -34,6 +34,13 @@ if (!_sendgridFromEmail) {
   );
 }
 const FROM: string = _sendgridFromEmail;
+// Customer-facing Reply-To. Kept hardcoded on purpose — the address must
+// track an authenticated support inbox, not a per-tenant admin address.
+// Applied to welcome + temp-password + daily-shift + incident emails.
+// Admin-only alerts (missed-shift, breach, swap/handoff FYIs) omit it —
+// those already land on the admin's own inbox; a "support" Reply-To would
+// misdirect their replies.
+const REPLY_TO = 'support@netraops.com';
 const PORTAL = process.env.CLIENT_PORTAL_URL ?? '';
 // Base URL for admin-portal deep links in operator alerts. CLIENT_PORTAL_URL
 // historically pointed at a stale Vercel preview; this is the canonical
@@ -131,19 +138,18 @@ export async function sendIncidentAlert(
   report: { id: string; description: string; severity: string; reported_at: Date },
   siteId: string,
 ) {
-  // Active client only (recipient). Company admin email is fetched as
-  // Reply-To target so client replies route back to the security company.
+  // Active client only (recipient). Reply-To is the shared support address —
+  // client replies route to NetraOps support rather than the per-tenant
+  // primary admin (which had support-request replies going to admins).
   const result = await pool.query(
     `SELECT s.name AS site_name,
             s.timezone AS site_tz,
             c.name AS client_name,
             c.email AS client_email,
-            co.name AS company_name,
-            ca.email AS admin_reply_to
+            co.name AS company_name
      FROM sites s
      JOIN clients c ON c.site_id = s.id
      JOIN companies co ON co.id = s.company_id
-     LEFT JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE s.id = $1 AND c.is_active = true`,
     [siteId],
   );
@@ -151,7 +157,7 @@ export async function sendIncidentAlert(
     console.warn(`[email] sendIncidentAlert: no active client found for site_id=${siteId} — email not sent`);
     return;
   }
-  const { site_name, site_tz, client_name, client_email, company_name, admin_reply_to } = result.rows[0];
+  const { site_name, site_tz, client_name, client_email, company_name } = result.rows[0];
   console.log(`[email] sendIncidentAlert: sending to ${client_email} for site=${site_name} (report=${report.id})`);
 
   const { subject, html } = renderIncidentAlert({
@@ -166,9 +172,8 @@ export async function sendIncidentAlert(
   });
 
   const sendOpts: sgMail.MailDataRequired = {
-    to: client_email, from: FROM, subject, html,
+    to: client_email, from: FROM, replyTo: REPLY_TO, subject, html,
   };
-  if (admin_reply_to) sendOpts.replyTo = admin_reply_to;
 
   try {
     await sgMail.send(sendOpts);
@@ -289,9 +294,8 @@ function firstName(fullName: string | null | undefined): string {
 }
 
 export async function sendDailyShiftReport(shiftId: string) {
-  // company_admins is LEFT-joined (was inner) — primary admin's email is used
-  // as Reply-To only, not a recipient. If no primary admin exists, the email
-  // still ships to the client without a Reply-To override.
+  // Reply-To is the shared support address — client replies route to
+  // NetraOps support rather than the per-tenant primary admin.
   const shiftResult = await pool.query(
     `SELECT sh.id, sh.scheduled_start,
             si.name     AS site_name,
@@ -300,14 +304,12 @@ export async function sendDailyShiftReport(shiftId: string) {
             g.badge_number,
             c.name      AS client_name,
             c.email     AS client_email,
-            co.name     AS company_name,
-            ca.email    AS admin_reply_to
+            co.name     AS company_name
      FROM shifts sh
      JOIN sites          si ON si.id = sh.site_id
      JOIN guards         g  ON g.id  = sh.guard_id
      LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
-     LEFT JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE sh.id = $1 AND sh.daily_report_email_sent = false`,
     [shiftId],
   );
@@ -368,10 +370,10 @@ export async function sendDailyShiftReport(shiftId: string) {
   const sendOpts: sgMail.MailDataRequired = {
     to:      sh.client_email,
     from:    FROM,
+    replyTo: REPLY_TO,
     subject,
     html,
   };
-  if (sh.admin_reply_to) sendOpts.replyTo = sh.admin_reply_to;
 
   try {
     await sgMail.send(sendOpts);
@@ -666,6 +668,7 @@ export async function sendTempPasswordEmail(
     await sgMail.send({
     to: email,
     from: FROM,
+    replyTo: REPLY_TO,
     subject: 'NetraOps password reset',
     html: `<style>${BASE_STYLE}</style>
     <div class="card">
@@ -1168,5 +1171,342 @@ export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number
   catch (err: any) {
     console.error(`[email] sendHandoffNudgeFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('handoff_nudge', err, { history_id: historyId, minutes_late: minutesLate });
+  }
+}
+
+// ── Welcome emails ───────────────────────────────────────────────────────────
+//
+// Fired from the four account-creation route handlers on new-account INSERT.
+// Customer-facing: Reply-To is REPLY_TO (support inbox) on all four.
+// Send fns catch internally, Sentry-tag, and re-throw so the caller's fire-
+// and-forget .catch() can capture at the route site (matches the pattern
+// used by sendTempPasswordEmail and sendIncidentAlert).
+
+export function renderGuardWelcome(data: {
+  guard_name: string;
+  guard_email: string;
+  company_name: string;
+  primary_admin_email: string | null;
+  temp_password: string;
+}) {
+  const contact = data.primary_admin_email
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>GUARD ACCOUNT</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.guard_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:20px">
+          An account has been created for you on NetraOps by <strong>${data.company_name}</strong>.
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.guard_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Download the NetraOps app</h3>
+        <p style="color:#555;font-size:13px;margin:0 0 4px">iOS: Coming to App Store soon — contact your admin for TestFlight access</p>
+        <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>
+        ${contact}
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Guard Account', html };
+}
+
+export async function sendGuardWelcomeEmail(args: {
+  guard_id: string;
+  guard_name: string;
+  guard_email: string;
+  company_id: string;
+  temp_password: string;
+}): Promise<void> {
+  const result = await pool.query<{
+    company_name: string | null;
+    primary_admin_email: string | null;
+  }>(
+    `SELECT co.name AS company_name,
+            ca.email AS primary_admin_email
+       FROM companies co
+       LEFT JOIN company_admins ca
+         ON ca.company_id = co.id AND ca.is_primary = true AND ca.is_active = true
+      WHERE co.id = $1`,
+    [args.company_id],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    console.warn(`[email] sendGuardWelcomeEmail: no company found for company_id=${args.company_id}`);
+    return;
+  }
+  const { subject, html } = renderGuardWelcome({
+    guard_name:          args.guard_name,
+    guard_email:         args.guard_email,
+    company_name:        row.company_name ?? 'NetraOps',
+    primary_admin_email: row.primary_admin_email,
+    temp_password:       args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.guard_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendGuardWelcomeEmail: SUCCESS — delivered to ${args.guard_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendGuardWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_guard', err, { guard_id: args.guard_id });
+    throw err;
+  }
+}
+
+export function renderPrimaryAdminWelcome(data: {
+  admin_name: string;
+  admin_email: string;
+  company_name: string;
+  temp_password: string;
+}) {
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>ADMIN ACCOUNT</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.admin_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:20px">
+          An admin account has been created for you on NetraOps for <strong>${data.company_name}</strong>.
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.admin_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Access the admin portal</h3>
+        <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
+        <p style="color:#555;font-size:13px;margin:0 0 24px">You can manage guards, sites, shifts, monitor real-time activity, and review reports.</p>
+        <p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Admin Account', html };
+}
+
+export async function sendPrimaryAdminWelcomeEmail(args: {
+  admin_id: string;
+  admin_name: string;
+  admin_email: string;
+  company_id: string;
+  temp_password: string;
+}): Promise<void> {
+  const result = await pool.query<{ company_name: string | null }>(
+    `SELECT name AS company_name FROM companies WHERE id = $1`,
+    [args.company_id],
+  );
+  const companyName = result.rows[0]?.company_name ?? 'NetraOps';
+  const { subject, html } = renderPrimaryAdminWelcome({
+    admin_name:    args.admin_name,
+    admin_email:   args.admin_email,
+    company_name:  companyName,
+    temp_password: args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendPrimaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendPrimaryAdminWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_admin_primary', err, { admin_id: args.admin_id });
+    throw err;
+  }
+}
+
+export function renderSecondaryAdminWelcome(data: {
+  admin_name: string;
+  admin_email: string;
+  company_name: string;
+  creator_name: string;
+  primary_admin_email: string | null;
+  temp_password: string;
+}) {
+  const contact = data.primary_admin_email
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>ADMIN ACCOUNT</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.admin_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:20px">
+          <strong>${data.creator_name}</strong> has created an admin account for you on NetraOps for <strong>${data.company_name}</strong>.
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.admin_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Access the admin portal</h3>
+        <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
+        ${contact}
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Admin Account', html };
+}
+
+export async function sendSecondaryAdminWelcomeEmail(args: {
+  admin_id: string;
+  admin_name: string;
+  admin_email: string;
+  company_id: string;
+  creator_admin_id: string;
+  temp_password: string;
+}): Promise<void> {
+  const result = await pool.query<{
+    company_name: string | null;
+    creator_name: string | null;
+    primary_admin_email: string | null;
+  }>(
+    `SELECT co.name AS company_name,
+            creator.name AS creator_name,
+            pa.email AS primary_admin_email
+       FROM companies co
+       LEFT JOIN company_admins creator ON creator.id = $2
+       LEFT JOIN company_admins pa
+         ON pa.company_id = co.id AND pa.is_primary = true AND pa.is_active = true
+      WHERE co.id = $1`,
+    [args.company_id, args.creator_admin_id],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    console.warn(`[email] sendSecondaryAdminWelcomeEmail: no company found for company_id=${args.company_id}`);
+    return;
+  }
+  const { subject, html } = renderSecondaryAdminWelcome({
+    admin_name:          args.admin_name,
+    admin_email:         args.admin_email,
+    company_name:        row.company_name ?? 'NetraOps',
+    creator_name:        row.creator_name ?? 'A NetraOps admin',
+    primary_admin_email: row.primary_admin_email,
+    temp_password:       args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendSecondaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendSecondaryAdminWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_admin_secondary', err, { admin_id: args.admin_id });
+    throw err;
+  }
+}
+
+export function renderClientWelcome(data: {
+  client_name: string;
+  client_email: string;
+  company_name: string;
+  site_names: string;
+  primary_admin_email: string | null;
+  temp_password: string;
+}) {
+  const contact = data.primary_admin_email
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>CLIENT PORTAL</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.client_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:12px">
+          A client portal account has been created for you by <strong>${data.company_name}</strong> to review security operations.
+        </p>
+        ${data.site_names
+          ? `<p style="color:#555;font-size:13px;margin:0 0 20px">Assigned site(s): <strong>${data.site_names}</strong></p>`
+          : ''}
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.client_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Access your client portal</h3>
+        <p style="margin:0 0 16px"><a href="https://app.netraops.com/client" style="color:#6699FF;text-decoration:none">app.netraops.com/client</a></p>
+        <p style="color:#555;font-size:13px;margin:0 0 24px">You can view live guard activity, daily shift reports, incident reports, and geofence alerts.</p>
+        ${contact}
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Client Portal Access', html };
+}
+
+export async function sendClientWelcomeEmail(args: {
+  client_id: string;
+  client_name: string;
+  client_email: string;
+  company_id: string;
+  site_ids: string[];
+  temp_password: string;
+}): Promise<void> {
+  const [companyResult, sitesResult] = await Promise.all([
+    pool.query<{
+      company_name: string | null;
+      primary_admin_email: string | null;
+    }>(
+      `SELECT co.name AS company_name,
+              ca.email AS primary_admin_email
+         FROM companies co
+         LEFT JOIN company_admins ca
+           ON ca.company_id = co.id AND ca.is_primary = true AND ca.is_active = true
+        WHERE co.id = $1`,
+      [args.company_id],
+    ),
+    pool.query<{ name: string }>(
+      `SELECT name FROM sites WHERE id = ANY($1::uuid[]) ORDER BY name`,
+      [args.site_ids],
+    ),
+  ]);
+  const co = companyResult.rows[0];
+  if (!co) {
+    console.warn(`[email] sendClientWelcomeEmail: no company found for company_id=${args.company_id}`);
+    return;
+  }
+  const siteNames = sitesResult.rows.map((r) => r.name).join(', ');
+  const { subject, html } = renderClientWelcome({
+    client_name:         args.client_name,
+    client_email:        args.client_email,
+    company_name:        co.company_name ?? 'NetraOps',
+    site_names:          siteNames,
+    primary_admin_email: co.primary_admin_email,
+    temp_password:       args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendClientWelcomeEmail: SUCCESS — delivered to ${args.client_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendClientWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_client', err, { client_id: args.client_id });
+    throw err;
   }
 }

@@ -5,6 +5,8 @@ import bcrypt from 'bcrypt';
 import { validatePassword } from './auth';
 import { getAssignedSitesForGuard, writeAssignmentAudit } from '../services/guardAssignments';
 import { pacificTodayStr, isPastPacificDateString } from '../services/pacificDate';
+import { Sentry } from '../services/sentry';
+import { sendGuardWelcomeEmail } from '../services/email';
 
 const router = Router();
 
@@ -110,7 +112,18 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       [req.user!.company_id, name.trim(), email.trim().toLowerCase(), password_hash, badge]
     );
     await client.query('COMMIT');
-    res.status(201).json(result.rows[0]);
+    const newGuard = result.rows[0];
+    res.status(201).json(newGuard);
+
+    sendGuardWelcomeEmail({
+      guard_id:      newGuard.id,
+      guard_name:    newGuard.name,
+      guard_email:   newGuard.email,
+      // requireAuth('company_admin') guarantees company_id is set. Second !
+      // narrows the optional field type on AuthPayload.
+      company_id:    req.user!.company_id!,
+      temp_password: temp_password,
+    }).catch((err) => Sentry.captureException(err));
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     // PostgreSQL unique_violation = error code 23505
