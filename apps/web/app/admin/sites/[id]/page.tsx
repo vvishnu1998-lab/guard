@@ -201,7 +201,7 @@ export default function SiteDetailPage() {
 
       {/* Upcoming shifts (next 7 days, grouped by day) */}
       <section>
-        <div className="flex items-center justify-between mb-3 gap-3">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
           <Link
             href={`/admin/shifts?newShift=1&siteId=${siteId}`}
