@@ -824,10 +824,18 @@ export default function SitesPage() {
           return (
             <div key={site.id} className={`border-b border-[#1A3050] last:border-b-0 ${isDeactivated ? 'opacity-60' : ''}`}>
               {/* Collapsed row — uniform height */}
-              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-4 px-4 py-3 hover:bg-[#0B1526] transition-colors">
+              {/*
+               * Mobile ({'<'}md): stack name/address on their own row (full
+               * width, wraps instead of truncating so the full site name is
+               * always visible) with badge + DETAILS button in a right-aligned
+               * row below.
+               * Desktop (md+): unchanged 4-column grid — name column
+               * truncates as before.
+               */}
+              <div className="flex flex-col gap-2 md:grid md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-center md:gap-4 px-4 py-3 hover:bg-[#0B1526] transition-colors">
                 <div className="min-w-0">
-                  <p className="text-gray-200 font-medium truncate">{site.name}</p>
-                  {site.address && <p className="text-gray-500 text-xs truncate">{site.address}</p>}
+                  <p className="text-gray-200 font-medium break-words md:truncate">{site.name}</p>
+                  {site.address && <p className="text-gray-500 text-xs break-words md:truncate">{site.address}</p>}
                   {showCompanyLabel && site.company_name && (
                     <p className="text-gray-600 text-[10px] tracking-widest mt-0.5">{site.company_name.toUpperCase()}</p>
                   )}
@@ -843,17 +851,22 @@ export default function SitesPage() {
                     </>
                   )}
                 </div>
-                {site.is_active ? (
-                  <span className="text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">ENABLED</span>
-                ) : (
-                  <span className="text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded">DISABLED</span>
-                )}
-                <button
-                  onClick={() => toggleExpand(site.id)}
-                  className="px-2.5 py-1 rounded-full text-[11px] font-bold tracking-widest bg-blue-500/20 border border-blue-500/40 text-blue-300 hover:bg-blue-500/30 transition-colors"
-                >
-                  DETAILS {isExpanded ? '▲' : '▾'}
-                </button>
+                {/* Badge + button share a mobile row (justify-end); on md+
+                    md:contents flattens them into direct grid children so the
+                    desktop 4-col grid layout is unchanged. */}
+                <div className="flex items-center justify-end gap-3 md:contents">
+                  {site.is_active ? (
+                    <span className="text-xs tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-2 py-0.5 rounded">ENABLED</span>
+                  ) : (
+                    <span className="text-xs tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-2 py-0.5 rounded">DISABLED</span>
+                  )}
+                  <button
+                    onClick={() => toggleExpand(site.id)}
+                    className="px-2.5 py-1 rounded-full text-[11px] font-bold tracking-widest bg-blue-500/20 border border-blue-500/40 text-blue-300 hover:bg-blue-500/30 transition-colors"
+                  >
+                    DETAILS {isExpanded ? '▲' : '▾'}
+                  </button>
+                </div>
               </div>
 
               {/* Expanded detail section */}
