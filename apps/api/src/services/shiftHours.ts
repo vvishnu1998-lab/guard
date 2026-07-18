@@ -42,14 +42,39 @@ export function emptyShiftHours(): ShiftHours {
 /**
  * "5.80" → "5h 48m". Small helper for surfaces (emails, PDFs) that
  * prefer HH:MM over decimal. Negative or NaN → "—".
+ *
+ * Kept in sync with the web-side formatHoursHHMM in
+ * apps/web/lib/formatHours.ts. Change both together or the same shift
+ * row will read differently in two places.
  */
 export function formatHoursHHMM(hours: number | string | null | undefined): string {
   const n = typeof hours === 'string' ? parseFloat(hours) : hours;
   if (n == null || !Number.isFinite(n) || n < 0) return '—';
+  if (n === 0) return '0h 00m';
   const totalMinutes = Math.round(n * 60);
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
-  return `${h}h ${m}m`;
+  return `${h}h ${String(m).padStart(2, '0')}m`;
+}
+
+/**
+ * violation_hours: 0 → "None" so a clean shift doesn't read as a defect.
+ */
+export function formatOffPostHours(hours: number | string | null | undefined): string {
+  const n = typeof hours === 'string' ? parseFloat(hours) : hours;
+  if (n == null || !Number.isFinite(n) || n < 0) return '—';
+  if (n === 0) return 'None';
+  return formatHoursHHMM(n);
+}
+
+/**
+ * scheduled_hours defensive: zero should never occur legitimately, so
+ * render "—" as a "data error / not applicable" signal. D2 update.
+ */
+export function formatScheduledHours(hours: number | string | null | undefined): string {
+  const n = typeof hours === 'string' ? parseFloat(hours) : hours;
+  if (n == null || !Number.isFinite(n) || n === 0 || n < 0) return '—';
+  return formatHoursHHMM(n);
 }
 
 /**

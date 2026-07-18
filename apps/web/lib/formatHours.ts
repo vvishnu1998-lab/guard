@@ -38,3 +38,15 @@ export function formatOffPostHours(hours: number | string | null | undefined): s
   if (n === 0) return 'None';
   return formatHoursHHMM(n);
 }
+
+/**
+ * scheduled_hours defensive: a zero value should never occur legitimately
+ * (a shift can't have equal start and end), so render "—" as a
+ * "data error / not applicable" signal instead of "0h 00m". D2 update.
+ */
+export function formatScheduledHours(hours: number | string | null | undefined): string {
+  if (hours == null) return '—';
+  const n = typeof hours === 'string' ? parseFloat(hours) : hours;
+  if (!Number.isFinite(n) || n === 0) return '—';
+  return formatHoursHHMM(n);
+}
