@@ -61,7 +61,7 @@ cron.schedule('0 2 1 * *', async () => {
       const detailData = [
         ['Guard Name', 'Site Name', 'Shift Date', 'Clock In', 'Clock Out',
          'Break (mins)', 'Total Hours (legacy)',
-         'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Violation Hours',
+         'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Off-post Hours',
          'Status'],
         ...rows.rows.map((r: Record<string, unknown>) => [
           r.guard_name,

@@ -829,13 +829,16 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(NAVY).lineWidth(2).stroke();
   y += 20;
 
-  const gColW      = [160, 60, 80, 90, 105];
-  const gColLabels = ['GUARD NAME', 'SHIFTS', 'HOURS', 'REPORTS', 'INCIDENTS'];
+  // Phase 2 D3/D5 \u2014 per-guard 4-field breakdown. Client-facing labels:
+  // Scheduled / On duty / Break / Off-post. Column widths tuned so the
+  // 6-column table fits within CW without wrapping at 9pt.
+  const gColW      = [105, 40, 55, 55, 55, 55, 45, 45]; // sum=455 fits CW=495
+  const gColLabels = ['GUARD NAME', 'SHIFTS', 'SCHEDULED', 'ON DUTY', 'BREAK', 'OFF-POST', 'REPORTS', 'INCIDENTS'];
   doc.rect(ML, y, CW, 24).fill(NAVY);
   let gx = ML;
   for (let i = 0; i < gColLabels.length; i++) {
-    doc.fontSize(8).fillColor(WHITE).font('Helvetica-Bold')
-       .text(gColLabels[i], gx + 6, y + 8, { width: gColW[i], lineBreak: false });
+    doc.fontSize(7).fillColor(WHITE).font('Helvetica-Bold')
+       .text(gColLabels[i], gx + 4, y + 8, { width: gColW[i] - 4, lineBreak: false });
     gx += gColW[i];
   }
   y += 24;
@@ -858,16 +861,21 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     const cells = [
       isTop ? `\u2605 ${g.name}` : g.name,
       String(g.shifts),
+      // scheduled_hours not tracked per-guard on the aggregator; leave blank.
+      // Phase 2.5 (if wanted) could push scheduled_hours per guard down.
+      '\u2014',
       `${g.hours.toFixed(1)}h`,
+      `${g.break_hours.toFixed(1)}h`,
+      g.violation_hours > 0 ? `${g.violation_hours.toFixed(1)}h` : 'None',
       String(g.reports),
       String(g.incidents),
     ];
     let gx2 = ML;
     for (let i = 0; i < cells.length; i++) {
-      doc.fontSize(9)
+      doc.fontSize(8)
          .fillColor(isTop ? '#92400E' : TEXT)
          .font(isTop ? 'Helvetica-Bold' : 'Helvetica')
-         .text(cells[i], gx2 + 6, y + 7, { width: gColW[i] - 8, lineBreak: false });
+         .text(cells[i], gx2 + 4, y + 7, { width: gColW[i] - 6, lineBreak: false });
       gx2 += gColW[i];
     }
     y += rowH;
@@ -878,14 +886,17 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   const totalCells = [
     'TOTAL',
     String(shifts.length),
+    '\u2014',
     `${totalHours.toFixed(1)}h`,
+    `${totalBreaks.toFixed(1)}h`,
+    totalViolations > 0 ? `${totalViolations.toFixed(1)}h` : 'None',
     String(reports.length),
     String(incidentReports.length),
   ];
   let tx = ML;
   for (let i = 0; i < totalCells.length; i++) {
-    doc.fontSize(9).fillColor(WHITE).font('Helvetica-Bold')
-       .text(totalCells[i], tx + 6, y + 7, { width: gColW[i] - 8, lineBreak: false });
+    doc.fontSize(8).fillColor(WHITE).font('Helvetica-Bold')
+       .text(totalCells[i], tx + 4, y + 7, { width: gColW[i] - 6, lineBreak: false });
     tx += gColW[i];
   }
   y += 36;

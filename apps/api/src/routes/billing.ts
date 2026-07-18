@@ -78,7 +78,7 @@ function buildWorkbook(rows: Record<string, unknown>[], fileName: string): XLSX.
   const detailData: unknown[][] = [
     ['Guard Name', 'Site Name', 'Shift Date', 'Clock In Time', 'Clock Out Time',
      'Break (mins)', 'Total Hours (legacy)',
-     'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Violation Hours',
+     'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Off-post Hours',
      'Status'],
     ...rows.map(r => [
       r.guard_name,
@@ -110,7 +110,7 @@ function buildWorkbook(rows: Record<string, unknown>[], fileName: string): XLSX.
   }
   detailData.push([]);
   detailData.push(['SUMMARY', '', '', '', '', '', '', '', '', '', '', '']);
-  detailData.push(['Guard @ Site', '', '', '', '', '', '', 'Scheduled', 'Actual', 'Breaks', 'Violations', '']);
+  detailData.push(['Guard @ Site', '', '', '', '', '', '', 'Scheduled', 'Actual', 'Breaks', 'Off-post', '']);
   for (const [key, agg] of summaryMap) {
     detailData.push([
       key, '', '', '', '', '', '',

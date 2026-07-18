@@ -475,15 +475,15 @@ export function renderDailyShiftReport(data: {
       <table style="width:100%;border-collapse:collapse;font-size:13px;color:#333;margin:0 0 18px 0;background:#F9FAFB;border-radius:6px;overflow:hidden">
         <tr style="background:#F3F4F6">
           <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">SCHEDULED</th>
-          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">ACTUAL</th>
-          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">BREAKS</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">ON DUTY</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">BREAK</th>
           <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">OFF-POST</th>
         </tr>
         <tr>
           <td style="padding:8px 12px">${formatHoursHHMM(data.hours.scheduled_hours)}</td>
           <td style="padding:8px 12px">${formatHoursHHMM(data.hours.actual_hours)}</td>
           <td style="padding:8px 12px">${formatHoursHHMM(data.hours.break_hours)}</td>
-          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.violation_hours)}</td>
+          <td style="padding:8px 12px">${data.hours.violation_hours > 0 ? formatHoursHHMM(data.hours.violation_hours) : 'None'}</td>
         </tr>
       </table>` : ''}
 
