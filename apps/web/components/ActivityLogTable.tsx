@@ -662,7 +662,15 @@ export default function ActivityLogTable({
       )}
 
       {/* Table */}
-      <div className="bg-[#0B1526] border border-[#1A3050] rounded-xl overflow-hidden">
+      {/*
+       * Fixed-width columns sum to ~660px + gaps + padding. Below md we let
+       * the whole table scroll horizontally as a unit (header + rows +
+       * expanded body) via overflow-x-auto on the outer shell and a
+       * matching min-w on the inner wrapper. Desktop is unaffected — the
+       * min-w floors the width, doesn't cap it.
+       */}
+      <div className="bg-[#0B1526] border border-[#1A3050] rounded-xl overflow-x-auto">
+       <div className="min-w-[720px]">
         {/* Header row */}
         <div className="grid grid-cols-[1fr_220px_180px_120px_60px] gap-4 px-4 py-3 border-b border-[#1A3050] bg-[#0F1E35]">
           <span className="text-[10px] text-gray-500 tracking-widest">GUARD</span>
@@ -901,6 +909,7 @@ export default function ActivityLogTable({
             </div>
           </div>
         )}
+       </div>
       </div>
 
       {pendingHoldAction && (
