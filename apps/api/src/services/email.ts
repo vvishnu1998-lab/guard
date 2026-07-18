@@ -14,6 +14,7 @@ import sgMail from '@sendgrid/mail';
 import { pool } from '../db/pool';
 import { haversineDistance } from './geofence';
 import { Sentry } from './sentry';
+import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, type ShiftHours } from './shiftHours';
 
 // Central SendGrid error tag helper. Called from every sgMail.send catch
 // site so a Sentry.setTag('service','sendgrid') + flow tag lets us slice
@@ -328,9 +329,13 @@ export async function sendDailyShiftReport(shiftId: string) {
   }
 
   const sessionResult = await pool.query(
-    `SELECT id, clocked_in_at, clocked_out_at,
-            ROUND(CAST(total_hours AS NUMERIC), 2) AS total_hours
-     FROM shift_sessions WHERE shift_id = $1 ORDER BY clocked_in_at DESC LIMIT 1`,
+    `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at,
+            ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
+            ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
+     FROM shift_sessions ss
+     JOIN shifts sh ON sh.id = ss.shift_id
+     WHERE ss.shift_id = $1
+     ORDER BY ss.clocked_in_at DESC LIMIT 1`,
     [shiftId],
   );
   const session = sessionResult.rows[0];
@@ -362,6 +367,14 @@ export async function sendDailyShiftReport(shiftId: string) {
     clocked_in_at:   session?.clocked_in_at ?? null,
     clocked_out_at:  session?.clocked_out_at ?? null,
     total_hours:     session?.total_hours ?? null,
+    hours: session
+      ? {
+          scheduled_hours: Number(session.scheduled_hours) || 0,
+          actual_hours:    Number(session.actual_hours)    || 0,
+          break_hours:     Number(session.break_hours)     || 0,
+          violation_hours: Number(session.violation_hours) || 0,
+        }
+      : null,
     reports:         reportsResult.rows,
     tasks_completed: parseInt(tasksResult.rows[0]?.completed ?? 0),
     tasks_total:     parseInt(taskTotalResult.rows[0]?.total ?? 0),
@@ -409,15 +422,16 @@ export function renderDailyShiftReport(data: {
   clocked_in_at:   Date | string | null;
   clocked_out_at:  Date | string | null;
   total_hours:     string | number | null;
+  hours?:          ShiftHours | null;
   reports:         Array<{ report_type: string; severity: string | null; description: string; reported_at: Date | string }>;
   tasks_completed: number;
   tasks_total:     number;
 }): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
   const dateLabel  = fmtDateSite(data.scheduled_start, tz);
-  const totalHours = data.total_hours != null
-    ? `${parseFloat(String(data.total_hours))}h`
-    : '—';
+  const totalHours = data.hours
+    ? formatHoursHHMM(data.hours.actual_hours)
+    : (data.total_hours != null ? `${parseFloat(String(data.total_hours))}h` : '—');
   const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
   const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
@@ -456,6 +470,22 @@ export function renderDailyShiftReport(data: {
         <div class="kpi"><div class="n">${data.reports.length}</div><div class="l">REPORTS</div></div>
         <div class="kpi"><div class="n">${data.tasks_completed}/${data.tasks_total}</div><div class="l">TASKS</div></div>
       </div>
+
+      ${data.hours ? `
+      <table style="width:100%;border-collapse:collapse;font-size:13px;color:#333;margin:0 0 18px 0;background:#F9FAFB;border-radius:6px;overflow:hidden">
+        <tr style="background:#F3F4F6">
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">SCHEDULED</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">ACTUAL</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">BREAKS</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">OFF-POST</th>
+        </tr>
+        <tr>
+          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.scheduled_hours)}</td>
+          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.actual_hours)}</td>
+          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.break_hours)}</td>
+          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.violation_hours)}</td>
+        </tr>
+      </table>` : ''}
 
       <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
         <tr><td style="padding:6px 0;color:#888;width:110px">Guard</td><td style="padding:6px 0">${titleCase(data.guard_name)} <span style="color:#888">(${data.badge_number})</span></td></tr>
@@ -1041,13 +1071,19 @@ interface HandoffFyiRow {
 }
 
 async function loadHandoffFyiRow(historyId: string): Promise<HandoffFyiRow | null> {
+  // Phase 1 — duration_hours now derived from the canonical actual_hours on
+  // the outgoing session (raw clock_out − clock_in), matching the daily-report
+  // "HOURS" tile. Falls back to stored total_hours only when the join misses.
   const result = await pool.query<HandoffFyiRow>(
     `SELECT ssr.id           AS history_id,
             ssr.shift_id,
             ssr.reason,
             ssr.accepted_at,
             ts.clocked_in_at   AS handoff_at,
-            fs.total_hours     AS duration_hours,
+            COALESCE(
+              ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(fs.clocked_out_at, NOW()) - fs.clocked_in_at))/3600.0) AS NUMERIC), 2),
+              fs.total_hours
+            )                  AS duration_hours,
             fg.name            AS from_guard_name,
             fg.badge_number    AS from_badge,
             tg.name            AS to_guard_name,
