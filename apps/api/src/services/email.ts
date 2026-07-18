@@ -14,7 +14,7 @@ import sgMail from '@sendgrid/mail';
 import { pool } from '../db/pool';
 import { haversineDistance } from './geofence';
 import { Sentry } from './sentry';
-import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, type ShiftHours } from './shiftHours';
+import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 
 // Central SendGrid error tag helper. Called from every sgMail.send catch
 // site so a Sentry.setTag('service','sendgrid') + flow tag lets us slice
@@ -480,10 +480,10 @@ export function renderDailyShiftReport(data: {
           <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">OFF-POST</th>
         </tr>
         <tr>
-          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.scheduled_hours)}</td>
+          <td style="padding:8px 12px">${formatScheduledHours(data.hours.scheduled_hours)}</td>
           <td style="padding:8px 12px">${formatHoursHHMM(data.hours.actual_hours)}</td>
           <td style="padding:8px 12px">${formatHoursHHMM(data.hours.break_hours)}</td>
-          <td style="padding:8px 12px">${data.hours.violation_hours > 0 ? formatHoursHHMM(data.hours.violation_hours) : 'None'}</td>
+          <td style="padding:8px 12px">${formatOffPostHours(data.hours.violation_hours)}</td>
         </tr>
       </table>` : ''}
 

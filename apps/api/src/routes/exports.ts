@@ -125,12 +125,21 @@ async function fetchAnalyticsData(companyId: string | null, params: {
 
 // ── CSV export ───────────────────────────────────────────────────────────────
 
-function rowsToCsv(headers: string[], rows: Record<string, unknown>[]): string {
+function rowsToCsv(
+  headers: string[],
+  rows: Record<string, unknown>[],
+  labels?: string[],
+): string {
   const escape = (v: unknown) => {
     const s = v == null ? '' : String(v).replace(/"/g, '""');
     return `"${s}"`;
   };
-  const header = headers.map(escape).join(',');
+  // `labels` is optional; when supplied it becomes the first row of the CSV
+  // (friendly column names) while `headers` remains the row-object key list
+  // used for value lookup. Length mismatch → falls back to headers so callers
+  // can't accidentally desync labels and lookups.
+  const headerLabels = labels && labels.length === headers.length ? labels : headers;
+  const header = headerLabels.map(escape).join(',');
   const body   = rows.map((row) => headers.map((h) => escape(row[h])).join(',')).join('\n');
   return `${header}\n${body}`;
 }
@@ -152,7 +161,13 @@ router.get('/analytics/csv', requireAuth('company_admin', 'vishnu'), async (req:
         'total_hours','scheduled_hours','actual_hours','break_hours','violation_hours',
         'clocked_in_at','clocked_out_at',
       ],
-      data.hours
+      data.hours,
+      // Phase 2 D3 — Off-post header for label consistency with UI/XLSX.
+      [
+        'Site','Guard','Badge','Shift Date',
+        'Total Hours (legacy)','Scheduled Hours','Actual Hours','Break Hours','Off-post Hours',
+        'Clocked In','Clocked Out',
+      ],
     ));
   }
   if (!type || type === 'reports') {
