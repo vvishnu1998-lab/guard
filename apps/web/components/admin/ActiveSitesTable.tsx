@@ -14,9 +14,11 @@ interface Site {
   name: string;
   guard_count: number;
   reports_today: number;
-  // Legacy scalar (SUM of stored total_hours). Phase 1 added the 4-field
-  // `hours` object alongside; Phase 2 prefers it and falls back to the
-  // scalar for a brief compat window until every deploy has Phase 1 shipped.
+  // Legacy scalar retained on the interface (the API still emits it) but
+  // Phase 2 Q3 has us trust the `hours` object exclusively. If the API ever
+  // omits `hours`, actualHoursThisWeek() returns 0 and the cell shows "—"
+  // via formatHoursHHMM — no silent regression to the stored-total_hours
+  // formula.
   hours_this_week: number;
   hours?: ShiftHours;
   status: 'active' | 'inactive';
@@ -38,13 +40,12 @@ function displayStatus(site: Site): { label: string; color: string } {
   return                { label: 'INACTIVE',  color: 'text-gray-500' };
 }
 
-// Prefer the 4-field object's actual_hours (raw clock_out − clock_in, per
-// Phase 1 D1); fall back to the legacy scalar total_hours sum when the API
-// hasn't shipped Phase 1 yet.
+// Phase 2 Q3: trust `hours.actual_hours` exclusively. The Phase 1 API
+// always emits the object alongside the legacy scalar, so this branch
+// only degrades to 0 (rendered "—") if the API has genuinely regressed.
 function actualHoursThisWeek(site: Site): number {
   const fromObj = site.hours?.actual_hours;
-  if (typeof fromObj === 'number' && Number.isFinite(fromObj)) return fromObj;
-  return Number(site.hours_this_week) || 0;
+  return typeof fromObj === 'number' && Number.isFinite(fromObj) ? fromObj : 0;
 }
 
 export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {

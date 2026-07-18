@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { adminGet } from '../../../lib/adminApi';
 import ExportPanel from '../../../components/admin/ExportPanel';
-import { formatHoursHHMM, formatOffPostHours } from '../../../lib/formatHours';
+import { formatHoursHHMM, formatOffPostHours, formatScheduledHours } from '../../../lib/formatHours';
 
 interface ShiftHours {
   scheduled_hours: number;
@@ -145,7 +145,7 @@ export default function AnalyticsPage() {
   const monthKpiValue = formatHoursHHMM(monthTotals.actual_hours);
   const monthKpiSub = (
     <>
-      Scheduled: <span className="text-gray-500">{formatHoursHHMM(monthTotals.scheduled_hours)}</span>
+      Scheduled: <span className="text-gray-500">{formatScheduledHours(monthTotals.scheduled_hours)}</span>
       {'  ·  '}
       Break: <span className="text-gray-500">{formatHoursHHMM(monthTotals.break_hours)}</span>
       {'  ·  '}

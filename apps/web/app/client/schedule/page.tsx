@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { clientGet } from '../../../lib/clientApi';
-import { formatHoursHHMM, formatOffPostHours } from '../../../lib/formatHours';
+import { formatHoursHHMM, formatOffPostHours, formatScheduledHours } from '../../../lib/formatHours';
 
 interface ShiftHours {
   scheduled_hours: number;
@@ -18,9 +18,9 @@ interface ShiftHours {
 interface GuardOnDuty {
   name:           string;
   clocked_in_at:  string;
-  // Legacy scalar (decimal hours since clock-in). Phase 1 added the 4-field
-  // `hours` object; Phase 2 prefers it and falls back to hours_on_duty when
-  // the API deploy hasn't landed yet.
+  // Legacy scalar retained on the interface (the API still emits it) but
+  // Phase 2 Q3 trusts the `hours` object exclusively. If `hours` is missing
+  // the card falls to the empty 4-field object and each cell renders "—".
   hours_on_duty:  number;
   hours?:         ShiftHours;
   last_lat:       number | null;
@@ -97,14 +97,19 @@ export default function SchedulePage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {guards.map((g, i) => {
           const ping = lastPingLabel(g.last_ping_at);
-          // Phase 2: prefer the 4-field object; fall back to hours_on_duty
-          // scalar (also decimal hours). Client-facing labels per D3:
-          // Scheduled / On duty / Break / Off-post.
-          const h = g.hours ?? {
-            scheduled_hours: 0,
-            actual_hours:    g.hours_on_duty ?? 0,
-            break_hours:     0,
-            violation_hours: 0,
+          // Phase 2 Q3: trust the 4-field object. When absent, pass null
+          // to the D2 helpers so each cell renders "—" (unknown) rather
+          // than silently reading 0 as "0h 00m".
+          const h: {
+            scheduled_hours: number | null;
+            actual_hours:    number | null;
+            break_hours:     number | null;
+            violation_hours: number | null;
+          } = g.hours ?? {
+            scheduled_hours: null,
+            actual_hours:    null,
+            break_hours:     null,
+            violation_hours: null,
           };
           return (
             <div
@@ -133,7 +138,7 @@ export default function SchedulePage() {
               <div className="border-t border-[#1A3050] pt-3 space-y-2">
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">SCHEDULED</span>
-                  <span className="text-gray-300 tabular-nums">{formatHoursHHMM(h.scheduled_hours)}</span>
+                  <span className="text-gray-300 tabular-nums">{formatScheduledHours(h.scheduled_hours)}</span>
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">BREAK</span>
@@ -141,7 +146,7 @@ export default function SchedulePage() {
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">OFF-POST</span>
-                  <span className={`tabular-nums ${h.violation_hours > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
+                  <span className={`tabular-nums ${(h.violation_hours ?? 0) > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
                     {formatOffPostHours(h.violation_hours)}
                   </span>
                 </div>
