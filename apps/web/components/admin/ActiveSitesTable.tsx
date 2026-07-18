@@ -1,12 +1,24 @@
 'use client';
 import Link from 'next/link';
+import { formatHoursHHMM } from '../../lib/formatHours';
+
+interface ShiftHours {
+  scheduled_hours: number;
+  actual_hours:    number;
+  break_hours:     number;
+  violation_hours: number;
+}
 
 interface Site {
   id: string;
   name: string;
   guard_count: number;
   reports_today: number;
+  // Legacy scalar (SUM of stored total_hours). Phase 1 added the 4-field
+  // `hours` object alongside; Phase 2 prefers it and falls back to the
+  // scalar for a brief compat window until every deploy has Phase 1 shipped.
   hours_this_week: number;
+  hours?: ShiftHours;
   status: 'active' | 'inactive';
   days_until_deletion: number | null;
 }
@@ -20,10 +32,19 @@ interface Site {
 //   neither          → INACTIVE (gray)
 function displayStatus(site: Site): { label: string; color: string } {
   const guards = Number(site.guard_count) || 0;
-  const hours  = Number(site.hours_this_week) || 0;
+  const hours  = actualHoursThisWeek(site);
   if (guards > 0) return { label: 'ACTIVE',    color: 'text-green-400' };
   if (hours  > 0) return { label: 'SCHEDULED', color: 'text-amber-400' };
   return                { label: 'INACTIVE',  color: 'text-gray-500' };
+}
+
+// Prefer the 4-field object's actual_hours (raw clock_out − clock_in, per
+// Phase 1 D1); fall back to the legacy scalar total_hours sum when the API
+// hasn't shipped Phase 1 yet.
+function actualHoursThisWeek(site: Site): number {
+  const fromObj = site.hours?.actual_hours;
+  if (typeof fromObj === 'number' && Number.isFinite(fromObj)) return fromObj;
+  return Number(site.hours_this_week) || 0;
 }
 
 export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
@@ -48,8 +69,7 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
           )}
           {sites.map((site) => {
             const status = displayStatus(site);
-            // node-postgres returns numeric columns as strings; guard toFixed.
-            const hoursWeek = Number(site.hours_this_week) || 0;
+            const hoursWeek = actualHoursThisWeek(site);
             return (
               <tr key={site.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
                 <td className="p-4">
@@ -62,7 +82,7 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
                 </td>
                 <td className="p-4 text-right text-gray-300">{site.guard_count}</td>
                 <td className="p-4 text-right text-gray-300">{site.reports_today}</td>
-                <td className="p-4 text-right text-gray-300">{hoursWeek.toFixed(1)}h</td>
+                <td className="p-4 text-right text-gray-300">{formatHoursHHMM(hoursWeek)}</td>
                 <td className="p-4 text-right">
                   <span className={`text-xs tracking-widest ${status.color}`}>
                     {status.label}

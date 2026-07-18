@@ -32,6 +32,15 @@ interface DashboardSite {
   guard_count:         number;
   reports_today:       number;
   hours_this_week:     number;
+  // Phase 1 added the 4-field breakdown alongside the legacy scalar.
+  // ActiveSitesTable prefers `hours.actual_hours` and falls back to
+  // `hours_this_week` when the API hasn't shipped Phase 1 yet.
+  hours?: {
+    scheduled_hours: number;
+    actual_hours:    number;
+    break_hours:     number;
+    violation_hours: number;
+  };
   status:              'active' | 'inactive';
   days_until_deletion: number | null;
 }

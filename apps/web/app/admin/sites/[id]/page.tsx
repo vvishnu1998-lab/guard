@@ -19,6 +19,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { adminGet } from '../../../../lib/adminApi';
 import { fmtTime } from '../../../../lib/shiftFormat';
+import { formatHoursHHMM } from '../../../../lib/formatHours';
 
 interface Site {
   id:      string;
@@ -190,7 +191,7 @@ export default function SiteDetailPage() {
                       CHAT →
                     </Link>
                   </div>
-                  <p className="text-gray-400 text-xs shrink-0">{hoursWorked.toFixed(1)}h</p>
+                  <p className="text-gray-400 text-xs shrink-0">{formatHoursHHMM(hoursWorked)}</p>
                 </li>
               );
             })}
