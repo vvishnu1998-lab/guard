@@ -6,11 +6,23 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { clientGet } from '../../../lib/clientApi';
+import { formatHoursHHMM, formatOffPostHours } from '../../../lib/formatHours';
+
+interface ShiftHours {
+  scheduled_hours: number;
+  actual_hours:    number;
+  break_hours:     number;
+  violation_hours: number;
+}
 
 interface GuardOnDuty {
   name:           string;
   clocked_in_at:  string;
+  // Legacy scalar (decimal hours since clock-in). Phase 1 added the 4-field
+  // `hours` object; Phase 2 prefers it and falls back to hours_on_duty when
+  // the API deploy hasn't landed yet.
   hours_on_duty:  number;
+  hours?:         ShiftHours;
   last_lat:       number | null;
   last_lng:       number | null;
   last_ping_at:   string | null;
@@ -85,8 +97,15 @@ export default function SchedulePage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {guards.map((g, i) => {
           const ping = lastPingLabel(g.last_ping_at);
-          const hours = Math.floor(g.hours_on_duty);
-          const mins  = Math.round((g.hours_on_duty - hours) * 60);
+          // Phase 2: prefer the 4-field object; fall back to hours_on_duty
+          // scalar (also decimal hours). Client-facing labels per D3:
+          // Scheduled / On duty / Break / Off-post.
+          const h = g.hours ?? {
+            scheduled_hours: 0,
+            actual_hours:    g.hours_on_duty ?? 0,
+            break_hours:     0,
+            violation_hours: 0,
+          };
           return (
             <div
               key={i}
@@ -102,16 +121,35 @@ export default function SchedulePage() {
                 </div>
               </div>
 
+              {/* On-duty headline (D4) — the actual_hours field, big. */}
+              <div className="border-t border-[#1A3050] pt-3">
+                <p className="text-3xl font-bold text-blue-400 tabular-nums leading-none">
+                  {formatHoursHHMM(h.actual_hours)}
+                </p>
+                <p className="text-gray-500 text-[10px] tracking-widest mt-1">ON DUTY</p>
+              </div>
+
+              {/* 4-field detail line — client labels per D3. */}
               <div className="border-t border-[#1A3050] pt-3 space-y-2">
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500 tracking-widest">SCHEDULED</span>
+                  <span className="text-gray-300 tabular-nums">{formatHoursHHMM(h.scheduled_hours)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500 tracking-widest">BREAK</span>
+                  <span className="text-gray-300 tabular-nums">{formatHoursHHMM(h.break_hours)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500 tracking-widest">OFF-POST</span>
+                  <span className={`tabular-nums ${h.violation_hours > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
+                    {formatOffPostHours(h.violation_hours)}
+                  </span>
+                </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">CLOCKED IN</span>
                   <span className="text-gray-300">
                     {new Date(g.clocked_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                   </span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-500 tracking-widest">DURATION</span>
-                  <span className="text-gray-300">{hours}h {mins.toString().padStart(2, '0')}m</span>
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">LAST PING</span>
