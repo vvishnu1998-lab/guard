@@ -66,7 +66,7 @@ function StatCard({ label, value, sub }: { label: string; value: string | number
   return (
     <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
       <p className="text-gray-500 text-xs tracking-widest mb-2">{label}</p>
-      <p className="text-3xl font-bold text-amber-400">{value}</p>
+      <p className="text-2xl md:text-3xl font-bold text-amber-400 whitespace-nowrap">{value}</p>
       {sub && <p className="text-gray-600 text-xs mt-1">{sub}</p>}
     </div>
   );
