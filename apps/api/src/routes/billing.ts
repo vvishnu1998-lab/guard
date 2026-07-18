@@ -11,6 +11,7 @@ import * as XLSX from 'xlsx';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { uploadBufferToS3, urlOrPresign } from '../services/s3';
+import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
 
 const router = Router();
 
@@ -52,6 +53,7 @@ async function fetchHoursData(companyId: string, params: {
            AND bs.break_end IS NOT NULL), 0
       )                                               AS break_duration_mins,
       ROUND(CAST(COALESCE(ss.total_hours, 0) AS NUMERIC), 2) AS total_hours_worked,
+      ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
       sh.status
     FROM shift_sessions ss
     JOIN shifts sh ON sh.id = ss.shift_id
@@ -71,8 +73,13 @@ function buildWorkbook(rows: Record<string, unknown>[], fileName: string): XLSX.
   const wb = XLSX.utils.book_new();
 
   // ── Detail sheet ─────────────────────────────────────────────────────────
-  const detailData = [
-    ['Guard Name', 'Site Name', 'Shift Date', 'Clock In Time', 'Clock Out Time', 'Break (mins)', 'Total Hours', 'Status'],
+  // Phase 1 — 4-field breakdown columns appended (Scheduled/Actual/Break/Violation)
+  // alongside legacy Total Hours. Summary aggregates on actual_hours per (guard, site).
+  const detailData: unknown[][] = [
+    ['Guard Name', 'Site Name', 'Shift Date', 'Clock In Time', 'Clock Out Time',
+     'Break (mins)', 'Total Hours (legacy)',
+     'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Violation Hours',
+     'Status'],
     ...rows.map(r => [
       r.guard_name,
       r.site_name,
@@ -81,25 +88,45 @@ function buildWorkbook(rows: Record<string, unknown>[], fileName: string): XLSX.
       r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB') : '',
       r.break_duration_mins,
       r.total_hours_worked,
+      Number(r.scheduled_hours) || 0,
+      Number(r.actual_hours)    || 0,
+      Number(r.break_hours)     || 0,
+      Number(r.violation_hours) || 0,
       r.status,
     ]),
   ];
 
-  // Summary row: total hours per guard per site
-  const summaryMap = new Map<string, number>();
+  // Summary row: total actual hours per guard per site (Phase 1 canonical).
+  type Agg = { actual: number; breaks: number; violations: number; scheduled: number };
+  const summaryMap = new Map<string, Agg>();
   for (const r of rows) {
     const key = `${r.guard_name} @ ${r.site_name}`;
-    summaryMap.set(key, (summaryMap.get(key) ?? 0) + Number(r.total_hours_worked));
+    const agg = summaryMap.get(key) ?? { actual: 0, breaks: 0, violations: 0, scheduled: 0 };
+    agg.actual     += Number(r.actual_hours)    || 0;
+    agg.breaks     += Number(r.break_hours)     || 0;
+    agg.violations += Number(r.violation_hours) || 0;
+    agg.scheduled  += Number(r.scheduled_hours) || 0;
+    summaryMap.set(key, agg);
   }
   detailData.push([]);
-  detailData.push(['SUMMARY', '', '', '', '', '', '', '']);
-  detailData.push(['Guard @ Site', '', '', '', '', '', 'Total Hours', '']);
-  for (const [key, hours] of summaryMap) {
-    detailData.push([key, '', '', '', '', '', Math.round(hours * 100) / 100, '']);
+  detailData.push(['SUMMARY', '', '', '', '', '', '', '', '', '', '', '']);
+  detailData.push(['Guard @ Site', '', '', '', '', '', '', 'Scheduled', 'Actual', 'Breaks', 'Violations', '']);
+  for (const [key, agg] of summaryMap) {
+    detailData.push([
+      key, '', '', '', '', '', '',
+      Math.round(agg.scheduled  * 100) / 100,
+      Math.round(agg.actual     * 100) / 100,
+      Math.round(agg.breaks     * 100) / 100,
+      Math.round(agg.violations * 100) / 100,
+      '',
+    ]);
   }
 
   const ws = XLSX.utils.aoa_to_sheet(detailData);
-  ws['!cols'] = [{ wch: 24 }, { wch: 24 }, { wch: 14 }, { wch: 22 }, { wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 12 }];
+  ws['!cols'] = [
+    { wch: 24 }, { wch: 24 }, { wch: 14 }, { wch: 22 }, { wch: 22 },
+    { wch: 14 }, { wch: 20 }, { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 12 },
+  ];
   XLSX.utils.book_append_sheet(wb, ws, 'Hours Detail');
 
   return wb;

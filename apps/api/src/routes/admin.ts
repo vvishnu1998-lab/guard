@@ -20,6 +20,7 @@ import {
   type ActivityRow,
   type UserScope,
 } from './activityLog';
+import { SHIFT_HOURS_SQL_FIELDS, type ShiftHours } from '../services/shiftHours';
 
 const router = Router();
 
@@ -837,11 +838,48 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
           WHERE ss2.site_id = s.id AND ss2.clocked_out_at IS NULL
        ), 0) AS guard_count,
        COUNT(DISTINCT r.id) FILTER (WHERE r.reported_at >= CURRENT_DATE) AS reports_today,
+       -- Legacy scalar: sum of stored total_hours this week. Kept for
+       -- back-compat until the web dashboard consumes hours_this_week
+       -- from the new 4-field object below.
        COALESCE((
          SELECT SUM(ss2.total_hours) FROM shift_sessions ss2
           WHERE ss2.site_id = s.id
             AND ss2.clocked_in_at >= DATE_TRUNC('week', NOW())
        ), 0) AS hours_this_week,
+       -- Phase 1 — 4-field canonical hours, summed this week per site.
+       -- scheduled_hours here sums each shift's window (deduped by shift_id
+       -- so multi-session handoffs don't double-count the schedule).
+       COALESCE((
+         SELECT ROUND(CAST(SUM(sched.scheduled_hours) AS NUMERIC), 2)
+           FROM (
+             SELECT DISTINCT sh.id,
+                    EXTRACT(EPOCH FROM (sh.scheduled_end - sh.scheduled_start))/3600.0 AS scheduled_hours
+               FROM shifts sh
+               JOIN shift_sessions ss3 ON ss3.shift_id = sh.id
+              WHERE ss3.site_id = s.id
+                AND ss3.clocked_in_at >= DATE_TRUNC('week', NOW())
+           ) sched
+       ), 0) AS h_scheduled,
+       COALESCE((
+         SELECT ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss4.clocked_out_at, NOW()) - ss4.clocked_in_at))/3600.0)) AS NUMERIC), 2)
+           FROM shift_sessions ss4
+          WHERE ss4.site_id = s.id
+            AND ss4.clocked_in_at >= DATE_TRUNC('week', NOW())
+       ), 0) AS h_actual,
+       COALESCE((
+         SELECT ROUND(CAST(SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0) AS NUMERIC), 2)
+           FROM break_sessions bs
+           JOIN shift_sessions ss5 ON ss5.id = bs.shift_session_id
+          WHERE ss5.site_id = s.id
+            AND ss5.clocked_in_at >= DATE_TRUNC('week', NOW())
+       ), 0) AS h_break,
+       COALESCE((
+         SELECT ROUND(CAST(SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0) AS NUMERIC), 2)
+           FROM geofence_violations gv
+           JOIN shift_sessions ss6 ON ss6.id = gv.shift_session_id
+          WHERE ss6.site_id = s.id
+            AND ss6.clocked_in_at >= DATE_TRUNC('week', NOW())
+       ), 0) AS h_violation,
        CASE WHEN s.contract_end >= NOW() THEN 'active' ELSE 'inactive' END AS status
      FROM sites s
      LEFT JOIN reports r ON r.site_id = s.id
@@ -850,6 +888,18 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
      ORDER BY s.name`,
     [cid]
   );
+  for (const row of result.rows) {
+    row.hours = {
+      scheduled_hours: Number(row.h_scheduled) || 0,
+      actual_hours:    Number(row.h_actual)    || 0,
+      break_hours:     Number(row.h_break)     || 0,
+      violation_hours: Number(row.h_violation) || 0,
+    } satisfies ShiftHours;
+    delete row.h_scheduled;
+    delete row.h_actual;
+    delete row.h_break;
+    delete row.h_violation;
+  }
   res.json(result.rows);
 });
 
@@ -1019,9 +1069,33 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
 
   const [hoursResult, reportsByType, incidentBySeverity, guardPerf, monthlyHours] = await Promise.all([
-    // Total hours this month
+    // Total hours this month — legacy `total_hours` scalar + Phase 1
+    // 4-field breakdown. scheduled_hours is deduped across sessions per
+    // shift so mid-shift handoffs don't double-count the schedule window.
     pool.query(`
-      SELECT COALESCE(ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1), 0) AS total_hours
+      SELECT
+        COALESCE(ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1), 0) AS total_hours,
+        COALESCE((
+          SELECT ROUND(CAST(SUM(sched.scheduled_hours) AS NUMERIC), 2)
+            FROM (
+              SELECT DISTINCT sh.id,
+                     EXTRACT(EPOCH FROM (sh.scheduled_end - sh.scheduled_start))/3600.0 AS scheduled_hours
+                FROM shifts sh
+                JOIN shift_sessions ss2 ON ss2.shift_id = sh.id
+                JOIN sites s2 ON s2.id = ss2.site_id
+               WHERE s2.company_id = $1
+                 AND ss2.clocked_in_at >= DATE_TRUNC('month', NOW())
+            ) sched
+        ), 0) AS h_scheduled,
+        COALESCE(ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2), 0) AS h_actual,
+        COALESCE(ROUND(CAST(SUM((
+          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+            FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+        )) AS NUMERIC), 2), 0) AS h_break,
+        COALESCE(ROUND(CAST(SUM((
+          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+            FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+        )) AS NUMERIC), 2), 0) AS h_violation
       FROM shift_sessions ss
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
@@ -1049,44 +1123,96 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       GROUP BY r.severity
     `, [cid]),
 
-    // Top guards by hours (last 30 days)
+    // Top guards by hours (last 30 days) — legacy total_hours + Phase 1
+    // 4-field breakdown per guard.
     pool.query(`
       SELECT g.name, g.badge_number,
              ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS total_hours,
-             COUNT(DISTINCT ss.id) AS shift_count
+             COUNT(DISTINCT ss.id) AS shift_count,
+             COALESCE(ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2), 0) AS h_actual,
+             COALESCE(ROUND(CAST(SUM((
+               SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+                 FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+             )) AS NUMERIC), 2), 0) AS h_break,
+             COALESCE(ROUND(CAST(SUM((
+               SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+                 FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+             )) AS NUMERIC), 2), 0) AS h_violation
       FROM shift_sessions ss
       JOIN guards g ON g.id = ss.guard_id
       JOIN sites s  ON s.id = ss.site_id
       WHERE s.company_id = $1
         AND ss.clocked_in_at >= NOW() - INTERVAL '30 days'
-        AND ss.total_hours IS NOT NULL
       GROUP BY g.id, g.name, g.badge_number
-      ORDER BY total_hours DESC
+      ORDER BY h_actual DESC
       LIMIT 10
     `, [cid]),
 
-    // Monthly hours per site (last 6 months)
+    // Monthly hours per site (last 6 months) — legacy total_hours scalar
+    // + Phase 1 4-field breakdown per (month, site).
     pool.query(`
       SELECT
         TO_CHAR(DATE_TRUNC('month', ss.clocked_in_at), 'Mon YYYY') AS month,
         s.name AS site_name,
-        ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS hours
+        ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS hours,
+        COALESCE(ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2), 0) AS h_actual,
+        COALESCE(ROUND(CAST(SUM((
+          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+            FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+        )) AS NUMERIC), 2), 0) AS h_break,
+        COALESCE(ROUND(CAST(SUM((
+          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+            FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+        )) AS NUMERIC), 2), 0) AS h_violation
       FROM shift_sessions ss
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
         AND ss.clocked_in_at >= DATE_TRUNC('month', NOW()) - INTERVAL '5 months'
-        AND ss.total_hours IS NOT NULL
       GROUP BY DATE_TRUNC('month', ss.clocked_in_at), s.name
       ORDER BY DATE_TRUNC('month', ss.clocked_in_at) ASC, s.name
     `, [cid]),
   ]);
 
+  // Phase 1 — expose the 4-field breakdown for total-this-month, top-guards,
+  // and monthly-by-site. Legacy scalars kept untouched.
+  const totalsRow = hoursResult.rows[0];
+  const totals_this_month: ShiftHours = {
+    scheduled_hours: Number(totalsRow?.h_scheduled) || 0,
+    actual_hours:    Number(totalsRow?.h_actual)    || 0,
+    break_hours:     Number(totalsRow?.h_break)     || 0,
+    violation_hours: Number(totalsRow?.h_violation) || 0,
+  };
+  const topGuards = guardPerf.rows.map((r) => ({
+    name:         r.name,
+    badge_number: r.badge_number,
+    total_hours:  r.total_hours,
+    shift_count:  r.shift_count,
+    hours: {
+      scheduled_hours: 0, // per-guard scheduled aggregate is ambiguous (multi-site) — surfaced at (guard, shift) level only.
+      actual_hours:    Number(r.h_actual)    || 0,
+      break_hours:     Number(r.h_break)     || 0,
+      violation_hours: Number(r.h_violation) || 0,
+    } satisfies ShiftHours,
+  }));
+  const monthlyBySite = monthlyHours.rows.map((r) => ({
+    month:     r.month,
+    site_name: r.site_name,
+    hours_legacy: r.hours,
+    hours: {
+      scheduled_hours: 0, // aggregate scheduled_hours per (month, site) omitted — dedup would require another CTE; add when web needs it.
+      actual_hours:    Number(r.h_actual)    || 0,
+      break_hours:     Number(r.h_break)     || 0,
+      violation_hours: Number(r.h_violation) || 0,
+    } satisfies ShiftHours,
+  }));
+
   res.json({
     total_hours_this_month: parseFloat(hoursResult.rows[0].total_hours),
+    totals_this_month,
     reports_by_type:        reportsByType.rows,
     incidents_by_severity:  incidentBySeverity.rows,
-    top_guards:             guardPerf.rows,
-    monthly_hours_by_site:  monthlyHours.rows,
+    top_guards:             topGuards,
+    monthly_hours_by_site:  monthlyBySite,
   });
 });
 
@@ -1101,14 +1227,28 @@ router.get('/sites/:site_id/sessions', requireAuth('company_admin'), async (req,
   if (!verify.rows[0]) return res.status(404).json({ error: 'Site not found' });
 
   const result = await pool.query(
-    `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at, g.name AS guard_name
+    `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at, g.name AS guard_name,
+            ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
      FROM shift_sessions ss
+     JOIN shifts sh ON sh.id = ss.shift_id
      JOIN guards g ON g.id = ss.guard_id
      WHERE ss.site_id = $1
      ORDER BY ss.clocked_in_at DESC
      LIMIT 50`,
     [req.params.site_id],
   );
+  for (const row of result.rows) {
+    row.hours = {
+      scheduled_hours: Number(row.scheduled_hours) || 0,
+      actual_hours:    Number(row.actual_hours)    || 0,
+      break_hours:     Number(row.break_hours)     || 0,
+      violation_hours: Number(row.violation_hours) || 0,
+    } satisfies ShiftHours;
+    delete row.scheduled_hours;
+    delete row.actual_hours;
+    delete row.break_hours;
+    delete row.violation_hours;
+  }
   res.json(result.rows);
 });
 
@@ -1133,7 +1273,8 @@ router.get('/sessions', requireAuth('company_admin'), async (req, res) => {
        ss.clocked_in_at,
        ss.clocked_out_at,
        sh.scheduled_start,
-       sh.scheduled_end
+       sh.scheduled_end,
+       ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
      FROM shift_sessions ss
      JOIN guards g  ON g.id  = ss.guard_id
      JOIN sites  si ON si.id = ss.site_id
@@ -1145,6 +1286,18 @@ router.get('/sessions', requireAuth('company_admin'), async (req, res) => {
      LIMIT 500`,
     [req.user!.company_id, toIso, fromIso],
   );
+  for (const row of result.rows) {
+    row.hours = {
+      scheduled_hours: Number(row.scheduled_hours) || 0,
+      actual_hours:    Number(row.actual_hours)    || 0,
+      break_hours:     Number(row.break_hours)     || 0,
+      violation_hours: Number(row.violation_hours) || 0,
+    } satisfies ShiftHours;
+    delete row.scheduled_hours;
+    delete row.actual_hours;
+    delete row.break_hours;
+    delete row.violation_hours;
+  }
   res.json(result.rows);
 });
 

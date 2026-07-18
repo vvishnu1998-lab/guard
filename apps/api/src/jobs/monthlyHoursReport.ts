@@ -8,6 +8,7 @@ import cron from 'node-cron';
 import * as XLSX from 'xlsx';
 import { pool } from '../db/pool';
 import { uploadBufferToS3 } from '../services/s3';
+import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
 
 cron.schedule('0 2 1 * *', async () => {
   console.log('[monthly-hours] Starting at', new Date().toISOString());
@@ -41,6 +42,7 @@ cron.schedule('0 2 1 * *', async () => {
              WHERE bs.shift_session_id = ss.id AND bs.break_end IS NOT NULL), 0
           )                                              AS break_duration_mins,
           ROUND(CAST(COALESCE(ss.total_hours, 0) AS NUMERIC), 2) AS total_hours_worked,
+          ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
           sh.status
         FROM shift_sessions ss
         JOIN shifts sh ON sh.id = ss.shift_id
@@ -55,8 +57,12 @@ cron.schedule('0 2 1 * *', async () => {
       `, [companyId, monthStart, monthEnd]);
 
       const wb = XLSX.utils.book_new();
+      // Phase 1 — 4-field breakdown columns appended (Scheduled/Actual/Break/Violation).
       const detailData = [
-        ['Guard Name', 'Site Name', 'Shift Date', 'Clock In', 'Clock Out', 'Break (mins)', 'Total Hours', 'Status'],
+        ['Guard Name', 'Site Name', 'Shift Date', 'Clock In', 'Clock Out',
+         'Break (mins)', 'Total Hours (legacy)',
+         'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Violation Hours',
+         'Status'],
         ...rows.rows.map((r: Record<string, unknown>) => [
           r.guard_name,
           r.site_name,
@@ -65,6 +71,10 @@ cron.schedule('0 2 1 * *', async () => {
           r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB') : '',
           r.break_duration_mins,
           r.total_hours_worked,
+          Number(r.scheduled_hours) || 0,
+          Number(r.actual_hours)    || 0,
+          Number(r.break_hours)     || 0,
+          Number(r.violation_hours) || 0,
           r.status,
         ]),
       ];

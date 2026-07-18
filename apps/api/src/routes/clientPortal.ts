@@ -22,6 +22,7 @@ import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
 import { presignAll } from '../services/s3';
 import { signTokens } from './auth';
+import { SHIFT_HOURS_SQL_FIELDS, type ShiftHours } from '../services/shiftHours';
 import {
   NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
   PAGE_W, PAGE_H, ML, MR, CW,
@@ -122,11 +123,17 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
     `SELECT
        g.name,
        ss.clocked_in_at,
-       EXTRACT(EPOCH FROM (NOW() - ss.clocked_in_at))::int / 3600 AS hours_on_duty,
+       -- hours_on_duty kept as decimal (2 dp) for back-compat. The
+       -- previous ::int / 3600 formulation truncated 5.8h to 5. Replaced
+       -- with the 4-field breakdown in the hours object for the new client
+       -- UI; kept as a scalar here so existing consumers keep rendering.
+       ROUND(CAST(EXTRACT(EPOCH FROM (NOW() - ss.clocked_in_at))/3600.0 AS NUMERIC), 2) AS hours_on_duty,
+       ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
        lp.latitude  AS last_lat,
        lp.longitude AS last_lng,
        lp.pinged_at AS last_ping_at
      FROM shift_sessions ss
+     JOIN shifts sh ON sh.id = ss.shift_id
      JOIN guards g ON g.id = ss.guard_id
      LEFT JOIN LATERAL (
        SELECT latitude, longitude, pinged_at
@@ -138,6 +145,18 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
      ORDER BY ss.clocked_in_at ASC`,
     [req.user!.site_id]
   );
+  for (const row of result.rows) {
+    row.hours = {
+      scheduled_hours: Number(row.scheduled_hours) || 0,
+      actual_hours:    Number(row.actual_hours)    || 0,
+      break_hours:     Number(row.break_hours)     || 0,
+      violation_hours: Number(row.violation_hours) || 0,
+    } satisfies ShiftHours;
+    delete row.scheduled_hours;
+    delete row.actual_hours;
+    delete row.break_hours;
+    delete row.violation_hours;
+  }
   res.json(result.rows);
 });
 
@@ -378,11 +397,17 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   const reports = (await pool.query(reportQuery, params)).rows;
 
   // ── 3. Shift sessions (for guard hours) ───────────────────────────────────────
+  // Phase 1 — return the 4-field breakdown alongside `hours` (legacy alias
+  // for actual_hours so existing PDF renderers keep working). Aggregators
+  // below sum actual_hours per guard; break/violation are surfaced in the
+  // Guard Coverage block.
   let shiftQuery = `
     SELECT ss.guard_id, g.name AS guard_name,
            ss.clocked_in_at, ss.clocked_out_at,
-           COALESCE(EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600, 0) AS hours
+           ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
+           ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0) AS NUMERIC), 2) AS hours
     FROM shift_sessions ss
+    JOIN shifts sh ON sh.id = ss.shift_id
     JOIN guards g ON g.id = ss.guard_id
     WHERE ss.site_id = $1`;
   const shiftParams: unknown[] = [payload.site_id];
@@ -409,13 +434,27 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   const incidentReports    = reports.filter(r => r.report_type === 'incident');
   const maintenanceReports = reports.filter(r => r.report_type === 'maintenance');
 
-  const totalHours = shifts.reduce((sum, s) => sum + parseFloat(s.hours), 0);
+  const totalHours     = shifts.reduce((sum, s) => sum + parseFloat(s.actual_hours), 0);
+  const totalBreaks    = shifts.reduce((sum, s) => sum + parseFloat(s.break_hours), 0);
+  const totalViolations = shifts.reduce((sum, s) => sum + parseFloat(s.violation_hours), 0);
 
-  const guardMap = new Map<string, { name: string; shifts: number; hours: number; reports: number; incidents: number }>();
+  const guardMap = new Map<string, {
+    name: string;
+    shifts: number;
+    hours: number;              // actual_hours (Phase 1: renamed conceptually, key kept for PDF-side compat)
+    break_hours: number;
+    violation_hours: number;
+    reports: number;
+    incidents: number;
+  }>();
   for (const s of shifts) {
-    const g = guardMap.get(s.guard_id) ?? { name: s.guard_name, shifts: 0, hours: 0, reports: 0, incidents: 0 };
+    const g = guardMap.get(s.guard_id) ?? {
+      name: s.guard_name, shifts: 0, hours: 0, break_hours: 0, violation_hours: 0, reports: 0, incidents: 0,
+    };
     g.shifts++;
-    g.hours += parseFloat(s.hours);
+    g.hours           += parseFloat(s.actual_hours);
+    g.break_hours     += parseFloat(s.break_hours);
+    g.violation_hours += parseFloat(s.violation_hours);
     guardMap.set(s.guard_id, g);
   }
   for (const r of reports) {
@@ -510,14 +549,17 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // Guard coverage summary
   doc.fontSize(10).fillColor(TEXT).font('Helvetica-Bold').text('Guard Coverage Summary', ML, y);
   y += 16;
-  doc.rect(ML, y, CW, 50).fill(GRAY1);
+  doc.rect(ML, y, CW, 62).fill(GRAY1);
   doc.fontSize(28).fillColor(NAVY).font('Helvetica-Bold')
      .text(totalHours.toFixed(1), ML + 20, y + 10, { lineBreak: false });
   doc.fontSize(11).fillColor(MUTED).font('Helvetica')
-     .text(' hours total coverage', ML + 80, y + 18, { lineBreak: false });
+     .text(' hours on duty (actual)', ML + 80, y + 18, { lineBreak: false });
   doc.fontSize(9).fillColor(MUTED).font('Helvetica')
      .text(`${shifts.length} shifts  |  ${guardStats.length} guards deployed`, ML + 20, y + 36);
-  y += 64;
+  // Phase 1 — 4-field breakdown so the PDF matches the canonical service.
+  doc.fontSize(9).fillColor(MUTED).font('Helvetica')
+     .text(`Breaks: ${totalBreaks.toFixed(1)}h  |  Off-post (geofence violations): ${totalViolations.toFixed(1)}h`, ML + 20, y + 48);
+  y += 76;
 
   if (guardStats.length > 0) {
     doc.fontSize(10).fillColor(TEXT).font('Helvetica-Bold').text('Top Guards This Period', ML, y);

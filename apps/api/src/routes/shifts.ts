@@ -29,6 +29,12 @@ import {
   sendHandoffAcceptedFyi,
   sendHandoffCompletedFyi,
 } from '../services/email';
+import {
+  SHIFT_HOURS_SQL_FIELDS,
+  emptyShiftHours,
+  getShiftHours,
+  type ShiftHours,
+} from '../services/shiftHours';
 
 const router = Router();
 
@@ -1770,7 +1776,15 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
                     WHEN ss_agg.open_clocked_in_at IS NOT NULL
                       THEN GREATEST(0, EXTRACT(EPOCH FROM (NOW() - ss_agg.open_clocked_in_at)) / 3600.0)
                     ELSE 0
-                  END AS total_hours_worked
+                  END AS total_hours_worked,
+              -- 4-field canonical hours (Phase 1). scheduled_hours is a
+              -- per-shift property; actual/break/violation aggregate every
+              -- session belonging to this shift (handoff cases contribute
+              -- more than one). See services/shiftHours.ts for the contract.
+              ROUND(CAST(EXTRACT(EPOCH FROM (s.scheduled_end - s.scheduled_start))/3600.0 AS NUMERIC), 2) AS h_scheduled,
+              COALESCE(ss_hrs.actual_hours,    0) AS h_actual,
+              COALESCE(ss_hrs.break_hours,     0) AS h_break,
+              COALESCE(ss_hrs.violation_hours, 0) AS h_violation
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
        JOIN companies co ON co.id = si.company_id
@@ -1782,6 +1796,21 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
          WHERE guard_id = $1
          GROUP BY shift_id
        ) ss_agg ON ss_agg.shift_id = s.id
+       LEFT JOIN (
+         SELECT ss.shift_id,
+                ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2) AS actual_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+                    FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS break_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+                    FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS violation_hours
+         FROM shift_sessions ss
+         WHERE ss.guard_id = $1
+         GROUP BY ss.shift_id
+       ) ss_hrs ON ss_hrs.shift_id = s.id
        WHERE s.guard_id = $1 ORDER BY s.scheduled_start DESC LIMIT 50`,
       [user!.sub]
     );
@@ -1792,11 +1821,31 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
       `SELECT s.*, si.name as site_name, si.is_active AS site_is_active,
               si.instructions_pdf_url, g.name as guard_name,
               co.name AS company_name,
-              COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit
+              COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit,
+              -- 4-field canonical hours (Phase 1). Aggregates every session on
+              -- this shift (handoff cases sum across guards).
+              ROUND(CAST(EXTRACT(EPOCH FROM (s.scheduled_end - s.scheduled_start))/3600.0 AS NUMERIC), 2) AS h_scheduled,
+              COALESCE(ss_hrs.actual_hours,    0) AS h_actual,
+              COALESCE(ss_hrs.break_hours,     0) AS h_break,
+              COALESCE(ss_hrs.violation_hours, 0) AS h_violation
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
        JOIN companies co ON co.id = si.company_id
        LEFT JOIN guards g ON s.guard_id = g.id
+       LEFT JOIN (
+         SELECT ss.shift_id,
+                ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2) AS actual_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+                    FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS break_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+                    FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS violation_hours
+         FROM shift_sessions ss
+         GROUP BY ss.shift_id
+       ) ss_hrs ON ss_hrs.shift_id = s.id
        ${isVishnu ? '' : 'WHERE si.company_id = $1'}
        ORDER BY s.scheduled_start DESC LIMIT 100`,
       isVishnu ? [] : [user!.company_id]
@@ -1807,6 +1856,16 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
   // from S3. Field name unchanged.
   for (const row of result.rows) {
     row.instructions_pdf_url = buildInstructionsUrl(row.id, row.instructions_pdf_url);
+    row.hours = {
+      scheduled_hours: Number(row.h_scheduled) || 0,
+      actual_hours:    Number(row.h_actual)    || 0,
+      break_hours:     Number(row.h_break)     || 0,
+      violation_hours: Number(row.h_violation) || 0,
+    } satisfies ShiftHours;
+    delete row.h_scheduled;
+    delete row.h_actual;
+    delete row.h_break;
+    delete row.h_violation;
   }
   res.json(result.rows);
 });
@@ -1870,6 +1929,11 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       }
     : null;
 
+  // Phase 1 — 4-field live hours for the active session. break_hours /
+  // violation_hours count open intervals up to NOW() so the mobile can
+  // display a running total without a second endpoint.
+  const hours = await getShiftHours({ shift_session_id: r.session_id });
+
   res.json({
     shift:   {
       id: r.shift_id,
@@ -1884,6 +1948,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
     },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
     current_break: currentBreak,
+    hours,
   });
 });
 
@@ -1992,9 +2057,37 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
 
   shift.instructions_pdf_url = buildInstructionsUrl(shift.id, shift.instructions_pdf_url);
 
+  // Phase 1 — 4-field hours aggregated across every session on this shift.
+  // Handoff shifts sum multiple sessions; scheduled_hours is the shift's own.
+  const hoursResult = await pool.query<ShiftHours>(
+    `SELECT
+       ROUND(CAST(EXTRACT(EPOCH FROM ($1::timestamptz - $2::timestamptz))/3600.0 AS NUMERIC), 2) AS scheduled_hours,
+       ROUND(CAST(COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)), 0) AS NUMERIC), 2) AS actual_hours,
+       ROUND(CAST(COALESCE(SUM((
+         SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+           FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+       )), 0) AS NUMERIC), 2) AS break_hours,
+       ROUND(CAST(COALESCE(SUM((
+         SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+           FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+       )), 0) AS NUMERIC), 2) AS violation_hours
+     FROM shift_sessions ss
+     WHERE ss.shift_id = $3`,
+    [shift.scheduled_end, shift.scheduled_start, shift.id],
+  );
+  const hours: ShiftHours = hoursResult.rows[0]
+    ? {
+        scheduled_hours: Number(hoursResult.rows[0].scheduled_hours) || 0,
+        actual_hours:    Number(hoursResult.rows[0].actual_hours)    || 0,
+        break_hours:     Number(hoursResult.rows[0].break_hours)     || 0,
+        violation_hours: Number(hoursResult.rows[0].violation_hours) || 0,
+      }
+    : emptyShiftHours();
+
   res.json({
     ...shift,
     geofence,
+    hours,
     reassignment_history: historyResult.rows,
     swap_history:         swapResult.rows,
   });

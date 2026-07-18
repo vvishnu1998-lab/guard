@@ -19,6 +19,7 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
+import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
 
 const router = Router();
 
@@ -56,7 +57,8 @@ async function fetchAnalyticsData(companyId: string | null, params: {
     return { args, cidPredicate, filter: clauses.join(' ') };
   }
 
-  // Guard hours by site
+  // Guard hours by site — Phase 1 adds the 4-field breakdown alongside
+  // the legacy `total_hours` scalar. sh JOIN needed for scheduled_hours.
   const hq = buildArgs('ss.clocked_in_at', 'ss.clocked_in_at');
   const hours = await pool.query(`
     SELECT
@@ -65,11 +67,13 @@ async function fetchAnalyticsData(companyId: string | null, params: {
       g.badge_number,
       DATE(ss.clocked_in_at)           AS shift_date,
       ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
+      ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
       ss.clocked_in_at,
       ss.clocked_out_at
     FROM shift_sessions ss
-    JOIN sites s  ON s.id = ss.site_id
-    JOIN guards g ON g.id = ss.guard_id
+    JOIN shifts sh ON sh.id = ss.shift_id
+    JOIN sites s   ON s.id = ss.site_id
+    JOIN guards g  ON g.id = ss.guard_id
     WHERE ${hq.cidPredicate}
       ${hq.filter}
     ORDER BY ss.clocked_in_at DESC
@@ -143,7 +147,11 @@ router.get('/analytics/csv', requireAuth('company_admin', 'vishnu'), async (req:
 
   if (!type || type === 'hours') {
     sections.push('GUARD HOURS\n' + rowsToCsv(
-      ['site_name','guard_name','badge_number','shift_date','total_hours','clocked_in_at','clocked_out_at'],
+      [
+        'site_name','guard_name','badge_number','shift_date',
+        'total_hours','scheduled_hours','actual_hours','break_hours','violation_hours',
+        'clocked_in_at','clocked_out_at',
+      ],
       data.hours
     ));
   }
