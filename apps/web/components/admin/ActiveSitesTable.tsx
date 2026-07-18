@@ -11,6 +11,21 @@ interface Site {
   days_until_deletion: number | null;
 }
 
+// Derive display status from OPERATIONAL state, not from the API's `status`
+// field. The API's `status` reflects contract_end (contract active vs expired),
+// which surfaced as "INACTIVE" on sites with a live guard on-shift. Order:
+//   guards on-post   → ACTIVE  (green)
+//   completed shifts → SCHEDULED (amber) — no one on-post right now but the
+//                      site had activity this week
+//   neither          → INACTIVE (gray)
+function displayStatus(site: Site): { label: string; color: string } {
+  const guards = Number(site.guard_count) || 0;
+  const hours  = Number(site.hours_this_week) || 0;
+  if (guards > 0) return { label: 'ACTIVE',    color: 'text-green-400' };
+  if (hours  > 0) return { label: 'SCHEDULED', color: 'text-amber-400' };
+  return                { label: 'INACTIVE',  color: 'text-gray-500' };
+}
+
 export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
   return (
     <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
@@ -31,26 +46,31 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
           {sites.length === 0 && (
             <tr><td colSpan={5} className="text-center text-gray-500 py-8">No sites yet</td></tr>
           )}
-          {sites.map((site) => (
-            <tr key={site.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
-              <td className="p-4">
-                <Link href={`/admin/sites/${site.id}`} className="text-amber-400 hover:underline">
-                  {site.name}
-                </Link>
-                {site.days_until_deletion !== null && site.days_until_deletion <= 30 && (
-                  <span className="ml-2 text-xs text-red-400">{site.days_until_deletion}d left</span>
-                )}
-              </td>
-              <td className="p-4 text-right text-gray-300">{site.guard_count}</td>
-              <td className="p-4 text-right text-gray-300">{site.reports_today}</td>
-              <td className="p-4 text-right text-gray-300">{site.hours_this_week.toFixed(1)}h</td>
-              <td className="p-4 text-right">
-                <span className={`text-xs tracking-widest ${site.status === 'active' ? 'text-green-400' : 'text-gray-500'}`}>
-                  {site.status.toUpperCase()}
-                </span>
-              </td>
-            </tr>
-          ))}
+          {sites.map((site) => {
+            const status = displayStatus(site);
+            // node-postgres returns numeric columns as strings; guard toFixed.
+            const hoursWeek = Number(site.hours_this_week) || 0;
+            return (
+              <tr key={site.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
+                <td className="p-4">
+                  <Link href={`/admin/sites/${site.id}`} className="text-amber-400 hover:underline">
+                    {site.name}
+                  </Link>
+                  {site.days_until_deletion !== null && site.days_until_deletion <= 30 && (
+                    <span className="ml-2 text-xs text-red-400">{site.days_until_deletion}d left</span>
+                  )}
+                </td>
+                <td className="p-4 text-right text-gray-300">{site.guard_count}</td>
+                <td className="p-4 text-right text-gray-300">{site.reports_today}</td>
+                <td className="p-4 text-right text-gray-300">{hoursWeek.toFixed(1)}h</td>
+                <td className="p-4 text-right">
+                  <span className={`text-xs tracking-widest ${status.color}`}>
+                    {status.label}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

@@ -12,8 +12,20 @@ interface Analytics {
   total_hours_this_month: number;
   reports_by_type:        { report_type: string; count: string }[];
   incidents_by_severity:  { severity: string; count: string }[];
-  top_guards:             { name: string; badge_number: string; total_hours: string; shift_count: string }[];
-  monthly_hours_by_site:  { month: string; site_name: string; hours: string }[];
+  // total_hours can be null when a guard's only sessions this window are still open
+  // (SUM(NULL) = NULL). Phase 2 will consume `hours.actual_hours` from the API
+  // instead; until then, null-guard the scalar at every render site.
+  top_guards:             { name: string; badge_number: string; total_hours: string | null; shift_count: string }[];
+  // Phase 1 restructured the API: the scalar `hours` string was renamed to
+  // `hours_legacy`, and `hours` is now the 4-field object. Read `hours_legacy`
+  // here — Phase 2 web UI will switch to the object shape.
+  monthly_hours_by_site:  { month: string; site_name: string; hours_legacy: string | null; hours?: unknown }[];
+}
+
+function parseHours(v: string | null | undefined): number {
+  if (v == null) return 0;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : 0;
 }
 
 const TYPE_COLOR: Record<string, string> = {
@@ -79,13 +91,17 @@ export default function AnalyticsPage() {
   const totalReports = data?.reports_by_type.reduce((s, r) => s + parseInt(r.count), 0) ?? 0;
   const maxSeverity  = Math.max(...(data?.incidents_by_severity.map((i) => parseInt(i.count)) ?? [1]));
 
-  // Monthly totals across all sites
+  // Monthly totals across all sites. Uses `hours_legacy` (the Phase-1
+  // renamed scalar) — Phase 2 will switch to the 4-field object. Zero rows
+  // where every session was still open would collapse the bar chart to
+  // NaN via Math.max(...[]) → -Infinity; the || 1 fallback keeps geometry sane.
   const monthMap: Record<string, number> = {};
-  data?.monthly_hours_by_site.forEach(({ month, hours }) => {
-    monthMap[month] = (monthMap[month] ?? 0) + parseFloat(hours);
+  data?.monthly_hours_by_site.forEach(({ month, hours_legacy }) => {
+    monthMap[month] = (monthMap[month] ?? 0) + parseHours(hours_legacy);
   });
-  const months = Object.entries(monthMap);
+  const months = Object.entries(monthMap).filter(([, h]) => Number.isFinite(h));
   const maxMonthHours = Math.max(...months.map(([, h]) => h), 1);
+  const hasMonthlyData = months.some(([, h]) => h > 0);
 
   return (
     <div className="space-y-6">
@@ -107,7 +123,11 @@ export default function AnalyticsPage() {
         />
         <StatCard
           label="TOP GUARD HOURS"
-          value={data?.top_guards[0] ? `${data.top_guards[0].total_hours}h` : '—'}
+          value={
+            data?.top_guards[0]?.total_hours != null
+              ? `${data.top_guards[0].total_hours}h`
+              : '—'
+          }
           sub={data?.top_guards[0]?.name ?? ''}
         />
       </div>
@@ -116,8 +136,8 @@ export default function AnalyticsPage() {
         {/* Monthly hours */}
         <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
           <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">MONTHLY HOURS (ALL SITES)</p>
-          {months.length === 0 ? (
-            <p className="text-gray-600 text-xs text-center py-8">No data yet</p>
+          {!hasMonthlyData ? (
+            <p className="text-gray-600 text-xs text-center py-8">No completed shifts yet</p>
           ) : (
             <div className="space-y-3">
               {months.map(([month, hours]) => (
@@ -189,7 +209,9 @@ export default function AnalyticsPage() {
                       {g.badge_number} · {g.shift_count} shift{parseInt(g.shift_count) !== 1 ? 's' : ''}
                     </p>
                   </div>
-                  <span className="text-amber-400 text-sm font-bold">{g.total_hours}h</span>
+                  <span className="text-amber-400 text-sm font-bold">
+                    {g.total_hours != null ? `${g.total_hours}h` : '—'}
+                  </span>
                 </div>
               ))}
             </div>
