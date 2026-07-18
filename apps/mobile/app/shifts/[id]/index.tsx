@@ -21,6 +21,7 @@ import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../../lib/apiClient';
 import { useAuthStore } from '../../../store/authStore';
+import { formatScheduledHours } from '../../../lib/formatHours';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 import RequestSwapModal from '../../../components/RequestSwapModal';
 import HandoffRequestModal from '../../../components/HandoffRequestModal';
@@ -97,7 +98,8 @@ function fmtInTz(iso: string, tz: string | null, opts: Intl.DateTimeFormatOption
 
 function duration(start: string, end: string): string {
   const h = (new Date(end).getTime() - new Date(start).getTime()) / 3_600_000;
-  return `${h.toFixed(1)}h`;
+  // Phase 3 — D2: scheduled duration in HH:MM. 0-length shifts render "—".
+  return formatScheduledHours(h);
 }
 
 export default function ShiftDetailScreen() {

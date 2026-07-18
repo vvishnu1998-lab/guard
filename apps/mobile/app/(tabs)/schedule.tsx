@@ -10,6 +10,7 @@ import {
 import { useFocusEffect, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../lib/apiClient';
+import { formatScheduledHours } from '../../lib/formatHours';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -89,7 +90,10 @@ function fmtTime(iso: string) {
 
 function duration(start: string, end: string) {
   const h = (new Date(end).getTime() - new Date(start).getTime()) / 3_600_000;
-  return `${h.toFixed(1)}h`;
+  // Phase 3 — D2: scheduled duration displayed as HH:MM. A 0-length shift
+  // is a data error, so formatScheduledHours renders it as "—" rather
+  // than "0h 00m".
+  return formatScheduledHours(h);
 }
 
 export default function ScheduleScreen() {
