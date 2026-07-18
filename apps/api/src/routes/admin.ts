@@ -151,7 +151,7 @@ router.patch('/companies/:id', requireAuth('vishnu'), async (req, res) => {
 // GET /api/admin/companies/:id/admins — list admins for a company
 router.get('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => {
   const result = await pool.query(
-    `SELECT id, name, email, is_primary, is_active, created_at
+    `SELECT id, name, email, is_primary, is_active, must_change_password, created_at
      FROM company_admins WHERE company_id = $1 ORDER BY is_primary DESC, created_at ASC`,
     [req.params.id]
   );

@@ -21,11 +21,18 @@ interface Company {
 }
 
 interface Admin {
-  id:         string;
-  name:       string;
-  email:      string;
-  is_primary: boolean;
-  is_active:  boolean;
+  id:                   string;
+  name:                 string;
+  email:                string;
+  is_primary:           boolean;
+  is_active:            boolean;
+  must_change_password: boolean;
+}
+
+interface CredentialsBanner {
+  email:         string;
+  temp_password: string;
+  email_status:  'sent' | 'failed';
 }
 
 interface Site {
@@ -84,6 +91,8 @@ export default function CompaniesPage() {
   const [editSiteId,  setEditSiteId]  = useState<string | null>(null);
   const [overrideVal, setOverrideVal] = useState('');
   const [savingSite,  setSavingSite]  = useState(false);
+  const [credentialsBanner, setCredentialsBanner] = useState<CredentialsBanner | null>(null);
+  const [resendingAdminId, setResendingAdminId] = useState<string | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const siteRowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
 
@@ -246,6 +255,25 @@ export default function CompaniesPage() {
     } catch (e: any) { setError(e.message); }
   }
 
+  async function resendPrimaryAdminWelcome(companyId: string, admin: Admin) {
+    if (!confirm(`Resend welcome email to ${admin.email}? A new temporary password will be generated and the old one will stop working.`)) return;
+    setResendingAdminId(admin.id);
+    try {
+      const r = await vishnuPost<{ temp_password: string; email_status: 'sent' | 'failed' }>(
+        `/api/admin/companies/${companyId}/admins/${admin.id}/resend-welcome`, {},
+      );
+      setCredentialsBanner({ email: admin.email, temp_password: r.temp_password, email_status: r.email_status });
+      setAdmins((prev) => { const n = { ...prev }; delete n[companyId]; return n; });
+      await loadAdmins(companyId);
+    } catch (e: any) { setError(e?.message ?? 'Failed to resend welcome email'); }
+    finally { setResendingAdminId(null); }
+  }
+
+  function copyCredentialsToClipboard(b: CredentialsBanner) {
+    const text = `Portal: https://app.netraops.com/admin\nEmail: ${b.email}\nPassword: ${b.temp_password}`;
+    navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
+  }
+
   async function saveOverride(siteId: string) {
     setSavingSite(true);
     try {
@@ -270,6 +298,49 @@ export default function CompaniesPage() {
       </div>
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
+
+      {credentialsBanner && (
+        <div className={`text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3 border ${
+          credentialsBanner.email_status === 'sent'
+            ? 'bg-green-900/40 border-green-500 text-green-300'
+            : 'bg-amber-900/40 border-amber-500 text-amber-200'
+        }`}>
+          <div className="min-w-0 flex-1">
+            <p className={`font-medium mb-1 ${credentialsBanner.email_status === 'sent' ? 'text-green-200' : 'text-amber-100'}`}>
+              {credentialsBanner.email_status === 'sent'
+                ? '✅ Welcome email sent. New temp password:'
+                : '⚠️ Email delivery failed — share these credentials manually:'}
+            </p>
+            <p className="text-sm leading-6">
+              Portal: <span className="font-mono">https://app.netraops.com/admin</span><br />
+              Email: <span className="font-mono">{credentialsBanner.email}</span><br />
+              Password: <span className="font-mono font-bold">{credentialsBanner.temp_password}</span>
+            </p>
+            <p className={`text-xs mt-2 ${credentialsBanner.email_status === 'sent' ? 'text-green-400' : 'text-amber-300'}`}>
+              Admin will be required to change this password on first login.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => copyCredentialsToClipboard(credentialsBanner)}
+              className={`text-xs tracking-widest border rounded px-3 py-1 ${
+                credentialsBanner.email_status === 'sent'
+                  ? 'text-green-300 hover:text-green-100 border-green-500/40 hover:bg-green-500/10'
+                  : 'text-amber-200 hover:text-amber-50 border-amber-500/40 hover:bg-amber-500/10'
+              }`}
+            >
+              COPY
+            </button>
+            <button
+              onClick={() => setCredentialsBanner(null)}
+              aria-label="Dismiss"
+              className={`text-lg leading-none ${credentialsBanner.email_status === 'sent' ? 'text-green-400 hover:text-green-200' : 'text-amber-300 hover:text-amber-100'}`}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       <input
         type="text"
@@ -474,6 +545,15 @@ export default function CompaniesPage() {
                             <span className="text-gray-600">{a.email}</span>
                             {a.is_primary && (
                               <span className="text-gray-400 border border-gray-600 px-1.5 rounded text-xs tracking-widest">PRIMARY</span>
+                            )}
+                            {a.is_primary && a.is_active && a.must_change_password && (
+                              <button
+                                onClick={() => resendPrimaryAdminWelcome(c.id, a)}
+                                disabled={resendingAdminId === a.id}
+                                className="ml-auto text-xs text-cyan-400 tracking-widest border border-cyan-500/40 px-2 py-0.5 rounded hover:bg-cyan-500/10 hover:border-cyan-400 transition-colors disabled:opacity-40"
+                              >
+                                {resendingAdminId === a.id ? 'SENDING…' : '↻ RESEND EMAIL'}
+                              </button>
                             )}
                           </div>
                         ))}

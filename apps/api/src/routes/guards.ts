@@ -34,7 +34,7 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   // only surfaces the label when Set<company_name>.size > 1, so single-tenant
   // (company_admin) views stay visually unchanged.
   const result = await pool.query(
-    `SELECT g.id, g.name, g.email, g.badge_number, g.is_active, g.created_at,
+    `SELECT g.id, g.name, g.email, g.badge_number, g.is_active, g.must_change_password, g.created_at,
             co.name AS company_name,
             array_agg(json_build_object(
               'id', gsa.id,

@@ -47,7 +47,8 @@ interface Client {
 interface CredentialsBanner {
   email:         string;
   temp_password: string;
-  mode:          'created' | 'reset';
+  mode:          'created' | 'reset' | 'resent';
+  email_status?: 'sent' | 'failed';
 }
 
 type StatusFilter = 'active' | 'inactive' | 'all';
@@ -290,6 +291,30 @@ function ClientPortalsPageInner() {
     finally { setClientSaving(false); }
   }
 
+  async function resendClientWelcome() {
+    if (!editingClient) return;
+    if (!confirm(`Resend welcome email to ${editingClient.email}? A new temporary password will be generated and the old one will stop working.`)) return;
+    setClientSaving(true); setClientFormError('');
+    try {
+      const r = await adminPost<{ temp_password: string; email_status: 'sent' | 'failed' }>(
+        `/api/clients/${editingClient.id}/resend-welcome`, {},
+      );
+      setCredentialsBanner({
+        email:         editingClient.email,
+        temp_password: r.temp_password,
+        mode:          'resent',
+        email_status:  r.email_status,
+      });
+      const target = clientModalSite;
+      closeClientModal();
+      if (target) {
+        const list = await adminGet<Client[]>(`/api/clients/${target}`);
+        setClientsPerSite((prev) => ({ ...prev, [target]: list }));
+      }
+    } catch (e: any) { setClientFormError(e?.message ?? 'Failed to resend welcome email'); }
+    finally { setClientSaving(false); }
+  }
+
   async function toggleClientActive(client: Client, siteId: string) {
     const msg = client.is_active
       ? `Deactivate ${client.email}? Their session will end immediately.`
@@ -436,36 +461,50 @@ function ClientPortalsPageInner() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      {credentialsBanner && (
-        <div className="bg-green-900/40 border border-green-500 text-green-300 text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <p className="text-green-200 font-medium mb-1">
-              {credentialsBanner.mode === 'created' ? 'Client created.' : 'New temp password ready.'} Share these credentials:
-            </p>
-            <p className="text-sm leading-6">
-              Portal: <span className="font-mono text-green-100">https://netraops.com/portal</span><br />
-              Email: <span className="font-mono text-green-100">{credentialsBanner.email}</span><br />
-              Password: <span className="font-mono text-green-100 font-bold">{credentialsBanner.temp_password}</span>
-            </p>
-            <p className="text-green-400 text-xs mt-2">Client will be prompted to change the password on first login.</p>
+      {credentialsBanner && (() => {
+        const failed = credentialsBanner.mode === 'resent' && credentialsBanner.email_status === 'failed';
+        const headline =
+          credentialsBanner.mode === 'created' ? 'Client created. Share these credentials:'
+          : credentialsBanner.mode === 'reset'  ? 'New temp password ready. Share these credentials:'
+          : failed                              ? '⚠️ Email delivery failed — share these credentials manually:'
+                                                : '✅ Welcome email sent. New temp password:';
+        return (
+          <div className={`text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3 border ${
+            failed ? 'bg-amber-900/40 border-amber-500 text-amber-200'
+                   : 'bg-green-900/40 border-green-500 text-green-300'
+          }`}>
+            <div className="min-w-0 flex-1">
+              <p className={`font-medium mb-1 ${failed ? 'text-amber-100' : 'text-green-200'}`}>{headline}</p>
+              <p className="text-sm leading-6">
+                Portal: <span className="font-mono">https://netraops.com/portal</span><br />
+                Email: <span className="font-mono">{credentialsBanner.email}</span><br />
+                Password: <span className="font-mono font-bold">{credentialsBanner.temp_password}</span>
+              </p>
+              <p className={`text-xs mt-2 ${failed ? 'text-amber-300' : 'text-green-400'}`}>
+                Client will be prompted to change the password on first login.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => copyCredentialsToClipboard(credentialsBanner)}
+                className={`text-xs tracking-widest border rounded px-3 py-1 ${
+                  failed ? 'text-amber-200 hover:text-amber-50 border-amber-500/40 hover:bg-amber-500/10'
+                         : 'text-green-300 hover:text-green-100 border-green-500/40 hover:bg-green-500/10'
+                }`}
+              >
+                COPY
+              </button>
+              <button
+                onClick={() => setCredentialsBanner(null)}
+                aria-label="Dismiss"
+                className={`text-lg leading-none ${failed ? 'text-amber-300 hover:text-amber-100' : 'text-green-400 hover:text-green-200'}`}
+              >
+                ✕
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => copyCredentialsToClipboard(credentialsBanner)}
-              className="text-xs text-green-300 hover:text-green-100 tracking-widest border border-green-500/40 rounded px-3 py-1 hover:bg-green-500/10"
-            >
-              COPY
-            </button>
-            <button
-              onClick={() => setCredentialsBanner(null)}
-              aria-label="Dismiss"
-              className="text-green-400 hover:text-green-200 text-lg leading-none"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {loading && <p className="text-center text-gray-500 py-10">Loading…</p>}
       {!loading && visibleSites.length === 0 && (
@@ -698,15 +737,27 @@ function ClientPortalsPageInner() {
               {clientModalMode === 'edit' && editingClient && (
                 <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-3">
                   <p className="text-gray-500 text-xs tracking-widest mb-1">PASSWORD</p>
-                  <button
-                    type="button"
-                    onClick={resetClientPassword}
-                    disabled={clientSaving}
-                    className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40"
-                  >
-                    RESET PASSWORD
-                  </button>
-                  <p className="text-gray-500 text-xs mt-2">Mints a new temp password and ends the client's current session.</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={resetClientPassword}
+                      disabled={clientSaving}
+                      className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40"
+                    >
+                      RESET PASSWORD
+                    </button>
+                    {editingClient.must_change_password && (
+                      <button
+                        type="button"
+                        onClick={resendClientWelcome}
+                        disabled={clientSaving}
+                        className="text-xs text-cyan-400 tracking-widest border border-cyan-400/40 rounded px-3 py-1.5 hover:bg-cyan-400/10 hover:border-cyan-400 transition-colors disabled:opacity-40"
+                      >
+                        ↻ RESEND WELCOME EMAIL
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-gray-500 text-xs mt-2">Reset mints a new temp password. Resend also fires the welcome template.</p>
                 </div>
               )}
               <p className="text-gray-500 text-xs">

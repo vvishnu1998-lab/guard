@@ -20,19 +20,26 @@ interface Assignment {
 }
 
 interface Guard {
-  id:            string;
-  name:          string;
-  email:         string;
-  badge_number:  string;
-  is_active:     boolean;
-  created_at:    string;
-  company_name?: string;               // present when Vishnu view spans multiple companies
-  assignments:   Assignment[] | null;
+  id:                    string;
+  name:                  string;
+  email:                 string;
+  badge_number:          string;
+  is_active:             boolean;
+  must_change_password:  boolean;
+  created_at:            string;
+  company_name?:         string;       // present when Vishnu view spans multiple companies
+  assignments:           Assignment[] | null;
 }
 
 interface Site { id: string; name: string; }
 
 interface ImpactReport { future_shift_count: number; sample_dates: string[] }
+
+interface CredentialsBanner {
+  email:         string;
+  temp_password: string;
+  email_status:  'sent' | 'failed';
+}
 
 type StatusFilter = 'active' | 'inactive' | 'all';
 
@@ -90,6 +97,8 @@ export default function GuardsPage() {
   const [assignForm, setAssignForm] = useState({ site_id: '', assigned_from: '', assigned_until: '' });
   const [saving,     setSaving]     = useState(false);
   const [formError,  setFormError]  = useState('');
+  const [credentialsBanner, setCredentialsBanner] = useState<CredentialsBanner | null>(null);
+  const [resendingId, setResendingId] = useState<string | null>(null);
 
   // ── Redesign state (Session 2) ─────────────────────────────────────────
   const [search,       setSearch]       = useState('');
@@ -148,6 +157,24 @@ export default function GuardsPage() {
     if (!confirm('Reactivate this guard? They will be able to log in again.')) return;
     try { await adminFetch(`/api/guards/${id}/reactivate`, { method: 'PATCH' }); await load(); }
     catch (e: any) { setError(e.message); }
+  }
+
+  async function resendWelcome(g: Guard) {
+    if (!confirm(`Resend welcome email to ${g.email}? A new temporary password will be generated and the old one will stop working.`)) return;
+    setResendingId(g.id);
+    try {
+      const r = await adminPost<{ temp_password: string; email_status: 'sent' | 'failed' }>(
+        `/api/guards/${g.id}/resend-welcome`, {},
+      );
+      setCredentialsBanner({ email: g.email, temp_password: r.temp_password, email_status: r.email_status });
+      await load();
+    } catch (e: any) { setError(e?.message ?? 'Failed to resend welcome email'); }
+    finally { setResendingId(null); }
+  }
+
+  function copyCredentialsToClipboard(b: CredentialsBanner) {
+    const text = `Email: ${b.email}\nPassword: ${b.temp_password}`;
+    navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
   }
 
   async function assignGuard() {
@@ -295,6 +322,48 @@ export default function GuardsPage() {
         </div>
       )}
 
+      {credentialsBanner && (
+        <div className={`text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3 border ${
+          credentialsBanner.email_status === 'sent'
+            ? 'bg-green-900/40 border-green-500 text-green-300'
+            : 'bg-amber-900/40 border-amber-500 text-amber-200'
+        }`}>
+          <div className="min-w-0 flex-1">
+            <p className={`font-medium mb-1 ${credentialsBanner.email_status === 'sent' ? 'text-green-200' : 'text-amber-100'}`}>
+              {credentialsBanner.email_status === 'sent'
+                ? '✅ Welcome email sent. New temp password:'
+                : '⚠️ Email delivery failed — share these credentials manually:'}
+            </p>
+            <p className="text-sm leading-6">
+              Email: <span className="font-mono font-medium">{credentialsBanner.email}</span><br />
+              Password: <span className="font-mono font-bold">{credentialsBanner.temp_password}</span>
+            </p>
+            <p className={`text-xs mt-2 ${credentialsBanner.email_status === 'sent' ? 'text-green-400' : 'text-amber-300'}`}>
+              Guard will be required to change this password on first login.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => copyCredentialsToClipboard(credentialsBanner)}
+              className={`text-xs tracking-widest border rounded px-3 py-1 ${
+                credentialsBanner.email_status === 'sent'
+                  ? 'text-green-300 hover:text-green-100 border-green-500/40 hover:bg-green-500/10'
+                  : 'text-amber-200 hover:text-amber-50 border-amber-500/40 hover:bg-amber-500/10'
+              }`}
+            >
+              COPY
+            </button>
+            <button
+              onClick={() => setCredentialsBanner(null)}
+              aria-label="Dismiss"
+              className={`text-lg leading-none ${credentialsBanner.email_status === 'sent' ? 'text-green-400 hover:text-green-200' : 'text-amber-300 hover:text-amber-100'}`}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Desktop list */}
       <div className="hidden md:block bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         {loading && <p className="p-8 text-center text-gray-500">Loading…</p>}
@@ -353,6 +422,15 @@ export default function GuardsPage() {
                 <div className="flex gap-3 justify-end">
                   {g.is_active && (
                     <button onClick={() => { setShowAssign(g); setFormError(''); }} className="text-xs text-amber-400 tracking-widest hover:underline">ASSIGN</button>
+                  )}
+                  {g.is_active && g.must_change_password && (
+                    <button
+                      onClick={() => resendWelcome(g)}
+                      disabled={resendingId === g.id}
+                      className="text-xs text-cyan-400 tracking-widest hover:underline disabled:opacity-40"
+                    >
+                      {resendingId === g.id ? 'RESENDING…' : '↻ RESEND WELCOME'}
+                    </button>
                   )}
                   {g.is_active ? (
                     <button onClick={() => deactivate(g.id)} className="text-xs text-red-400 tracking-widest hover:underline">DEACTIVATE</button>
@@ -467,6 +545,12 @@ export default function GuardsPage() {
                   <button onClick={() => { setShowAssign(g); setFormError(''); }}
                     className="flex-1 text-xs text-amber-400 tracking-widest border border-amber-400/30 rounded-lg py-2 hover:bg-amber-400/10 transition-colors">
                     ASSIGN
+                  </button>
+                )}
+                {g.is_active && g.must_change_password && (
+                  <button onClick={() => resendWelcome(g)} disabled={resendingId === g.id}
+                    className="flex-1 text-xs text-cyan-400 tracking-widest border border-cyan-400/30 rounded-lg py-2 hover:bg-cyan-400/10 transition-colors disabled:opacity-40">
+                    {resendingId === g.id ? 'SENDING…' : '↻ RESEND'}
                   </button>
                 )}
                 {g.is_active ? (
