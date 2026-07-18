@@ -56,10 +56,19 @@ export default function ClockInStep4() {
     reset: resetClockIn,
   } = useClockInStore();
 
-  const { pendingShift, setActiveSession } = useShiftStore();
+  const { pendingShift, setActiveSession, activeSession } = useShiftStore();
 
   // ── Guard: selfie proof must be present ──────────────────────────────
-  if (!verifiedLatitude || !selfie || !pendingShiftId) {
+  // Bypass the "INCOMPLETE DATA" screen once a session has been committed
+  // (activeSession set) — startShift → setActiveSession → resetClockIn
+  // used to null the three fields below WHILE step 4 was still mounted
+  // on the PDF-instructions branch (that branch doesn't navigate away),
+  // so the next re-render would flash "INCOMPLETE DATA" on top of a
+  // just-committed clock-in. Belt-and-suspenders alongside the reordered
+  // reset in startShift + dismissInstructions. RESTART still works: it
+  // takes the guard back to home where handleClockIn refreshes the store
+  // on wizard re-entry.
+  if (!activeSession && (!verifiedLatitude || !selfie || !pendingShiftId)) {
     return (
       <View style={styles.container}>
         <Text style={styles.errorTitle}>INCOMPLETE DATA</Text>
@@ -69,6 +78,15 @@ export default function ClockInStep4() {
         </TouchableOpacity>
       </View>
     );
+  }
+  // Post-dismiss transitional state: session committed AND clockInStore
+  // already reset (dismissInstructions ran). If Expo Router hasn't fully
+  // unmounted step 4 yet, the JSX below would crash on
+  // verifiedLatitude!.toFixed(6) / selfie.uri. Return null until unmount
+  // completes — no user-visible flash because the modal already closed
+  // and navigation to /(tabs)/home is in flight.
+  if (activeSession && (!verifiedLatitude || !selfie || !pendingShiftId)) {
+    return null;
   }
 
   async function startShift() {
@@ -170,7 +188,9 @@ export default function ClockInStep4() {
         scheduled_end:   session.clocked_in_at,
       };
       setActiveSession(shiftForStore, { ...session, shift_id: pendingShiftId });
-      resetClockIn();
+      // resetClockIn intentionally NOT called here — deferring it fixes the
+      // step-4 race on the PDF-instructions branch. See dismissInstructions
+      // (PDF branch cleanup) and the non-PDF branch below (immediate cleanup).
 
       // Field is populated with the JWT-scoped streaming URL when the
       // site has a PDF configured (Build 38 API #1 + followup). Pass it
@@ -180,7 +200,9 @@ export default function ClockInStep4() {
       if (pdfUrl) {
         setInstructionsPdfUrl(pdfUrl);
         setShowInstructions(true);
+        // Deferred to dismissInstructions — see comment above the guard.
       } else {
+        resetClockIn();
         router.replace('/(tabs)/home');
       }
     } catch (err: any) {
@@ -213,6 +235,11 @@ export default function ClockInStep4() {
 
   function dismissInstructions() {
     setShowInstructions(false);
+    // Deferred from startShift so the clockInStore's verifiedLatitude /
+    // selfie / pendingShiftId stay populated while the modal is open —
+    // step 4 stays mounted on the PDF branch and would otherwise flash
+    // INCOMPLETE DATA on the re-render after resetClockIn.
+    resetClockIn();
     router.replace('/(tabs)/home');
   }
 
