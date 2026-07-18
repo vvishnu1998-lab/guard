@@ -672,8 +672,21 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 
   if (!userId || !table) return res.json(safeResponse);
 
+  const role = portal === 'admin' ? 'company_admin' : portal === 'client' ? 'client' : 'guard';
   const tempPassword = generateTempPassword();
   const hash = await bcrypt.hash(tempPassword, 12);
+
+  // Email-first ordering — rotating the stored hash before a confirmed send would silently lock the user out.
+  try {
+    await sendTempPasswordEmail(normalizedEmail, tempPassword, portal as 'admin' | 'client' | 'guard');
+  } catch (err) {
+    await logEvent(userId, role, 'password_reset_email_failed', req);
+    Sentry.captureException(err, {
+      tags: { flow: 'forgot_password', role },
+      extra: { target_email: normalizedEmail, target_id: userId },
+    });
+    return res.json(safeResponse);
+  }
 
   await pool.query(
     `UPDATE ${table} SET password_hash = $1, must_change_password = true WHERE id = $2`,
@@ -688,8 +701,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     ).catch(() => {});
   }
 
-  await sendTempPasswordEmail(normalizedEmail, tempPassword, portal as 'admin' | 'client' | 'guard');
-  await logEvent(userId, portal === 'admin' ? 'company_admin' : portal === 'client' ? 'client' : 'guard', 'password_reset_emailed', req);
+  await logEvent(userId, role, 'password_reset_emailed', req);
 
   res.json(safeResponse);
 });
