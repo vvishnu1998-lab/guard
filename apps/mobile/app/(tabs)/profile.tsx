@@ -11,6 +11,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { formatHoursHHMM, type ShiftHours } from '../../lib/formatHours';
 import Constants from 'expo-constants';
 
 interface GuardProfile {
@@ -28,9 +29,12 @@ interface ShiftRecord {
   scheduled_start:    string;
   scheduled_end:      string;
   status:             string;
-  // Sum of shift_sessions.total_hours for this shift, plus live elapsed for
-  // any still-open session. 0 for no-shows (no session rows).
+  // Legacy scalar (MAX(clock_in, scheduled_start) formula). Kept as a
+  // fallback for pre-Phase-1 shifts whose row won't carry the new object.
   total_hours_worked: number | string | null;
+  // Phase 1 4-field canonical breakdown. Prefer `hours.actual_hours` at
+  // read time — matches admin/client (raw clock_out − clock_in).
+  hours?:             ShiftHours;
 }
 
 export default function ProfileScreen() {
@@ -52,7 +56,11 @@ export default function ProfileScreen() {
   );
 
   function hoursWorked(shift: ShiftRecord) {
-    // pg returns NUMERIC as string; coerce. Null/undefined → 0.
+    // Phase 1 4-field canonical: prefer hours.actual_hours (raw
+    // clock_out − clock_in — matches admin/client). Fall back to the
+    // legacy total_hours_worked scalar for pre-Phase-1 rows.
+    const fromObj = shift.hours?.actual_hours;
+    if (typeof fromObj === 'number' && Number.isFinite(fromObj)) return fromObj;
     const v = shift.total_hours_worked;
     if (v == null) return 0;
     const n = typeof v === 'number' ? v : Number(v);
@@ -156,7 +164,7 @@ export default function ProfileScreen() {
                       {new Date(s.scheduled_start).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}
                     </Text>
                     <Text style={styles.historySite} numberOfLines={1}>{s.site_name}</Text>
-                    <Text style={styles.historyHours}>{hoursWorked(s).toFixed(1)}h</Text>
+                    <Text style={styles.historyHours}>{formatHoursHHMM(hoursWorked(s))}</Text>
                   </View>
                 ))}
               </View>
@@ -185,9 +193,11 @@ export default function ProfileScreen() {
 }
 
 function HoursStat({ label, value }: { label: string; value: number }) {
+  // Zero is a legitimate "no shifts in this window" state, not an
+  // unknown — render "0h 00m" via the D2 helper (not "—").
   return (
     <View style={styles.hoursStat}>
-      <Text style={styles.hoursValue}>{value.toFixed(1)}<Text style={styles.hoursUnit}>h</Text></Text>
+      <Text style={styles.hoursValue}>{formatHoursHHMM(value)}</Text>
       <Text style={styles.hoursLabel}>{label}</Text>
     </View>
   );
@@ -264,8 +274,10 @@ const styles = StyleSheet.create({
 
   hoursGrid:    { flexDirection: 'row', padding: Spacing.md },
   hoursStat:    { flex: 1, alignItems: 'center', paddingVertical: Spacing.sm },
-  hoursValue:   { fontFamily: Fonts.heading, color: Colors.action, fontSize: 28, letterSpacing: 1 },
-  hoursUnit:    { fontSize: 16, color: Colors.muted },
+  // Phase 3 — dropped fontSize 28 → 22 and letterSpacing 1 → 0 because
+  // "10h 25m" is 7 chars vs the old "10.5h" 5 chars, and 3-across on a
+  // narrow iPhone SE screen clipped at the old size.
+  hoursValue:   { fontFamily: Fonts.heading, color: Colors.action, fontSize: 22 },
   hoursLabel:   { color: Colors.muted, fontSize: 10, letterSpacing: 2, marginTop: 2 },
   hoursDivider: { width: 1, backgroundColor: Colors.border, marginVertical: Spacing.sm },
 

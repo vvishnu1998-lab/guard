@@ -14,6 +14,7 @@ import { useDrawerStore } from '../../store/drawerStore';
 import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
 import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
+import { formatDurationMs, formatHoursHHMM, type ShiftHours } from '../../lib/formatHours';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BreakType } from '../../constants/breakDurations';
@@ -42,14 +43,16 @@ interface ActiveSessionResponse {
     ping_interval_minutes?: number;
   };
   session: { id: string; shift_id: string; clocked_in_at: string };
+  /** Phase 1 4-field breakdown (server-truth, computed against NOW). Home
+   *  reads break_hours off this so the stat bar's Break Time is the real
+   *  cumulative time, not a hard-coded 0m. Refreshed on session fetch —
+   *  live-tick between refreshes is a Phase 2.5 story. */
+  hours?: ShiftHours;
 }
 
-function formatDuration(ms: number) {
-  const totalMins = Math.floor(ms / 60000);
-  const h = Math.floor(totalMins / 60);
-  const m = totalMins % 60;
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
+// formatDuration removed 2026-07-18: replaced by formatDurationMs from
+// lib/formatHours.ts so the stat bar renders in the same "Nh MMm" style
+// (minutes zero-padded) that admin/client/emails use. See D2 contract.
 
 function fmtTime(iso: string | null | undefined) {
   if (!iso) return '';
@@ -75,6 +78,10 @@ export default function HomeScreen() {
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [currentTime, setCurrentTime] = useState(getCurrentTimeStr());
   const [elapsed, setElapsed] = useState(0);
+  // Phase 1 4-field hours for the active session. Populated from
+  // /shifts/active-session on restore/focus. Break Time on the stat bar
+  // reads break_hours off this; null while loading or unclocked.
+  const [activeHours, setActiveHours] = useState<ShiftHours | null>(null);
   const [showInstructions, setShowInstructions] = useState(false);
 
   // Walk-test 2026-07-09 BUG D: outbound handoff visibility. After the
@@ -170,22 +177,20 @@ export default function HomeScreen() {
   );
 
   // Working hours ticker.
-  // Option C: pay starts at MAX(clocked_in_at, scheduled_start) — early
-  // arrivals show 0m until scheduled_start, then accumulate. Late stays
-  // continue past scheduled_end. Mirrors the server math in
-  // apps/api/src/routes/shifts.ts and apps/api/src/jobs/autoCompleteShifts.ts.
+  // Phase 1 D1 update: elapsed is RAW clocked_in_at → NOW, matching the
+  // canonical actual_hours field returned by every /shifts endpoint. The
+  // old MAX(clocked_in_at, scheduled_start) "Option C" truncation was
+  // dropped so mobile agrees with admin/client. Early arrivals now
+  // accumulate before scheduled_start — the same as what the guard sees
+  // on the admin dashboard for their own shift.
   useEffect(() => {
     if (!activeSession?.clocked_in_at) { setElapsed(0); return; }
-    const clockInMs   = new Date(activeSession.clocked_in_at).getTime();
-    const scheduledMs = activeShift?.scheduled_start
-      ? new Date(activeShift.scheduled_start).getTime()
-      : clockInMs;
-    const payStartMs  = Math.max(clockInMs, scheduledMs);
-    const compute = () => Math.max(0, Date.now() - payStartMs);
+    const clockInMs = new Date(activeSession.clocked_in_at).getTime();
+    const compute = () => Math.max(0, Date.now() - clockInMs);
     setElapsed(compute());
     const id = setInterval(() => setElapsed(compute()), 10000);
     return () => clearInterval(id);
-  }, [activeSession?.clocked_in_at, activeShift?.scheduled_start]);
+  }, [activeSession?.clocked_in_at]);
 
   // ── Live Map location acquisition ─────────────────────────────────────────
   // Walk-test bug #4 remediation. Previously this effect fired watchPosition
@@ -276,8 +281,11 @@ export default function HomeScreen() {
       const active = await apiClient.get<ActiveSessionResponse | null>('/shifts/active-session');
       if (active) {
         setActiveSession(active.shift, active.session);
+        setActiveHours(active.hours ?? null);
         return;
       }
+      // Session ended server-side. Clear the local hours cache too.
+      setActiveHours(null);
     } catch { /* not on shift */ }
     fetchUpcomingShift();
   }
@@ -519,17 +527,22 @@ export default function HomeScreen() {
             {/* Stat bar */}
             <View style={styles.statBar}>
               <View style={styles.statCol}>
-                <Text style={styles.statValue}>{formatDuration(elapsed)}</Text>
+                <Text style={styles.statValue}>{formatDurationMs(elapsed)}</Text>
                 <Text style={styles.statLabel}>Working Hours</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.statCol}>
-                <Text style={styles.statValue}>{formatDuration(timeLeftMs)}</Text>
+                <Text style={styles.statValue}>{formatDurationMs(timeLeftMs)}</Text>
                 <Text style={styles.statLabel}>Time Left</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.statCol}>
-                <Text style={styles.statValue}>0m</Text>
+                {/* Phase 3 — cumulative break_hours from /shifts/active-session.
+                    Server-truth (open breaks counted up to NOW server-side),
+                    refreshed on session fetch. Live-ticking between refreshes
+                    would need either a polling loop or a shift-store extension;
+                    kept out of scope for now — "—" while unloaded is honest. */}
+                <Text style={styles.statValue}>{formatHoursHHMM(activeHours?.break_hours)}</Text>
                 <Text style={styles.statLabel}>Break Time</Text>
               </View>
             </View>
