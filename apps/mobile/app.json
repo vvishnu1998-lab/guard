@@ -2,7 +2,7 @@
   "expo": {
     "name": "NetraOps",
     "slug": "guard",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -14,7 +14,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.netraops.guard",
-      "buildNumber": "39",
+      "buildNumber": "41",
       "config": {
         "googleMapsApiKey": "AIzaSyDTHH3yWZVpuxISFd5pHxE2dmZtyU9VN-I",
         "usesNonExemptEncryption": false
@@ -35,7 +35,7 @@
     },
     "android": {
       "package": "com.netraops.guard",
-      "versionCode": 16,
+      "versionCode": 17,
       "config": {
         "googleMaps": {
           "apiKey": "AIzaSyDstXR7ThtM6WPlhqBR-6RKWB2mNyqx3QE"
