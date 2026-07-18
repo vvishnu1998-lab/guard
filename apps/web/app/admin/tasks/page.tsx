@@ -136,7 +136,7 @@ export default function TaskTemplatesPage() {
   return (
     <div className="space-y-6">
       {/* Page header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-widest text-amber-400">TASK TEMPLATES</h1>
           <p className="text-gray-500 text-sm mt-1">
@@ -145,7 +145,7 @@ export default function TaskTemplatesPage() {
         </div>
         <button
           onClick={openCreate}
-          className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors"
+          className="self-start md:self-auto bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors whitespace-nowrap"
         >
           + NEW TEMPLATE
         </button>
