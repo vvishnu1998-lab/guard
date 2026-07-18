@@ -54,7 +54,13 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
       <div className="p-4 border-b border-[#1A3050]">
         <h2 className="text-amber-400 font-bold tracking-widest text-sm">ACTIVE SITES</h2>
       </div>
-      <table className="w-full text-sm">
+
+      {sites.length === 0 && (
+        <p className="text-center text-gray-500 py-8">No sites yet</p>
+      )}
+
+      {/* Desktop table (md+). Below md we use the card list further down. */}
+      <table className="hidden md:table w-full text-sm">
         <thead>
           <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
             <th className="text-left p-4">SITE</th>
@@ -65,9 +71,6 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
           </tr>
         </thead>
         <tbody>
-          {sites.length === 0 && (
-            <tr><td colSpan={5} className="text-center text-gray-500 py-8">No sites yet</td></tr>
-          )}
           {sites.map((site) => {
             const status = displayStatus(site);
             const hoursWeek = actualHoursThisWeek(site);
@@ -94,6 +97,42 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
           })}
         </tbody>
       </table>
+
+      {/* Mobile card list (below md). Site name gets its own line so it
+          doesn't have to wrap into 3 lines competing with metric columns;
+          the four stats sit on a compact metric row below. */}
+      <div className="md:hidden">
+        {sites.map((site) => {
+          const status = displayStatus(site);
+          const hoursWeek = actualHoursThisWeek(site);
+          return (
+            <div
+              key={site.id}
+              className="px-4 py-3 border-b border-[#1A3050] last:border-b-0 hover:bg-[#0B1526] transition-colors"
+            >
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <Link
+                  href={`/admin/sites/${site.id}`}
+                  className="text-amber-400 hover:underline text-sm font-medium min-w-0 truncate"
+                >
+                  {site.name}
+                </Link>
+                <span className={`text-[10px] tracking-widest shrink-0 ${status.color}`}>
+                  {status.label}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs text-gray-400 gap-3">
+                <span><span className="text-gray-600 tracking-widest text-[10px]">GUARDS</span> {site.guard_count}</span>
+                <span><span className="text-gray-600 tracking-widest text-[10px]">REPORTS</span> {site.reports_today}</span>
+                <span className="whitespace-nowrap"><span className="text-gray-600 tracking-widest text-[10px]">HOURS</span> {formatHoursHHMM(hoursWeek)}</span>
+              </div>
+              {site.days_until_deletion !== null && site.days_until_deletion <= 30 && (
+                <p className="text-[11px] text-red-400 mt-1">{site.days_until_deletion}d left</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
