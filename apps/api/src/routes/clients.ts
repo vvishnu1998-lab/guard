@@ -3,7 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
 import { generateTempPassword } from '../utils/tempPassword';
-import { validatePassword } from './auth';
+import { validatePassword, logEvent } from './auth';
 import { Sentry } from '../services/sentry';
 import { sendClientWelcomeEmail } from '../services/email';
 
@@ -232,6 +232,60 @@ router.post('/:id/reset-password', requireAuth('company_admin', 'vishnu'), async
   );
 
   res.json({ temp_password: tempPassword, email: scope.email });
+});
+
+// POST /api/clients/:id/resend-welcome — rotate temp password, kick session, resend welcome email.
+router.post('/:id/resend-welcome', requireAuth('company_admin'), async (req, res) => {
+  const scope = await clientInScope(req.params.id, req.user!.company_id, false);
+  if (!scope) return res.status(404).json({ error: 'Client not found' });
+
+  // Resolve all currently-linked sites for the v36 multisite welcome template.
+  const sitesResult = await pool.query<{ site_id: string; name: string | null }>(
+    `SELECT cs.site_id, s.name
+       FROM client_sites cs
+       LEFT JOIN sites s ON s.id = cs.site_id
+      WHERE cs.client_id = $1`,
+    [scope.id],
+  );
+  const site_ids = sitesResult.rows.map((r) => r.site_id);
+
+  const clientRow = await pool.query<{ name: string; email: string; company_id: string }>(
+    'SELECT name, email, company_id FROM clients WHERE id = $1',
+    [scope.id],
+  );
+  const target = clientRow.rows[0];
+  if (!target) return res.status(404).json({ error: 'Client not found' });
+
+  const tempPassword  = generateTempPassword(12);
+  const password_hash = await bcrypt.hash(tempPassword, 12);
+
+  await pool.query(
+    `UPDATE clients
+        SET password_hash        = $1,
+            must_change_password = true,
+            tokens_not_before    = NOW()
+      WHERE id = $2`,
+    [password_hash, scope.id],
+  );
+
+  let email_status: 'sent' | 'failed' = 'sent';
+  try {
+    await sendClientWelcomeEmail({
+      client_id:     scope.id,
+      client_name:   target.name,
+      client_email:  target.email,
+      company_id:    target.company_id,
+      site_ids,
+      temp_password: tempPassword,
+    });
+    await logEvent(scope.id, 'client', 'welcome_email_resent', req);
+  } catch (err) {
+    email_status = 'failed';
+    Sentry.captureException(err);
+    await logEvent(scope.id, 'client', 'welcome_email_send_failed', req);
+  }
+
+  res.json({ temp_password: tempPassword, email_status });
 });
 
 // ── v36 multi-site link/unlink ──────────────────────────────────────────────

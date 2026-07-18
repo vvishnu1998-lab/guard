@@ -4,7 +4,7 @@ import PDFDocument from 'pdfkit';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
-import { validatePassword } from './auth';
+import { validatePassword, logEvent } from './auth';
 import { generateTempPassword } from '../utils/tempPassword';
 import { Sentry } from '../services/sentry';
 import { sendPrimaryAdminWelcomeEmail, sendSecondaryAdminWelcomeEmail } from '../services/email';
@@ -202,6 +202,54 @@ router.post('/companies/:id/admins', requireAuth('vishnu'), async (req, res) => 
     creator_admin_id: req.user!.sub,
     temp_password:    tempPassword,
   }).catch((err) => Sentry.captureException(err));
+});
+
+// POST /api/admin/companies/:company_id/admins/:admin_id/resend-welcome
+// Vishnu resends the welcome for a PRIMARY company admin. Secondary admins
+// are handled by their primary via POST /api/admin/company-admins/:id/...
+router.post('/companies/:company_id/admins/:admin_id/resend-welcome', requireAuth('vishnu'), async (req, res) => {
+  const target = await pool.query<{
+    id: string; name: string; email: string; company_id: string; is_primary: boolean;
+  }>(
+    `SELECT id, name, email, company_id, is_primary
+       FROM company_admins
+      WHERE id = $1 AND company_id = $2 AND is_active = true`,
+    [req.params.admin_id, req.params.company_id],
+  );
+  const admin = target.rows[0];
+  if (!admin) return res.status(404).json({ error: 'Admin not found' });
+  if (!admin.is_primary) {
+    return res.status(400).json({ error: 'Vishnu resend is for primary admins only. Use the company admin flow for secondaries.' });
+  }
+
+  const tempPassword  = generateTempPassword(12);
+  const password_hash = await bcrypt.hash(tempPassword, 12);
+
+  await pool.query(
+    `UPDATE company_admins
+        SET password_hash        = $1,
+            must_change_password = true
+      WHERE id = $2`,
+    [password_hash, admin.id],
+  );
+
+  let email_status: 'sent' | 'failed' = 'sent';
+  try {
+    await sendPrimaryAdminWelcomeEmail({
+      admin_id:      admin.id,
+      admin_name:    admin.name,
+      admin_email:   admin.email,
+      company_id:    admin.company_id,
+      temp_password: tempPassword,
+    });
+    await logEvent(admin.id, 'company_admin', 'welcome_email_resent', req);
+  } catch (err) {
+    email_status = 'failed';
+    Sentry.captureException(err);
+    await logEvent(admin.id, 'company_admin', 'welcome_email_send_failed', req);
+  }
+
+  res.json({ temp_password: tempPassword, email_status });
 });
 
 // Vishnu: override photo limit for a site (custom billing add-on)
@@ -1062,6 +1110,67 @@ router.post('/company-admins', requireAuth('company_admin'), async (req, res) =>
     creator_admin_id: req.user!.sub,
     temp_password:    tempPassword,
   }).catch((err) => Sentry.captureException(err));
+});
+
+// POST /api/admin/company-admins/:id/resend-welcome
+// Primary admin resends the welcome for a SECONDARY admin at the same company.
+// Cannot resend for self, cannot resend for another primary.
+router.post('/company-admins/:id/resend-welcome', requireAuth('company_admin'), async (req, res) => {
+  if (req.params.id === req.user!.sub) {
+    return res.status(400).json({ error: 'Cannot resend welcome for yourself' });
+  }
+
+  const caller = await pool.query<{ is_primary: boolean }>(
+    'SELECT is_primary FROM company_admins WHERE id = $1',
+    [req.user!.sub],
+  );
+  if (!caller.rows[0]?.is_primary) {
+    return res.status(403).json({ error: 'Only primary admin can resend welcome emails' });
+  }
+
+  const target = await pool.query<{
+    id: string; name: string; email: string; company_id: string; is_primary: boolean;
+  }>(
+    `SELECT id, name, email, company_id, is_primary
+       FROM company_admins
+      WHERE id = $1 AND company_id = $2 AND is_active = true`,
+    [req.params.id, req.user!.company_id],
+  );
+  const admin = target.rows[0];
+  if (!admin) return res.status(404).json({ error: 'Admin not found' });
+  if (admin.is_primary) {
+    return res.status(400).json({ error: 'Cannot resend welcome for a primary admin from this endpoint. Ask Vishnu.' });
+  }
+
+  const tempPassword  = generateTempPassword(12);
+  const password_hash = await bcrypt.hash(tempPassword, 12);
+
+  await pool.query(
+    `UPDATE company_admins
+        SET password_hash        = $1,
+            must_change_password = true
+      WHERE id = $2`,
+    [password_hash, admin.id],
+  );
+
+  let email_status: 'sent' | 'failed' = 'sent';
+  try {
+    await sendSecondaryAdminWelcomeEmail({
+      admin_id:         admin.id,
+      admin_name:       admin.name,
+      admin_email:      admin.email,
+      company_id:       admin.company_id,
+      creator_admin_id: req.user!.sub,
+      temp_password:    tempPassword,
+    });
+    await logEvent(admin.id, 'company_admin', 'welcome_email_resent', req);
+  } catch (err) {
+    email_status = 'failed';
+    Sentry.captureException(err);
+    await logEvent(admin.id, 'company_admin', 'welcome_email_send_failed', req);
+  }
+
+  res.json({ temp_password: tempPassword, email_status });
 });
 
 // GET /api/admin/analytics — summary stats for analytics page

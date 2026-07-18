@@ -46,7 +46,7 @@ export function signTokens(payload: Omit<AuthPayload, 'iat' | 'exp' | 'jti'>) {
   return { access, refresh };
 }
 
-async function logEvent(
+export async function logEvent(
   actorId: string,
   role: AuthPayload['role'],
   eventType: string,

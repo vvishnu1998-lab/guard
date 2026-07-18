@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
-import { validatePassword } from './auth';
+import { validatePassword, logEvent } from './auth';
+import { generateTempPassword } from '../utils/tempPassword';
 import { getAssignedSitesForGuard, writeAssignmentAudit } from '../services/guardAssignments';
 import { pacificTodayStr, isPastPacificDateString } from '../services/pacificDate';
 import { Sentry } from '../services/sentry';
@@ -141,6 +142,50 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// POST /api/guards/:id/resend-welcome — rotate temp password, kick session, resend welcome email.
+router.post('/:id/resend-welcome', requireAuth('company_admin'), async (req, res) => {
+  const guardResult = await pool.query<{
+    id: string; name: string; email: string; company_id: string;
+  }>(
+    `SELECT id, name, email, company_id
+       FROM guards
+      WHERE id = $1 AND company_id = $2 AND is_active = true`,
+    [req.params.id, req.user!.company_id],
+  );
+  const guard = guardResult.rows[0];
+  if (!guard) return res.status(404).json({ error: 'Guard not found' });
+
+  const tempPassword = generateTempPassword(12);
+  const password_hash = await bcrypt.hash(tempPassword, 12);
+
+  await pool.query(
+    `UPDATE guards
+        SET password_hash        = $1,
+            must_change_password = true,
+            tokens_not_before    = NOW()
+      WHERE id = $2`,
+    [password_hash, guard.id],
+  );
+
+  let email_status: 'sent' | 'failed' = 'sent';
+  try {
+    await sendGuardWelcomeEmail({
+      guard_id:      guard.id,
+      guard_name:    guard.name,
+      guard_email:   guard.email,
+      company_id:    guard.company_id,
+      temp_password: tempPassword,
+    });
+    await logEvent(guard.id, 'guard', 'welcome_email_resent', req);
+  } catch (err) {
+    email_status = 'failed';
+    Sentry.captureException(err);
+    await logEvent(guard.id, 'guard', 'welcome_email_send_failed', req);
+  }
+
+  res.json({ temp_password: tempPassword, email_status });
 });
 
 router.patch('/:id/deactivate', requireAuth('company_admin'), async (req, res) => {
