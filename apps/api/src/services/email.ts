@@ -4,10 +4,15 @@
  * Flows implemented in this file:
  *  - Incident Alert          — to active client on incident report
  *  - Daily Shift Report      — 9:00 AM Pacific cron, to active client
- *  - Missed Shift Alert      — primary company admin, T+10 and T+30 rungs
- *  - Geofence Breach Alert   — primary company admin, per fresh violation
+ *  - Missed Shift Alert      — all active company admins, T+10 and T+30 rungs
+ *  - Geofence Breach Alert   — all active company admins, per fresh violation
  *  - Temporary Password      — forgot-password recipient's own email
- *  - Swap / Handoff FYIs     — primary company admin, fire-and-forget
+ *  - Swap / Handoff FYIs     — all active company admins, fire-and-forget
+ *
+ * Admin-alert recipient policy: sendToAdmins() fans out to every
+ * company_admins row where is_active = true. Primary+secondaries both
+ * receive; deactivated admins do not (fixes the pre-existing gap where
+ * a deactivated primary would still receive alerts).
  */
 
 import sgMail from '@sendgrid/mail';
@@ -24,6 +29,47 @@ function reportSendgridFailure(flow: string, err: any, extra?: Record<string, un
     tags: { service: 'sendgrid', flow },
     extra: { ...(extra ?? {}), response_body: err?.response?.body },
   });
+}
+
+// Recipient resolver for all admin-alert flows. Fans out to every active
+// admin on the tenant, ordered primary-first so log ordering matches the
+// old single-recipient trace when a tenant only has one admin.
+async function getActiveAdminEmails(companyId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ email: string }>(
+    `SELECT email FROM company_admins
+      WHERE company_id = $1 AND is_active = true
+      ORDER BY is_primary DESC, email`,
+    [companyId],
+  );
+  return rows.map((r) => r.email);
+}
+
+// Per-recipient send via Promise.allSettled so one bad address doesn't
+// stop delivery to the rest. Each failure is Sentry-tagged with the
+// recipient in `extra` so the issues list shows per-recipient bounces.
+async function sendToAdmins(
+  adminEmails: string[],
+  msg: Omit<sgMail.MailDataRequired, 'to'>,
+  flow: string,
+  extra: Record<string, unknown>,
+): Promise<{ succeeded: number; failed: number }> {
+  const results = await Promise.allSettled(
+    adminEmails.map((email) =>
+      sgMail.send({ ...msg, to: email } as sgMail.MailDataRequired),
+    ),
+  );
+  let succeeded = 0, failed = 0;
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') { succeeded += 1; return; }
+    failed += 1;
+    const err: any = r.reason;
+    console.error(
+      `[email] ${flow}: SENDGRID ERROR for ${adminEmails[i]} — ${err?.message ?? err}`,
+      err?.response?.body,
+    );
+    reportSendgridFailure(flow, err, { ...extra, recipient: adminEmails[i] });
+  });
+  return { succeeded, failed };
 }
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
@@ -517,11 +563,9 @@ export function renderDailyShiftReport(data: {
 // ── Email Type 5 — Missed Shift Alert ────────────────────────────────────────
 
 export async function sendMissedShiftAlert(shiftId: string) {
-  // SELECT: kept primary-admin-only (ca.is_primary = true) per spec; client_email
-  // still SELECTed but discarded (intentional — clients are not on this email).
-  // New fields: sh.scheduled_end, si.address, last_login_at (from auth_events),
-  // upcoming_shifts_count (count of this guard's other scheduled shifts in the
-  // next 24h, excluding the current missed one).
+  // SELECT: fans out to every active company_admin via getActiveAdminEmails
+  // below; client_email still SELECTed but discarded (intentional — clients
+  // are not on this email). company_id is projected for the admin lookup.
   const result = await pool.query(
     `SELECT sh.id,
             sh.scheduled_start,
@@ -534,7 +578,7 @@ export async function sendMissedShiftAlert(shiftId: string) {
             g.badge_number,
             g.phone_number AS guard_phone,
             c.email        AS client_email,
-            ca.email       AS admin_email,
+            co.id          AS company_id,
             (SELECT MAX(created_at) FROM auth_events
               WHERE actor_id = g.id AND event_type = 'login_success'
             ) AS last_login_at,
@@ -549,27 +593,36 @@ export async function sendMissedShiftAlert(shiftId: string) {
      JOIN guards         g  ON g.id  = sh.guard_id
      LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
-     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE sh.id = $1`,
     [shiftId],
   );
   if (!result.rows[0]) return;
-  const {
-    scheduled_start, scheduled_end, site_name, site_address,
-    guard_name, badge_number, guard_phone,
-    admin_email, last_login_at, upcoming_shifts_count,
-  } = result.rows[0];
+  const row = result.rows[0];
 
-  if (!admin_email) return;
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage('sendMissedShiftAlert: no active admins for tenant', {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow: 'missed_shift_alert' },
+      extra: { company_id: row.company_id, shift_id: shiftId },
+    });
+    return;
+  }
 
-  const { subject, html } = renderMissedShiftAlert(result.rows[0]);
+  const { subject, html } = renderMissedShiftAlert(row);
 
-  try {
-    await sgMail.send({ to: admin_email, from: FROM, subject, html });
-  } catch (err: any) {
-    console.error(`[email] sendMissedShiftAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('missed_shift_alert', err, { shift_id: shiftId });
-    throw err;
+  const { succeeded, failed } = await sendToAdmins(
+    admins,
+    { from: FROM, subject, html },
+    'missed_shift_alert',
+    { shift_id: shiftId },
+  );
+
+  // Throw when every recipient failed so the caller (missedShiftAlert cron
+  // OR lateClockInReminder's T+30 rung) skips its own follow-on stamp and
+  // the shift stays eligible for the next tick's retry.
+  if (succeeded === 0) {
+    throw new Error(`sendMissedShiftAlert: all ${failed} recipients failed for shift ${shiftId}`);
   }
 
   await pool.query(
@@ -770,29 +823,40 @@ export async function sendGeofenceBreachAlert(
             g.name       AS guard_name,
             g.badge_number,
             c.email      AS client_email,
-            ca.email     AS admin_email
+            co.id        AS company_id
      FROM geofence_violations v
      JOIN sites          si ON si.id = v.site_id
      LEFT JOIN site_geofence sg ON sg.site_id = si.id
      JOIN guards         g  ON g.id  = v.guard_id
      LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
-     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE v.id = $1`,
     [violationId],
   );
   if (!result.rows[0]) return;
   const row = result.rows[0];
-  if (!row.admin_email) return;
+
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage('sendGeofenceBreachAlert: no active admins for tenant', {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow: 'geofence_breach_alert' },
+      extra: { company_id: row.company_id, violation_id: violationId, kind: context.kind },
+    });
+    return;
+  }
 
   const { subject, html } = renderGeofenceBreachAlert(row, context);
 
-  try {
-    await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
-  } catch (err: any) {
-    console.error(`[email] sendGeofenceBreachAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('geofence_breach_alert', err, { violation_id: violationId, kind: context.kind });
-    throw err;
+  const { succeeded, failed } = await sendToAdmins(
+    admins,
+    { from: FROM, subject, html },
+    'geofence_breach_alert',
+    { violation_id: violationId, kind: context.kind },
+  );
+
+  if (succeeded === 0) {
+    throw new Error(`sendGeofenceBreachAlert: all ${failed} recipients failed for violation ${violationId}`);
   }
 }
 
@@ -924,8 +988,8 @@ export function renderGeofenceBreachAlert(row: {
 // ── Email Type 8 — Coverage swap FYI (admin) ────────────────────────────────
 //
 // Fires from POST /api/shifts/:id/swap-response when a guard-initiated
-// swap is accepted. Recipient policy: primary company admin only,
-// matching sendMissedShiftAlert. No client-facing email — this is an
+// swap is accepted. Recipient policy: all active company admins on the
+// tenant (via getActiveAdminEmails). No client-facing email — this is an
 // internal FYI so admins can audit "did I know Deepak's shift got
 // covered by James".
 
@@ -948,7 +1012,7 @@ export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
             fg.badge_number      AS from_badge,
             tg.name              AS to_guard_name,
             tg.badge_number      AS to_badge,
-            ca.email             AS admin_email,
+            co.id                AS company_id,
             EXISTS (
               SELECT 1 FROM guard_site_assignments gsa
               WHERE gsa.guard_id = ssr.to_guard_id
@@ -963,21 +1027,29 @@ export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
        JOIN guards fg ON fg.id = ssr.from_guard_id
        JOIN guards tg ON tg.id = ssr.to_guard_id
        JOIN companies      co ON co.id = si.company_id
-       JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
       WHERE ssr.id = $1`,
     [historyId],
   );
   if (!result.rows[0]) return;
   const row = result.rows[0];
-  if (!row.admin_email) return;
+
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage('sendSwapAcceptedFyi: no active admins for tenant', {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow: 'swap_accepted_fyi' },
+      extra: { company_id: row.company_id, history_id: historyId },
+    });
+    return;
+  }
 
   const { subject, html } = renderSwapAcceptedFyi(row);
-  try {
-    await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
-  } catch (err: any) {
-    console.error(`[email] sendSwapAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('swap_accepted_fyi', err, { history_id: historyId });
-  }
+  await sendToAdmins(
+    admins,
+    { from: FROM, subject, html },
+    'swap_accepted_fyi',
+    { history_id: historyId },
+  );
 }
 
 export function renderSwapAcceptedFyi(row: {
@@ -1067,7 +1139,7 @@ interface HandoffFyiRow {
   to_badge:         string;
   site_name:        string;
   site_tz:          string | null;
-  admin_email:      string | null;
+  company_id:       string;
 }
 
 async function loadHandoffFyiRow(historyId: string): Promise<HandoffFyiRow | null> {
@@ -1090,14 +1162,13 @@ async function loadHandoffFyiRow(historyId: string): Promise<HandoffFyiRow | nul
             tg.badge_number    AS to_badge,
             si.name            AS site_name,
             si.timezone        AS site_tz,
-            ca.email           AS admin_email
+            co.id              AS company_id
        FROM shift_swap_requests ssr
        JOIN shifts sh ON sh.id = ssr.shift_id
        JOIN sites  si ON si.id = sh.site_id
        JOIN guards fg ON fg.id = ssr.from_guard_id
        JOIN guards tg ON tg.id = ssr.to_guard_id
        JOIN companies      co ON co.id = si.company_id
-       JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
        LEFT JOIN shift_sessions fs ON fs.id = ssr.from_session_id
        LEFT JOIN shift_sessions ts ON ts.id = ssr.to_session_id
       WHERE ssr.id = $1`,
@@ -1177,37 +1248,38 @@ function renderHandoffFyi(
   return { subject, html };
 }
 
-export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
+async function fanoutHandoffFyi(
+  historyId: string,
+  kind: 'accepted' | 'completed' | 'nudge',
+  flow: 'handoff_accepted_fyi' | 'handoff_completed_fyi' | 'handoff_nudge',
+  extra: Record<string, unknown>,
+  nudgeMinutes = 0,
+): Promise<void> {
   const row = await loadHandoffFyiRow(historyId);
-  if (!row?.admin_email) return;
-  const { subject, html } = renderHandoffFyi(row, 'accepted');
-  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) {
-    console.error(`[email] sendHandoffAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('handoff_accepted_fyi', err, { history_id: historyId });
+  if (!row) return;
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage(`${flow}: no active admins for tenant`, {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow },
+      extra: { company_id: row.company_id, history_id: historyId },
+    });
+    return;
   }
+  const { subject, html } = renderHandoffFyi(row, kind, nudgeMinutes);
+  await sendToAdmins(admins, { from: FROM, subject, html }, flow, extra);
+}
+
+export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
+  await fanoutHandoffFyi(historyId, 'accepted', 'handoff_accepted_fyi', { history_id: historyId });
 }
 
 export async function sendHandoffCompletedFyi(historyId: string): Promise<void> {
-  const row = await loadHandoffFyiRow(historyId);
-  if (!row?.admin_email) return;
-  const { subject, html } = renderHandoffFyi(row, 'completed');
-  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) {
-    console.error(`[email] sendHandoffCompletedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('handoff_completed_fyi', err, { history_id: historyId });
-  }
+  await fanoutHandoffFyi(historyId, 'completed', 'handoff_completed_fyi', { history_id: historyId });
 }
 
 export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number): Promise<void> {
-  const row = await loadHandoffFyiRow(historyId);
-  if (!row?.admin_email) return;
-  const { subject, html } = renderHandoffFyi(row, 'nudge', minutesLate);
-  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) {
-    console.error(`[email] sendHandoffNudgeFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('handoff_nudge', err, { history_id: historyId, minutes_late: minutesLate });
-  }
+  await fanoutHandoffFyi(historyId, 'nudge', 'handoff_nudge', { history_id: historyId, minutes_late: minutesLate }, minutesLate);
 }
 
 // ── Welcome emails ───────────────────────────────────────────────────────────
