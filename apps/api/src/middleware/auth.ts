@@ -158,6 +158,50 @@ export function requireAuth(...roles: UserRole[]) {
       }
     }
 
+    // Company-admin session revocation (Finding #1). Mirrors the guard/
+    // client branches: is_active gate + tokens_not_before nbf check.
+    // Stamped by admin change-password and company deactivation. A NULL
+    // tokens_not_before means no revocation — existing sessions survive.
+    if (payload.role === 'company_admin') {
+      const adminResult = await pool.query(
+        'SELECT is_active, tokens_not_before FROM company_admins WHERE id = $1',
+        [payload.sub]
+      ).catch(() => ({ rows: [] as { is_active: boolean; tokens_not_before: Date | null }[] }));
+
+      const adminRow = adminResult.rows[0];
+      if (!adminRow?.is_active) {
+        return res.status(403).json({ error: 'Account deactivated' });
+      }
+      if (adminRow.tokens_not_before) {
+        const notBeforeMs = new Date(adminRow.tokens_not_before).getTime();
+        // See guard branch above for the +1s / <= precision rationale.
+        if ((payload.iat + 1) * 1000 <= notBeforeMs) {
+          return res.status(401).json({ error: 'Session revoked by administrator' });
+        }
+      }
+    }
+
+    // Vishnu (super-admin) session revocation (Finding #1). Vishnu has no
+    // DB row (env-based auth), so revocation lives in the vishnu_state
+    // singleton, bumped by POST /api/auth/vishnu/revoke-sessions. No
+    // is_active check (no row to deactivate). On a DB read error we fail
+    // OPEN — same as the guard/client tokens_not_before reads, which treat
+    // an unreadable stamp as "no revocation" rather than locking out the
+    // only super-admin on a transient blip.
+    if (payload.role === 'vishnu') {
+      const vsResult = await pool.query(
+        'SELECT tokens_not_before FROM vishnu_state WHERE id = 1'
+      ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+
+      const nb = vsResult.rows[0]?.tokens_not_before;
+      if (nb) {
+        const notBeforeMs = new Date(nb).getTime();
+        if ((payload.iat + 1) * 1000 <= notBeforeMs) {
+          return res.status(401).json({ error: 'Session revoked' });
+        }
+      }
+    }
+
     req.user = payload;
     tagRequest(req, payload);
     next();

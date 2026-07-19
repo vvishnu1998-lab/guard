@@ -304,8 +304,12 @@ router.post('/admin/change-password', requireAuth('company_admin'), async (req: 
   if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
 
   const newHash = await bcrypt.hash(new_password, 12);
+  // Finding #1: a password change is session-invalidating. Stamp
+  // tokens_not_before = NOW() so any admin JWT minted before this instant
+  // is rejected by the middleware + refresh nbf checks (mirrors the guard
+  // change-password path).
   await pool.query(
-    'UPDATE company_admins SET password_hash = $1, must_change_password = false WHERE id = $2',
+    'UPDATE company_admins SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
     [newHash, req.user!.sub]
   );
   await logEvent(req.user!.sub, 'company_admin', 'password_changed', req);
@@ -428,6 +432,23 @@ router.post('/vishnu/login', async (req: Request, res: Response) => {
   res.json(tokens);
 });
 
+// ── Vishnu: revoke ALL super-admin sessions (break-glass) ────────────────────
+// Finding #1: bumps the vishnu_state singleton's tokens_not_before so every
+// vishnu JWT minted before now is rejected by the middleware + refresh nbf
+// checks. NOTE: this includes the CALLER'S OWN current session — after
+// calling this, Vishnu must log in again. actor_id uses the nil UUID (the
+// established vishnu convention; auth_events.actor_id has no FK).
+router.post('/vishnu/revoke-sessions', requireAuth('vishnu'), async (req: Request, res: Response) => {
+  await pool.query(
+    'UPDATE vishnu_state SET tokens_not_before = NOW(), last_updated_at = NOW() WHERE id = 1'
+  );
+  await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'sessions_revoked', req);
+  res.json({
+    success: true,
+    warning: 'All vishnu sessions revoked including current. Log in again.',
+  });
+});
+
 // ── Refresh token rotation ───────────────────────────────────────────────────
 
 router.post('/refresh', async (req: Request, res: Response) => {
@@ -470,6 +491,36 @@ router.post('/refresh', async (req: Request, res: Response) => {
       [payload.sub],
     ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
     const nb = c.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  } else if (payload.role === 'company_admin') {
+    const a = await pool.query(
+      'SELECT tokens_not_before FROM company_admins WHERE id = $1',
+      [payload.sub],
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = a.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  } else if (payload.role === 'vishnu') {
+    // Fail-open on DB read error (see middleware vishnu branch).
+    const vs = await pool.query(
+      'SELECT tokens_not_before FROM vishnu_state WHERE id = 1',
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = vs.rows[0]?.tokens_not_before;
     if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
       Sentry.addBreadcrumb({
         category: 'auth',

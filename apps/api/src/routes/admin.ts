@@ -145,6 +145,18 @@ router.patch('/companies/:id', requireAuth('vishnu'), async (req, res) => {
     params
   );
   if (!result.rows[0]) return res.status(404).json({ error: 'Company not found' });
+
+  // Finding #1: deactivating a company must also revoke its admins' live
+  // sessions. Stamp every admin of this company so the middleware + refresh
+  // nbf checks reject any JWT minted before now. NULL-safe check means
+  // active companies are unaffected.
+  if (is_active === false) {
+    await pool.query(
+      'UPDATE company_admins SET tokens_not_before = NOW() WHERE company_id = $1',
+      [req.params.id],
+    );
+  }
+
   res.json(result.rows[0]);
 });
 
