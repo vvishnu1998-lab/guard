@@ -68,12 +68,12 @@ export default function SchedulePage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <h1 className="text-3xl font-bold tracking-widest text-blue-400">GUARDS ON DUTY</h1>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full ${guards.length > 0 ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
-            <span className="text-gray-400 text-sm">{guards.length} active</span>
+            <span className="text-gray-400 text-sm whitespace-nowrap">{guards.length} active</span>
           </div>
           <button
             onClick={load}
