@@ -997,6 +997,16 @@ router.post('/:id/swap-request', requireAuth('guard'), async (req, res) => {
     }
     const toGuardName = overlapRes.rows[0].name;
 
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date — same gate the admin paths
+    // enforce. Runs inside the txn (pass client) to avoid a TOCTOU.
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    const elig = await checkShiftEligibility(to_guard_id, shift.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
+    }
+
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO shift_swap_requests
          (shift_id, from_guard_id, to_guard_id, initiated_by, reason)
@@ -1147,6 +1157,15 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
     if (overlap.rows[0]) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'You now have an overlapping shift; swap is no longer possible.' });
+    }
+
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date. Runs inside the txn (pass client).
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    const elig = await checkShiftEligibility(hist.to_guard_id, shift.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
     }
 
     await client.query(
@@ -1311,6 +1330,15 @@ router.post('/:id/handoff-request', requireAuth('guard'), async (req, res) => {
       return res.status(409).json({ error: 'Selected guard is not eligible (already clocked in, has an overlapping shift, inactive, or wrong company).' });
     }
     const toGuardName = overlapRes.rows[0].name;
+
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date. Runs inside the txn (pass client).
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    const elig = await checkShiftEligibility(to_guard_id, shift.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
+    }
 
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO shift_swap_requests
@@ -1514,6 +1542,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       history_id: string; from_guard_id: string;
       shift_id: string; site_id: string; site_name: string;
       guard_id: string | null; shift_status: string;
+      scheduled_start: string;
       from_session_id: string | null;
     }>(
       `SELECT ssr.id           AS history_id,
@@ -1523,6 +1552,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
               sh.site_id,
               sh.guard_id,
               sh.status         AS shift_status,
+              sh.scheduled_start,
               si.name           AS site_name
          FROM shift_swap_requests ssr
          JOIN shifts sh ON sh.id = ssr.shift_id
@@ -1549,6 +1579,16 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       // Admin reassign in-between.
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Shift has been reassigned by an admin; handoff is stale.' });
+    }
+
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date before taking the post. Runs
+    // inside the txn (pass client); rejected before any geofence work.
+    const shiftDate = pacificDateStr(hist.scheduled_start);
+    const elig = await checkShiftEligibility(user!.sub, hist.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
     }
 
     // Geofence — same helper as regular clock-in.
