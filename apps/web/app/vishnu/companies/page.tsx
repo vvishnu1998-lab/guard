@@ -287,11 +287,11 @@ export default function CompaniesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <h1 className="text-3xl font-bold tracking-widest text-gray-300">COMPANIES</h1>
         <button
           onClick={() => { setShowCreate(true); setFormError(''); setCreateForm(EMPTY_FORM); }}
-          className="bg-gray-600 text-white text-xs tracking-widest font-bold px-4 py-2 rounded-lg hover:bg-gray-500 transition-colors"
+          className="self-start md:self-auto bg-gray-600 text-white text-xs tracking-widest font-bold px-4 py-2 rounded-lg hover:bg-gray-500 transition-colors whitespace-nowrap"
         >
           + NEW COMPANY
         </button>
@@ -369,7 +369,13 @@ export default function CompaniesPage() {
           return (
             <div key={c.id} className={`bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden ${!c.is_active ? 'opacity-60' : ''}`}>
               {/* Company row */}
-              <div className="p-4 flex items-center gap-4">
+              {/*
+               * Mobile ({'<'}md): stack name/uuid on line 1, then a right-aligned
+               * sub-row with PHOTOS/RPT (sm+: with SITES/GUARDS/ADMINS) + actions.
+               * Desktop (md+): md:contents on the sub-row flattens it back into
+               * direct flex children of the outer row — desktop layout unchanged.
+               */}
+              <div className="p-4 flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
                 <button
                   onClick={() => toggleExpand(c.id)}
                   className="flex-1 text-left flex items-center gap-4"
@@ -394,50 +400,52 @@ export default function CompaniesPage() {
                   </div>
                 </button>
 
-                {/* Stats */}
-                <div className="hidden sm:flex gap-6 text-center shrink-0">
-                  <div><p className="text-gray-200 font-bold">{c.active_sites}</p><p className="text-gray-600 text-xs">SITES</p></div>
-                  <div><p className="text-gray-200 font-bold">{c.active_guards}</p><p className="text-gray-600 text-xs">GUARDS</p></div>
-                  <div><p className="text-gray-200 font-bold">{c.admin_count}</p><p className="text-gray-600 text-xs">ADMINS</p></div>
-                </div>
+                <div className="flex items-center justify-end gap-4 flex-wrap md:contents">
+                  {/* Stats */}
+                  <div className="hidden sm:flex gap-6 text-center shrink-0">
+                    <div><p className="text-gray-200 font-bold">{c.active_sites}</p><p className="text-gray-600 text-xs">SITES</p></div>
+                    <div><p className="text-gray-200 font-bold">{c.active_guards}</p><p className="text-gray-600 text-xs">GUARDS</p></div>
+                    <div><p className="text-gray-200 font-bold">{c.admin_count}</p><p className="text-gray-600 text-xs">ADMINS</p></div>
+                  </div>
 
-                {/* Photo limit */}
-                <div className="text-center shrink-0">
-                  {editId === c.id ? (
-                    <input
-                      type="number" min={1} max={20}
-                      value={editForm.default_photo_limit}
-                      onChange={(e) => setEditForm((f) => ({ ...f, default_photo_limit: e.target.value }))}
-                      placeholder={String(c.default_photo_limit)}
-                      className="bg-[#0B1526] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none w-14 text-center"
-                    />
-                  ) : (
-                    <div>
-                      <p className="text-gray-300 font-bold">{c.default_photo_limit}</p>
-                      <p className="text-gray-600 text-xs">PHOTOS/RPT</p>
-                    </div>
-                  )}
-                </div>
+                  {/* Photo limit */}
+                  <div className="text-center shrink-0">
+                    {editId === c.id ? (
+                      <input
+                        type="number" min={1} max={20}
+                        value={editForm.default_photo_limit}
+                        onChange={(e) => setEditForm((f) => ({ ...f, default_photo_limit: e.target.value }))}
+                        placeholder={String(c.default_photo_limit)}
+                        className="bg-[#0B1526] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none w-14 text-center"
+                      />
+                    ) : (
+                      <div>
+                        <p className="text-gray-300 font-bold">{c.default_photo_limit}</p>
+                        <p className="text-gray-600 text-xs">PHOTOS/RPT</p>
+                      </div>
+                    )}
+                  </div>
 
-                {/* Actions */}
-                <div className="flex gap-2 shrink-0">
-                  {editId === c.id ? (
-                    <>
-                      <button onClick={() => saveEdit(c.id)} disabled={saving} className="text-xs text-green-400 border border-green-700 px-2 py-1 rounded hover:bg-green-900/30 transition-colors disabled:opacity-40">SAVE</button>
-                      <button onClick={() => { setEditId(null); setEditForm(EDIT_EMPTY); }} className="text-xs text-gray-500 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 transition-colors">CANCEL</button>
-                    </>
-                  ) : (
-                    <>
-                      <button onClick={() => { setEditId(c.id); setEditForm({ name: c.name, default_photo_limit: String(c.default_photo_limit) }); }}
-                        className="text-xs text-gray-400 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 hover:text-gray-200 transition-colors">
-                        EDIT
-                      </button>
-                      <button onClick={() => toggleActive(c)}
-                        className={`text-xs px-2 py-1 rounded border transition-colors ${c.is_active ? 'border-red-800 text-red-400 hover:bg-red-900/20' : 'border-green-800 text-green-400 hover:bg-green-900/20'}`}>
-                        {c.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
-                      </button>
-                    </>
-                  )}
+                  {/* Actions */}
+                  <div className="flex gap-2 shrink-0">
+                    {editId === c.id ? (
+                      <>
+                        <button onClick={() => saveEdit(c.id)} disabled={saving} className="text-xs text-green-400 border border-green-700 px-2 py-1 rounded hover:bg-green-900/30 transition-colors disabled:opacity-40">SAVE</button>
+                        <button onClick={() => { setEditId(null); setEditForm(EDIT_EMPTY); }} className="text-xs text-gray-500 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 transition-colors">CANCEL</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => { setEditId(c.id); setEditForm({ name: c.name, default_photo_limit: String(c.default_photo_limit) }); }}
+                          className="text-xs text-gray-400 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 hover:text-gray-200 transition-colors">
+                          EDIT
+                        </button>
+                        <button onClick={() => toggleActive(c)}
+                          className={`text-xs px-2 py-1 rounded border transition-colors ${c.is_active ? 'border-red-800 text-red-400 hover:bg-red-900/20' : 'border-green-800 text-green-400 hover:bg-green-900/20'}`}>
+                          {c.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
 
