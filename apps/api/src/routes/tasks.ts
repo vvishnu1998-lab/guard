@@ -50,15 +50,29 @@ router.get('/instances', requireAuth('guard'), async (req, res) => {
 router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) => {
   const { completion_lat, completion_lng, photo_url, shift_session_id, accuracy } = req.body;
 
-  // Verify task requires_photo constraint
+  // Verify task requires_photo constraint AND resolve the owning guard.
+  // Finding #2: task_instances has no guard_id, so the task's owner is
+  // shifts.guard_id reached via ti.shift_id. Without this JOIN the SELECT
+  // was gated only on id+status, letting any guard complete any tenant's
+  // pending task. (shifts has no company_id column — guard_id is the gate.)
   const taskResult = await pool.query(
-    `SELECT ti.id, tt.requires_photo FROM task_instances ti
+    `SELECT ti.id, ti.shift_id, tt.requires_photo, s.guard_id AS shift_guard_id
+     FROM task_instances ti
      JOIN task_templates tt ON tt.id = ti.template_id
+     JOIN shifts s ON s.id = ti.shift_id
      WHERE ti.id = $1 AND ti.status = 'pending'`,
     [req.params.id]
   );
   const task = taskResult.rows[0];
   if (!task) return res.status(404).json({ error: 'Task not found or already completed' });
+
+  // Ownership gate — a guard may only complete a task on their own shift.
+  // Runs before any transaction so a cross-tenant/foreign-shift attempt is
+  // rejected up front regardless of whether coordinates are supplied.
+  if (task.shift_guard_id !== req.user!.sub) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
   if (task.requires_photo && !photo_url) {
     return res.status(400).json({ error: 'Photo required to complete this task' });
   }
@@ -72,21 +86,34 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
   try {
     await client.query('BEGIN');
 
-    // T2-C — resolve site_id from session, validate. ROLLBACK on reject
-    // leaves task_instances.status='pending', task_completions empty.
+    // Session validation — UNCONDITIONAL (Finding #2). Previously nested
+    // inside if(haveCoords), so the no-coords path (the live mobile path —
+    // the app never sends `accuracy`) wrote a completion under an
+    // unvalidated, attacker-supplied shift_session_id. The session must
+    // belong to the caller AND to the same shift as the task, so a
+    // completion can't be attached to an arbitrary session.
+    const ssr = await client.query(
+      'SELECT site_id, shift_id FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+      [shift_session_id, req.user!.sub],
+    );
+    if (!ssr.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Session not found' });
+    }
+    if (ssr.rows[0].shift_id !== task.shift_id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Session does not match task shift' });
+    }
+    const sessionSiteId = ssr.rows[0].site_id;
+
+    // T2-C — geofence check runs only when the client supplies coords.
+    // ROLLBACK on reject leaves task_instances.status='pending',
+    // task_completions empty. Uses the validated session's site_id.
     let within: boolean | null = null;
     if (haveCoords) {
-      const ssr = await client.query(
-        'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2',
-        [shift_session_id, req.user!.sub],
-      );
-      if (!ssr.rows[0]) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({ error: 'Session not found' });
-      }
       const fence = await validateAtSite(
         { lat: completion_lat, lng: completion_lng, accuracy_m: accuracy },
-        ssr.rows[0].site_id,
+        sessionSiteId,
         client,
       );
       if (!fence.allowed) {
