@@ -279,6 +279,7 @@ router.post('/admin/login', async (req: Request, res: Response) => {
 
   const result = await pool.query(
     `SELECT ca.id, ca.company_id, ca.password_hash, ca.is_active, ca.is_primary, ca.must_change_password,
+            ca.failed_login_count, ca.locked_at,
             c.is_active AS company_active
      FROM company_admins ca
      JOIN companies c ON c.id = ca.company_id
@@ -286,10 +287,36 @@ router.post('/admin/login', async (req: Request, res: Response) => {
     [email.toLowerCase().trim()]
   );
   const admin = result.rows[0];
+
+  // Finding #9: auto-unlock a stale soft-lock (mirror guard #8) before the
+  // password check so a returning admin gets a clean slate. DB-side interval
+  // (no clock skew); no-op when not locked or still within the cooldown.
+  if (admin) {
+    await pool.query(
+      `UPDATE company_admins
+          SET failed_login_count = 0, locked_at = NULL
+        WHERE id = $1 AND locked_at IS NOT NULL
+          AND locked_at < NOW() - make_interval(mins => $2)`,
+      [admin.id, LOCKOUT_COOLDOWN_MINUTES],
+    );
+  }
+
   const hashToCheck = admin?.password_hash ?? '$2b$12$invalidhashpadding000000000000000000000000000000000000';
   const valid = await bcrypt.compare(password, hashToCheck);
 
   if (!admin || !valid || !admin.is_active) {
+    // Increment only on a wrong password for a real admin — not on a missing
+    // account (nothing to count) and not on a correct-password-but-deactivated
+    // attempt (password was right). Anti-enumeration 401 unchanged.
+    if (admin && !valid) {
+      await pool.query(
+        `UPDATE company_admins
+            SET failed_login_count = failed_login_count + 1,
+                locked_at = CASE WHEN failed_login_count + 1 >= $2 THEN NOW() ELSE locked_at END
+          WHERE id = $1`,
+        [admin.id, MAX_FAILED_ATTEMPTS],
+      );
+    }
     if (admin) await logEvent(admin.id, 'company_admin', 'login_failed', req);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
@@ -297,6 +324,27 @@ router.post('/admin/login', async (req: Request, res: Response) => {
   if (!admin.company_active) {
     return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your platform administrator.' });
   }
+
+  // Finding #9: lock check AFTER bcrypt — only a correct-password attempt
+  // reaches here. Re-read the post-stale-clear lock state (guard pattern) so
+  // a just-auto-unlocked admin isn't wrongly rejected.
+  const lockRow = (await pool.query(
+    'SELECT failed_login_count, locked_at FROM company_admins WHERE id = $1',
+    [admin.id],
+  )).rows[0];
+  if (lockRow?.locked_at && lockRow.failed_login_count >= MAX_FAILED_ATTEMPTS) {
+    await logEvent(admin.id, 'company_admin', 'login_blocked_locked', req);
+    return res.status(423).json({
+      error: 'Too many failed attempts. Try again in 30 minutes or contact your platform administrator.',
+      locked: true,
+    });
+  }
+
+  // Success — clear any accrued failures.
+  await pool.query(
+    'UPDATE company_admins SET failed_login_count = 0, locked_at = NULL WHERE id = $1',
+    [admin.id],
+  );
 
   const tokens = signTokens({
     sub: admin.id,
@@ -437,15 +485,49 @@ router.post('/vishnu/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
+  // Wrong email — stateless 401. Never touch vishnu_state for a non-account
+  // so an attacker guessing emails can't lock the real Vishnu out.
   if (email.toLowerCase().trim() !== process.env.VISHNU_EMAIL?.toLowerCase()) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
+  // Finding #9: brute-force lockout on the vishnu_state singleton, mirroring
+  // the guard/admin pattern. Self-lock is accepted (5 fails → 30-min cooldown
+  // applies to Vishnu too). Stale-lock clear before the password check.
+  await pool.query(
+    `UPDATE vishnu_state
+        SET failed_login_count = 0, locked_at = NULL
+      WHERE id = 1 AND locked_at IS NOT NULL
+        AND locked_at < NOW() - make_interval(mins => $1)`,
+    [LOCKOUT_COOLDOWN_MINUTES],
+  );
+
   const valid = await bcrypt.compare(password, process.env.VISHNU_PASSWORD_HASH!);
   if (!valid) {
+    await pool.query(
+      `UPDATE vishnu_state
+          SET failed_login_count = failed_login_count + 1,
+              locked_at = CASE WHEN failed_login_count + 1 >= $1 THEN NOW() ELSE locked_at END
+        WHERE id = 1`,
+      [MAX_FAILED_ATTEMPTS],
+    );
     await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_failed', req);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
+
+  // Lock check AFTER bcrypt — only a correct password reaches here.
+  const vs = (await pool.query(
+    'SELECT failed_login_count, locked_at FROM vishnu_state WHERE id = 1',
+  )).rows[0];
+  if (vs?.locked_at && vs.failed_login_count >= MAX_FAILED_ATTEMPTS) {
+    await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_blocked_locked', req);
+    return res.status(423).json({
+      error: 'Too many failed attempts. Try again in 30 minutes.',
+      locked: true,
+    });
+  }
+
+  await pool.query('UPDATE vishnu_state SET failed_login_count = 0, locked_at = NULL WHERE id = 1');
 
   const tokens = signTokens({ sub: '00000000-0000-0000-0000-000000000000', role: 'vishnu' });
   await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_success', req);
