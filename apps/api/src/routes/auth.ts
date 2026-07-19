@@ -11,6 +11,9 @@ import { Sentry } from '../services/sentry';
 const router = Router();
 
 const MAX_FAILED_ATTEMPTS = 5;
+// Finding #8: a 5-fail lock auto-expires after this cooldown so an account
+// self-recovers without admin intervention (defeats the lockout DoS).
+const LOCKOUT_COOLDOWN_MINUTES = 30;
 const ACCESS_TOKEN_TTL  = '8h';   // web sessions; mobile app refreshes automatically
 const REFRESH_TOKEN_TTL = '30d';
 
@@ -90,6 +93,23 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   );
   const guard = guardResult.rows[0];
 
+  // Finding #8: auto-unlock a stale soft-lock. If the account was locked
+  // (failed_count >= 5) more than LOCKOUT_COOLDOWN_MINUTES ago, clear the
+  // lock + counter so it self-recovers without admin intervention. Runs
+  // before the password check so both the failed path and the lock check
+  // below see a clean slate. No-op (0 rows) when not locked or still within
+  // the cooldown; the hard 5-fail threshold and admin unlock are unchanged.
+  if (guard) {
+    await pool.query(
+      `UPDATE login_attempts
+          SET failed_count = 0, locked_at = NULL, updated_at = NOW()
+        WHERE guard_id = $1
+          AND locked_at IS NOT NULL
+          AND locked_at < NOW() - make_interval(mins => $2)`,
+      [guard.id, LOCKOUT_COOLDOWN_MINUTES],
+    );
+  }
+
   const hashToCheck = guard?.password_hash ?? '$2b$12$invalidhashpadding000000000000000000000000000000000000';
   const valid = await bcrypt.compare(password, hashToCheck);
 
@@ -137,7 +157,7 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   if (lockRow?.locked_at && lockRow.failed_count >= MAX_FAILED_ATTEMPTS) {
     await logEvent(guard.id, 'guard', 'login_blocked_locked', req);
     return res.status(423).json({
-      error: 'Account locked after 5 failed attempts. Contact your supervisor to unlock.',
+      error: 'Too many failed attempts. Try again in 30 minutes or contact your supervisor.',
       locked: true,
     });
   }
