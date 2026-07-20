@@ -23,6 +23,51 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  */
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5-20250929';
 
+// ── Finding #7: in-memory AI rate limit (reduced scope) ──────────────────────
+// Bounds Anthropic spend from a compromised/looping account. CAVEATS:
+//   * In-memory only — a process restart clears all counters.
+//   * Single-instance only — if Railway scales to N instances, each keeps its
+//     own counters, so the effective ceiling is N × these limits.
+// A durable, cross-instance (schema-backed) limiter is a backlog item; ship
+// this now and harden when abuse is actually observed. Values are tunable.
+const PER_GUARD_LIMIT     = 20;          // requests per rolling hour, per actor
+const PER_GUARD_WINDOW_MS = 3_600_000;   // 1 hour
+const GLOBAL_DAILY_LIMIT  = 500;         // requests per rolling 24h, all actors
+const GLOBAL_WINDOW_MS    = 86_400_000;  // 24 hours
+const MAX_INPUT_CHARS     = 5000;
+
+const perGuardBuckets = new Map<string, { count: number; resetAt: number }>();
+let globalBucket = { count: 0, resetAt: 0 };
+
+/**
+ * Returns null if the request is allowed (and records the hit against both the
+ * global and per-actor budgets), or a 429 descriptor if blocked. The global
+ * cap is checked FIRST — when the platform-wide daily budget is exhausted we
+ * fail closed for everyone, not just the heaviest actor.
+ */
+function checkRateLimit(actorId: string, now: number):
+  | null
+  | { scope: 'global' | 'guard'; retryAfterSec: number } {
+  if (now >= globalBucket.resetAt) globalBucket = { count: 0, resetAt: now + GLOBAL_WINDOW_MS };
+  if (globalBucket.count >= GLOBAL_DAILY_LIMIT) {
+    return { scope: 'global', retryAfterSec: Math.ceil((globalBucket.resetAt - now) / 1000) };
+  }
+
+  let bucket = perGuardBuckets.get(actorId);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + PER_GUARD_WINDOW_MS };
+    perGuardBuckets.set(actorId, bucket);
+  }
+  if (bucket.count >= PER_GUARD_LIMIT) {
+    return { scope: 'guard', retryAfterSec: Math.ceil((bucket.resetAt - now) / 1000) };
+  }
+
+  // Allowed — record the hit against both budgets.
+  bucket.count += 1;
+  globalBucket.count += 1;
+  return null;
+}
+
 /**
  * POST /api/ai/enhance-description
  * Body: { text: string, report_type: 'activity' | 'incident' | 'maintenance' }
@@ -36,6 +81,23 @@ router.post('/enhance-description', requireAuth('guard', 'company_admin'), async
 
   if (!text || typeof text !== 'string' || text.trim().length < 10) {
     return res.status(400).json({ error: 'text must be at least 10 characters' });
+  }
+  if (text.trim().length > MAX_INPUT_CHARS) {
+    return res.status(400).json({ error: `text must be at most ${MAX_INPUT_CHARS} characters` });
+  }
+
+  // Finding #7: bound spend BEFORE the paid call. checkRateLimit increments on
+  // gate pass, so a failed/looping call still counts (the internal 529 retry
+  // loop below stays one logical request).
+  const limited = checkRateLimit(req.user!.sub, Date.now());
+  if (limited) {
+    res.setHeader('Retry-After', String(limited.retryAfterSec));
+    return res.status(429).json({
+      error: limited.scope === 'global'
+        ? 'AI enhancement is temporarily unavailable (daily limit reached). Please try again later.'
+        : `Too many AI enhancement requests. Try again in about ${Math.ceil(limited.retryAfterSec / 60)} minutes.`,
+      retry_after_seconds: limited.retryAfterSec,
+    });
   }
 
   const type = report_type ?? 'activity';
@@ -70,6 +132,11 @@ Rewrite this as a professional security report entry:`;
           messages: [{ role: 'user', content: userPrompt }],
           system: systemPrompt,
         });
+        // Finding #7 observability: guard + company + token usage per call.
+        console.log(
+          `[ai.enhance.success] guard=${req.user!.sub} company=${req.user!.company_id ?? 'n/a'} ` +
+          `in_tokens=${message.usage?.input_tokens ?? '?'} out_tokens=${message.usage?.output_tokens ?? '?'}`,
+        );
         enhanced = (message.content[0] as { type: string; text: string }).text?.trim() || '';
         break;
       } catch (err: any) {
