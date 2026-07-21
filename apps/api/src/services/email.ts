@@ -185,9 +185,10 @@ export async function sendIncidentAlert(
   report: { id: string; description: string; severity: string; reported_at: Date },
   siteId: string,
 ) {
-  // Active client only (recipient). Reply-To is the shared support address —
-  // client replies route to NetraOps support rather than the per-tenant
-  // primary admin (which had support-request replies going to admins).
+  // Fan out to EVERY active client linked to this site via the v36
+  // client_sites junction — not just clients.site_id, which misses multi-site
+  // secondary sites (Finding #2). Reply-To is the shared support address —
+  // client replies route to NetraOps support rather than the per-tenant admin.
   const result = await pool.query(
     `SELECT s.name AS site_name,
             s.timezone AS site_tz,
@@ -195,41 +196,55 @@ export async function sendIncidentAlert(
             c.email AS client_email,
             co.name AS company_name
      FROM sites s
-     JOIN clients c ON c.site_id = s.id
+     JOIN client_sites cs ON cs.site_id = s.id
+     JOIN clients c ON c.id = cs.client_id
      JOIN companies co ON co.id = s.company_id
-     WHERE s.id = $1 AND c.is_active = true`,
+     WHERE s.id = $1 AND c.is_active = true
+     ORDER BY c.email`,
     [siteId],
   );
-  if (!result.rows[0]) {
+  if (result.rows.length === 0) {
     console.warn(`[email] sendIncidentAlert: no active client found for site_id=${siteId} — email not sent`);
+    Sentry.captureMessage('sendIncidentAlert: no active clients for site', {
+      level: 'warning',
+      tags: { flow: 'incident_alert' },
+      extra: { site_id: siteId, report_id: report.id },
+    });
     return;
   }
-  const { site_name, site_tz, client_name, client_email, company_name } = result.rows[0];
-  console.log(`[email] sendIncidentAlert: sending to ${client_email} for site=${site_name} (report=${report.id})`);
 
-  const { subject, html } = renderIncidentAlert({
-    report_id:    report.id,
-    description:  report.description,
-    severity:     report.severity,
-    reported_at:  report.reported_at,
-    site_name,
-    site_tz,
-    client_name,
-    company_name,
+  // site_name / site_tz / company_name are identical across rows.
+  const { site_name, site_tz, company_name } = result.rows[0];
+
+  // Render per-recipient (personalized greeting) and send in parallel. One bad
+  // recipient must not suppress the others, so we don't throw — each failure is
+  // Sentry-captured individually via reportSendgridFailure (sendToAdmins pattern).
+  const outcomes = await Promise.allSettled(
+    result.rows.map((row) => {
+      const { subject, html } = renderIncidentAlert({
+        report_id:    report.id,
+        description:  report.description,
+        severity:     report.severity,
+        reported_at:  report.reported_at,
+        site_name,
+        site_tz,
+        client_name:  row.client_name,
+        company_name,
+      });
+      return sgMail.send({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    }),
+  );
+
+  outcomes.forEach((o, i) => {
+    const email = result.rows[i].client_email;
+    if (o.status === 'fulfilled') {
+      console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${email} (report=${report.id})`);
+    } else {
+      const err: any = o.reason;
+      console.error(`[email] sendIncidentAlert: SENDGRID ERROR for ${email} — ${err?.message ?? err}`, err?.response?.body);
+      reportSendgridFailure('incident_alert', err, { report_id: report.id, site_id: siteId, recipient: email });
+    }
   });
-
-  const sendOpts: sgMail.MailDataRequired = {
-    to: client_email, from: FROM, replyTo: REPLY_TO, subject, html,
-  };
-
-  try {
-    await sgMail.send(sendOpts);
-    console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${client_email}`);
-  } catch (err: any) {
-    console.error(`[email] sendIncidentAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('incident_alert', err, { report_id: report.id, site_id: siteId });
-    throw err;
-  }
 }
 
 /**
