@@ -100,7 +100,7 @@ export default function TermsOfService() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">9. Contact Us</h2>
             <p>
-              If you have any questions about these Terms, please contact us at: <a href="mailto:vvishnu1998@gmail.com" className="text-[#00C8FF] hover:underline">vvishnu1998@gmail.com</a>.
+              If you have any questions about these Terms, please contact us at: <a href="mailto:support@netraops.com?subject=Terms%20Question" className="text-[#00C8FF] hover:underline">support@netraops.com</a>.
             </p>
           </section>
         </div>

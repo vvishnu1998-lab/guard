@@ -198,7 +198,7 @@ export default function LandingPage() {
 
           <FadeSection>
             <form
-              action="mailto:vvishnu1998@gmail.com"
+              action="mailto:support@netraops.com"
               method="post"
               encType="text/plain"
               className="flex flex-col gap-5"
@@ -407,7 +407,7 @@ function HeroSection() {
         style={{ animation: 'fadeInUp 0.9s ease 0.3s forwards', opacity: 0 }}
       >
         <a
-          href="mailto:vvishnu1998@gmail.com"
+          href="mailto:support@netraops.com"
           className="bg-[#C9A84C] hover:bg-[#D4B560] text-[#0B1526] font-black px-10 py-4 rounded-lg tracking-[0.15em] text-sm transition-all shadow-lg shadow-[#C9A84C]/25 hover:shadow-[#C9A84C]/40"
         >
           GET STARTED
