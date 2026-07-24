@@ -1,5 +1,7 @@
 'use client';
 
+import Image from 'next/image';
+
 // ── Hero section ──────────────────────────────────────────────────────────────
 export default function HeroSection() {
   return (
@@ -64,6 +66,42 @@ export default function HeroSection() {
         >
           SEE HOW IT WORKS
         </a>
+      </div>
+
+      {/* Product visual — browser-framed dashboard with phone overlay */}
+      <div
+        className="relative w-full max-w-4xl mt-20 md:mb-10"
+        style={{ animation: 'fadeInUp 0.9s ease 0.45s forwards', opacity: 0 }}
+      >
+        {/* Browser frame */}
+        <div className="rounded-xl border border-white/10 bg-[#0B1526] shadow-2xl shadow-black/50 overflow-hidden">
+          <div className="flex items-center gap-1.5 h-8 px-4 bg-white/[0.04] border-b border-white/[0.06]">
+            <span className="w-2.5 h-2.5 rounded-full bg-white/[0.15]" />
+            <span className="w-2.5 h-2.5 rounded-full bg-white/[0.15]" />
+            <span className="w-2.5 h-2.5 rounded-full bg-white/[0.15]" />
+          </div>
+          <Image
+            src="/product/dashboard.webp"
+            alt="NetraOps admin dashboard showing active sites, guards on duty, weekly hours, and a missed-shift alert"
+            width={1920}
+            height={1067}
+            priority
+            sizes="(max-width: 960px) 100vw, 896px"
+            className="w-full h-auto block"
+          />
+        </div>
+
+        {/* Phone overlay — desktop only, no overlap on mobile */}
+        <div className="hidden md:block absolute -bottom-10 -right-4 w-[28%] rounded-[1.25rem] border border-white/10 bg-[#0B1526] shadow-2xl shadow-black/60 overflow-hidden">
+          <Image
+            src="/product/phone-reports.webp"
+            alt="NetraOps mobile app showing a guard's activity, incident, and maintenance reports"
+            width={540}
+            height={960}
+            sizes="251px"
+            className="w-full h-auto block"
+          />
+        </div>
       </div>
 
       {/* Scroll indicator */}
