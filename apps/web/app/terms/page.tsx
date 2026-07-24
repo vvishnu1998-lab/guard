@@ -1,5 +1,11 @@
 import React from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
+
+export const metadata: Metadata = {
+  title: 'Terms of Service',
+  description: 'The terms that govern use of the NetraOps security guard management platform.',
+};
 
 export default function TermsOfService() {
   return (

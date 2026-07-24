@@ -1,5 +1,11 @@
 import React from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
+
+export const metadata: Metadata = {
+  title: 'Privacy Policy',
+  description: 'How NetraOps collects, uses, and protects your data — including location data collected during active shifts.',
+};
 
 export default function PrivacyPolicy() {
   return (

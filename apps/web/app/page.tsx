@@ -1,44 +1,14 @@
-'use client';
-
-import { useEffect, useRef, useState } from 'react';
-import Image from 'next/image';
+import type { Metadata } from 'next';
 import Link from 'next/link';
+import FadeSection from '../components/marketing/FadeSection';
+import NavBar from '../components/marketing/NavBar';
+import HeroSection from '../components/marketing/HeroSection';
+import ContactForm from '../components/marketing/ContactForm';
+import LogoImage from '../components/marketing/LogoImage';
 
-// ── Scroll-fade hook ──────────────────────────────────────────────────────────
-function useFadeIn() {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          el.style.opacity = '1';
-          el.style.transform = 'translateY(0)';
-          observer.disconnect();
-        }
-      },
-      { threshold: 0.12 }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-  return ref;
-}
-
-// ── Reusable fade section wrapper ─────────────────────────────────────────────
-function FadeSection({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  const ref = useFadeIn();
-  return (
-    <div
-      ref={ref}
-      className={className}
-      style={{ opacity: 0, transform: 'translateY(32px)', transition: 'opacity 0.7s ease, transform 0.7s ease' }}
-    >
-      {children}
-    </div>
-  );
-}
+export const metadata: Metadata = {
+  alternates: { canonical: '/' },
+};
 
 // ── Feature card data ──────────────────────────────────────────────────────────
 const features = [
@@ -81,7 +51,8 @@ const features = [
   },
 ];
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── Main page (server component — metadata lives here, interactivity in
+//    components/marketing/* client islands) ───────────────────────────────────
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-[#0B1526] text-white overflow-x-hidden">
@@ -206,14 +177,7 @@ export default function LandingPage() {
       <footer className="relative z-10 border-t border-white/[0.05] py-10 px-6">
         <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-6">
           <div className="flex items-center gap-3">
-            <Image
-              src="/vwing_logo.png"
-              alt="NetraOps"
-              width={28}
-              height={28}
-              className="object-contain opacity-80"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-            />
+            <LogoImage size={28} className="object-contain opacity-80" />
             <span className="text-white/30 text-xs tracking-[0.2em]">© 2026 NETRAOPS. ALL RIGHTS RESERVED.</span>
           </div>
           <div className="flex items-center gap-6">
@@ -230,293 +194,5 @@ export default function LandingPage() {
         </div>
       </footer>
     </div>
-  );
-}
-
-// ── Contact form ──────────────────────────────────────────────────────────────
-const SITE_OPTIONS = ['1–4 sites', '5–14 sites', '15–24 sites', '25+ sites'];
-
-function ContactForm() {
-  const [name, setName] = useState('');
-  const [company, setCompany] = useState('');
-  const [email, setEmail] = useState('');
-  const [sites, setSites] = useState(SITE_OPTIONS[0]);
-  const [message, setMessage] = useState('');
-  const [website, setWebsite] = useState(''); // honeypot — humans never see it
-  const [status, setStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
-
-  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!name.trim() || !company.trim() || !email.trim()) return;
-    setStatus('sending');
-    try {
-      const res = await fetch('/api/contact', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, company, email, sites, message, website }),
-      });
-      if (!res.ok) throw new Error(`status ${res.status}`);
-      setStatus('success');
-    } catch {
-      setStatus('error');
-    }
-  }
-
-  if (status === 'success') {
-    return (
-      <div className="flex flex-col items-center text-center py-12 gap-4">
-        <div className="w-16 h-16 rounded-full border-2 border-[#C9A84C]/60 bg-[#C9A84C]/10 flex items-center justify-center">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#C9A84C" strokeWidth={2} className="w-8 h-8">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-          </svg>
-        </div>
-        <p className="text-white font-bold text-lg tracking-tight">Request received</p>
-        <p className="text-white/40 text-sm" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
-          We&apos;ll reach out within one business day.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <div className="flex flex-col gap-2">
-          <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">NAME</label>
-          <input
-            type="text"
-            name="name"
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="John Smith"
-            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
-            style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-          />
-        </div>
-        <div className="flex flex-col gap-2">
-          <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">COMPANY</label>
-          <input
-            type="text"
-            name="company"
-            required
-            value={company}
-            onChange={(e) => setCompany(e.target.value)}
-            placeholder="Apex Security Ltd."
-            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
-            style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <div className="flex flex-col gap-2">
-          <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">EMAIL</label>
-          <input
-            type="email"
-            name="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="john@apexsecurity.com"
-            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
-            style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-          />
-        </div>
-        <div className="flex flex-col gap-2">
-          <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">NUMBER OF SITES</label>
-          <select
-            name="sites"
-            value={sites}
-            onChange={(e) => setSites(e.target.value)}
-            className="bg-[#0B1526] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:border-[#C9A84C]/50 transition-colors appearance-none cursor-pointer"
-            style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-          >
-            {SITE_OPTIONS.map((opt) => (
-              <option key={opt} value={opt}>{opt}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">MESSAGE (OPTIONAL)</label>
-        <textarea
-          name="message"
-          rows={4}
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          placeholder="Tell us about your security operations..."
-          className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors resize-none"
-          style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-        />
-      </div>
-
-      {/* Honeypot — visually hidden, ignored by humans, filled by bots */}
-      <input
-        type="text"
-        name="website"
-        value={website}
-        onChange={(e) => setWebsite(e.target.value)}
-        tabIndex={-1}
-        autoComplete="off"
-        aria-hidden="true"
-        style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, opacity: 0 }}
-      />
-
-      {status === 'error' && (
-        <p className="text-red-400/90 text-sm text-center" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
-          Something went wrong — email us at{' '}
-          <a href="mailto:support@netraops.com" className="underline hover:text-red-300">support@netraops.com</a>
-        </p>
-      )}
-
-      <button
-        type="submit"
-        disabled={status === 'sending'}
-        className="bg-[#C9A84C] hover:bg-[#D4B560] disabled:opacity-60 disabled:cursor-not-allowed text-[#0B1526] font-black py-4 rounded-lg tracking-[0.15em] text-sm transition-all shadow-lg shadow-[#C9A84C]/20 hover:shadow-[#C9A84C]/30 mt-2"
-      >
-        {status === 'sending' ? 'SENDING…' : 'REQUEST A DEMO'}
-      </button>
-    </form>
-  );
-}
-
-// ── NavBar component ──────────────────────────────────────────────────────────
-function NavBar() {
-  return (
-    <nav className="fixed top-0 left-0 right-0 z-50 px-6 py-4">
-      <div
-        className="max-w-6xl mx-auto flex items-center justify-between rounded-xl border border-white/[0.07] px-5 py-3"
-        style={{ background: 'rgba(11,21,38,0.85)', backdropFilter: 'blur(16px)' }}
-      >
-        {/* Logo + name */}
-        <div className="flex items-center gap-3">
-          <Image
-            src="/vwing_logo.png"
-            alt="NetraOps"
-            width={30}
-            height={30}
-            className="object-contain"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-          />
-          <span
-            className="text-white font-black tracking-[0.25em] text-lg"
-            style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.18em' }}
-          >
-            NETRAOPS
-          </span>
-        </div>
-
-        {/* Nav links + CTA */}
-        <div className="flex items-center gap-6">
-          <a href="#features" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
-            FEATURES
-          </a>
-          <a href="#contact" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
-            CONTACT
-          </a>
-          <Link
-            href="/portal"
-            className="bg-white/[0.07] hover:bg-white/[0.12] border border-white/[0.12] text-white font-bold px-5 py-2 rounded-lg text-xs tracking-[0.2em] transition-all"
-          >
-            LOGIN
-          </Link>
-        </div>
-      </div>
-    </nav>
-  );
-}
-
-// ── Hero section ──────────────────────────────────────────────────────────────
-function HeroSection() {
-  return (
-    <section className="relative z-10 min-h-screen flex flex-col items-center justify-center px-6 pt-24 pb-20 text-center">
-      {/* Radial glow behind headline */}
-      <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[400px] rounded-full pointer-events-none"
-        style={{ background: 'radial-gradient(ellipse, rgba(201,168,76,0.07) 0%, transparent 70%)' }}
-      />
-
-      {/* Pill badge */}
-      <div
-        className="flex items-center gap-2 border border-[#C9A84C]/30 rounded-full px-4 py-2 mb-10"
-        style={{ background: 'rgba(201,168,76,0.06)', animation: 'fadeInDown 0.8s ease forwards' }}
-      >
-        <span className="w-1.5 h-1.5 rounded-full bg-[#C9A84C] animate-pulse" />
-        <span className="text-[#C9A84C] text-xs tracking-[0.25em] font-semibold">LIVE GUARD MANAGEMENT PLATFORM</span>
-      </div>
-
-      {/* Main headline */}
-      <h1
-        className="text-5xl sm:text-7xl md:text-8xl font-black text-white leading-none mb-8 max-w-4xl"
-        style={{
-          fontFamily: 'var(--font-bebas), sans-serif',
-          letterSpacing: '0.04em',
-          animation: 'fadeInUp 0.9s ease 0.1s forwards',
-          opacity: 0,
-        }}
-      >
-        Every Shift.<br />
-        Every Site.<br />
-        <span className="text-[#C9A84C]">Accounted For.</span>
-      </h1>
-
-      {/* Sub-headline */}
-      <p
-        className="text-white/45 text-base sm:text-lg max-w-2xl leading-relaxed mb-12"
-        style={{
-          fontFamily: 'var(--font-dm-sans), sans-serif',
-          animation: 'fadeInUp 0.9s ease 0.2s forwards',
-          opacity: 0,
-        }}
-      >
-        Real-time guard monitoring, geofence compliance, and automated reporting —
-        built for serious security operations.
-      </p>
-
-      {/* CTAs */}
-      <div
-        className="flex flex-col sm:flex-row gap-4 items-center"
-        style={{ animation: 'fadeInUp 0.9s ease 0.3s forwards', opacity: 0 }}
-      >
-        <a
-          href="mailto:support@netraops.com"
-          className="bg-[#C9A84C] hover:bg-[#D4B560] text-[#0B1526] font-black px-10 py-4 rounded-lg tracking-[0.15em] text-sm transition-all shadow-lg shadow-[#C9A84C]/25 hover:shadow-[#C9A84C]/40"
-        >
-          GET STARTED
-        </a>
-        <a
-          href="#features"
-          className="border border-white/[0.15] hover:border-white/[0.3] text-white/70 hover:text-white font-bold px-10 py-4 rounded-lg tracking-[0.15em] text-sm transition-all"
-        >
-          SEE HOW IT WORKS
-        </a>
-      </div>
-
-      {/* Scroll indicator */}
-      <div
-        className="absolute bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 opacity-30"
-        style={{ animation: 'fadeIn 1.5s ease 1s forwards' }}
-      >
-        <div className="w-px h-10 bg-gradient-to-b from-transparent to-white/60" />
-        <span className="text-white/60 text-[10px] tracking-[0.3em]">SCROLL</span>
-      </div>
-
-      <style>{`
-        @keyframes fadeInUp {
-          from { opacity: 0; transform: translateY(24px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes fadeInDown {
-          from { opacity: 0; transform: translateY(-12px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to   { opacity: 0.3; }
-        }
-      `}</style>
-    </section>
   );
 }

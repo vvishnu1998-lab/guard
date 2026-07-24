@@ -3,7 +3,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 export const metadata: Metadata = {
-  title: 'Support · NetraOps',
+  title: 'Support',
   description: 'Get help with NetraOps. Contact support@netraops.com for account, sign-in, or shift questions.',
 };
 
