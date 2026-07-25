@@ -64,6 +64,7 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
     notifications.type IN (
       'chat',
       'late_clock_in',
+      'shift_assigned',
       'swap_request_received', 'swap_request_sent',
       'swap_accepted', 'swap_declined', 'swap_expired',
       'handoff_request_received', 'handoff_request_sent',

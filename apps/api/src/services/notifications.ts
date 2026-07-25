@@ -61,7 +61,11 @@ export type NotificationType =
   | 'handoff_cancelled'
   | 'handoff_complete'
   | 'handoff_nudge'
-  | 'handoff_expired';
+  | 'handoff_expired'
+  // Commit 1 addition: shift creation / assignment. Written by
+  // services/shiftPush.ts unconditionally per guard bucket, even
+  // when fcm_token is null (Alerts tab is source of truth).
+  | 'shift_assigned';
 
 export interface NotificationRow {
   id: string;

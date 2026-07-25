@@ -17,6 +17,7 @@
  */
 import { pool } from '../db/pool';
 import { sendPushNotification } from './firebase';
+import { insertNotification } from './notifications';
 
 export interface CreatedShift {
   id:              string;
@@ -129,13 +130,6 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
 
   for (const [guardId, bucket] of byGuard) {
     try {
-      const tokRow = await pool.query<{ fcm_token: string | null }>(
-        'SELECT fcm_token FROM guards WHERE id = $1',
-        [guardId],
-      );
-      const token = tokRow.rows[0]?.fcm_token;
-      if (!token) continue;
-
       // Sort chronologically so the message uses first/last correctly.
       bucket.sort(
         (a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime(),
@@ -144,6 +138,35 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
       const { title, body } = buildMessage(bucket, siteMeta);
       const firstDate = new Date(bucket[0].scheduled_start).toISOString();
       const lastDate  = new Date(bucket[bucket.length - 1].scheduled_start).toISOString();
+      const shiftIds  = bucket.map((s) => s.id);
+      const siteIds   = Array.from(new Set(bucket.map((s) => s.site_id)));
+
+      // Write the in-app Alerts row FIRST — the Alerts tab is the source
+      // of truth for whether the guard sees the assignment. Fire regardless
+      // of fcm_token state so guards without a push token still see the
+      // entry when they open the app. insertNotification is best-effort
+      // (internal try/catch) so this never throws.
+      await insertNotification({
+        guardId,
+        type:  'shift_assigned',
+        title,
+        body,
+        data: {
+          shift_ids:  shiftIds,
+          site_ids:   siteIds,
+          count:      bucket.length,
+          first_date: firstDate,
+          last_date:  lastDate,
+        },
+        shiftSessionId: null,
+      });
+
+      const tokRow = await pool.query<{ fcm_token: string | null }>(
+        'SELECT fcm_token FROM guards WHERE id = $1',
+        [guardId],
+      );
+      const token = tokRow.rows[0]?.fcm_token;
+      if (!token) continue;
 
       const { staleToken } = await sendPushNotification({
         token,
@@ -151,7 +174,7 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
         body,
         data: {
           type:       'shifts_assigned',
-          shift_ids:  bucket.map((s) => s.id).join(','),
+          shift_ids:  shiftIds.join(','),
           count:      String(bucket.length),
           first_date: firstDate,
           last_date:  lastDate,

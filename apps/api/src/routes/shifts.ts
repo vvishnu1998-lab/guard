@@ -406,6 +406,15 @@ router.patch('/:id/assign-guard', requireAuth('company_admin'), async (req, res)
     [guard_id, req.params.id]
   );
   res.json(result.rows[0]);
+  // Aggregated per-guard push + notification, fire-and-forget after response.
+  const row = result.rows[0];
+  pushShiftAssignments([{
+    id:              row.id,
+    guard_id:        row.guard_id,
+    site_id:         row.site_id,
+    scheduled_start: row.scheduled_start,
+    scheduled_end:   row.scheduled_end,
+  }]).catch((err) => console.error('[shifts.assign-guard] push failed:', err));
 });
 
 // PATCH /api/shifts/:id/reassign — admin reassigns a shift to a different guard.
