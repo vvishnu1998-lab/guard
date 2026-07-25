@@ -68,6 +68,18 @@ export default function HeroSection() {
         </a>
       </div>
 
+      {/* Trust line */}
+      <p
+        className="text-white/35 text-sm mt-5 text-center"
+        style={{
+          fontFamily: 'var(--font-dm-sans), sans-serif',
+          animation: 'fadeInUp 0.9s ease 0.35s forwards',
+          opacity: 0,
+        }}
+      >
+        First month free&nbsp;&nbsp;·&nbsp;&nbsp;No hardware&nbsp;&nbsp;·&nbsp;&nbsp;Cancel anytime
+      </p>
+
       {/* Product visual — browser-framed dashboard with phone overlay */}
       <div
         className="relative w-full max-w-4xl mt-20 md:mb-10"
