@@ -22,8 +22,8 @@ export default function NavBar() {
           </span>
         </div>
 
-        {/* Nav links + CTA */}
-        <div className="flex items-center gap-6">
+        {/* Nav links + CTAs */}
+        <div className="flex items-center gap-3 md:gap-6">
           <a href="#features" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             FEATURES
           </a>
@@ -32,10 +32,16 @@ export default function NavBar() {
           </a>
           <Link
             href="/portal"
-            className="bg-white/[0.07] hover:bg-white/[0.12] border border-white/[0.12] text-white font-bold px-5 py-2 rounded-lg text-xs tracking-[0.2em] transition-all"
+            className="hidden sm:block bg-white/[0.07] hover:bg-white/[0.12] border border-white/[0.12] text-white font-bold px-5 py-2 rounded-lg text-xs tracking-[0.2em] transition-all"
           >
             LOGIN
           </Link>
+          <a
+            href="#contact"
+            className="bg-[#C9A84C] hover:bg-[#D4B560] text-[#0B1526] font-black px-4 md:px-5 py-2 rounded-lg text-xs tracking-[0.15em] transition-all shadow-md shadow-[#C9A84C]/20 whitespace-nowrap"
+          >
+            REQUEST DEMO
+          </a>
         </div>
       </div>
     </nav>
