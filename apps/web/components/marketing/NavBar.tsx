@@ -27,6 +27,9 @@ export default function NavBar() {
           <a href="#features" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             FEATURES
           </a>
+          <a href="#faq" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
+            FAQ
+          </a>
           <a href="#contact" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             CONTACT
           </a>

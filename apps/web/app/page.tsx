@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Image from 'next/image';
 import Link from 'next/link';
 import FadeSection from '../components/marketing/FadeSection';
+import FaqSection from '../components/marketing/FaqSection';
 import NavBar from '../components/marketing/NavBar';
 import HeroSection from '../components/marketing/HeroSection';
 import ContactForm from '../components/marketing/ContactForm';
@@ -171,6 +172,23 @@ export default function LandingPage() {
               </FadeSection>
             ))}
           </div>
+        </div>
+      </section>
+
+      {/* ── FAQ ─────────────────────────────────────────────────────────────── */}
+      <section id="faq" className="relative z-10 py-28 px-6 border-t border-white/[0.05]">
+        <div className="max-w-3xl mx-auto">
+          <FadeSection>
+            <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold text-center mb-4">FAQ</p>
+            <h2 className="text-center text-4xl md:text-5xl font-black text-white mb-16"
+              style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.04em' }}>
+              Frequently Asked Questions
+            </h2>
+          </FadeSection>
+
+          <FadeSection>
+            <FaqSection />
+          </FadeSection>
         </div>
       </section>
 
