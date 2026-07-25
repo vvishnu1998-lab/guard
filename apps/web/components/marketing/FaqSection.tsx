@@ -46,6 +46,10 @@ const faqs: { q: string; a: React.ReactNode }[] = [
     q: 'Do you offer a trial?',
     a: 'Yes — your first month is free. Request a demo to get started.',
   },
+  {
+    q: 'How is NetraOps different from generic workforce apps?',
+    a: 'Generic tools record where a clock-in happened. NetraOps enforces it — off-post clock-ins, patrol pings, and task completions are blocked at the server, missed shifts trigger automatic alerts, and your clients get their own portal with proof of coverage. It’s purpose-built for security operations, not adapted to them.',
+  },
 ];
 
 export default function FaqSection() {
