@@ -85,6 +85,21 @@ export default function LandingPage() {
       {/* ── HERO ────────────────────────────────────────────────────────────── */}
       <HeroSection />
 
+      {/* ── POSITIONING STRIP ───────────────────────────────────────────────── */}
+      <section className="relative z-10 py-14 px-6 border-t border-white/[0.05]">
+        <div className="max-w-3xl mx-auto">
+          <FadeSection>
+            <p className="text-center text-2xl md:text-3xl font-black text-white tracking-tight mb-3">
+              <span className="inline-block">Workforce apps track time.</span>{' '}
+              <span className="inline-block">NetraOps <span className="text-[#C9A84C]">proves coverage.</span></span>
+            </p>
+            <p className="text-center text-white/40 text-base" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
+              Purpose-built for security operations — replace the spreadsheets, group texts, and paper DARs.
+            </p>
+          </FadeSection>
+        </div>
+      </section>
+
       {/* ── FEATURES ────────────────────────────────────────────────────────── */}
       <section id="features" className="relative z-10 py-28 px-6">
         <div className="max-w-6xl mx-auto">
