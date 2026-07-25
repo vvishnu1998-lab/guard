@@ -208,6 +208,9 @@ export default function LandingPage() {
             <Link href="/terms" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               TERMS OF SERVICE
             </Link>
+            <Link href="/security" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+              SECURITY
+            </Link>
             <Link href="/portal" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               LOGIN
             </Link>
