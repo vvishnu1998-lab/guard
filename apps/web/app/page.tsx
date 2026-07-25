@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Image from 'next/image';
 import Link from 'next/link';
 import FadeSection from '../components/marketing/FadeSection';
 import NavBar from '../components/marketing/NavBar';
@@ -21,6 +22,8 @@ const features = [
     ),
     title: 'Live Patrol Visibility',
     body: 'Track every officer\'s patrol in real time. GPS check-ins every 30 minutes confirm guards are on post and moving — no radio calls required.',
+    image: '/product/live-patrol.webp',
+    imageAlt: 'Live status board listing on-duty guards with their site, shift hours, and last GPS ping',
   },
   {
     icon: (
@@ -30,6 +33,8 @@ const features = [
     ),
     title: 'Post Order Enforcement',
     body: 'Define patrol boundaries for every post. Officers who leave their designated zone trigger an instant alert — before a client ever notices.',
+    image: '/product/post-orders.webp',
+    imageAlt: 'Site cards showing active posts with scheduled shift counts per location',
   },
   {
     icon: (
@@ -39,6 +44,8 @@ const features = [
     ),
     title: 'Digital Duty Logs',
     body: 'Every shift generates a complete duty log — clock-in time, patrol checkpoints, incidents, and handoff notes. Delivered to your inbox every morning.',
+    image: '/product/duty-logs.webp',
+    imageAlt: 'Activity log table with per-guard clock-in, ping-verified, and report-submitted entries',
   },
   {
     icon: (
@@ -48,6 +55,8 @@ const features = [
     ),
     title: 'No-Show Incident Response',
     body: 'If an officer fails to report to post within 15 minutes of shift start, command is notified automatically. No gap in coverage goes undetected.',
+    image: '/product/alerts.webp',
+    imageAlt: 'Recent alerts panel with a missed-shift warning: no guard clocked in 15+ minutes after scheduled start',
   },
 ];
 
@@ -93,6 +102,18 @@ export default function LandingPage() {
             {features.map((f, i) => (
               <FadeSection key={i}>
                 <div className="relative group h-full rounded-xl border border-white/[0.07] bg-white/[0.03] hover:bg-white/[0.055] hover:border-[#C9A84C]/30 transition-all duration-300 p-7 flex flex-col gap-4">
+                  {/* UI preview */}
+                  <div className="relative rounded-lg border border-white/10 overflow-hidden">
+                    <Image
+                      src={f.image}
+                      alt={f.imageAlt}
+                      width={1200}
+                      height={360}
+                      sizes="(max-width: 768px) 100vw, 512px"
+                      className="w-full h-auto block"
+                    />
+                    <div className="pointer-events-none absolute inset-0 rounded-lg" style={{ boxShadow: 'inset 0 0 14px rgba(0,0,0,0.35)' }} />
+                  </div>
                   <div className="text-[#C9A84C] w-10 h-10 flex items-center justify-center rounded-lg bg-[#C9A84C]/10 border border-[#C9A84C]/20">
                     {f.icon}
                   </div>
