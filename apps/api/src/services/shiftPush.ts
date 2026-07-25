@@ -18,6 +18,7 @@
 import { pool } from '../db/pool';
 import { sendPushNotification } from './firebase';
 import { insertNotification } from './notifications';
+import { Sentry } from './sentry';
 
 export interface CreatedShift {
   id:              string;
@@ -166,7 +167,14 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
         [guardId],
       );
       const token = tokRow.rows[0]?.fcm_token;
-      if (!token) continue;
+      if (!token) {
+        Sentry.captureMessage('push_skip_null_token', {
+          level: 'warning',
+          tags: { flow: 'shift_assignment' },
+          extra: { guard_id: guardId, shift_ids: shiftIds },
+        });
+        continue;
+      }
 
       const { staleToken } = await sendPushNotification({
         token,

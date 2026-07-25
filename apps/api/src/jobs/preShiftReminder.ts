@@ -22,6 +22,7 @@ import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
+import { Sentry } from '../services/sentry';
 
 interface CandidateRow {
   shift_id: string;
@@ -94,6 +95,15 @@ cron.schedule('*/5 * * * *', async () => {
           }
         } else {
           console.warn(`[preShiftReminder] shift=${row.shift_id} — no fcm_token; notification row still written`);
+          Sentry.captureMessage('push_skip_null_token', {
+            level: 'warning',
+            tags: { flow: 'pre_shift_reminder' },
+            extra: {
+              guard_id:  row.guard_id,
+              shift_id:  row.shift_id,
+              site_name: row.site_name,
+            },
+          });
         }
 
         // 3. Stamp unconditionally — cron must not retry this row now

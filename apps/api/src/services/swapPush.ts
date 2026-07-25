@@ -80,7 +80,19 @@ async function fireOne(
       [guardId],
     );
     const token = tokRow.rows[0]?.fcm_token;
-    if (!token) return;
+    if (!token) {
+      Sentry.captureMessage('push_skip_null_token', {
+        level: 'warning',
+        tags: { flow: 'swap_push' },
+        extra: {
+          guard_id:   guardId,
+          shift_id:   data.shift_id,
+          history_id: data.history_id,
+          type,
+        },
+      });
+      return;
+    }
     const { staleToken } = await sendPushNotification({ token, title, body, data });
     if (staleToken) {
       await pool.query(

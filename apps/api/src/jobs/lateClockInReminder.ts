@@ -40,6 +40,7 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
 import { sendMissedShiftAlert } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 interface LateCandidateRow {
   shift_id: string;
@@ -73,6 +74,15 @@ async function fireGuardPush(row: LateCandidateRow, rung: 10 | 15): Promise<bool
       });
     } else {
       console.warn(`[lateClockIn] shift=${row.shift_id} rung=T+${rung} — no fcm_token; notification row still written`);
+      Sentry.captureMessage('push_skip_null_token', {
+        level: 'warning',
+        tags: { flow: 'late_clock_in' },
+        extra: {
+          guard_id: row.guard_id,
+          shift_id: row.shift_id,
+          rung,
+        },
+      });
     }
     // Mirror to notifications table — always, even when fcm_token is
     // missing (so the Alerts tab renders the row once the guard opens
