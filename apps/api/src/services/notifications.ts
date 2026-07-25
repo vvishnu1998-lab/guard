@@ -65,7 +65,14 @@ export type NotificationType =
   // Commit 1 addition: shift creation / assignment. Written by
   // services/shiftPush.ts unconditionally per guard bucket, even
   // when fcm_token is null (Alerts tab is source of truth).
-  | 'shift_assigned';
+  | 'shift_assigned'
+  // Commit 2 additions: pre-shift + shift-start reminders. Written
+  // by jobs/preShiftReminder.ts and jobs/shiftStartReminder.ts
+  // unconditionally per row (Alerts tab source of truth). Stamp
+  // column advances regardless of push outcome so the cron never
+  // retries the same row.
+  | 'pre_shift_reminder'
+  | 'shift_start_reminder';
 
 export interface NotificationRow {
   id: string;

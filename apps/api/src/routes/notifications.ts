@@ -65,6 +65,8 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
       'chat',
       'late_clock_in',
       'shift_assigned',
+      'pre_shift_reminder',
+      'shift_start_reminder',
       'swap_request_received', 'swap_request_sent',
       'swap_accepted', 'swap_declined', 'swap_expired',
       'handoff_request_received', 'handoff_request_sent',
@@ -125,6 +127,26 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
       )
     )
     WHEN 'late_clock_in' THEN NOT (
+      notifications.data ? 'shiftId' AND EXISTS (
+        SELECT 1 FROM shift_sessions ss
+        WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid
+          AND ss.clocked_in_at IS NOT NULL
+      )
+    )
+    -- Commit 2: Pre-shift and shift-start reminders auto-erase the moment
+    -- the guard clocks in for the referenced shift — same shape and
+    -- rationale as late_clock_in above. Both crons stamp their respective
+    -- *_reminder_sent_at columns so a repeat notification for the same
+    -- shift is impossible; auto-erase is what hides yesterday's reminder
+    -- from today's Alerts tab.
+    WHEN 'pre_shift_reminder' THEN NOT (
+      notifications.data ? 'shiftId' AND EXISTS (
+        SELECT 1 FROM shift_sessions ss
+        WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid
+          AND ss.clocked_in_at IS NOT NULL
+      )
+    )
+    WHEN 'shift_start_reminder' THEN NOT (
       notifications.data ? 'shiftId' AND EXISTS (
         SELECT 1 FROM shift_sessions ss
         WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid
