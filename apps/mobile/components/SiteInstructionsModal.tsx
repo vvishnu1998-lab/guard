@@ -1,28 +1,33 @@
 /**
  * SiteInstructionsModal — in-app PDF viewer for a site's instructions
- * document. Replaces the Build ≤37 Linking.openURL flow which handed
- * the guard off to the OS browser with a public S3 URL (bucket went
- * private post-lockdown, so those URLs now 403).
+ * document.
  *
- * The pdfUrl prop comes straight from the server's
- * shifts.instructions_pdf_url wire field, which now points at the
- * JWT-scoped GET /api/shifts/:id/instructions.pdf endpoint (Build 38
- * API #1 + followup). We attach the guard's Bearer token in the Pdf
- * source headers so the server auth layer accepts the request.
+ * Historically we passed the JWT-scoped GET
+ * /api/shifts/:id/instructions.pdf URL + Authorization header directly
+ * to <Pdf source={...} />, but react-native-pdf@7.0.4 on Android does
+ * not forward the Authorization header to its native PdfRenderer — the
+ * request goes out unauthed, gets 401, and surfaces as "Download
+ * interrupted". iOS uses a different native path that handles headers
+ * correctly.
  *
- * Errors surfaced to the guard as a retry-or-close panel with the
- * short server-side reason. The full failure — including native
- * error stack — lands in Sentry via the 'site_instructions.error'
- * breadcrumb + captureMessage.
+ * Fix: pre-download the PDF ourselves via react-native-blob-util
+ * (uniform header handling across platforms), then hand the local
+ * file:// path to <Pdf>. No headers needed for a local file.
+ *
+ * Errors surface as a retry-or-close panel with a status-specific
+ * reason. Full failure (HTTP status + native error stack) lands in
+ * Sentry via 'site_instructions.*' breadcrumbs + captureMessage.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, Modal, TouchableOpacity, ActivityIndicator, StyleSheet,
 } from 'react-native';
 import Pdf from 'react-native-pdf';
 import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
+// @ts-expect-error react-native-blob-util ships without types; see backlog
+import ReactNativeBlobUtil from 'react-native-blob-util';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
 
 interface Props {
@@ -31,74 +36,174 @@ interface Props {
   onClose: () => void;
 }
 
+// Minimal structural types — react-native-blob-util's exported types are
+// incomplete/inconsistent across versions, so we type only what we use.
+type BlobTask = Promise<BlobResponse> & { cancel: (cb?: () => void) => void };
+interface BlobResponse {
+  path: () => string;
+  info: () => { status: number };
+}
+
+const DOWNLOAD_TIMEOUT_MS = 30_000;
+
+function messageForStatus(status: number): string {
+  if (status === 401) return 'Session expired. Please log in again.';
+  if (status === 404) return 'Instructions not available for this site.';
+  if (status === 502 || status === 503 || status === 504) {
+    return 'Instructions temporarily unavailable. Please try again.';
+  }
+  return `Couldn't load instructions (HTTP ${status}).`;
+}
+
 export function SiteInstructionsModal({ pdfUrl, visible, onClose }: Props) {
-  const [token, setToken] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  // Bump to force a fresh mount of <Pdf> for retry — the library caches
-  // per-source and a bare state reset won't re-fetch.
+  const [localPath, setLocalPath] = useState<string | null>(null);
+  const [error, setError]         = useState<string | null>(null);
+  const [loading, setLoading]     = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
+
+  const taskRef       = useRef<BlobTask | null>(null);
+  const cachedFileRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!visible) return;
 
     Sentry.addBreadcrumb({
       category: 'site_instructions',
-      message: 'open',
-      level: 'info',
-      data: { pdf_url: pdfUrl },
+      message:  'open',
+      level:    'info',
+      data:     { pdf_url: pdfUrl },
     });
 
     setError(null);
     setLoading(true);
-    setToken(null);
+    setLocalPath(null);
 
-    SecureStore.getItemAsync('guard_access_token').then((t) => {
-      if (!t) {
+    let cancelled = false;
+
+    (async () => {
+      const token = await SecureStore.getItemAsync('guard_access_token');
+      if (cancelled) return;
+      if (!token) {
         Sentry.addBreadcrumb({
           category: 'site_instructions',
-          message: 'error',
-          level: 'error',
-          data: { pdf_url: pdfUrl, reason: 'no_token' },
+          message:  'error',
+          level:    'error',
+          data:     { pdf_url: pdfUrl, reason: 'no_token' },
         });
         setError('Not authenticated');
         setLoading(false);
         return;
       }
-      setToken(t);
-    });
 
-    return () => {
       Sentry.addBreadcrumb({
         category: 'site_instructions',
-        message: 'close',
-        level: 'info',
-        data: { pdf_url: pdfUrl },
+        message:  'download.start',
+        level:    'info',
+        data:     { pdf_url: pdfUrl },
       });
+
+      const start = Date.now();
+      let res: BlobResponse;
+      try {
+        const task = ReactNativeBlobUtil.config({
+          fileCache: true,
+          appendExt: 'pdf',
+          timeout:   DOWNLOAD_TIMEOUT_MS,
+        }).fetch('GET', pdfUrl, {
+          Authorization: `Bearer ${token}`,
+        }) as unknown as BlobTask;
+        taskRef.current = task;
+        res = await task;
+      } catch (err) {
+        if (cancelled) return;
+        const message = String((err as { message?: string })?.message ?? err);
+        Sentry.addBreadcrumb({
+          category: 'site_instructions',
+          message:  'download.error',
+          level:    'error',
+          data:     { pdf_url: pdfUrl, message },
+        });
+        Sentry.captureMessage('site_instructions: download failed (network)', {
+          level: 'error',
+          extra: { pdf_url: pdfUrl, message },
+        });
+        setError("Couldn't reach the server. Check your connection and try again.");
+        setLoading(false);
+        return;
+      }
+
+      if (cancelled) {
+        // Modal closed mid-download; drop the file we no longer need.
+        ReactNativeBlobUtil.fs.unlink(res.path()).catch(() => {});
+        return;
+      }
+
+      const path   = res.path();
+      const status = res.info().status;
+
+      if (status !== 200) {
+        ReactNativeBlobUtil.fs.unlink(path).catch(() => {});
+        Sentry.addBreadcrumb({
+          category: 'site_instructions',
+          message:  'download.error',
+          level:    'error',
+          data:     { pdf_url: pdfUrl, status },
+        });
+        Sentry.captureMessage('site_instructions: download failed (http)', {
+          level: 'error',
+          extra: { pdf_url: pdfUrl, status },
+        });
+        setError(messageForStatus(status));
+        setLoading(false);
+        return;
+      }
+
+      const stat        = await ReactNativeBlobUtil.fs.stat(path).catch(() => null);
+      const size        = stat ? Number(stat.size) : null;
+      const duration_ms = Date.now() - start;
+      Sentry.addBreadcrumb({
+        category: 'site_instructions',
+        message:  'download.success',
+        level:    'info',
+        data:     { pdf_url: pdfUrl, size, duration_ms },
+      });
+
+      cachedFileRef.current = path;
+      setLocalPath('file://' + path);
+    })();
+
+    return () => {
+      cancelled = true;
+      Sentry.addBreadcrumb({
+        category: 'site_instructions',
+        message:  'close',
+        level:    'info',
+        data:     { pdf_url: pdfUrl },
+      });
+      if (taskRef.current) {
+        try { taskRef.current.cancel(() => {}); } catch { /* noop */ }
+        taskRef.current = null;
+      }
+      if (cachedFileRef.current) {
+        ReactNativeBlobUtil.fs.unlink(cachedFileRef.current).catch(() => {});
+        cachedFileRef.current = null;
+      }
     };
   }, [visible, pdfUrl, reloadKey]);
-
-  const source = token
-    ? {
-        uri: pdfUrl,
-        headers: { Authorization: `Bearer ${token}` },
-        cache: true,
-      }
-    : null;
 
   function handlePdfError(err: object) {
     const message = String((err as { message?: string })?.message ?? err);
     Sentry.addBreadcrumb({
       category: 'site_instructions',
-      message: 'error',
-      level: 'error',
-      data: { pdf_url: pdfUrl, message },
+      message:  'render_error',
+      level:    'error',
+      data:     { pdf_url: pdfUrl, message },
     });
-    Sentry.captureMessage('site_instructions: PDF load failed', {
+    Sentry.captureMessage('site_instructions: PDF render failed', {
       level: 'error',
       extra: { pdf_url: pdfUrl, message },
     });
-    setError(message);
+    setError("Couldn't load instructions");
     setLoading(false);
   }
 
@@ -107,6 +212,8 @@ export function SiteInstructionsModal({ pdfUrl, visible, onClose }: Props) {
     setLoading(true);
     setReloadKey((k) => k + 1);
   }
+
+  const source = localPath ? { uri: localPath } : null;
 
   return (
     <Modal
