@@ -56,7 +56,8 @@
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
-        "com.google.android.gms.permission.AD_ID"
+        "com.google.android.gms.permission.AD_ID",
+        "POST_NOTIFICATIONS"
       ]
     },
     "plugins": [
@@ -81,6 +82,13 @@
           "organization": "netraopscom",
           "project": "netraops-mobile",
           "url": "https://sentry.io/"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#00C8FF",
+          "defaultChannel": "default"
         }
       ]
     ],
