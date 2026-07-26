@@ -26,7 +26,6 @@ import {
 import Pdf from 'react-native-pdf';
 import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
-// @ts-expect-error react-native-blob-util ships without types; see backlog
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
 
