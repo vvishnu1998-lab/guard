@@ -36,6 +36,7 @@
     "android": {
       "package": "com.netraops.guard",
       "versionCode": 17,
+      "googleServicesFile": "./google-services.json",
       "config": {
         "googleMaps": {
           "apiKey": "AIzaSyDstXR7ThtM6WPlhqBR-6RKWB2mNyqx3QE"
