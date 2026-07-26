@@ -4,7 +4,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateAtSite } from '../services/geofence';
-import { streamS3Object, extractS3Key } from '../services/s3';
+import { streamS3Object, extractS3Key, headS3Object } from '../services/s3';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
@@ -2191,6 +2191,24 @@ router.get('/:id/instructions.pdf', requireAuth('guard'), async (req, res) => {
 
   const key = extractS3Key(shift.instructions_pdf_url);
 
+  // Fetch metadata via headObject before opening the stream so we can
+  // set Content-Length on the response. Android OkHttp (used by
+  // react-native-pdf AND react-native-blob-util) reports "Download
+  // interrupted" for chunked-encoded responses without a length hint
+  // when Railway's edge translates to HTTP/2. iOS/URLSession and curl
+  // are tolerant; OkHttp is not. One extra S3 API call (~50-100ms) per
+  // guard tap — imperceptible.
+  let head: Awaited<ReturnType<typeof headS3Object>>;
+  try {
+    head = await headS3Object(key);
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { context: 'site_instructions.head' },
+      extra: { shift_id: id, site_id: shift.site_id, guard_id: guardId },
+    });
+    return res.status(502).json({ error: 'S3_HEAD_FAILED' });
+  }
+
   Sentry.addBreadcrumb({
     category: 'site_instructions.stream',
     message: 'streaming site instructions PDF',
@@ -2213,7 +2231,10 @@ router.get('/:id/instructions.pdf', requireAuth('guard'), async (req, res) => {
     }
   });
 
-  res.setHeader('Content-Type', 'application/pdf');
+  if (head.ContentLength != null) {
+    res.setHeader('Content-Length', String(head.ContentLength));
+  }
+  res.setHeader('Content-Type', head.ContentType || 'application/pdf');
   res.setHeader('Content-Disposition', 'inline; filename="site-instructions.pdf"');
   res.setHeader('Cache-Control', 'private, no-store');
 

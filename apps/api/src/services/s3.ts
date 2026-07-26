@@ -120,6 +120,21 @@ export function streamS3Object(key: string): NodeJS.ReadableStream {
 }
 
 /**
+ * Fetch object metadata (ContentLength, ContentType, ETag) without
+ * downloading the body. Used by callers that need to set Content-Length
+ * on a streaming response before piping — Android OkHttp (react-native-pdf,
+ * react-native-blob-util) reports "Download interrupted" for chunked-
+ * encoded responses without a length hint over HTTP/2.
+ */
+export async function headS3Object(key: string): Promise<{
+  ContentLength?: number;
+  ContentType?: string;
+  ETag?: string;
+}> {
+  return s3.headObject({ Bucket: BUCKET, Key: key }).promise();
+}
+
+/**
  * D2 — extract the S3 key from a public URL of the form
  *   https://<bucket>.s3.<region>.amazonaws.com/<key>
  * Returns null if the URL doesn't match (e.g. external URL, malformed).
