@@ -10,6 +10,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import * as Notifications from 'expo-notifications';
+import * as Sentry from '@sentry/react-native';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -39,6 +40,9 @@ export default function LoginScreen() {
         }
       } catch (e) {
         console.warn('Failed to get push token', e);
+        Sentry.captureException(e, {
+          tags: { flow: 'fcm_token_register_login' },
+        });
       }
       await loginWithEmail(email.trim(), password, fcmToken);
       // Navigation handled by root _layout.tsx

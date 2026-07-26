@@ -26,10 +26,18 @@ import { apiClient } from '../lib/apiClient';
 import { navigateForNotification } from '../lib/navigateForNotification';
 import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locationBackground';
 import { initSentry } from '../lib/sentry';
+import { setupAndroidChannels } from '../lib/notifications';
 
 // Initialize at module load — before any component mounts — so early native
 // crashes during startup are captured.
 initSentry();
+
+// Register Android notification channels at module load so channels exist
+// before any push arrives (Android 8+ suppresses pushes without a channel).
+// Fire-and-forget — iOS early-returns; channel setup is idempotent.
+setupAndroidChannels().catch((err) => {
+  Sentry.captureException(err, { tags: { flow: 'android_channel_setup' } });
+});
 
 const EAS_PROJECT_ID = '5fd28125-2461-4165-b9df-7f34ced8b194';
 
@@ -106,6 +114,9 @@ export default function RootLayout() {
           message: 'fcm-token register failed',
           level: 'warning',
           data: { message: (err as Error)?.message },
+        });
+        Sentry.captureException(err, {
+          tags: { flow: 'fcm_token_register' },
         });
       }
       // Always pull the latest unread counts so the badge isn't stale on launch.
