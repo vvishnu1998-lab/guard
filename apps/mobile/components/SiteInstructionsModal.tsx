@@ -45,6 +45,20 @@ interface BlobResponse {
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 
+/**
+ * Scheme+host[:port] prefix of a URL via regex. RN/Hermes has no reliable
+ * `new URL().host` and the app ships no url-polyfill, so we stay
+ * string-based like the rest of the app. Returns null for non-http(s) input.
+ */
+function originOf(u: string): string | null {
+  const m = /^(https?:\/\/[^/?#]+)/i.exec(u);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/** Our own API origin — the only host we attach the guard's bearer token
+ *  to. Derived from EXPO_PUBLIC_API_URL (same env apiClient uses). */
+const API_ORIGIN = originOf(process.env.EXPO_PUBLIC_API_URL ?? '');
+
 function messageForStatus(status: number): string {
   if (status === 401) return 'Session expired. Please log in again.';
   if (status === 404) return 'Instructions not available for this site.';
@@ -101,6 +115,26 @@ export function SiteInstructionsModal({ pdfUrl, visible, onClose }: Props) {
         data:     { pdf_url: pdfUrl },
       });
 
+      // Defense-in-depth (security review Vuln 1): only attach the guard's
+      // bearer token when pdfUrl is our own API origin. The server now
+      // returns a same-origin streaming-proxy URL (buildInstructionsUrl),
+      // so this is normally a no-op — but if a stale/poisoned
+      // instructions_pdf_url ever points elsewhere, we fetch WITHOUT the
+      // token rather than leak it. No user-facing error: the Pdf lib gets
+      // whatever the foreign host returns and fails via the existing path.
+      const pdfOrigin  = originOf(pdfUrl);
+      const sameOrigin = API_ORIGIN != null && pdfOrigin === API_ORIGIN;
+      if (!sameOrigin) {
+        Sentry.captureMessage('site_instructions: host mismatch — token withheld', {
+          level: 'warning',
+          tags:  { flow: 'site_instructions_host_mismatch' },
+          extra: {
+            pdf_url:       pdfUrl.split(/[?#]/)[0], // scheme+host+path, no query
+            expected_host: API_ORIGIN,
+          },
+        });
+      }
+
       const start = Date.now();
       let res: BlobResponse;
       try {
@@ -108,9 +142,9 @@ export function SiteInstructionsModal({ pdfUrl, visible, onClose }: Props) {
           fileCache: true,
           appendExt: 'pdf',
           timeout:   DOWNLOAD_TIMEOUT_MS,
-        }).fetch('GET', pdfUrl, {
+        }).fetch('GET', pdfUrl, sameOrigin ? {
           Authorization: `Bearer ${token}`,
-        }) as unknown as BlobTask;
+        } : {}) as unknown as BlobTask;
         taskRef.current = task;
         res = await task;
       } catch (err) {
