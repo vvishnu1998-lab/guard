@@ -2,9 +2,12 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import bcrypt from 'bcrypt';
-import { validatePassword } from './auth';
+import { validatePassword, logEvent } from './auth';
+import { generateTempPassword } from '../utils/tempPassword';
 import { getAssignedSitesForGuard, writeAssignmentAudit } from '../services/guardAssignments';
 import { pacificTodayStr, isPastPacificDateString } from '../services/pacificDate';
+import { Sentry } from '../services/sentry';
+import { sendGuardWelcomeEmail } from '../services/email';
 
 const router = Router();
 
@@ -31,7 +34,7 @@ router.get('/', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   // only surfaces the label when Set<company_name>.size > 1, so single-tenant
   // (company_admin) views stay visually unchanged.
   const result = await pool.query(
-    `SELECT g.id, g.name, g.email, g.badge_number, g.is_active, g.created_at,
+    `SELECT g.id, g.name, g.email, g.badge_number, g.is_active, g.must_change_password, g.created_at,
             co.name AS company_name,
             array_agg(json_build_object(
               'id', gsa.id,
@@ -110,7 +113,18 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       [req.user!.company_id, name.trim(), email.trim().toLowerCase(), password_hash, badge]
     );
     await client.query('COMMIT');
-    res.status(201).json(result.rows[0]);
+    const newGuard = result.rows[0];
+    res.status(201).json(newGuard);
+
+    sendGuardWelcomeEmail({
+      guard_id:      newGuard.id,
+      guard_name:    newGuard.name,
+      guard_email:   newGuard.email,
+      // requireAuth('company_admin') guarantees company_id is set. Second !
+      // narrows the optional field type on AuthPayload.
+      company_id:    req.user!.company_id!,
+      temp_password: temp_password,
+    }).catch((err) => Sentry.captureException(err));
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     // PostgreSQL unique_violation = error code 23505
@@ -128,6 +142,50 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// POST /api/guards/:id/resend-welcome — rotate temp password, kick session, resend welcome email.
+router.post('/:id/resend-welcome', requireAuth('company_admin'), async (req, res) => {
+  const guardResult = await pool.query<{
+    id: string; name: string; email: string; company_id: string;
+  }>(
+    `SELECT id, name, email, company_id
+       FROM guards
+      WHERE id = $1 AND company_id = $2 AND is_active = true`,
+    [req.params.id, req.user!.company_id],
+  );
+  const guard = guardResult.rows[0];
+  if (!guard) return res.status(404).json({ error: 'Guard not found' });
+
+  const tempPassword = generateTempPassword(12);
+  const password_hash = await bcrypt.hash(tempPassword, 12);
+
+  await pool.query(
+    `UPDATE guards
+        SET password_hash        = $1,
+            must_change_password = true,
+            tokens_not_before    = NOW()
+      WHERE id = $2`,
+    [password_hash, guard.id],
+  );
+
+  let email_status: 'sent' | 'failed' = 'sent';
+  try {
+    await sendGuardWelcomeEmail({
+      guard_id:      guard.id,
+      guard_name:    guard.name,
+      guard_email:   guard.email,
+      company_id:    guard.company_id,
+      temp_password: tempPassword,
+    });
+    await logEvent(guard.id, 'guard', 'welcome_email_resent', req);
+  } catch (err) {
+    email_status = 'failed';
+    Sentry.captureException(err);
+    await logEvent(guard.id, 'guard', 'welcome_email_send_failed', req);
+  }
+
+  res.json({ temp_password: tempPassword, email_status });
 });
 
 router.patch('/:id/deactivate', requireAuth('company_admin'), async (req, res) => {

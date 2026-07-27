@@ -1,13 +1,16 @@
 import { Router } from 'express';
+import * as Sentry from '@sentry/node';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
 import { validateAtSite } from '../services/geofence';
+import { streamS3Object, extractS3Key, headS3Object } from '../services/s3';
 import { idempotent } from '../services/idempotency';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { expiresAtFor } from '../services/retention';
+import { BREAK_DURATIONS, isBreakType } from '../constants/breakDurations';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
   pushSwapRequestToRecipient,
@@ -26,8 +29,43 @@ import {
   sendHandoffAcceptedFyi,
   sendHandoffCompletedFyi,
 } from '../services/email';
+import {
+  SHIFT_HOURS_SQL_FIELDS,
+  emptyShiftHours,
+  getShiftHours,
+  type ShiftHours,
+} from '../services/shiftHours';
 
 const router = Router();
+
+/**
+ * Build the JWT-scoped streaming URL for a shift's site instructions PDF.
+ *
+ * Replaces the S3 presigned URL previously returned in shifts responses
+ * (commit 3f667f6). Presigned URLs leak the storage location + expire in
+ * 15 min, which forced mobile to reload constantly. The streaming
+ * endpoint keeps the S3 URL server-side and gates each fetch on JWT.
+ *
+ * Returns null when the site has no PDF (parity with sites.instructions_
+ * pdf_url = null) OR when API_BASE_URL isn't set — the latter is an infra
+ * misconfig that we log to Sentry but never propagate to the client as a
+ * 500. Guard's clock-in wizard simply won't show the modal in that case.
+ */
+function buildInstructionsUrl(
+  shiftId: string,
+  dbUrl: string | null | undefined,
+): string | null {
+  if (!dbUrl) return null;
+  const base = process.env.API_BASE_URL;
+  if (!base) {
+    Sentry.captureMessage(
+      'API_BASE_URL not set — instructions URL cannot be built',
+      { level: 'error' },
+    );
+    return null;
+  }
+  return `${base.replace(/\/$/, '')}/api/shifts/${shiftId}/instructions.pdf`;
+}
 
 /**
  * Phase A enforcement: for a guard + site combo, scan a list of Pacific
@@ -368,6 +406,15 @@ router.patch('/:id/assign-guard', requireAuth('company_admin'), async (req, res)
     [guard_id, req.params.id]
   );
   res.json(result.rows[0]);
+  // Aggregated per-guard push + notification, fire-and-forget after response.
+  const row = result.rows[0];
+  pushShiftAssignments([{
+    id:              row.id,
+    guard_id:        row.guard_id,
+    site_id:         row.site_id,
+    scheduled_start: row.scheduled_start,
+    scheduled_end:   row.scheduled_end,
+  }]).catch((err) => console.error('[shifts.assign-guard] push failed:', err));
 });
 
 // PATCH /api/shifts/:id/reassign — admin reassigns a shift to a different guard.
@@ -959,6 +1006,16 @@ router.post('/:id/swap-request', requireAuth('guard'), async (req, res) => {
     }
     const toGuardName = overlapRes.rows[0].name;
 
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date — same gate the admin paths
+    // enforce. Runs inside the txn (pass client) to avoid a TOCTOU.
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    const elig = await checkShiftEligibility(to_guard_id, shift.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
+    }
+
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO shift_swap_requests
          (shift_id, from_guard_id, to_guard_id, initiated_by, reason)
@@ -1109,6 +1166,15 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
     if (overlap.rows[0]) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'You now have an overlapping shift; swap is no longer possible.' });
+    }
+
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date. Runs inside the txn (pass client).
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    const elig = await checkShiftEligibility(hist.to_guard_id, shift.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
     }
 
     await client.query(
@@ -1273,6 +1339,15 @@ router.post('/:id/handoff-request', requireAuth('guard'), async (req, res) => {
       return res.status(409).json({ error: 'Selected guard is not eligible (already clocked in, has an overlapping shift, inactive, or wrong company).' });
     }
     const toGuardName = overlapRes.rows[0].name;
+
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date. Runs inside the txn (pass client).
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    const elig = await checkShiftEligibility(to_guard_id, shift.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
+    }
 
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO shift_swap_requests
@@ -1476,6 +1551,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       history_id: string; from_guard_id: string;
       shift_id: string; site_id: string; site_name: string;
       guard_id: string | null; shift_status: string;
+      scheduled_start: string;
       from_session_id: string | null;
     }>(
       `SELECT ssr.id           AS history_id,
@@ -1485,6 +1561,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
               sh.site_id,
               sh.guard_id,
               sh.status         AS shift_status,
+              sh.scheduled_start,
               si.name           AS site_name
          FROM shift_swap_requests ssr
          JOIN shifts sh ON sh.id = ssr.shift_id
@@ -1511,6 +1588,16 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       // Admin reassign in-between.
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Shift has been reassigned by an admin; handoff is stale.' });
+    }
+
+    // Finding #6: recipient must have a covering guard_site_assignments
+    // window for the shift's Pacific date before taking the post. Runs
+    // inside the txn (pass client); rejected before any geofence work.
+    const shiftDate = pacificDateStr(hist.scheduled_start);
+    const elig = await checkShiftEligibility(user!.sub, hist.site_id, shiftDate, client);
+    if (!elig.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
     }
 
     // Geofence — same helper as regular clock-in.
@@ -1738,7 +1825,15 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
                     WHEN ss_agg.open_clocked_in_at IS NOT NULL
                       THEN GREATEST(0, EXTRACT(EPOCH FROM (NOW() - ss_agg.open_clocked_in_at)) / 3600.0)
                     ELSE 0
-                  END AS total_hours_worked
+                  END AS total_hours_worked,
+              -- 4-field canonical hours (Phase 1). scheduled_hours is a
+              -- per-shift property; actual/break/violation aggregate every
+              -- session belonging to this shift (handoff cases contribute
+              -- more than one). See services/shiftHours.ts for the contract.
+              ROUND(CAST(EXTRACT(EPOCH FROM (s.scheduled_end - s.scheduled_start))/3600.0 AS NUMERIC), 2) AS h_scheduled,
+              COALESCE(ss_hrs.actual_hours,    0) AS h_actual,
+              COALESCE(ss_hrs.break_hours,     0) AS h_break,
+              COALESCE(ss_hrs.violation_hours, 0) AS h_violation
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
        JOIN companies co ON co.id = si.company_id
@@ -1750,6 +1845,21 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
          WHERE guard_id = $1
          GROUP BY shift_id
        ) ss_agg ON ss_agg.shift_id = s.id
+       LEFT JOIN (
+         SELECT ss.shift_id,
+                ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2) AS actual_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+                    FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS break_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+                    FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS violation_hours
+         FROM shift_sessions ss
+         WHERE ss.guard_id = $1
+         GROUP BY ss.shift_id
+       ) ss_hrs ON ss_hrs.shift_id = s.id
        WHERE s.guard_id = $1 ORDER BY s.scheduled_start DESC LIMIT 50`,
       [user!.sub]
     );
@@ -1760,15 +1870,51 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
       `SELECT s.*, si.name as site_name, si.is_active AS site_is_active,
               si.instructions_pdf_url, g.name as guard_name,
               co.name AS company_name,
-              COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit
+              COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit,
+              -- 4-field canonical hours (Phase 1). Aggregates every session on
+              -- this shift (handoff cases sum across guards).
+              ROUND(CAST(EXTRACT(EPOCH FROM (s.scheduled_end - s.scheduled_start))/3600.0 AS NUMERIC), 2) AS h_scheduled,
+              COALESCE(ss_hrs.actual_hours,    0) AS h_actual,
+              COALESCE(ss_hrs.break_hours,     0) AS h_break,
+              COALESCE(ss_hrs.violation_hours, 0) AS h_violation
        FROM shifts s
        JOIN sites si ON s.site_id = si.id
        JOIN companies co ON co.id = si.company_id
        LEFT JOIN guards g ON s.guard_id = g.id
+       LEFT JOIN (
+         SELECT ss.shift_id,
+                ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2) AS actual_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+                    FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS break_hours,
+                ROUND(CAST(COALESCE(SUM((
+                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+                    FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+                )), 0) AS NUMERIC), 2) AS violation_hours
+         FROM shift_sessions ss
+         GROUP BY ss.shift_id
+       ) ss_hrs ON ss_hrs.shift_id = s.id
        ${isVishnu ? '' : 'WHERE si.company_id = $1'}
        ORDER BY s.scheduled_start DESC LIMIT 100`,
       isVishnu ? [] : [user!.company_id]
     );
+  }
+  // Build 38: swap raw / presigned S3 URL for the JWT-scoped streaming
+  // endpoint so mobile fetches PDFs through our auth layer, not directly
+  // from S3. Field name unchanged.
+  for (const row of result.rows) {
+    row.instructions_pdf_url = buildInstructionsUrl(row.id, row.instructions_pdf_url);
+    row.hours = {
+      scheduled_hours: Number(row.h_scheduled) || 0,
+      actual_hours:    Number(row.h_actual)    || 0,
+      break_hours:     Number(row.h_break)     || 0,
+      violation_hours: Number(row.h_violation) || 0,
+    } satisfies ShiftHours;
+    delete row.h_scheduled;
+    delete row.h_actual;
+    delete row.h_break;
+    delete row.h_violation;
   }
   res.json(result.rows);
 });
@@ -1787,11 +1933,13 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
             si.photo_limit_override,
             si.ping_interval_minutes,
             co.default_photo_limit,
-            ss.id as session_id, ss.clocked_in_at
+            ss.id as session_id, ss.clocked_in_at,
+            sg.polygon_coordinates, sg.center_lat, sg.center_lng, sg.radius_meters
      FROM shifts s
      JOIN sites si ON si.id = s.site_id
      JOIN companies co ON co.id = si.company_id
      JOIN shift_sessions ss ON ss.shift_id = s.id AND ss.guard_id = $1 AND ss.clocked_out_at IS NULL
+     LEFT JOIN site_geofence sg ON sg.site_id = s.site_id
      WHERE s.guard_id = $1 AND s.status = 'active'
        AND s.scheduled_end > NOW() - INTERVAL '2 hours'
      ORDER BY ss.clocked_in_at DESC LIMIT 1`,
@@ -1800,6 +1948,41 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
   if (!result.rows[0]) return res.json(null);
   const r = result.rows[0];
   const effectivePhotoLimit = r.photo_limit_override ?? r.default_photo_limit ?? 5;
+  const geofence = r.center_lat !== null
+    ? {
+        polygon_coordinates: r.polygon_coordinates,
+        center_lat:          r.center_lat,
+        center_lng:          r.center_lng,
+        radius_meters:       r.radius_meters,
+      }
+    : null;
+
+  // Phase D — surface any open break for this session so the mobile break
+  // screen can hydrate on cold-start / foreground without a separate call.
+  // Mobile derives remaining = (break_start + duration) - now; if the guard
+  // reopens the app after backgrounding through a break, this call gets the
+  // truthful state without a pure setInterval countdown that the OS froze.
+  const breakResult = await pool.query(
+    `SELECT id, break_start, break_type, planned_duration_minutes
+       FROM break_sessions
+      WHERE shift_session_id = $1 AND break_end IS NULL
+      ORDER BY break_start DESC LIMIT 1`,
+    [r.session_id]
+  );
+  const currentBreak = breakResult.rows[0]
+    ? {
+        break_id: breakResult.rows[0].id,
+        break_start: breakResult.rows[0].break_start,
+        break_type: breakResult.rows[0].break_type,
+        planned_duration_minutes: breakResult.rows[0].planned_duration_minutes,
+      }
+    : null;
+
+  // Phase 1 — 4-field live hours for the active session. break_hours /
+  // violation_hours count open intervals up to NOW() so the mobile can
+  // display a running total without a second endpoint.
+  const hours = await getShiftHours({ shift_session_id: r.session_id });
+
   res.json({
     shift:   {
       id: r.shift_id,
@@ -1807,11 +1990,14 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       site_name: r.site_name,
       scheduled_start: r.scheduled_start,
       scheduled_end: r.scheduled_end,
-      instructions_pdf_url: r.instructions_pdf_url ?? null,
+      instructions_pdf_url: buildInstructionsUrl(r.shift_id, r.instructions_pdf_url),
       effective_photo_limit: effectivePhotoLimit,
       ping_interval_minutes: r.ping_interval_minutes,
+      geofence,
     },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
+    current_break: currentBreak,
+    hours,
   });
 });
 
@@ -1832,6 +2018,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
             sh.status, sh.missed_alert_sent_at, sh.created_at,
             si.name AS site_name, si.is_active AS site_is_active,
             si.address AS site_address, si.timezone AS site_tz, si.company_id,
+            si.instructions_pdf_url,
             g.name AS guard_name, g.badge_number, g.phone_number AS guard_phone
        FROM shifts sh
        JOIN sites  si ON si.id = sh.site_id
@@ -1917,19 +2104,160 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
       }
     : null;
 
+  shift.instructions_pdf_url = buildInstructionsUrl(shift.id, shift.instructions_pdf_url);
+
+  // Phase 1 — 4-field hours aggregated across every session on this shift.
+  // Handoff shifts sum multiple sessions; scheduled_hours is the shift's own.
+  const hoursResult = await pool.query<ShiftHours>(
+    `SELECT
+       ROUND(CAST(EXTRACT(EPOCH FROM ($1::timestamptz - $2::timestamptz))/3600.0 AS NUMERIC), 2) AS scheduled_hours,
+       ROUND(CAST(COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)), 0) AS NUMERIC), 2) AS actual_hours,
+       ROUND(CAST(COALESCE(SUM((
+         SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
+           FROM break_sessions bs WHERE bs.shift_session_id = ss.id
+       )), 0) AS NUMERIC), 2) AS break_hours,
+       ROUND(CAST(COALESCE(SUM((
+         SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
+           FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
+       )), 0) AS NUMERIC), 2) AS violation_hours
+     FROM shift_sessions ss
+     WHERE ss.shift_id = $3`,
+    [shift.scheduled_end, shift.scheduled_start, shift.id],
+  );
+  const hours: ShiftHours = hoursResult.rows[0]
+    ? {
+        scheduled_hours: Number(hoursResult.rows[0].scheduled_hours) || 0,
+        actual_hours:    Number(hoursResult.rows[0].actual_hours)    || 0,
+        break_hours:     Number(hoursResult.rows[0].break_hours)     || 0,
+        violation_hours: Number(hoursResult.rows[0].violation_hours) || 0,
+      }
+    : emptyShiftHours();
+
   res.json({
     ...shift,
     geofence,
+    hours,
     reassignment_history: historyResult.rows,
     swap_history:         swapResult.rows,
   });
 });
 
+// GET /api/shifts/:id/instructions.pdf — stream the site's instructions
+// PDF server-side, JWT-scoped. Replaces the S3 presigned URL that mobile
+// used to open directly with Linking.openURL (which leaks the storage
+// location + expires in 15 min).
+//
+// Tenancy mirrors GET /:id's guard branch: own shift OR pending handoff
+// arrival. Admin surfaces don't consume this endpoint — company_admin
+// and vishnu manage PDFs via /sites/:id/instructions.
+router.get('/:id/instructions.pdf', requireAuth('guard'), async (req, res) => {
+  const { id } = req.params;
+  const guardId = req.user!.sub;
+
+  const shiftResult = await pool.query<{
+    site_id: string;
+    guard_id: string | null;
+    instructions_pdf_url: string | null;
+  }>(
+    `SELECT sh.site_id, sh.guard_id, si.instructions_pdf_url
+       FROM shifts sh
+       JOIN sites  si ON si.id = sh.site_id
+      WHERE sh.id = $1`,
+    [id],
+  );
+  if (!shiftResult.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+  const shift = shiftResult.rows[0];
+
+  if (shift.guard_id !== guardId) {
+    // Pending-handoff guard: shift not yet reassigned but the accept has
+    // landed, so they need to see the PDF before clock-in. Mirrors the
+    // same pattern in GET /:id.
+    const pendingArrival = await pool.query(
+      `SELECT 1 FROM shift_swap_requests
+        WHERE shift_id      = $1
+          AND to_guard_id   = $2
+          AND initiated_by  = 'guard_handoff'
+          AND status        = 'accepted'
+          AND to_session_id IS NULL
+        LIMIT 1`,
+      [id, guardId],
+    );
+    if (!pendingArrival.rows[0]) return res.status(404).json({ error: 'Shift not found' });
+  }
+
+  if (!shift.instructions_pdf_url) {
+    return res.status(404).json({ error: 'NO_INSTRUCTIONS' });
+  }
+
+  const key = extractS3Key(shift.instructions_pdf_url);
+
+  // Fetch metadata via headObject before opening the stream so we can
+  // set Content-Length on the response. Android OkHttp (used by
+  // react-native-pdf AND react-native-blob-util) reports "Download
+  // interrupted" for chunked-encoded responses without a length hint
+  // when Railway's edge translates to HTTP/2. iOS/URLSession and curl
+  // are tolerant; OkHttp is not. One extra S3 API call (~50-100ms) per
+  // guard tap — imperceptible.
+  let head: Awaited<ReturnType<typeof headS3Object>>;
+  try {
+    head = await headS3Object(key);
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { context: 'site_instructions.head' },
+      extra: { shift_id: id, site_id: shift.site_id, guard_id: guardId },
+    });
+    return res.status(502).json({ error: 'S3_HEAD_FAILED' });
+  }
+
+  Sentry.addBreadcrumb({
+    category: 'site_instructions.stream',
+    message: 'streaming site instructions PDF',
+    level: 'info',
+    data: { shift_id: id, site_id: shift.site_id, guard_id: guardId },
+  });
+
+  const stream = streamS3Object(key);
+  stream.on('error', (err) => {
+    // Never leak the S3 URL — Sentry capture holds the shift/site ids,
+    // the client sees a generic 502.
+    Sentry.captureException(err, {
+      tags: { context: 'site_instructions.stream' },
+      extra: { shift_id: id, site_id: shift.site_id, guard_id: guardId },
+    });
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'S3_FETCH_FAILED' });
+    } else {
+      res.destroy();
+    }
+  });
+
+  if (head.ContentLength != null) {
+    res.setHeader('Content-Length', String(head.ContentLength));
+  }
+  res.setHeader('Content-Type', head.ContentType || 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="site-instructions.pdf"');
+  res.setHeader('Cache-Control', 'private, no-store');
+
+  stream.pipe(res);
+});
+
 // POST /api/shifts/break-start — guard starts a break
+//
+// Server-driven timer (Phase D Bug A). Client sends {session_id, break_type}
+// only; server derives planned_duration_minutes from BREAK_DURATIONS. If an
+// open break (break_end IS NULL) already exists for the session, we return
+// the existing row's fields idempotently instead of inserting a new one —
+// the mobile screen re-mounts on foreground/nav and would otherwise fan out
+// duplicate open breaks. A requested break_type that differs from the open
+// row's type is a Sentry warning (visibility into UI double-taps hitting
+// different buttons) but still returns the existing row.
 router.post('/break-start', requireAuth('guard'), async (req, res) => {
   const { session_id, break_type } = req.body;
   if (!session_id || !break_type) {
     return res.status(400).json({ error: 'session_id and break_type are required' });
+  }
+  if (!isBreakType(break_type)) {
+    return res.status(400).json({ error: 'break_type must be one of meal, rest, other' });
   }
   try {
     // Verify session belongs to this guard and is open
@@ -1940,12 +2268,48 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
     if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
     const { site_id } = sessionResult.rows[0];
 
-    const result = await pool.query(
-      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type)
-       VALUES ($1, $2, $3, NOW(), $4) RETURNING id`,
-      [session_id, req.user!.sub, site_id, break_type]
+    // Idempotency: return the existing open row instead of inserting a
+    // duplicate. Race-safe enough for the mobile double-tap case — no
+    // UNIQUE constraint on the table today, but the mobile client is the
+    // sole writer per guard and this SELECT + INSERT window is O(1ms).
+    const existing = await pool.query(
+      `SELECT id, break_start, break_type, planned_duration_minutes
+         FROM break_sessions
+        WHERE shift_session_id = $1 AND break_end IS NULL
+        ORDER BY break_start DESC LIMIT 1`,
+      [session_id]
     );
-    res.status(201).json({ break_id: result.rows[0].id });
+    if (existing.rows[0]) {
+      const row = existing.rows[0];
+      if (row.break_type !== break_type) {
+        Sentry.addBreadcrumb({
+          category: 'break',
+          message: 'break-start type mismatch',
+          level: 'warning',
+          data: { requested: break_type, existing: row.break_type, break_id: row.id },
+        });
+      }
+      return res.status(200).json({
+        break_id: row.id,
+        break_start: row.break_start,
+        break_type: row.break_type,
+        planned_duration_minutes: row.planned_duration_minutes,
+      });
+    }
+
+    const planned = BREAK_DURATIONS[break_type];
+    const result = await pool.query(
+      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes)
+       VALUES ($1, $2, $3, NOW(), $4, $5) RETURNING id, break_start, break_type, planned_duration_minutes`,
+      [session_id, req.user!.sub, site_id, break_type, planned]
+    );
+    const row = result.rows[0];
+    res.status(201).json({
+      break_id: row.id,
+      break_start: row.break_start,
+      break_type: row.break_type,
+      planned_duration_minutes: row.planned_duration_minutes,
+    });
   } catch (err: any) {
     console.error('break-start error:', err);
     res.status(500).json({ error: err.message ?? 'Failed to start break' });
@@ -2054,8 +2418,19 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['active', id]);
     const session = sessionResult.rows[0];
     await client.query('COMMIT');
-    // Generate task instances outside transaction (non-critical)
-    generateTaskInstancesForShift(id, shift.site_id, session.clocked_in_at).catch(console.error);
+    // Generate task instances outside transaction (non-critical).
+    // Build 38 #3: surface async failures to Sentry — the fire-and-forget
+    // .catch(console.error) previously swallowed template-fetch and
+    // INSERT errors to stdout only. A dropped tick here presents as an
+    // empty Tasks tab post-clock-in and looks identical to "site has no
+    // templates" (audit findings from the July mosser walk-test).
+    generateTaskInstancesForShift(id, shift.site_id, session.clocked_in_at).catch((err) => {
+      Sentry.captureException(err, {
+        tags: { context: 'generateTaskInstancesForShift' },
+        extra: { shift_id: id, site_id: shift.site_id },
+      });
+      console.error('generateTaskInstancesForShift failed:', err);
+    });
     res.status(201).json(session);
   } catch (err: any) {
     await client.query('ROLLBACK');

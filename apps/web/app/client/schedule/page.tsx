@@ -6,11 +6,23 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { clientGet } from '../../../lib/clientApi';
+import { formatHoursHHMM, formatOffPostHours, formatScheduledHours } from '../../../lib/formatHours';
+
+interface ShiftHours {
+  scheduled_hours: number;
+  actual_hours:    number;
+  break_hours:     number;
+  violation_hours: number;
+}
 
 interface GuardOnDuty {
   name:           string;
   clocked_in_at:  string;
+  // Legacy scalar retained on the interface (the API still emits it) but
+  // Phase 2 Q3 trusts the `hours` object exclusively. If `hours` is missing
+  // the card falls to the empty 4-field object and each cell renders "—".
   hours_on_duty:  number;
+  hours?:         ShiftHours;
   last_lat:       number | null;
   last_lng:       number | null;
   last_ping_at:   string | null;
@@ -56,12 +68,12 @@ export default function SchedulePage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <h1 className="text-3xl font-bold tracking-widest text-blue-400">GUARDS ON DUTY</h1>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full ${guards.length > 0 ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
-            <span className="text-gray-400 text-sm">{guards.length} active</span>
+            <span className="text-gray-400 text-sm whitespace-nowrap">{guards.length} active</span>
           </div>
           <button
             onClick={load}
@@ -85,8 +97,20 @@ export default function SchedulePage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {guards.map((g, i) => {
           const ping = lastPingLabel(g.last_ping_at);
-          const hours = Math.floor(g.hours_on_duty);
-          const mins  = Math.round((g.hours_on_duty - hours) * 60);
+          // Phase 2 Q3: trust the 4-field object. When absent, pass null
+          // to the D2 helpers so each cell renders "—" (unknown) rather
+          // than silently reading 0 as "0h 00m".
+          const h: {
+            scheduled_hours: number | null;
+            actual_hours:    number | null;
+            break_hours:     number | null;
+            violation_hours: number | null;
+          } = g.hours ?? {
+            scheduled_hours: null,
+            actual_hours:    null,
+            break_hours:     null,
+            violation_hours: null,
+          };
           return (
             <div
               key={i}
@@ -102,16 +126,35 @@ export default function SchedulePage() {
                 </div>
               </div>
 
+              {/* On-duty headline (D4) — the actual_hours field, big. */}
+              <div className="border-t border-[#1A3050] pt-3">
+                <p className="text-3xl font-bold text-blue-400 tabular-nums leading-none">
+                  {formatHoursHHMM(h.actual_hours)}
+                </p>
+                <p className="text-gray-500 text-[10px] tracking-widest mt-1">ON DUTY</p>
+              </div>
+
+              {/* 4-field detail line — client labels per D3. */}
               <div className="border-t border-[#1A3050] pt-3 space-y-2">
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500 tracking-widest">SCHEDULED</span>
+                  <span className="text-gray-300 tabular-nums">{formatScheduledHours(h.scheduled_hours)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500 tracking-widest">BREAK</span>
+                  <span className="text-gray-300 tabular-nums">{formatHoursHHMM(h.break_hours)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500 tracking-widest">OFF-POST</span>
+                  <span className={`tabular-nums ${(h.violation_hours ?? 0) > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
+                    {formatOffPostHours(h.violation_hours)}
+                  </span>
+                </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">CLOCKED IN</span>
                   <span className="text-gray-300">
                     {new Date(g.clocked_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                   </span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-500 tracking-widest">DURATION</span>
-                  <span className="text-gray-300">{hours}h {mins.toString().padStart(2, '0')}m</span>
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500 tracking-widest">LAST PING</span>

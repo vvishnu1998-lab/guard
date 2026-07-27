@@ -238,14 +238,14 @@ export default function LiveMapPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-3xl font-bold tracking-widest text-amber-400">LIVE STATUS</h1>
           <p className="text-gray-600 text-xs tracking-widest mt-1">
             Refreshes in {countdown}s · Last updated {lastRefresh.toLocaleTimeString('en-GB')}
           </p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
           {violations.length > 0 && (
             <div className="flex items-center gap-2 bg-red-900/40 border border-red-700 rounded-lg px-3 py-2">
               <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
@@ -284,16 +284,16 @@ export default function LiveMapPage() {
         </div>
       )}
 
-      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-x-auto">
+        <table className="w-full min-w-[640px] text-sm">
           <thead>
             <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
-              <th className="text-left p-4">GUARD</th>
-              <th className="text-left p-4">SITE</th>
-              <th className="text-left p-4">ON SHIFT</th>
-              <th className="text-left p-4">LAST PING</th>
-              <th className="text-left p-4">LAST REPORT</th>
-              <th className="text-center p-4">STATUS</th>
+              <th className="text-left p-4 whitespace-nowrap">GUARD</th>
+              <th className="text-left p-4 whitespace-nowrap">SITE</th>
+              <th className="text-left p-4 whitespace-nowrap">ON SHIFT</th>
+              <th className="text-left p-4 whitespace-nowrap">LAST PING</th>
+              <th className="text-left p-4 whitespace-nowrap">LAST REPORT</th>
+              <th className="text-center p-4 whitespace-nowrap">STATUS</th>
             </tr>
           </thead>
           <tbody>
@@ -357,7 +357,7 @@ export default function LiveMapPage() {
             <h2 className="text-amber-400 font-bold tracking-widest text-sm">RECENT BREACHES</h2>
             <p className="text-gray-600 text-xs mt-1">Geofence violations across all sites</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {/* Time-range chips. When a date range is set, chips are visually
                 muted to signal they're overridden; clicking one clears the
                 date range and re-activates the chip. */}
@@ -469,17 +469,17 @@ export default function LiveMapPage() {
           </div>
         </div>
 
-        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
             <thead>
               <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
-                <th className="text-left p-4">OCCURRED</th>
-                <th className="text-left p-4">GUARD</th>
-                <th className="text-left p-4">SITE</th>
-                <th className="text-left p-4">COORDS</th>
-                <th className="text-left p-4">DURATION</th>
-                <th className="text-center p-4">STATUS</th>
-                <th className="text-center p-4">PHOTO</th>
+                <th className="text-left p-4 whitespace-nowrap">OCCURRED</th>
+                <th className="text-left p-4 whitespace-nowrap">GUARD</th>
+                <th className="text-left p-4 whitespace-nowrap">SITE</th>
+                <th className="text-left p-4 whitespace-nowrap">COORDS</th>
+                <th className="text-left p-4 whitespace-nowrap">DURATION</th>
+                <th className="text-center p-4 whitespace-nowrap">STATUS</th>
+                <th className="text-center p-4 whitespace-nowrap">PHOTO</th>
               </tr>
             </thead>
             <tbody>

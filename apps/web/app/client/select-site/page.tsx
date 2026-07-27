@@ -84,7 +84,7 @@ export default function ClientSelectSitePage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#060E1A] flex items-center justify-center p-8">
+    <main className="min-h-screen bg-[#060E1A] flex items-center justify-center p-6 md:p-8">
       <div className="w-full max-w-[520px]">
         <div className="flex items-center gap-3 mb-10">
           <Image

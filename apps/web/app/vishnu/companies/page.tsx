@@ -21,11 +21,18 @@ interface Company {
 }
 
 interface Admin {
-  id:         string;
-  name:       string;
-  email:      string;
-  is_primary: boolean;
-  is_active:  boolean;
+  id:                   string;
+  name:                 string;
+  email:                string;
+  is_primary:           boolean;
+  is_active:            boolean;
+  must_change_password: boolean;
+}
+
+interface CredentialsBanner {
+  email:         string;
+  temp_password: string;
+  email_status:  'sent' | 'failed';
 }
 
 interface Site {
@@ -84,6 +91,8 @@ export default function CompaniesPage() {
   const [editSiteId,  setEditSiteId]  = useState<string | null>(null);
   const [overrideVal, setOverrideVal] = useState('');
   const [savingSite,  setSavingSite]  = useState(false);
+  const [credentialsBanner, setCredentialsBanner] = useState<CredentialsBanner | null>(null);
+  const [resendingAdminId, setResendingAdminId] = useState<string | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const siteRowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
 
@@ -246,6 +255,25 @@ export default function CompaniesPage() {
     } catch (e: any) { setError(e.message); }
   }
 
+  async function resendPrimaryAdminWelcome(companyId: string, admin: Admin) {
+    if (!confirm(`Resend welcome email to ${admin.email}? A new temporary password will be generated and the old one will stop working.`)) return;
+    setResendingAdminId(admin.id);
+    try {
+      const r = await vishnuPost<{ temp_password: string; email_status: 'sent' | 'failed' }>(
+        `/api/admin/companies/${companyId}/admins/${admin.id}/resend-welcome`, {},
+      );
+      setCredentialsBanner({ email: admin.email, temp_password: r.temp_password, email_status: r.email_status });
+      setAdmins((prev) => { const n = { ...prev }; delete n[companyId]; return n; });
+      await loadAdmins(companyId);
+    } catch (e: any) { setError(e?.message ?? 'Failed to resend welcome email'); }
+    finally { setResendingAdminId(null); }
+  }
+
+  function copyCredentialsToClipboard(b: CredentialsBanner) {
+    const text = `Portal: https://app.netraops.com/admin\nEmail: ${b.email}\nPassword: ${b.temp_password}`;
+    navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
+  }
+
   async function saveOverride(siteId: string) {
     setSavingSite(true);
     try {
@@ -259,17 +287,60 @@ export default function CompaniesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <h1 className="text-3xl font-bold tracking-widest text-gray-300">COMPANIES</h1>
         <button
           onClick={() => { setShowCreate(true); setFormError(''); setCreateForm(EMPTY_FORM); }}
-          className="bg-gray-600 text-white text-xs tracking-widest font-bold px-4 py-2 rounded-lg hover:bg-gray-500 transition-colors"
+          className="self-start md:self-auto bg-gray-600 text-white text-xs tracking-widest font-bold px-4 py-2 rounded-lg hover:bg-gray-500 transition-colors whitespace-nowrap"
         >
           + NEW COMPANY
         </button>
       </div>
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
+
+      {credentialsBanner && (
+        <div className={`text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3 border ${
+          credentialsBanner.email_status === 'sent'
+            ? 'bg-green-900/40 border-green-500 text-green-300'
+            : 'bg-amber-900/40 border-amber-500 text-amber-200'
+        }`}>
+          <div className="min-w-0 flex-1">
+            <p className={`font-medium mb-1 ${credentialsBanner.email_status === 'sent' ? 'text-green-200' : 'text-amber-100'}`}>
+              {credentialsBanner.email_status === 'sent'
+                ? '✅ Welcome email sent. New temp password:'
+                : '⚠️ Email delivery failed — share these credentials manually:'}
+            </p>
+            <p className="text-sm leading-6">
+              Portal: <span className="font-mono">https://app.netraops.com/admin</span><br />
+              Email: <span className="font-mono">{credentialsBanner.email}</span><br />
+              Password: <span className="font-mono font-bold">{credentialsBanner.temp_password}</span>
+            </p>
+            <p className={`text-xs mt-2 ${credentialsBanner.email_status === 'sent' ? 'text-green-400' : 'text-amber-300'}`}>
+              Admin will be required to change this password on first login.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => copyCredentialsToClipboard(credentialsBanner)}
+              className={`text-xs tracking-widest border rounded px-3 py-1 ${
+                credentialsBanner.email_status === 'sent'
+                  ? 'text-green-300 hover:text-green-100 border-green-500/40 hover:bg-green-500/10'
+                  : 'text-amber-200 hover:text-amber-50 border-amber-500/40 hover:bg-amber-500/10'
+              }`}
+            >
+              COPY
+            </button>
+            <button
+              onClick={() => setCredentialsBanner(null)}
+              aria-label="Dismiss"
+              className={`text-lg leading-none ${credentialsBanner.email_status === 'sent' ? 'text-green-400 hover:text-green-200' : 'text-amber-300 hover:text-amber-100'}`}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       <input
         type="text"
@@ -298,7 +369,13 @@ export default function CompaniesPage() {
           return (
             <div key={c.id} className={`bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden ${!c.is_active ? 'opacity-60' : ''}`}>
               {/* Company row */}
-              <div className="p-4 flex items-center gap-4">
+              {/*
+               * Mobile ({'<'}md): stack name/uuid on line 1, then a right-aligned
+               * sub-row with PHOTOS/RPT (sm+: with SITES/GUARDS/ADMINS) + actions.
+               * Desktop (md+): md:contents on the sub-row flattens it back into
+               * direct flex children of the outer row — desktop layout unchanged.
+               */}
+              <div className="p-4 flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
                 <button
                   onClick={() => toggleExpand(c.id)}
                   className="flex-1 text-left flex items-center gap-4"
@@ -323,50 +400,52 @@ export default function CompaniesPage() {
                   </div>
                 </button>
 
-                {/* Stats */}
-                <div className="hidden sm:flex gap-6 text-center shrink-0">
-                  <div><p className="text-gray-200 font-bold">{c.active_sites}</p><p className="text-gray-600 text-xs">SITES</p></div>
-                  <div><p className="text-gray-200 font-bold">{c.active_guards}</p><p className="text-gray-600 text-xs">GUARDS</p></div>
-                  <div><p className="text-gray-200 font-bold">{c.admin_count}</p><p className="text-gray-600 text-xs">ADMINS</p></div>
-                </div>
+                <div className="flex items-center justify-end gap-4 flex-wrap md:contents">
+                  {/* Stats */}
+                  <div className="hidden sm:flex gap-6 text-center shrink-0">
+                    <div><p className="text-gray-200 font-bold">{c.active_sites}</p><p className="text-gray-600 text-xs">SITES</p></div>
+                    <div><p className="text-gray-200 font-bold">{c.active_guards}</p><p className="text-gray-600 text-xs">GUARDS</p></div>
+                    <div><p className="text-gray-200 font-bold">{c.admin_count}</p><p className="text-gray-600 text-xs">ADMINS</p></div>
+                  </div>
 
-                {/* Photo limit */}
-                <div className="text-center shrink-0">
-                  {editId === c.id ? (
-                    <input
-                      type="number" min={1} max={20}
-                      value={editForm.default_photo_limit}
-                      onChange={(e) => setEditForm((f) => ({ ...f, default_photo_limit: e.target.value }))}
-                      placeholder={String(c.default_photo_limit)}
-                      className="bg-[#0B1526] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none w-14 text-center"
-                    />
-                  ) : (
-                    <div>
-                      <p className="text-gray-300 font-bold">{c.default_photo_limit}</p>
-                      <p className="text-gray-600 text-xs">PHOTOS/RPT</p>
-                    </div>
-                  )}
-                </div>
+                  {/* Photo limit */}
+                  <div className="text-center shrink-0">
+                    {editId === c.id ? (
+                      <input
+                        type="number" min={1} max={20}
+                        value={editForm.default_photo_limit}
+                        onChange={(e) => setEditForm((f) => ({ ...f, default_photo_limit: e.target.value }))}
+                        placeholder={String(c.default_photo_limit)}
+                        className="bg-[#0B1526] border border-gray-600 rounded px-2 py-1 text-gray-200 text-sm focus:outline-none w-14 text-center"
+                      />
+                    ) : (
+                      <div>
+                        <p className="text-gray-300 font-bold">{c.default_photo_limit}</p>
+                        <p className="text-gray-600 text-xs">PHOTOS/RPT</p>
+                      </div>
+                    )}
+                  </div>
 
-                {/* Actions */}
-                <div className="flex gap-2 shrink-0">
-                  {editId === c.id ? (
-                    <>
-                      <button onClick={() => saveEdit(c.id)} disabled={saving} className="text-xs text-green-400 border border-green-700 px-2 py-1 rounded hover:bg-green-900/30 transition-colors disabled:opacity-40">SAVE</button>
-                      <button onClick={() => { setEditId(null); setEditForm(EDIT_EMPTY); }} className="text-xs text-gray-500 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 transition-colors">CANCEL</button>
-                    </>
-                  ) : (
-                    <>
-                      <button onClick={() => { setEditId(c.id); setEditForm({ name: c.name, default_photo_limit: String(c.default_photo_limit) }); }}
-                        className="text-xs text-gray-400 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 hover:text-gray-200 transition-colors">
-                        EDIT
-                      </button>
-                      <button onClick={() => toggleActive(c)}
-                        className={`text-xs px-2 py-1 rounded border transition-colors ${c.is_active ? 'border-red-800 text-red-400 hover:bg-red-900/20' : 'border-green-800 text-green-400 hover:bg-green-900/20'}`}>
-                        {c.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
-                      </button>
-                    </>
-                  )}
+                  {/* Actions */}
+                  <div className="flex gap-2 shrink-0">
+                    {editId === c.id ? (
+                      <>
+                        <button onClick={() => saveEdit(c.id)} disabled={saving} className="text-xs text-green-400 border border-green-700 px-2 py-1 rounded hover:bg-green-900/30 transition-colors disabled:opacity-40">SAVE</button>
+                        <button onClick={() => { setEditId(null); setEditForm(EDIT_EMPTY); }} className="text-xs text-gray-500 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 transition-colors">CANCEL</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => { setEditId(c.id); setEditForm({ name: c.name, default_photo_limit: String(c.default_photo_limit) }); }}
+                          className="text-xs text-gray-400 border border-[#1A3050] px-2 py-1 rounded hover:border-gray-500 hover:text-gray-200 transition-colors">
+                          EDIT
+                        </button>
+                        <button onClick={() => toggleActive(c)}
+                          className={`text-xs px-2 py-1 rounded border transition-colors ${c.is_active ? 'border-red-800 text-red-400 hover:bg-red-900/20' : 'border-green-800 text-green-400 hover:bg-green-900/20'}`}>
+                          {c.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -474,6 +553,15 @@ export default function CompaniesPage() {
                             <span className="text-gray-600">{a.email}</span>
                             {a.is_primary && (
                               <span className="text-gray-400 border border-gray-600 px-1.5 rounded text-xs tracking-widest">PRIMARY</span>
+                            )}
+                            {a.is_primary && a.is_active && a.must_change_password && (
+                              <button
+                                onClick={() => resendPrimaryAdminWelcome(c.id, a)}
+                                disabled={resendingAdminId === a.id}
+                                className="ml-auto text-xs text-cyan-400 tracking-widest border border-cyan-500/40 px-2 py-0.5 rounded hover:bg-cyan-500/10 hover:border-cyan-400 transition-colors disabled:opacity-40"
+                              >
+                                {resendingAdminId === a.id ? 'SENDING…' : '↻ RESEND EMAIL'}
+                              </button>
                             )}
                           </div>
                         ))}

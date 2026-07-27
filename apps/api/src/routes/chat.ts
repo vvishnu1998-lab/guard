@@ -15,6 +15,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
+import { Sentry } from '../services/sentry';
 
 const router = Router();
 
@@ -196,28 +197,18 @@ router.post('/rooms/:roomId/messages', requireAuth('company_admin', 'guard'), as
         body:    preview,
         data:    { roomId },
       });
-    } catch { /* skip silently */ }
-  } else {
-    // Push to all company admins (no notification-log persistence for admins yet)
-    try {
-      const guardRow = await pool.query('SELECT name FROM guards WHERE id = $1', [user!.sub]);
-      const senderName = guardRow.rows[0]?.name ?? 'Guard';
-      const adminRows = await pool.query(
-        'SELECT fcm_token FROM company_admins WHERE company_id = $1 AND is_active = true AND fcm_token IS NOT NULL',
-        [r.company_id]
-      );
-      await Promise.allSettled(
-        adminRows.rows.map((a: { fcm_token: string }) =>
-          sendPushNotification({
-            token: a.fcm_token,
-            title: `New message from ${senderName}`,
-            body: preview,
-            data: { type: 'chat', roomId },
-          })
-        )
-      );
-    } catch { /* skip silently */ }
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: { flow: 'chat_message_push' },
+        extra: { message_id: saved.rows[0]?.id, room_id: roomId },
+      });
+    }
   }
+  // Guard→admin push intentionally NOT wired: company_admins has no fcm_token
+  // column and there is no admin device-token registration surface (see
+  // locations.ts / shifts.ts). Removing the dead SELECT that raised 42703 on
+  // every guard message (Finding #3). Admins see guard messages via the web
+  // unread-count poll, not push.
 
   res.status(201).json(saved.rows[0]);
 });

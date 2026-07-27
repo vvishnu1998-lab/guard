@@ -72,7 +72,7 @@ export default function ClientChangePasswordPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#060E1A] flex items-center justify-center p-8">
+    <main className="min-h-screen bg-[#060E1A] flex items-center justify-center p-6 md:p-8">
       <div className="w-full max-w-[420px]">
         <div className="mb-10">
           <p className="text-blue-400 text-[11px] tracking-[0.3em] font-semibold mb-3">SET PASSWORD</p>

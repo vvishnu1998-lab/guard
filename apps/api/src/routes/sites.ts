@@ -112,9 +112,13 @@ router.get('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
 // the address on blur, the client sends the resolved coordinates here
 // so they can pre-populate the geofence editor later (schema_v27).
 router.post('/', requireAuth('company_admin'), async (req, res) => {
+  // Finding #3: instructions_pdf_url is NOT accepted from the body — a
+  // client-supplied key would be presigned with server AWS creds on read,
+  // enabling cross-tenant object reads. The only legitimate setter is the
+  // server-computed key in POST /:id/instructions.
   const {
     name, address, contract_start, contract_end,
-    instructions_pdf_url, timezone,
+    timezone,
     geocoded_lat, geocoded_lng,
   } = req.body;
   if (!name || !address || !contract_start) {
@@ -137,9 +141,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     // DEFAULT would apply. Postgres has no clean way to say "use DEFAULT"
     // via a bound parameter without dynamic SQL, so we spell it out here.
     const siteResult = await client.query(
-      `INSERT INTO sites (company_id, name, address, contract_start, contract_end, instructions_pdf_url, timezone, geocoded_lat, geocoded_lng)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, instructions_pdf_url || null, timezone || 'America/Los_Angeles', lat, lng]
+      `INSERT INTO sites (company_id, name, address, contract_start, contract_end, timezone, geocoded_lat, geocoded_lng)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.user!.company_id, name.trim(), address.trim(), contract_start, contract_end || null, timezone || 'America/Los_Angeles', lat, lng]
     );
     const site = siteResult.rows[0];
     // Retention rebuild: no per-site retention row. Each retention-
@@ -157,7 +161,10 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
 
 // PUT /api/sites/:id — update site fields including instructions_pdf_url
 router.put('/:id', requireAuth('company_admin'), async (req, res) => {
-  const { name, address, contract_start, contract_end, instructions_pdf_url, timezone } = req.body;
+  // Finding #3: instructions_pdf_url is NOT accepted from the body (see
+  // POST handler). It is settable only via the server-computed key in
+  // POST /:id/instructions.
+  const { name, address, contract_start, contract_end, timezone } = req.body;
   const gate = await assertSiteActive(req.params.id, req.user!.company_id!);
   if (!gate.ok) return res.status(gate.status).json(gate.body);
   if (timezone != null && !ALLOWED_TIMEZONES.has(timezone)) {
@@ -172,10 +179,9 @@ router.put('/:id', requireAuth('company_admin'), async (req, res) => {
        address = COALESCE($2, address),
        contract_start = COALESCE($3, contract_start),
        contract_end = COALESCE($4, contract_end),
-       instructions_pdf_url = COALESCE($5, instructions_pdf_url),
-       timezone = COALESCE($7, timezone)
+       timezone = COALESCE($5, timezone)
      WHERE id = $6 RETURNING *`,
-    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, instructions_pdf_url ?? null, req.params.id, timezone || null]
+    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, timezone || null, req.params.id]
   );
   res.json(result.rows[0]);
 });

@@ -1,44 +1,16 @@
-'use client';
-
-import { useEffect, useRef } from 'react';
+import type { Metadata } from 'next';
 import Image from 'next/image';
 import Link from 'next/link';
+import FadeSection from '../components/marketing/FadeSection';
+import FaqSection from '../components/marketing/FaqSection';
+import NavBar from '../components/marketing/NavBar';
+import HeroSection from '../components/marketing/HeroSection';
+import ContactForm from '../components/marketing/ContactForm';
+import LogoImage from '../components/marketing/LogoImage';
 
-// ── Scroll-fade hook ──────────────────────────────────────────────────────────
-function useFadeIn() {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          el.style.opacity = '1';
-          el.style.transform = 'translateY(0)';
-          observer.disconnect();
-        }
-      },
-      { threshold: 0.12 }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-  return ref;
-}
-
-// ── Reusable fade section wrapper ─────────────────────────────────────────────
-function FadeSection({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  const ref = useFadeIn();
-  return (
-    <div
-      ref={ref}
-      className={className}
-      style={{ opacity: 0, transform: 'translateY(32px)', transition: 'opacity 0.7s ease, transform 0.7s ease' }}
-    >
-      {children}
-    </div>
-  );
-}
+export const metadata: Metadata = {
+  alternates: { canonical: '/' },
+};
 
 // ── Feature card data ──────────────────────────────────────────────────────────
 const features = [
@@ -51,6 +23,8 @@ const features = [
     ),
     title: 'Live Patrol Visibility',
     body: 'Track every officer\'s patrol in real time. GPS check-ins every 30 minutes confirm guards are on post and moving — no radio calls required.',
+    image: '/product/live-patrol.webp',
+    imageAlt: 'Live status board listing on-duty guards with their site, shift hours, and last GPS ping',
   },
   {
     icon: (
@@ -60,6 +34,8 @@ const features = [
     ),
     title: 'Post Order Enforcement',
     body: 'Define patrol boundaries for every post. Officers who leave their designated zone trigger an instant alert — before a client ever notices.',
+    image: '/product/post-orders.webp',
+    imageAlt: 'Site cards showing active posts with scheduled shift counts per location',
   },
   {
     icon: (
@@ -69,6 +45,8 @@ const features = [
     ),
     title: 'Digital Duty Logs',
     body: 'Every shift generates a complete duty log — clock-in time, patrol checkpoints, incidents, and handoff notes. Delivered to your inbox every morning.',
+    image: '/product/duty-logs.webp',
+    imageAlt: 'Activity log table with per-guard clock-in, ping-verified, and report-submitted entries',
   },
   {
     icon: (
@@ -78,10 +56,13 @@ const features = [
     ),
     title: 'No-Show Incident Response',
     body: 'If an officer fails to report to post within 15 minutes of shift start, command is notified automatically. No gap in coverage goes undetected.',
+    image: '/product/alerts.webp',
+    imageAlt: 'Recent alerts panel with a missed-shift warning: no guard clocked in 15+ minutes after scheduled start',
   },
 ];
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── Main page (server component — metadata lives here, interactivity in
+//    components/marketing/* client islands) ───────────────────────────────────
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-[#0B1526] text-white overflow-x-hidden">
@@ -104,6 +85,21 @@ export default function LandingPage() {
       {/* ── HERO ────────────────────────────────────────────────────────────── */}
       <HeroSection />
 
+      {/* ── POSITIONING STRIP ───────────────────────────────────────────────── */}
+      <section className="relative z-10 py-14 px-6 border-t border-white/[0.05]">
+        <div className="max-w-3xl mx-auto">
+          <FadeSection>
+            <p className="text-center text-2xl md:text-3xl font-black text-white tracking-tight mb-3">
+              <span className="inline-block">Workforce apps track time.</span>{' '}
+              <span className="inline-block">NetraOps <span className="text-[#C9A84C]">proves coverage.</span></span>
+            </p>
+            <p className="text-center text-white/40 text-base" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
+              Purpose-built for security operations — replace the spreadsheets, group texts, and paper DARs.
+            </p>
+          </FadeSection>
+        </div>
+      </section>
+
       {/* ── FEATURES ────────────────────────────────────────────────────────── */}
       <section id="features" className="relative z-10 py-28 px-6">
         <div className="max-w-6xl mx-auto">
@@ -122,6 +118,18 @@ export default function LandingPage() {
             {features.map((f, i) => (
               <FadeSection key={i}>
                 <div className="relative group h-full rounded-xl border border-white/[0.07] bg-white/[0.03] hover:bg-white/[0.055] hover:border-[#C9A84C]/30 transition-all duration-300 p-7 flex flex-col gap-4">
+                  {/* UI preview */}
+                  <div className="relative rounded-lg border border-white/10 overflow-hidden">
+                    <Image
+                      src={f.image}
+                      alt={f.imageAlt}
+                      width={1200}
+                      height={360}
+                      sizes="(max-width: 768px) 100vw, 512px"
+                      className="w-full h-auto block"
+                    />
+                    <div className="pointer-events-none absolute inset-0 rounded-lg" style={{ boxShadow: 'inset 0 0 14px rgba(0,0,0,0.35)' }} />
+                  </div>
                   <div className="text-[#C9A84C] w-10 h-10 flex items-center justify-center rounded-lg bg-[#C9A84C]/10 border border-[#C9A84C]/20">
                     {f.icon}
                   </div>
@@ -182,6 +190,23 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* ── FAQ ─────────────────────────────────────────────────────────────── */}
+      <section id="faq" className="relative z-10 py-28 px-6 border-t border-white/[0.05]">
+        <div className="max-w-3xl mx-auto">
+          <FadeSection>
+            <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold text-center mb-4">FAQ</p>
+            <h2 className="text-center text-4xl md:text-5xl font-black text-white mb-16"
+              style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.04em' }}>
+              Frequently Asked Questions
+            </h2>
+          </FadeSection>
+
+          <FadeSection>
+            <FaqSection />
+          </FadeSection>
+        </div>
+      </section>
+
       {/* ── CONTACT ─────────────────────────────────────────────────────────── */}
       <section id="contact" className="relative z-10 py-28 px-6 border-t border-white/[0.05]">
         <div className="max-w-2xl mx-auto">
@@ -197,82 +222,7 @@ export default function LandingPage() {
           </FadeSection>
 
           <FadeSection>
-            <form
-              action="mailto:vvishnu1998@gmail.com"
-              method="post"
-              encType="text/plain"
-              className="flex flex-col gap-5"
-            >
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div className="flex flex-col gap-2">
-                  <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">NAME</label>
-                  <input
-                    type="text"
-                    name="name"
-                    required
-                    placeholder="John Smith"
-                    className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
-                    style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-                  />
-                </div>
-                <div className="flex flex-col gap-2">
-                  <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">COMPANY</label>
-                  <input
-                    type="text"
-                    name="company"
-                    required
-                    placeholder="Apex Security Ltd."
-                    className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
-                    style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div className="flex flex-col gap-2">
-                  <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">EMAIL</label>
-                  <input
-                    type="email"
-                    name="email"
-                    required
-                    placeholder="john@apexsecurity.com"
-                    className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
-                    style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-                  />
-                </div>
-                <div className="flex flex-col gap-2">
-                  <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">NUMBER OF SITES</label>
-                  <select
-                    name="sites"
-                    className="bg-[#0B1526] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:border-[#C9A84C]/50 transition-colors appearance-none cursor-pointer"
-                    style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-                  >
-                    <option value="1-4">1–4 sites</option>
-                    <option value="5-14">5–14 sites</option>
-                    <option value="15-24">15–24 sites</option>
-                    <option value="25+">25+ sites</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="text-white/40 text-xs tracking-[0.2em] font-semibold">MESSAGE (OPTIONAL)</label>
-                <textarea
-                  name="message"
-                  rows={4}
-                  placeholder="Tell us about your security operations..."
-                  className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors resize-none"
-                  style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="bg-[#C9A84C] hover:bg-[#D4B560] text-[#0B1526] font-black py-4 rounded-lg tracking-[0.15em] text-sm transition-all shadow-lg shadow-[#C9A84C]/20 hover:shadow-[#C9A84C]/30 mt-2"
-              >
-                REQUEST A DEMO
-              </button>
-            </form>
+            <ContactForm />
           </FadeSection>
         </div>
       </section>
@@ -281,14 +231,7 @@ export default function LandingPage() {
       <footer className="relative z-10 border-t border-white/[0.05] py-10 px-6">
         <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-6">
           <div className="flex items-center gap-3">
-            <Image
-              src="/vwing_logo.png"
-              alt="NetraOps"
-              width={28}
-              height={28}
-              className="object-contain opacity-80"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-            />
+            <LogoImage size={28} className="object-contain opacity-80" />
             <span className="text-white/30 text-xs tracking-[0.2em]">© 2026 NETRAOPS. ALL RIGHTS RESERVED.</span>
           </div>
           <div className="flex items-center gap-6">
@@ -298,6 +241,9 @@ export default function LandingPage() {
             <Link href="/terms" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               TERMS OF SERVICE
             </Link>
+            <Link href="/security" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+              SECURITY
+            </Link>
             <Link href="/portal" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               LOGIN
             </Link>
@@ -305,144 +251,5 @@ export default function LandingPage() {
         </div>
       </footer>
     </div>
-  );
-}
-
-// ── NavBar component ──────────────────────────────────────────────────────────
-function NavBar() {
-  return (
-    <nav className="fixed top-0 left-0 right-0 z-50 px-6 py-4">
-      <div
-        className="max-w-6xl mx-auto flex items-center justify-between rounded-xl border border-white/[0.07] px-5 py-3"
-        style={{ background: 'rgba(11,21,38,0.85)', backdropFilter: 'blur(16px)' }}
-      >
-        {/* Logo + name */}
-        <div className="flex items-center gap-3">
-          <Image
-            src="/vwing_logo.png"
-            alt="NetraOps"
-            width={30}
-            height={30}
-            className="object-contain"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-          />
-          <span
-            className="text-white font-black tracking-[0.25em] text-lg"
-            style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.18em' }}
-          >
-            NETRAOPS
-          </span>
-        </div>
-
-        {/* Nav links + CTA */}
-        <div className="flex items-center gap-6">
-          <a href="#features" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
-            FEATURES
-          </a>
-          <a href="#contact" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
-            CONTACT
-          </a>
-          <Link
-            href="/portal"
-            className="bg-white/[0.07] hover:bg-white/[0.12] border border-white/[0.12] text-white font-bold px-5 py-2 rounded-lg text-xs tracking-[0.2em] transition-all"
-          >
-            LOGIN
-          </Link>
-        </div>
-      </div>
-    </nav>
-  );
-}
-
-// ── Hero section ──────────────────────────────────────────────────────────────
-function HeroSection() {
-  return (
-    <section className="relative z-10 min-h-screen flex flex-col items-center justify-center px-6 pt-24 pb-20 text-center">
-      {/* Radial glow behind headline */}
-      <div
-        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[400px] rounded-full pointer-events-none"
-        style={{ background: 'radial-gradient(ellipse, rgba(201,168,76,0.07) 0%, transparent 70%)' }}
-      />
-
-      {/* Pill badge */}
-      <div
-        className="flex items-center gap-2 border border-[#C9A84C]/30 rounded-full px-4 py-2 mb-10"
-        style={{ background: 'rgba(201,168,76,0.06)', animation: 'fadeInDown 0.8s ease forwards' }}
-      >
-        <span className="w-1.5 h-1.5 rounded-full bg-[#C9A84C] animate-pulse" />
-        <span className="text-[#C9A84C] text-xs tracking-[0.25em] font-semibold">LIVE GUARD MANAGEMENT PLATFORM</span>
-      </div>
-
-      {/* Main headline */}
-      <h1
-        className="text-5xl sm:text-7xl md:text-8xl font-black text-white leading-none mb-8 max-w-4xl"
-        style={{
-          fontFamily: 'var(--font-bebas), sans-serif',
-          letterSpacing: '0.04em',
-          animation: 'fadeInUp 0.9s ease 0.1s forwards',
-          opacity: 0,
-        }}
-      >
-        Every Shift.<br />
-        Every Site.<br />
-        <span className="text-[#C9A84C]">Accounted For.</span>
-      </h1>
-
-      {/* Sub-headline */}
-      <p
-        className="text-white/45 text-base sm:text-lg max-w-2xl leading-relaxed mb-12"
-        style={{
-          fontFamily: 'var(--font-dm-sans), sans-serif',
-          animation: 'fadeInUp 0.9s ease 0.2s forwards',
-          opacity: 0,
-        }}
-      >
-        Real-time guard monitoring, geofence compliance, and automated reporting —
-        built for serious security operations.
-      </p>
-
-      {/* CTAs */}
-      <div
-        className="flex flex-col sm:flex-row gap-4 items-center"
-        style={{ animation: 'fadeInUp 0.9s ease 0.3s forwards', opacity: 0 }}
-      >
-        <a
-          href="mailto:vvishnu1998@gmail.com"
-          className="bg-[#C9A84C] hover:bg-[#D4B560] text-[#0B1526] font-black px-10 py-4 rounded-lg tracking-[0.15em] text-sm transition-all shadow-lg shadow-[#C9A84C]/25 hover:shadow-[#C9A84C]/40"
-        >
-          GET STARTED
-        </a>
-        <a
-          href="#features"
-          className="border border-white/[0.15] hover:border-white/[0.3] text-white/70 hover:text-white font-bold px-10 py-4 rounded-lg tracking-[0.15em] text-sm transition-all"
-        >
-          SEE HOW IT WORKS
-        </a>
-      </div>
-
-      {/* Scroll indicator */}
-      <div
-        className="absolute bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 opacity-30"
-        style={{ animation: 'fadeIn 1.5s ease 1s forwards' }}
-      >
-        <div className="w-px h-10 bg-gradient-to-b from-transparent to-white/60" />
-        <span className="text-white/60 text-[10px] tracking-[0.3em]">SCROLL</span>
-      </div>
-
-      <style>{`
-        @keyframes fadeInUp {
-          from { opacity: 0; transform: translateY(24px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes fadeInDown {
-          from { opacity: 0; transform: translateY(-12px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to   { opacity: 0.3; }
-        }
-      `}</style>
-    </section>
   );
 }

@@ -1,17 +1,25 @@
 /**
  * Email service — all outbound emails via SendGrid.
  *
- * Email types (Section 4):
- *  1. Incident Alert       — immediate, to client on incident report
- *  2. Daily Shift Report   — 9:00 AM next morning, to client + primary admin
- *  3. Retention Notice     — monthly / milestone, to client + primary admin
- *  4. Vishnu Day-140 Warn  — 10 days before hard-delete, to VISHNU_EMAIL
+ * Flows implemented in this file:
+ *  - Incident Alert          — to active client on incident report
+ *  - Daily Shift Report      — 9:00 AM Pacific cron, to active client
+ *  - Missed Shift Alert      — all active company admins, T+10 and T+30 rungs
+ *  - Geofence Breach Alert   — all active company admins, per fresh violation
+ *  - Temporary Password      — forgot-password recipient's own email
+ *  - Swap / Handoff FYIs     — all active company admins, fire-and-forget
+ *
+ * Admin-alert recipient policy: sendToAdmins() fans out to every
+ * company_admins row where is_active = true. Primary+secondaries both
+ * receive; deactivated admins do not (fixes the pre-existing gap where
+ * a deactivated primary would still receive alerts).
  */
 
 import sgMail from '@sendgrid/mail';
 import { pool } from '../db/pool';
 import { haversineDistance } from './geofence';
 import { Sentry } from './sentry';
+import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 
 // Central SendGrid error tag helper. Called from every sgMail.send catch
 // site so a Sentry.setTag('service','sendgrid') + flow tag lets us slice
@@ -23,9 +31,63 @@ function reportSendgridFailure(flow: string, err: any, extra?: Record<string, un
   });
 }
 
+// Recipient resolver for all admin-alert flows. Fans out to every active
+// admin on the tenant, ordered primary-first so log ordering matches the
+// old single-recipient trace when a tenant only has one admin.
+async function getActiveAdminEmails(companyId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ email: string }>(
+    `SELECT email FROM company_admins
+      WHERE company_id = $1 AND is_active = true
+      ORDER BY is_primary DESC, email`,
+    [companyId],
+  );
+  return rows.map((r) => r.email);
+}
+
+// Per-recipient send via Promise.allSettled so one bad address doesn't
+// stop delivery to the rest. Each failure is Sentry-tagged with the
+// recipient in `extra` so the issues list shows per-recipient bounces.
+async function sendToAdmins(
+  adminEmails: string[],
+  msg: Omit<sgMail.MailDataRequired, 'to'>,
+  flow: string,
+  extra: Record<string, unknown>,
+): Promise<{ succeeded: number; failed: number }> {
+  const results = await Promise.allSettled(
+    adminEmails.map((email) =>
+      sgMail.send({ ...msg, to: email } as sgMail.MailDataRequired),
+    ),
+  );
+  let succeeded = 0, failed = 0;
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') { succeeded += 1; return; }
+    failed += 1;
+    const err: any = r.reason;
+    console.error(
+      `[email] ${flow}: SENDGRID ERROR for ${adminEmails[i]} — ${err?.message ?? err}`,
+      err?.response?.body,
+    );
+    reportSendgridFailure(flow, err, { ...extra, recipient: adminEmails[i] });
+  });
+  return { succeeded, failed };
+}
+
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
 
-const FROM   = process.env.SENDGRID_FROM_EMAIL ?? 'alerts@netraops.com';
+const _sendgridFromEmail = process.env.SENDGRID_FROM_EMAIL;
+if (!_sendgridFromEmail) {
+  throw new Error(
+    'SENDGRID_FROM_EMAIL env var is required — no fallback allowed (fallback sender would not be domain-authenticated and SendGrid would reject sends silently)',
+  );
+}
+const FROM: string = _sendgridFromEmail;
+// Customer-facing Reply-To. Kept hardcoded on purpose — the address must
+// track an authenticated support inbox, not a per-tenant admin address.
+// Applied to welcome + temp-password + daily-shift + incident emails.
+// Admin-only alerts (missed-shift, breach, swap/handoff FYIs) omit it —
+// those already land on the admin's own inbox; a "support" Reply-To would
+// misdirect their replies.
+const REPLY_TO = 'support@netraops.com';
 const PORTAL = process.env.CLIENT_PORTAL_URL ?? '';
 // Base URL for admin-portal deep links in operator alerts. CLIENT_PORTAL_URL
 // historically pointed at a stale Vercel preview; this is the canonical
@@ -123,53 +185,66 @@ export async function sendIncidentAlert(
   report: { id: string; description: string; severity: string; reported_at: Date },
   siteId: string,
 ) {
-  // Active client only (recipient). Company admin email is fetched as
-  // Reply-To target so client replies route back to the security company.
+  // Fan out to EVERY active client linked to this site via the v36
+  // client_sites junction — not just clients.site_id, which misses multi-site
+  // secondary sites (Finding #2). Reply-To is the shared support address —
+  // client replies route to NetraOps support rather than the per-tenant admin.
   const result = await pool.query(
     `SELECT s.name AS site_name,
             s.timezone AS site_tz,
             c.name AS client_name,
             c.email AS client_email,
-            co.name AS company_name,
-            ca.email AS admin_reply_to
+            co.name AS company_name
      FROM sites s
-     JOIN clients c ON c.site_id = s.id
+     JOIN client_sites cs ON cs.site_id = s.id
+     JOIN clients c ON c.id = cs.client_id
      JOIN companies co ON co.id = s.company_id
-     LEFT JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
-     WHERE s.id = $1 AND c.is_active = true`,
+     WHERE s.id = $1 AND c.is_active = true
+     ORDER BY c.email`,
     [siteId],
   );
-  if (!result.rows[0]) {
+  if (result.rows.length === 0) {
     console.warn(`[email] sendIncidentAlert: no active client found for site_id=${siteId} — email not sent`);
+    Sentry.captureMessage('sendIncidentAlert: no active clients for site', {
+      level: 'warning',
+      tags: { flow: 'incident_alert' },
+      extra: { site_id: siteId, report_id: report.id },
+    });
     return;
   }
-  const { site_name, site_tz, client_name, client_email, company_name, admin_reply_to } = result.rows[0];
-  console.log(`[email] sendIncidentAlert: sending to ${client_email} for site=${site_name} (report=${report.id})`);
 
-  const { subject, html } = renderIncidentAlert({
-    report_id:    report.id,
-    description:  report.description,
-    severity:     report.severity,
-    reported_at:  report.reported_at,
-    site_name,
-    site_tz,
-    client_name,
-    company_name,
+  // site_name / site_tz / company_name are identical across rows.
+  const { site_name, site_tz, company_name } = result.rows[0];
+
+  // Render per-recipient (personalized greeting) and send in parallel. One bad
+  // recipient must not suppress the others, so we don't throw — each failure is
+  // Sentry-captured individually via reportSendgridFailure (sendToAdmins pattern).
+  const outcomes = await Promise.allSettled(
+    result.rows.map((row) => {
+      const { subject, html } = renderIncidentAlert({
+        report_id:    report.id,
+        description:  report.description,
+        severity:     report.severity,
+        reported_at:  report.reported_at,
+        site_name,
+        site_tz,
+        client_name:  row.client_name,
+        company_name,
+      });
+      return sgMail.send({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    }),
+  );
+
+  outcomes.forEach((o, i) => {
+    const email = result.rows[i].client_email;
+    if (o.status === 'fulfilled') {
+      console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${email} (report=${report.id})`);
+    } else {
+      const err: any = o.reason;
+      console.error(`[email] sendIncidentAlert: SENDGRID ERROR for ${email} — ${err?.message ?? err}`, err?.response?.body);
+      reportSendgridFailure('incident_alert', err, { report_id: report.id, site_id: siteId, recipient: email });
+    }
   });
-
-  const sendOpts: sgMail.MailDataRequired = {
-    to: client_email, from: FROM, subject, html,
-  };
-  if (admin_reply_to) sendOpts.replyTo = admin_reply_to;
-
-  try {
-    await sgMail.send(sendOpts);
-    console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${client_email}`);
-  } catch (err: any) {
-    console.error(`[email] sendIncidentAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('incident_alert', err, { report_id: report.id, site_id: siteId });
-    throw err;
-  }
 }
 
 /**
@@ -281,9 +356,8 @@ function firstName(fullName: string | null | undefined): string {
 }
 
 export async function sendDailyShiftReport(shiftId: string) {
-  // company_admins is LEFT-joined (was inner) — primary admin's email is used
-  // as Reply-To only, not a recipient. If no primary admin exists, the email
-  // still ships to the client without a Reply-To override.
+  // Reply-To is the shared support address — client replies route to
+  // NetraOps support rather than the per-tenant primary admin.
   const shiftResult = await pool.query(
     `SELECT sh.id, sh.scheduled_start,
             si.name     AS site_name,
@@ -292,14 +366,12 @@ export async function sendDailyShiftReport(shiftId: string) {
             g.badge_number,
             c.name      AS client_name,
             c.email     AS client_email,
-            co.name     AS company_name,
-            ca.email    AS admin_reply_to
+            co.name     AS company_name
      FROM shifts sh
      JOIN sites          si ON si.id = sh.site_id
      JOIN guards         g  ON g.id  = sh.guard_id
      LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
-     LEFT JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE sh.id = $1 AND sh.daily_report_email_sent = false`,
     [shiftId],
   );
@@ -318,9 +390,13 @@ export async function sendDailyShiftReport(shiftId: string) {
   }
 
   const sessionResult = await pool.query(
-    `SELECT id, clocked_in_at, clocked_out_at,
-            ROUND(CAST(total_hours AS NUMERIC), 2) AS total_hours
-     FROM shift_sessions WHERE shift_id = $1 ORDER BY clocked_in_at DESC LIMIT 1`,
+    `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at,
+            ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
+            ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
+     FROM shift_sessions ss
+     JOIN shifts sh ON sh.id = ss.shift_id
+     WHERE ss.shift_id = $1
+     ORDER BY ss.clocked_in_at DESC LIMIT 1`,
     [shiftId],
   );
   const session = sessionResult.rows[0];
@@ -352,6 +428,14 @@ export async function sendDailyShiftReport(shiftId: string) {
     clocked_in_at:   session?.clocked_in_at ?? null,
     clocked_out_at:  session?.clocked_out_at ?? null,
     total_hours:     session?.total_hours ?? null,
+    hours: session
+      ? {
+          scheduled_hours: Number(session.scheduled_hours) || 0,
+          actual_hours:    Number(session.actual_hours)    || 0,
+          break_hours:     Number(session.break_hours)     || 0,
+          violation_hours: Number(session.violation_hours) || 0,
+        }
+      : null,
     reports:         reportsResult.rows,
     tasks_completed: parseInt(tasksResult.rows[0]?.completed ?? 0),
     tasks_total:     parseInt(taskTotalResult.rows[0]?.total ?? 0),
@@ -360,10 +444,10 @@ export async function sendDailyShiftReport(shiftId: string) {
   const sendOpts: sgMail.MailDataRequired = {
     to:      sh.client_email,
     from:    FROM,
+    replyTo: REPLY_TO,
     subject,
     html,
   };
-  if (sh.admin_reply_to) sendOpts.replyTo = sh.admin_reply_to;
 
   try {
     await sgMail.send(sendOpts);
@@ -399,15 +483,16 @@ export function renderDailyShiftReport(data: {
   clocked_in_at:   Date | string | null;
   clocked_out_at:  Date | string | null;
   total_hours:     string | number | null;
+  hours?:          ShiftHours | null;
   reports:         Array<{ report_type: string; severity: string | null; description: string; reported_at: Date | string }>;
   tasks_completed: number;
   tasks_total:     number;
 }): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
   const dateLabel  = fmtDateSite(data.scheduled_start, tz);
-  const totalHours = data.total_hours != null
-    ? `${parseFloat(String(data.total_hours))}h`
-    : '—';
+  const totalHours = data.hours
+    ? formatHoursHHMM(data.hours.actual_hours)
+    : (data.total_hours != null ? `${parseFloat(String(data.total_hours))}h` : '—');
   const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
   const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
@@ -447,6 +532,22 @@ export function renderDailyShiftReport(data: {
         <div class="kpi"><div class="n">${data.tasks_completed}/${data.tasks_total}</div><div class="l">TASKS</div></div>
       </div>
 
+      ${data.hours ? `
+      <table style="width:100%;border-collapse:collapse;font-size:13px;color:#333;margin:0 0 18px 0;background:#F9FAFB;border-radius:6px;overflow:hidden">
+        <tr style="background:#F3F4F6">
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">SCHEDULED</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">ON DUTY</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">BREAK</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">OFF-POST</th>
+        </tr>
+        <tr>
+          <td style="padding:8px 12px">${formatScheduledHours(data.hours.scheduled_hours)}</td>
+          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.actual_hours)}</td>
+          <td style="padding:8px 12px">${formatHoursHHMM(data.hours.break_hours)}</td>
+          <td style="padding:8px 12px">${formatOffPostHours(data.hours.violation_hours)}</td>
+        </tr>
+      </table>` : ''}
+
       <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
         <tr><td style="padding:6px 0;color:#888;width:110px">Guard</td><td style="padding:6px 0">${titleCase(data.guard_name)} <span style="color:#888">(${data.badge_number})</span></td></tr>
         <tr><td style="padding:6px 0;color:#888">Clock-in</td><td style="padding:6px 0">${clockIn}</td></tr>
@@ -474,17 +575,12 @@ export function renderDailyShiftReport(data: {
   return { subject, html };
 }
 
-// ── Email Type 3 — Data Retention Notice ─────────────────────────────────────
-
-
 // ── Email Type 5 — Missed Shift Alert ────────────────────────────────────────
 
 export async function sendMissedShiftAlert(shiftId: string) {
-  // SELECT: kept primary-admin-only (ca.is_primary = true) per spec; client_email
-  // still SELECTed but discarded (intentional — clients are not on this email).
-  // New fields: sh.scheduled_end, si.address, last_login_at (from auth_events),
-  // upcoming_shifts_count (count of this guard's other scheduled shifts in the
-  // next 24h, excluding the current missed one).
+  // SELECT: fans out to every active company_admin via getActiveAdminEmails
+  // below; client_email still SELECTed but discarded (intentional — clients
+  // are not on this email). company_id is projected for the admin lookup.
   const result = await pool.query(
     `SELECT sh.id,
             sh.scheduled_start,
@@ -497,7 +593,7 @@ export async function sendMissedShiftAlert(shiftId: string) {
             g.badge_number,
             g.phone_number AS guard_phone,
             c.email        AS client_email,
-            ca.email       AS admin_email,
+            co.id          AS company_id,
             (SELECT MAX(created_at) FROM auth_events
               WHERE actor_id = g.id AND event_type = 'login_success'
             ) AS last_login_at,
@@ -512,27 +608,36 @@ export async function sendMissedShiftAlert(shiftId: string) {
      JOIN guards         g  ON g.id  = sh.guard_id
      LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
-     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE sh.id = $1`,
     [shiftId],
   );
   if (!result.rows[0]) return;
-  const {
-    scheduled_start, scheduled_end, site_name, site_address,
-    guard_name, badge_number, guard_phone,
-    admin_email, last_login_at, upcoming_shifts_count,
-  } = result.rows[0];
+  const row = result.rows[0];
 
-  if (!admin_email) return;
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage('sendMissedShiftAlert: no active admins for tenant', {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow: 'missed_shift_alert' },
+      extra: { company_id: row.company_id, shift_id: shiftId },
+    });
+    return;
+  }
 
-  const { subject, html } = renderMissedShiftAlert(result.rows[0]);
+  const { subject, html } = renderMissedShiftAlert(row);
 
-  try {
-    await sgMail.send({ to: admin_email, from: FROM, subject, html });
-  } catch (err: any) {
-    console.error(`[email] sendMissedShiftAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('missed_shift_alert', err, { shift_id: shiftId });
-    throw err;
+  const { succeeded, failed } = await sendToAdmins(
+    admins,
+    { from: FROM, subject, html },
+    'missed_shift_alert',
+    { shift_id: shiftId },
+  );
+
+  // Throw when every recipient failed so the caller (missedShiftAlert cron
+  // OR lateClockInReminder's T+30 rung) skips its own follow-on stamp and
+  // the shift stays eligible for the next tick's retry.
+  if (succeeded === 0) {
+    throw new Error(`sendMissedShiftAlert: all ${failed} recipients failed for shift ${shiftId}`);
   }
 
   await pool.query(
@@ -661,6 +766,7 @@ export async function sendTempPasswordEmail(
     await sgMail.send({
     to: email,
     from: FROM,
+    replyTo: REPLY_TO,
     subject: 'NetraOps password reset',
     html: `<style>${BASE_STYLE}</style>
     <div class="card">
@@ -695,66 +801,6 @@ export async function sendTempPasswordEmail(
     throw err;
   }
 }
-
-// ── Email Type 6 — Password Reset (legacy reset-link flow, kept for back-compat) ─
-
-export async function sendPasswordResetEmail(
-  email: string,
-  resetUrl: string,
-  portal: 'admin' | 'client' | 'vishnu',
-) {
-  const portalLabels: Record<string, string> = {
-    admin: 'Admin Dashboard',
-    client: 'Client Portal',
-    vishnu: 'Super Admin',
-  };
-  const accentColors: Record<string, string> = {
-    admin: '#F59E0B',
-    client: '#6699FF',
-    vishnu: '#FFFFFF',
-  };
-  const label  = portalLabels[portal] ?? 'Portal';
-  const accent = accentColors[portal] ?? '#F59E0B';
-
-  try {
-    await sgMail.send({
-    to: email,
-    from: FROM,
-    subject: `Reset your Netra ${label} password`,
-    html: `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>PASSWORD RESET</h1>
-        <p>${label.toUpperCase()}</p>
-      </div>
-      <div class="body">
-        <p style="font-size:15px;color:#333;margin-bottom:20px">
-          We received a request to reset the password for your Netra <strong>${label}</strong> account.
-        </p>
-        <p style="color:#555;font-size:13px;margin-bottom:20px">
-          Click the button below to set a new password. This link expires in <strong>1 hour</strong>.
-        </p>
-        <a href="${resetUrl}" style="display:inline-block;background:${accent};color:${portal === 'vishnu' ? '#0B1526' : '#0B1526'};font-weight:700;padding:12px 28px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:14px;margin-bottom:24px">
-          RESET PASSWORD
-        </a>
-        <p style="color:#999;font-size:12px;margin-top:16px">
-          If you didn't request this, you can safely ignore this email. Your password will not change.
-        </p>
-        <p style="color:#bbb;font-size:11px;margin-top:8px;word-break:break-all">
-          Or copy this link: ${resetUrl}
-        </p>
-      </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`,
-    });
-  } catch (err: any) {
-    console.error(`[email] sendPasswordResetEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('password_reset', err, { portal });
-    throw err;
-  }
-}
-
 
 // ── Email Type 5 — Geofence Breach Alert (T1-D, 2026-05-17 audit) ────────────
 //
@@ -792,29 +838,40 @@ export async function sendGeofenceBreachAlert(
             g.name       AS guard_name,
             g.badge_number,
             c.email      AS client_email,
-            ca.email     AS admin_email
+            co.id        AS company_id
      FROM geofence_violations v
      JOIN sites          si ON si.id = v.site_id
      LEFT JOIN site_geofence sg ON sg.site_id = si.id
      JOIN guards         g  ON g.id  = v.guard_id
      LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
-     JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
      WHERE v.id = $1`,
     [violationId],
   );
   if (!result.rows[0]) return;
   const row = result.rows[0];
-  if (!row.admin_email) return;
+
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage('sendGeofenceBreachAlert: no active admins for tenant', {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow: 'geofence_breach_alert' },
+      extra: { company_id: row.company_id, violation_id: violationId, kind: context.kind },
+    });
+    return;
+  }
 
   const { subject, html } = renderGeofenceBreachAlert(row, context);
 
-  try {
-    await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
-  } catch (err: any) {
-    console.error(`[email] sendGeofenceBreachAlert: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('geofence_breach_alert', err, { violation_id: violationId, kind: context.kind });
-    throw err;
+  const { succeeded, failed } = await sendToAdmins(
+    admins,
+    { from: FROM, subject, html },
+    'geofence_breach_alert',
+    { violation_id: violationId, kind: context.kind },
+  );
+
+  if (succeeded === 0) {
+    throw new Error(`sendGeofenceBreachAlert: all ${failed} recipients failed for violation ${violationId}`);
   }
 }
 
@@ -946,8 +1003,8 @@ export function renderGeofenceBreachAlert(row: {
 // ── Email Type 8 — Coverage swap FYI (admin) ────────────────────────────────
 //
 // Fires from POST /api/shifts/:id/swap-response when a guard-initiated
-// swap is accepted. Recipient policy: primary company admin only,
-// matching sendMissedShiftAlert. No client-facing email — this is an
+// swap is accepted. Recipient policy: all active company admins on the
+// tenant (via getActiveAdminEmails). No client-facing email — this is an
 // internal FYI so admins can audit "did I know Deepak's shift got
 // covered by James".
 
@@ -970,7 +1027,7 @@ export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
             fg.badge_number      AS from_badge,
             tg.name              AS to_guard_name,
             tg.badge_number      AS to_badge,
-            ca.email             AS admin_email,
+            co.id                AS company_id,
             EXISTS (
               SELECT 1 FROM guard_site_assignments gsa
               WHERE gsa.guard_id = ssr.to_guard_id
@@ -985,21 +1042,29 @@ export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
        JOIN guards fg ON fg.id = ssr.from_guard_id
        JOIN guards tg ON tg.id = ssr.to_guard_id
        JOIN companies      co ON co.id = si.company_id
-       JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
       WHERE ssr.id = $1`,
     [historyId],
   );
   if (!result.rows[0]) return;
   const row = result.rows[0];
-  if (!row.admin_email) return;
+
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage('sendSwapAcceptedFyi: no active admins for tenant', {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow: 'swap_accepted_fyi' },
+      extra: { company_id: row.company_id, history_id: historyId },
+    });
+    return;
+  }
 
   const { subject, html } = renderSwapAcceptedFyi(row);
-  try {
-    await sgMail.send({ to: row.admin_email, from: FROM, subject, html });
-  } catch (err: any) {
-    console.error(`[email] sendSwapAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('swap_accepted_fyi', err, { history_id: historyId });
-  }
+  await sendToAdmins(
+    admins,
+    { from: FROM, subject, html },
+    'swap_accepted_fyi',
+    { history_id: historyId },
+  );
 }
 
 export function renderSwapAcceptedFyi(row: {
@@ -1089,31 +1154,36 @@ interface HandoffFyiRow {
   to_badge:         string;
   site_name:        string;
   site_tz:          string | null;
-  admin_email:      string | null;
+  company_id:       string;
 }
 
 async function loadHandoffFyiRow(historyId: string): Promise<HandoffFyiRow | null> {
+  // Phase 1 — duration_hours now derived from the canonical actual_hours on
+  // the outgoing session (raw clock_out − clock_in), matching the daily-report
+  // "HOURS" tile. Falls back to stored total_hours only when the join misses.
   const result = await pool.query<HandoffFyiRow>(
     `SELECT ssr.id           AS history_id,
             ssr.shift_id,
             ssr.reason,
             ssr.accepted_at,
             ts.clocked_in_at   AS handoff_at,
-            fs.total_hours     AS duration_hours,
+            COALESCE(
+              ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(fs.clocked_out_at, NOW()) - fs.clocked_in_at))/3600.0) AS NUMERIC), 2),
+              fs.total_hours
+            )                  AS duration_hours,
             fg.name            AS from_guard_name,
             fg.badge_number    AS from_badge,
             tg.name            AS to_guard_name,
             tg.badge_number    AS to_badge,
             si.name            AS site_name,
             si.timezone        AS site_tz,
-            ca.email           AS admin_email
+            co.id              AS company_id
        FROM shift_swap_requests ssr
        JOIN shifts sh ON sh.id = ssr.shift_id
        JOIN sites  si ON si.id = sh.site_id
        JOIN guards fg ON fg.id = ssr.from_guard_id
        JOIN guards tg ON tg.id = ssr.to_guard_id
        JOIN companies      co ON co.id = si.company_id
-       JOIN company_admins ca ON ca.company_id = co.id AND ca.is_primary = true
        LEFT JOIN shift_sessions fs ON fs.id = ssr.from_session_id
        LEFT JOIN shift_sessions ts ON ts.id = ssr.to_session_id
       WHERE ssr.id = $1`,
@@ -1193,35 +1263,373 @@ function renderHandoffFyi(
   return { subject, html };
 }
 
-export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
+async function fanoutHandoffFyi(
+  historyId: string,
+  kind: 'accepted' | 'completed' | 'nudge',
+  flow: 'handoff_accepted_fyi' | 'handoff_completed_fyi' | 'handoff_nudge',
+  extra: Record<string, unknown>,
+  nudgeMinutes = 0,
+): Promise<void> {
   const row = await loadHandoffFyiRow(historyId);
-  if (!row?.admin_email) return;
-  const { subject, html } = renderHandoffFyi(row, 'accepted');
-  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) {
-    console.error(`[email] sendHandoffAcceptedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('handoff_accepted_fyi', err, { history_id: historyId });
+  if (!row) return;
+  const admins = await getActiveAdminEmails(row.company_id);
+  if (admins.length === 0) {
+    Sentry.captureMessage(`${flow}: no active admins for tenant`, {
+      level: 'warning',
+      tags: { service: 'sendgrid', flow },
+      extra: { company_id: row.company_id, history_id: historyId },
+    });
+    return;
   }
+  const { subject, html } = renderHandoffFyi(row, kind, nudgeMinutes);
+  await sendToAdmins(admins, { from: FROM, subject, html }, flow, extra);
+}
+
+export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
+  await fanoutHandoffFyi(historyId, 'accepted', 'handoff_accepted_fyi', { history_id: historyId });
 }
 
 export async function sendHandoffCompletedFyi(historyId: string): Promise<void> {
-  const row = await loadHandoffFyiRow(historyId);
-  if (!row?.admin_email) return;
-  const { subject, html } = renderHandoffFyi(row, 'completed');
-  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) {
-    console.error(`[email] sendHandoffCompletedFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('handoff_completed_fyi', err, { history_id: historyId });
-  }
+  await fanoutHandoffFyi(historyId, 'completed', 'handoff_completed_fyi', { history_id: historyId });
 }
 
 export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number): Promise<void> {
-  const row = await loadHandoffFyiRow(historyId);
-  if (!row?.admin_email) return;
-  const { subject, html } = renderHandoffFyi(row, 'nudge', minutesLate);
-  try { await sgMail.send({ to: row.admin_email, from: FROM, subject, html }); }
-  catch (err: any) {
-    console.error(`[email] sendHandoffNudgeFyi: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('handoff_nudge', err, { history_id: historyId, minutes_late: minutesLate });
+  await fanoutHandoffFyi(historyId, 'nudge', 'handoff_nudge', { history_id: historyId, minutes_late: minutesLate }, minutesLate);
+}
+
+// ── Welcome emails ───────────────────────────────────────────────────────────
+//
+// Fired from the four account-creation route handlers on new-account INSERT.
+// Customer-facing: Reply-To is REPLY_TO (support inbox) on all four.
+// Send fns catch internally, Sentry-tag, and re-throw so the caller's fire-
+// and-forget .catch() can capture at the route site (matches the pattern
+// used by sendTempPasswordEmail and sendIncidentAlert).
+
+export function renderGuardWelcome(data: {
+  guard_name: string;
+  guard_email: string;
+  company_name: string;
+  primary_admin_email: string | null;
+  temp_password: string;
+}) {
+  const contact = data.primary_admin_email
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>GUARD ACCOUNT</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.guard_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:20px">
+          An account has been created for you on NetraOps by <strong>${data.company_name}</strong>.
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.guard_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Download the NetraOps app</h3>
+        <p style="color:#555;font-size:13px;margin:0 0 4px">iOS: Coming to App Store soon — contact your admin for TestFlight access</p>
+        <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>
+        ${contact}
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Guard Account', html };
+}
+
+export async function sendGuardWelcomeEmail(args: {
+  guard_id: string;
+  guard_name: string;
+  guard_email: string;
+  company_id: string;
+  temp_password: string;
+}): Promise<void> {
+  const result = await pool.query<{
+    company_name: string | null;
+    primary_admin_email: string | null;
+  }>(
+    `SELECT co.name AS company_name,
+            ca.email AS primary_admin_email
+       FROM companies co
+       LEFT JOIN company_admins ca
+         ON ca.company_id = co.id AND ca.is_primary = true AND ca.is_active = true
+      WHERE co.id = $1`,
+    [args.company_id],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    console.warn(`[email] sendGuardWelcomeEmail: no company found for company_id=${args.company_id}`);
+    return;
+  }
+  const { subject, html } = renderGuardWelcome({
+    guard_name:          args.guard_name,
+    guard_email:         args.guard_email,
+    company_name:        row.company_name ?? 'NetraOps',
+    primary_admin_email: row.primary_admin_email,
+    temp_password:       args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.guard_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendGuardWelcomeEmail: SUCCESS — delivered to ${args.guard_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendGuardWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_guard', err, { guard_id: args.guard_id });
+    throw err;
+  }
+}
+
+export function renderPrimaryAdminWelcome(data: {
+  admin_name: string;
+  admin_email: string;
+  company_name: string;
+  temp_password: string;
+}) {
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>ADMIN ACCOUNT</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.admin_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:20px">
+          An admin account has been created for you on NetraOps for <strong>${data.company_name}</strong>.
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.admin_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Access the admin portal</h3>
+        <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
+        <p style="color:#555;font-size:13px;margin:0 0 24px">You can manage guards, sites, shifts, monitor real-time activity, and review reports.</p>
+        <p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Admin Account', html };
+}
+
+export async function sendPrimaryAdminWelcomeEmail(args: {
+  admin_id: string;
+  admin_name: string;
+  admin_email: string;
+  company_id: string;
+  temp_password: string;
+}): Promise<void> {
+  const result = await pool.query<{ company_name: string | null }>(
+    `SELECT name AS company_name FROM companies WHERE id = $1`,
+    [args.company_id],
+  );
+  const companyName = result.rows[0]?.company_name ?? 'NetraOps';
+  const { subject, html } = renderPrimaryAdminWelcome({
+    admin_name:    args.admin_name,
+    admin_email:   args.admin_email,
+    company_name:  companyName,
+    temp_password: args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendPrimaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendPrimaryAdminWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_admin_primary', err, { admin_id: args.admin_id });
+    throw err;
+  }
+}
+
+export function renderSecondaryAdminWelcome(data: {
+  admin_name: string;
+  admin_email: string;
+  company_name: string;
+  creator_name: string;
+  primary_admin_email: string | null;
+  temp_password: string;
+}) {
+  const contact = data.primary_admin_email
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>ADMIN ACCOUNT</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.admin_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:20px">
+          <strong>${data.creator_name}</strong> has created an admin account for you on NetraOps for <strong>${data.company_name}</strong>.
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.admin_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Access the admin portal</h3>
+        <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
+        ${contact}
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Admin Account', html };
+}
+
+export async function sendSecondaryAdminWelcomeEmail(args: {
+  admin_id: string;
+  admin_name: string;
+  admin_email: string;
+  company_id: string;
+  creator_admin_id: string;
+  temp_password: string;
+}): Promise<void> {
+  const result = await pool.query<{
+    company_name: string | null;
+    creator_name: string | null;
+    primary_admin_email: string | null;
+  }>(
+    `SELECT co.name AS company_name,
+            creator.name AS creator_name,
+            pa.email AS primary_admin_email
+       FROM companies co
+       LEFT JOIN company_admins creator ON creator.id = $2
+       LEFT JOIN company_admins pa
+         ON pa.company_id = co.id AND pa.is_primary = true AND pa.is_active = true
+      WHERE co.id = $1`,
+    [args.company_id, args.creator_admin_id],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    console.warn(`[email] sendSecondaryAdminWelcomeEmail: no company found for company_id=${args.company_id}`);
+    return;
+  }
+  const { subject, html } = renderSecondaryAdminWelcome({
+    admin_name:          args.admin_name,
+    admin_email:         args.admin_email,
+    company_name:        row.company_name ?? 'NetraOps',
+    creator_name:        row.creator_name ?? 'A NetraOps admin',
+    primary_admin_email: row.primary_admin_email,
+    temp_password:       args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendSecondaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendSecondaryAdminWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_admin_secondary', err, { admin_id: args.admin_id });
+    throw err;
+  }
+}
+
+export function renderClientWelcome(data: {
+  client_name: string;
+  client_email: string;
+  company_name: string;
+  site_names: string;
+  primary_admin_email: string | null;
+  temp_password: string;
+}) {
+  const contact = data.primary_admin_email
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
+  const html = `<style>${BASE_STYLE}</style>
+    <div class="card">
+      <div class="hdr">
+        <div class="brand">NetraOps</div>
+        <h1>WELCOME</h1>
+        <p>CLIENT PORTAL</p>
+      </div>
+      <div class="body">
+        <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
+        <p style="color:#333;margin-bottom:16px">Hi ${data.client_name},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:12px">
+          A client portal account has been created for you by <strong>${data.company_name}</strong> to review security operations.
+        </p>
+        ${data.site_names
+          ? `<p style="color:#555;font-size:13px;margin:0 0 20px">Assigned site(s): <strong>${data.site_names}</strong></p>`
+          : ''}
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${data.client_email}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Access your client portal</h3>
+        <p style="margin:0 0 16px"><a href="https://app.netraops.com/client" style="color:#6699FF;text-decoration:none">app.netraops.com/client</a></p>
+        <p style="color:#555;font-size:13px;margin:0 0 24px">You can view live guard activity, daily shift reports, incident reports, and geofence alerts.</p>
+        ${contact}
+      </div>
+      <div class="footer">NetraOps — Do not reply to this email</div>
+    </div>`;
+  return { subject: '[NetraOps] Welcome — Your Client Portal Access', html };
+}
+
+export async function sendClientWelcomeEmail(args: {
+  client_id: string;
+  client_name: string;
+  client_email: string;
+  company_id: string;
+  site_ids: string[];
+  temp_password: string;
+}): Promise<void> {
+  const [companyResult, sitesResult] = await Promise.all([
+    pool.query<{
+      company_name: string | null;
+      primary_admin_email: string | null;
+    }>(
+      `SELECT co.name AS company_name,
+              ca.email AS primary_admin_email
+         FROM companies co
+         LEFT JOIN company_admins ca
+           ON ca.company_id = co.id AND ca.is_primary = true AND ca.is_active = true
+        WHERE co.id = $1`,
+      [args.company_id],
+    ),
+    pool.query<{ name: string }>(
+      `SELECT name FROM sites WHERE id = ANY($1::uuid[]) ORDER BY name`,
+      [args.site_ids],
+    ),
+  ]);
+  const co = companyResult.rows[0];
+  if (!co) {
+    console.warn(`[email] sendClientWelcomeEmail: no company found for company_id=${args.company_id}`);
+    return;
+  }
+  const siteNames = sitesResult.rows.map((r) => r.name).join(', ');
+  const { subject, html } = renderClientWelcome({
+    client_name:         args.client_name,
+    client_email:        args.client_email,
+    company_name:        co.company_name ?? 'NetraOps',
+    site_names:          siteNames,
+    primary_admin_email: co.primary_admin_email,
+    temp_password:       args.temp_password,
+  });
+  try {
+    await sgMail.send({ to: args.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    console.log(`[email] sendClientWelcomeEmail: SUCCESS — delivered to ${args.client_email}`);
+  } catch (err: any) {
+    console.error(`[email] sendClientWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('welcome_client', err, { client_id: args.client_id });
+    throw err;
   }
 }

@@ -215,10 +215,15 @@ function ChatPageInner() {
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
       {/* ── Two-panel layout ──────────────────────────────────────────── */}
+      {/*
+       * Mobile ({'<'}md): master/detail — show room list OR thread, never both.
+       * Tap a room → thread; back arrow in the thread header → list.
+       * Desktop (md+): side-by-side unchanged.
+       */}
       <div className="flex gap-4 h-[calc(100vh-200px)] min-h-[500px]">
 
         {/* Left panel — room list */}
-        <div className="w-80 shrink-0 bg-[#0F1E35] border border-[#1A3050] rounded-xl flex flex-col overflow-hidden">
+        <div className={`${selected ? 'hidden md:flex' : 'flex'} flex-1 md:flex-none md:w-80 md:shrink-0 bg-[#0F1E35] border border-[#1A3050] rounded-xl flex-col overflow-hidden`}>
           <div className="px-4 py-3 border-b border-[#1A3050]">
             <p className="text-gray-500 text-xs tracking-widest">CONVERSATIONS</p>
           </div>
@@ -263,7 +268,7 @@ function ChatPageInner() {
         </div>
 
         {/* Right panel — message thread */}
-        <div className="flex-1 bg-[#0F1E35] border border-[#1A3050] rounded-xl flex flex-col overflow-hidden">
+        <div className={`${selected ? 'flex' : 'hidden md:flex'} flex-1 bg-[#0F1E35] border border-[#1A3050] rounded-xl flex-col overflow-hidden`}>
           {!selected ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center">
@@ -276,6 +281,13 @@ function ChatPageInner() {
             <>
               {/* Thread header */}
               <div className="px-5 py-3 border-b border-[#1A3050] flex items-center gap-3">
+                <button
+                  onClick={() => setSelected(null)}
+                  className="md:hidden text-gray-400 hover:text-white text-xl w-8 h-8 -ml-2 flex items-center justify-center shrink-0"
+                  aria-label="Back to conversations"
+                >
+                  ←
+                </button>
                 <div>
                   <p className="text-white font-semibold text-sm">{selected.guard_name}</p>
                   <p className="text-gray-500 text-xs">{selected.site_name}</p>

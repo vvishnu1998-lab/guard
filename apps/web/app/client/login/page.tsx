@@ -137,10 +137,10 @@ export default function ClientLoginPage() {
       </div>
 
       {/* Right panel — form */}
-      <div className="flex-1 flex items-center justify-center p-8 lg:p-16">
+      <div className="flex-1 flex items-center justify-center p-6 md:p-8 lg:p-16">
         <div className="w-full max-w-[380px]">
           {/* Mobile logo */}
-          <div className="flex items-center gap-3 mb-12 lg:hidden">
+          <div className="flex items-center gap-3 mb-8 lg:hidden">
             <Image
               src="/vwing_logo.png"
               alt="Netra"

@@ -22,6 +22,7 @@ import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../components/admin/ScheduleShiftModal';
 import AssignGuardModal, { AssignableShift } from '../../../components/admin/AssignGuardModal';
 import { fmtDateShort, fmtDuration, fmtTime } from '../../../lib/shiftFormat';
+import { formatHoursHHMM } from '../../../lib/formatHours';
 
 interface Shift {
   id:               string;
@@ -354,7 +355,7 @@ function ShiftsPageInner() {
                     )}
                   </p>
                   {inWindow.length > 0 && (
-                    <p className="text-gray-500 text-xs mt-1">{totalHours.toFixed(1)}h scheduled</p>
+                    <p className="text-gray-500 text-xs mt-1">{formatHoursHHMM(totalHours)} scheduled</p>
                   )}
                   {/* Session S6 — gap pill. Only rendered when the site has
                       an active scheduling profile; silent otherwise. */}

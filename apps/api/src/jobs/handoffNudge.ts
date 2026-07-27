@@ -43,14 +43,19 @@ export async function runHandoffNudgeOnce(): Promise<number> {
     // Update-then-select in a single statement so two cron ticks racing
     // don't double-nudge — the WHERE guards on both time thresholds and
     // count cap.
+    //
+    // FROM uses comma-separated relations with all correlations moved to
+    // WHERE. Postgres does NOT allow references to the UPDATE-target alias
+    // (ssr) inside JOIN … ON clauses within the FROM chain — those ON
+    // clauses see only the FROM relations. Mirrors expireSwapRequests.ts.
     `UPDATE shift_swap_requests ssr
         SET handoff_last_nudge_at = NOW(),
             handoff_nudge_count   = handoff_nudge_count + 1
-      FROM shifts sh
-      JOIN sites  si ON si.id = sh.site_id
-      JOIN guards fg ON fg.id = ssr.from_guard_id
-      JOIN guards tg ON tg.id = ssr.to_guard_id
+      FROM shifts sh, sites si, guards fg, guards tg
       WHERE sh.id = ssr.shift_id
+        AND si.id = sh.site_id
+        AND fg.id = ssr.from_guard_id
+        AND tg.id = ssr.to_guard_id
         AND ssr.initiated_by  = 'guard_handoff'
         AND ssr.status        = 'accepted'
         AND ssr.to_session_id IS NULL

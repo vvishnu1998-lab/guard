@@ -6,10 +6,14 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthPayload, requireAuth, secretForRole } from '../middleware/auth';
 import { sendTempPasswordEmail } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 const router = Router();
 
 const MAX_FAILED_ATTEMPTS = 5;
+// Finding #8: a 5-fail lock auto-expires after this cooldown so an account
+// self-recovers without admin intervention (defeats the lockout DoS).
+const LOCKOUT_COOLDOWN_MINUTES = 30;
 const ACCESS_TOKEN_TTL  = '8h';   // web sessions; mobile app refreshes automatically
 const REFRESH_TOKEN_TTL = '30d';
 
@@ -45,7 +49,7 @@ export function signTokens(payload: Omit<AuthPayload, 'iat' | 'exp' | 'jti'>) {
   return { access, refresh };
 }
 
-async function logEvent(
+export async function logEvent(
   actorId: string,
   role: AuthPayload['role'],
   eventType: string,
@@ -88,6 +92,23 @@ router.post('/guard/login', async (req: Request, res: Response) => {
     [email.toLowerCase().trim()]
   );
   const guard = guardResult.rows[0];
+
+  // Finding #8: auto-unlock a stale soft-lock. If the account was locked
+  // (failed_count >= 5) more than LOCKOUT_COOLDOWN_MINUTES ago, clear the
+  // lock + counter so it self-recovers without admin intervention. Runs
+  // before the password check so both the failed path and the lock check
+  // below see a clean slate. No-op (0 rows) when not locked or still within
+  // the cooldown; the hard 5-fail threshold and admin unlock are unchanged.
+  if (guard) {
+    await pool.query(
+      `UPDATE login_attempts
+          SET failed_count = 0, locked_at = NULL, updated_at = NOW()
+        WHERE guard_id = $1
+          AND locked_at IS NOT NULL
+          AND locked_at < NOW() - make_interval(mins => $2)`,
+      [guard.id, LOCKOUT_COOLDOWN_MINUTES],
+    );
+  }
 
   const hashToCheck = guard?.password_hash ?? '$2b$12$invalidhashpadding000000000000000000000000000000000000';
   const valid = await bcrypt.compare(password, hashToCheck);
@@ -136,7 +157,7 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   if (lockRow?.locked_at && lockRow.failed_count >= MAX_FAILED_ATTEMPTS) {
     await logEvent(guard.id, 'guard', 'login_blocked_locked', req);
     return res.status(423).json({
-      error: 'Account locked after 5 failed attempts. Contact your supervisor to unlock.',
+      error: 'Too many failed attempts. Try again in 30 minutes or contact your supervisor.',
       locked: true,
     });
   }
@@ -147,9 +168,23 @@ router.post('/guard/login', async (req: Request, res: Response) => {
      ON CONFLICT (guard_id) DO UPDATE SET failed_count = 0, locked_at = NULL, updated_at = NOW()`,
     [guard.id]
   );
-  if (fcm_token) {
-    await pool.query('UPDATE guards SET fcm_token = $1 WHERE id = $2', [fcm_token, guard.id]);
-  }
+  // Session hijack fix (Interpretation B): a successful guard login
+  // is a session-invalidating event. Bump tokens_not_before so any
+  // JWT issued to a prior device (same guard, different phone) is
+  // rejected on next request. fcm_token write is now unconditional
+  // — an omitted body field coerces to NULL, which fails safe (no
+  // routing to the prior device) if this login's phone declined the
+  // notification permission prompt.
+  await pool.query(
+    'UPDATE guards SET tokens_not_before = NOW(), fcm_token = $1 WHERE id = $2',
+    [fcm_token ?? null, guard.id]
+  );
+  Sentry.addBreadcrumb({
+    category: 'auth',
+    message: 'guard login: session invalidated + fcm rewritten',
+    level: 'info',
+    data: { guard_id: guard.id, has_new_fcm: !!fcm_token },
+  });
 
   const tokens = signTokens({ sub: guard.id, role: 'guard', company_id: guard.company_id });
   await logEvent(guard.id, 'guard', 'login_success', req);
@@ -182,10 +217,21 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
   // stamp, so mobile must re-login after change-password (which the
   // existing "must_change_password=false → route back to home" flow
   // already does via the login handler once the guard re-auths).
+  // Phase C: also NULL fcm_token — matches admin/revoke-guard and the
+  // new /guard/login pattern. Defensive: closes the small window
+  // between change-password succeeding and re-login re-registering
+  // the token, so a push in that window fails safe rather than
+  // routing to whatever device last wrote fcm_token.
   await pool.query(
-    'UPDATE guards SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
+    'UPDATE guards SET password_hash = $1, must_change_password = false, tokens_not_before = NOW(), fcm_token = NULL WHERE id = $2',
     [newHash, req.user!.sub]
   );
+  Sentry.addBreadcrumb({
+    category: 'auth',
+    message: 'guard change-password: session invalidated + fcm cleared',
+    level: 'info',
+    data: { guard_id: req.user!.sub },
+  });
   await logEvent(req.user!.sub, 'guard', 'password_changed', req);
   res.json({ success: true });
 });
@@ -209,10 +255,18 @@ router.post('/guard/fcm-token', requireAuth('guard'), async (req: Request, res: 
     [clearing ? null : fcm_token, req.user!.sub],
   );
   if (clearing) {
-    // Not an error — expected on logout. Kept as a log line rather than
-    // a Sentry captureMessage so we can tail Railway logs during a
-    // walk-test without ballooning Sentry counts.
+    // Not an error — expected on logout. Console.log so we can tail
+    // Railway logs during a walk-test; a Sentry breadcrumb (info level,
+    // free — only surfaces if a later exception fires in this request
+    // context) so a null-clear paired with a subsequent crash has a
+    // linkable trail. NOT captureMessage — those balloon Sentry counts.
     console.log(`[fcm-token] cleared for guard ${req.user!.sub}`);
+    Sentry.addBreadcrumb({
+      category: 'auth',
+      message: 'fcm-token cleared (null received)',
+      level: 'info',
+      data: { guard_id: req.user!.sub },
+    });
   }
   res.json({ ok: true });
 });
@@ -225,6 +279,7 @@ router.post('/admin/login', async (req: Request, res: Response) => {
 
   const result = await pool.query(
     `SELECT ca.id, ca.company_id, ca.password_hash, ca.is_active, ca.is_primary, ca.must_change_password,
+            ca.failed_login_count, ca.locked_at,
             c.is_active AS company_active
      FROM company_admins ca
      JOIN companies c ON c.id = ca.company_id
@@ -232,10 +287,36 @@ router.post('/admin/login', async (req: Request, res: Response) => {
     [email.toLowerCase().trim()]
   );
   const admin = result.rows[0];
+
+  // Finding #9: auto-unlock a stale soft-lock (mirror guard #8) before the
+  // password check so a returning admin gets a clean slate. DB-side interval
+  // (no clock skew); no-op when not locked or still within the cooldown.
+  if (admin) {
+    await pool.query(
+      `UPDATE company_admins
+          SET failed_login_count = 0, locked_at = NULL
+        WHERE id = $1 AND locked_at IS NOT NULL
+          AND locked_at < NOW() - make_interval(mins => $2)`,
+      [admin.id, LOCKOUT_COOLDOWN_MINUTES],
+    );
+  }
+
   const hashToCheck = admin?.password_hash ?? '$2b$12$invalidhashpadding000000000000000000000000000000000000';
   const valid = await bcrypt.compare(password, hashToCheck);
 
   if (!admin || !valid || !admin.is_active) {
+    // Increment only on a wrong password for a real admin — not on a missing
+    // account (nothing to count) and not on a correct-password-but-deactivated
+    // attempt (password was right). Anti-enumeration 401 unchanged.
+    if (admin && !valid) {
+      await pool.query(
+        `UPDATE company_admins
+            SET failed_login_count = failed_login_count + 1,
+                locked_at = CASE WHEN failed_login_count + 1 >= $2 THEN NOW() ELSE locked_at END
+          WHERE id = $1`,
+        [admin.id, MAX_FAILED_ATTEMPTS],
+      );
+    }
     if (admin) await logEvent(admin.id, 'company_admin', 'login_failed', req);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
@@ -243,6 +324,27 @@ router.post('/admin/login', async (req: Request, res: Response) => {
   if (!admin.company_active) {
     return res.status(403).json({ error: 'Your company account has been deactivated. Please contact your platform administrator.' });
   }
+
+  // Finding #9: lock check AFTER bcrypt — only a correct-password attempt
+  // reaches here. Re-read the post-stale-clear lock state (guard pattern) so
+  // a just-auto-unlocked admin isn't wrongly rejected.
+  const lockRow = (await pool.query(
+    'SELECT failed_login_count, locked_at FROM company_admins WHERE id = $1',
+    [admin.id],
+  )).rows[0];
+  if (lockRow?.locked_at && lockRow.failed_login_count >= MAX_FAILED_ATTEMPTS) {
+    await logEvent(admin.id, 'company_admin', 'login_blocked_locked', req);
+    return res.status(423).json({
+      error: 'Too many failed attempts. Try again in 30 minutes or contact your platform administrator.',
+      locked: true,
+    });
+  }
+
+  // Success — clear any accrued failures.
+  await pool.query(
+    'UPDATE company_admins SET failed_login_count = 0, locked_at = NULL WHERE id = $1',
+    [admin.id],
+  );
 
   const tokens = signTokens({
     sub: admin.id,
@@ -270,8 +372,12 @@ router.post('/admin/change-password', requireAuth('company_admin'), async (req: 
   if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
 
   const newHash = await bcrypt.hash(new_password, 12);
+  // Finding #1: a password change is session-invalidating. Stamp
+  // tokens_not_before = NOW() so any admin JWT minted before this instant
+  // is rejected by the middleware + refresh nbf checks (mirrors the guard
+  // change-password path).
   await pool.query(
-    'UPDATE company_admins SET password_hash = $1, must_change_password = false WHERE id = $2',
+    'UPDATE company_admins SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
     [newHash, req.user!.sub]
   );
   await logEvent(req.user!.sub, 'company_admin', 'password_changed', req);
@@ -379,19 +485,70 @@ router.post('/vishnu/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
+  // Wrong email — stateless 401. Never touch vishnu_state for a non-account
+  // so an attacker guessing emails can't lock the real Vishnu out.
   if (email.toLowerCase().trim() !== process.env.VISHNU_EMAIL?.toLowerCase()) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
+  // Finding #9: brute-force lockout on the vishnu_state singleton, mirroring
+  // the guard/admin pattern. Self-lock is accepted (5 fails → 30-min cooldown
+  // applies to Vishnu too). Stale-lock clear before the password check.
+  await pool.query(
+    `UPDATE vishnu_state
+        SET failed_login_count = 0, locked_at = NULL
+      WHERE id = 1 AND locked_at IS NOT NULL
+        AND locked_at < NOW() - make_interval(mins => $1)`,
+    [LOCKOUT_COOLDOWN_MINUTES],
+  );
+
   const valid = await bcrypt.compare(password, process.env.VISHNU_PASSWORD_HASH!);
   if (!valid) {
+    await pool.query(
+      `UPDATE vishnu_state
+          SET failed_login_count = failed_login_count + 1,
+              locked_at = CASE WHEN failed_login_count + 1 >= $1 THEN NOW() ELSE locked_at END
+        WHERE id = 1`,
+      [MAX_FAILED_ATTEMPTS],
+    );
     await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_failed', req);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
+  // Lock check AFTER bcrypt — only a correct password reaches here.
+  const vs = (await pool.query(
+    'SELECT failed_login_count, locked_at FROM vishnu_state WHERE id = 1',
+  )).rows[0];
+  if (vs?.locked_at && vs.failed_login_count >= MAX_FAILED_ATTEMPTS) {
+    await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_blocked_locked', req);
+    return res.status(423).json({
+      error: 'Too many failed attempts. Try again in 30 minutes.',
+      locked: true,
+    });
+  }
+
+  await pool.query('UPDATE vishnu_state SET failed_login_count = 0, locked_at = NULL WHERE id = 1');
+
   const tokens = signTokens({ sub: '00000000-0000-0000-0000-000000000000', role: 'vishnu' });
   await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_success', req);
   res.json(tokens);
+});
+
+// ── Vishnu: revoke ALL super-admin sessions (break-glass) ────────────────────
+// Finding #1: bumps the vishnu_state singleton's tokens_not_before so every
+// vishnu JWT minted before now is rejected by the middleware + refresh nbf
+// checks. NOTE: this includes the CALLER'S OWN current session — after
+// calling this, Vishnu must log in again. actor_id uses the nil UUID (the
+// established vishnu convention; auth_events.actor_id has no FK).
+router.post('/vishnu/revoke-sessions', requireAuth('vishnu'), async (req: Request, res: Response) => {
+  await pool.query(
+    'UPDATE vishnu_state SET tokens_not_before = NOW(), last_updated_at = NOW() WHERE id = 1'
+  );
+  await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'sessions_revoked', req);
+  res.json({
+    success: true,
+    warning: 'All vishnu sessions revoked including current. Log in again.',
+  });
 });
 
 // ── Refresh token rotation ───────────────────────────────────────────────────
@@ -407,16 +564,104 @@ router.post('/refresh', async (req: Request, res: Response) => {
     return res.status(401).json({ error: 'Invalid or expired refresh token' });
   }
 
+  // Mirror the access-token nbf check the middleware runs on every
+  // authenticated request. Without this, apiClient's silent-refresh-on-401
+  // loop transparently masks a session revocation: middleware 401s the
+  // access token, refresh mints a fresh one, and the caller never notices.
+  // Same `(iat + 1) * 1000 <= notBeforeMs` form as middleware/auth.ts:124 /
+  // :154 (added in 2760d4b to absorb the iat-second / NOW()-millisecond
+  // precision mismatch on same-second logins). Preview-scope client tokens
+  // skip the check to match middleware behaviour.
+  if (payload.role === 'guard') {
+    const g = await pool.query(
+      'SELECT tokens_not_before FROM guards WHERE id = $1',
+      [payload.sub],
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = g.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  } else if (payload.role === 'client' && payload.scope !== 'preview') {
+    const c = await pool.query(
+      'SELECT tokens_not_before FROM clients WHERE id = $1',
+      [payload.sub],
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = c.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  } else if (payload.role === 'company_admin') {
+    const a = await pool.query(
+      'SELECT tokens_not_before FROM company_admins WHERE id = $1',
+      [payload.sub],
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = a.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  } else if (payload.role === 'vishnu') {
+    // Fail-open on DB read error (see middleware vishnu branch).
+    const vs = await pool.query(
+      'SELECT tokens_not_before FROM vishnu_state WHERE id = 1',
+    ).catch(() => ({ rows: [] as { tokens_not_before: Date | null }[] }));
+    const nb = vs.rows[0]?.tokens_not_before;
+    if (nb && (payload.iat + 1) * 1000 <= new Date(nb).getTime()) {
+      Sentry.addBreadcrumb({
+        category: 'auth',
+        message: 'refresh rejected: tokens_not_before',
+        level: 'info',
+        data: { sub: payload.sub, role: payload.role },
+      });
+      return res.status(401).json({ error: 'Session revoked' });
+    }
+  }
+
   if (payload.jti) {
     const revoked = await pool.query('SELECT id FROM revoked_tokens WHERE jti = $1', [payload.jti]);
     if (revoked.rows.length > 0) {
       return res.status(401).json({ error: 'Token has been revoked' });
     }
+    // Serialize rotation via the UNIQUE(jti) constraint: when N concurrent
+    // callers pass the SELECT with the same jti, only one INSERT wins; the
+    // rest hit 23505 and 401 BEFORE any tokens are minted below. Prior
+    // `ON CONFLICT DO NOTHING` silently no-oped losers and still minted new
+    // tokens for them — one refresh token could produce N access tokens.
     const exp = new Date(payload.exp * 1000);
-    await pool.query(
-      'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [payload.jti, exp]
-    );
+    try {
+      await pool.query(
+        'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2)',
+        [payload.jti, exp]
+      );
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'refresh race lost: jti already revoked',
+          level: 'info',
+          data: { sub: payload.sub, role: payload.role, jti: payload.jti },
+        });
+        return res.status(401).json({ error: 'Session revoked' });
+      }
+      throw err;
+    }
   }
 
   const { iat: _iat, exp: _exp, jti: _jti, ...rest } = payload;
@@ -428,11 +673,28 @@ router.post('/refresh', async (req: Request, res: Response) => {
 // ── Logout ───────────────────────────────────────────────────────────────────
 
 router.post('/logout', requireAuth('guard', 'company_admin', 'client', 'vishnu'), async (req: Request, res: Response) => {
+  // Both INSERTs drop ON CONFLICT DO NOTHING and let the UNIQUE(jti)
+  // index serialize concurrent double-taps. Logout stays idempotent —
+  // 23505 means someone (or this same caller) already revoked the jti,
+  // which is still a valid end state — so we breadcrumb and continue to
+  // 200. Other DB errors keep the pre-existing swallow behaviour: logout
+  // must not fail the user out of the sign-out flow because of a DB blip.
   if (req.user?.jti) {
-    await pool.query(
-      'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [req.user.jti, new Date(req.user.exp * 1000)]
-    ).catch(() => {});
+    try {
+      await pool.query(
+        'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2)',
+        [req.user.jti, new Date(req.user.exp * 1000)]
+      );
+    } catch (err: any) {
+      if (err?.code === '23505') {
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'logout race: jti already revoked',
+          level: 'info',
+          data: { sub: req.user.sub, role: req.user.role, jti: req.user.jti, token: 'access' },
+        });
+      }
+    }
   }
 
   const { refresh_token } = req.body;
@@ -440,10 +702,21 @@ router.post('/logout', requireAuth('guard', 'company_admin', 'client', 'vishnu')
     try {
       const payload = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET!) as AuthPayload & { jti?: string };
       if (payload.jti) {
-        await pool.query(
-          'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-          [payload.jti, new Date(payload.exp * 1000)]
-        );
+        try {
+          await pool.query(
+            'INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2)',
+            [payload.jti, new Date(payload.exp * 1000)]
+          );
+        } catch (err: any) {
+          if (err?.code === '23505') {
+            Sentry.addBreadcrumb({
+              category: 'auth',
+              message: 'logout race: jti already revoked',
+              level: 'info',
+              data: { sub: payload.sub, role: payload.role, jti: payload.jti, token: 'refresh' },
+            });
+          }
+        }
       }
     } catch {}
   }
@@ -552,8 +825,21 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 
   if (!userId || !table) return res.json(safeResponse);
 
+  const role = portal === 'admin' ? 'company_admin' : portal === 'client' ? 'client' : 'guard';
   const tempPassword = generateTempPassword();
   const hash = await bcrypt.hash(tempPassword, 12);
+
+  // Email-first ordering — rotating the stored hash before a confirmed send would silently lock the user out.
+  try {
+    await sendTempPasswordEmail(normalizedEmail, tempPassword, portal as 'admin' | 'client' | 'guard');
+  } catch (err) {
+    await logEvent(userId, role, 'password_reset_email_failed', req);
+    Sentry.captureException(err, {
+      tags: { flow: 'forgot_password', role },
+      extra: { target_email: normalizedEmail, target_id: userId },
+    });
+    return res.json(safeResponse);
+  }
 
   await pool.query(
     `UPDATE ${table} SET password_hash = $1, must_change_password = true WHERE id = $2`,
@@ -568,8 +854,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     ).catch(() => {});
   }
 
-  await sendTempPasswordEmail(normalizedEmail, tempPassword, portal as 'admin' | 'client' | 'guard');
-  await logEvent(userId, portal === 'admin' ? 'company_admin' : portal === 'client' ? 'client' : 'guard', 'password_reset_emailed', req);
+  await logEvent(userId, role, 'password_reset_emailed', req);
 
   res.json(safeResponse);
 });

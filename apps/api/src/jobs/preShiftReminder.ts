@@ -7,17 +7,22 @@
  * a `pre_shift_reminder_sent_at` stamp prevents the second tick from
  * re-pushing once the first succeeds.
  *
- * Skip behavior (no DB write — next tick may retry):
- *   - shift.guard_id IS NULL (unassigned)
- *   - guard.fcm_token IS NULL (no device)
- *   - FCM dispatch rejects (network / Expo error)
+ * Commit 2 semantics (c): Alerts tab is source of truth.
  *
- * Mark sent behavior (DB write — no further attempts):
- *   - FCM dispatch resolves successfully
+ * For every candidate row with a guard_id we ALWAYS:
+ *   1. Write a `pre_shift_reminder` notification row.
+ *   2. Attempt FCM push (best-effort; failure logged, not fatal).
+ *   3. Stamp pre_shift_reminder_sent_at NOW() so this row is done.
+ *
+ * Skip only when shift.guard_id IS NULL — nothing to notify.
+ * Null fcm_token no longer skips the row: notification is still
+ * written, push is skipped, stamp still advances.
  */
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { insertNotification } from '../services/notifications';
+import { Sentry } from '../services/sentry';
 
 interface CandidateRow {
   shift_id: string;
@@ -50,26 +55,68 @@ cron.schedule('*/5 * * * *', async () => {
     if (!candidates) return;
 
     for (const row of rows) {
-      if (!row.guard_id || !row.fcm_token) {
-        console.warn(`[preShiftReminder] Skipping shift ${row.shift_id} — ${row.guard_id ? 'no fcm_token' : 'unassigned'}`);
+      if (!row.guard_id) {
+        console.warn(`[preShiftReminder] Skipping shift ${row.shift_id} — unassigned`);
         continue;
       }
 
       try {
-        await sendPushNotification({
-          token: row.fcm_token,
-          title: 'Shift in 1 hour',
-          body:  row.site_name,
-          data:  { shift_id: row.shift_id, type: 'pre_shift_reminder' },
+        const title = 'Shift in 1 hour';
+        const body  = row.site_name;
+
+        // 1. Always write the Alerts-tab row first — source of truth for
+        //    the guard even when their fcm_token is null.
+        await insertNotification({
+          guardId:        row.guard_id,
+          type:           'pre_shift_reminder',
+          title,
+          body,
+          data: {
+            shiftId:        row.shift_id,
+            siteName:       row.site_name,
+            scheduledStart: row.scheduled_start,
+          },
+          shiftSessionId: null,
         });
+
+        // 2. Best-effort push. Wrapped so a throw doesn't skip the stamp.
+        if (row.fcm_token) {
+          try {
+            await sendPushNotification({
+              token: row.fcm_token,
+              title,
+              body,
+              data:  { shift_id: row.shift_id, type: 'pre_shift_reminder' },
+            });
+            successes += 1;
+          } catch (err) {
+            failures += 1;
+            console.error(`[preShiftReminder] FCM failed for shift ${row.shift_id}:`, err);
+          }
+        } else {
+          console.warn(`[preShiftReminder] shift=${row.shift_id} — no fcm_token; notification row still written`);
+          Sentry.captureMessage('push_skip_null_token', {
+            level: 'warning',
+            tags: { flow: 'pre_shift_reminder' },
+            extra: {
+              guard_id:  row.guard_id,
+              shift_id:  row.shift_id,
+              site_name: row.site_name,
+            },
+          });
+        }
+
+        // 3. Stamp unconditionally — cron must not retry this row now
+        //    that the notification row is committed.
         await pool.query(
           `UPDATE shifts SET pre_shift_reminder_sent_at = NOW() WHERE id = $1`,
           [row.shift_id],
         );
-        successes += 1;
       } catch (err) {
-        failures += 1;
-        console.error(`[preShiftReminder] FCM failed for shift ${row.shift_id}:`, err);
+        // insertNotification is best-effort and never throws; a throw here
+        // means the stamp UPDATE failed (DB down / conn dropped). Log and
+        // move on so other rows in this tick still get processed.
+        console.error(`[preShiftReminder] row failed for shift ${row.shift_id}:`, err);
       }
     }
   } catch (err) {

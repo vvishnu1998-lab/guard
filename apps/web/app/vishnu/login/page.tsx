@@ -76,7 +76,7 @@ export default function VishnuLoginPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#060E1A] flex items-center justify-center p-8">
+    <main className="min-h-screen bg-[#060E1A] flex items-center justify-center p-6 md:p-8">
       <div className="w-full max-w-[360px]">
         {/* Logo */}
         <div className="flex flex-col items-center mb-14">

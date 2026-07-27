@@ -23,11 +23,13 @@
 import cron from 'node-cron';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
+import { Sentry } from '../services/sentry';
 
 export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
   shiftsClosed: number;
   sessionsClosed: number;
   breaksClosed: number;
+  violationsResolved: number;
 }> {
   await client.query('BEGIN');
   try {
@@ -80,14 +82,15 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     // resolve its lingering open geofence violations. Uses the freshly-set
     // clocked_out_at as the resolution timestamp for parity with the
     // manual clock-out path.
-    await client.query(
+    const violations = await client.query(
       `UPDATE geofence_violations gv
           SET resolved_at = ss.clocked_out_at,
               duration_minutes = ROUND(EXTRACT(EPOCH FROM (ss.clocked_out_at - gv.occurred_at)) / 60)::INT
          FROM shift_sessions ss
         WHERE gv.shift_session_id = ss.id
           AND gv.resolved_at IS NULL
-          AND ss.clocked_out_at > NOW() - INTERVAL '10 minutes'`
+          AND ss.clocked_out_at > NOW() - INTERVAL '10 minutes'
+        RETURNING gv.id`
     );
 
     // Step 3: Mark the overdue shifts. Shifts with at least one
@@ -113,9 +116,10 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     await client.query('COMMIT');
 
     return {
-      shiftsClosed:   shifts.rowCount ?? 0,
-      sessionsClosed: sessions.rowCount ?? 0,
-      breaksClosed:   breaks.rowCount ?? 0,
+      shiftsClosed:       shifts.rowCount ?? 0,
+      sessionsClosed:     sessions.rowCount ?? 0,
+      breaksClosed:       breaks.rowCount ?? 0,
+      violationsResolved: violations.rowCount ?? 0,
     };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -124,6 +128,7 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
 }
 
 cron.schedule('*/5 * * * *', async () => {
+  const tickStart = Date.now();
   const client = await pool.connect();
   try {
     const r = await autoCompleteOverdueShifts(client);
@@ -134,8 +139,25 @@ cron.schedule('*/5 * * * *', async () => {
         `${r.breaksClosed} open break(s)`
       );
     }
+    // Finding #4 heartbeat — structured, EVERY tick (even zero-activity) so a
+    // silently wedged cron is detectable via "no heartbeat for N hours".
+    console.info('[auto_complete_shifts.tick]', {
+      shifts_closed:       r.shiftsClosed,
+      sessions_closed:     r.sessionsClosed,
+      breaks_closed:       r.breaksClosed,
+      violations_resolved: r.violationsResolved,
+      duration_ms:         Date.now() - tickStart,
+    });
   } catch (err) {
     console.error('[autoCompleteShifts] Error:', err);
+    // Finding #4 — surface the throw (was console.error-only, which defeated
+    // the global unhandled-rejection net). Fingerprint dedups the 5-min tick
+    // so a persistent failure is one grouped issue, not 288 events/day.
+    Sentry.captureException(err, {
+      tags: { flow: 'auto_complete_shifts' },
+      fingerprint: ['auto_complete_shifts', 'tick_error'],
+      extra: { tick_start: new Date(tickStart).toISOString() },
+    });
   } finally {
     client.release();
   }

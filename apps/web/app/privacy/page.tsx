@@ -1,5 +1,11 @@
 import React from 'react';
+import type { Metadata } from 'next';
 import Link from 'next/link';
+
+export const metadata: Metadata = {
+  title: 'Privacy Policy',
+  description: 'How NetraOps collects, uses, and protects your data — including location data collected during active shifts.',
+};
 
 export default function PrivacyPolicy() {
   return (
@@ -40,7 +46,7 @@ export default function PrivacyPolicy() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">2. Who We Are</h2>
             <p>
-              NetraOps provides an operations platform for security companies and their clients. If you have any questions about this policy or our privacy practices, you can contact us at: <a href="mailto:vvishnu1998@gmail.com" className="text-[#00C8FF] hover:underline">vvishnu1998@gmail.com</a>.
+              NetraOps provides an operations platform for security companies and their clients. If you have any questions about this policy or our privacy practices, you can contact us at: <a href="mailto:support@netraops.com?subject=Privacy%20Question" className="text-[#00C8FF] hover:underline">support@netraops.com</a>.
             </p>
           </section>
 
@@ -86,7 +92,7 @@ export default function PrivacyPolicy() {
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">7. Your Rights</h2>
             <p>
-              You have the right to access, correct, or request the deletion of your personal information. To exercise these rights, please contact your employer (the security company managing your account) or reach out to us directly at <a href="mailto:vvishnu1998@gmail.com" className="text-[#00C8FF] hover:underline">vvishnu1998@gmail.com</a>.
+              You have the right to access, correct, or request the deletion of your personal information. To exercise these rights, please contact your employer (the security company managing your account) or reach out to us directly at <a href="mailto:support@netraops.com?subject=Privacy%20Question" className="text-[#00C8FF] hover:underline">support@netraops.com</a>.
             </p>
           </section>
 

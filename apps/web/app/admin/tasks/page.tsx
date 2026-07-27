@@ -32,6 +32,8 @@ const RECURRENCE_LABELS: Record<string, string> = {
   custom:   'Custom',
 };
 
+interface ActiveShiftSummary { id: string; site_id: string; status: string }
+
 export default function TaskTemplatesPage() {
   const [sites,        setSites]        = useState<Site[]>([]);
   const [selectedSite, setSelectedSite] = useState('');
@@ -40,6 +42,11 @@ export default function TaskTemplatesPage() {
   const [modalOpen,    setModalOpen]    = useState(false);
   const [editing,      setEditing]      = useState<Template | null>(null);
   const [error,        setError]        = useState('');
+  // Non-null when the currently-selected site has an active shift. Drives
+  // the mid-shift hint inside TaskTemplateModal — new templates don't
+  // apply until the next clock-in, so an admin editing during a shift
+  // would otherwise assume their new template is live.
+  const [activeAtSelectedSite, setActiveAtSelectedSite] = useState<ActiveShiftSummary | null>(null);
 
   // Load sites once
   useEffect(() => {
@@ -70,6 +77,39 @@ export default function TaskTemplatesPage() {
 
   useEffect(() => { loadTemplates(); }, [loadTemplates]);
 
+  // Detect whether the selected site has an active shift right now.
+  // No dedicated /shifts?site_id=X endpoint exists; GET /api/shifts as
+  // admin returns up to 100 company shifts with s.status included, so
+  // we filter client-side. Runs on every site-select change — the site
+  // dropdown is a discrete click (no rapid firing) so no debounce.
+  useEffect(() => {
+    if (!selectedSite) { setActiveAtSelectedSite(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const shifts = await adminGet<ActiveShiftSummary[]>('/api/shifts');
+        if (cancelled) return;
+        const match = shifts.find(
+          (s) => s.status === 'active' && s.site_id === selectedSite,
+        ) ?? null;
+        setActiveAtSelectedSite(match);
+        if (match) {
+          // Observability parity with Sentry breadcrumbs used elsewhere —
+          // web has no @sentry SDK, so a structured console.info stands in.
+          console.info('[admin.template.mid_shift_hint_shown]', {
+            site_id: selectedSite,
+            active_shift_id: match.id,
+          });
+        }
+      } catch {
+        // Non-fatal: hint suppresses on error. Templates page continues to
+        // function; admin just doesn't get the "shift active" warning.
+        if (!cancelled) setActiveAtSelectedSite(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedSite]);
+
   async function handleSave(data: TemplateFormData, id?: string) {
     const method = id ? 'PATCH' : 'POST';
     const path   = id ? `/api/tasks/templates/${id}` : '/api/tasks/templates';
@@ -96,7 +136,7 @@ export default function TaskTemplatesPage() {
   return (
     <div className="space-y-6">
       {/* Page header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-widest text-amber-400">TASK TEMPLATES</h1>
           <p className="text-gray-500 text-sm mt-1">
@@ -105,7 +145,7 @@ export default function TaskTemplatesPage() {
         </div>
         <button
           onClick={openCreate}
-          className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors"
+          className="self-start md:self-auto bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-4 py-2 rounded-lg hover:bg-amber-300 transition-colors whitespace-nowrap"
         >
           + NEW TEMPLATE
         </button>
@@ -172,11 +212,14 @@ export default function TaskTemplatesPage() {
                     )}
                   </td>
                   <td className="p-4 text-gray-400 font-mono">
-                    {/* scheduled_time stored as UTC — convert to local for display */}
+                    {/* scheduled_time is site-local wall-clock (post-v40). Render as
+                        12-hour without a TZ round-trip so the digits displayed are
+                        the digits stored. */}
                     {(() => {
-                      const [h, m] = t.scheduled_time.split(':').map(Number);
-                      const d = new Date(); d.setUTCHours(h, m, 0, 0);
-                      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                      const hhmm = t.scheduled_time.slice(0, 5);
+                      return new Date(`2000-01-01T${hhmm}`).toLocaleTimeString([], {
+                        hour: 'numeric', minute: '2-digit'
+                      });
                     })()}
                   </td>
                   <td className="p-4 text-gray-400">
@@ -233,6 +276,7 @@ export default function TaskTemplatesPage() {
         open={modalOpen}
         initial={editing ? { id: editing.id, title: editing.title, description: editing.description ?? '', scheduled_time: editing.scheduled_time, recurrence: editing.recurrence, requires_photo: editing.requires_photo, is_active: editing.is_active } : undefined}
         siteId={selectedSite}
+        midShiftActive={!!activeAtSelectedSite}
         onSave={handleSave}
         onClose={() => setModalOpen(false)}
       />

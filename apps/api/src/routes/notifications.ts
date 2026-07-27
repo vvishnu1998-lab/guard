@@ -25,6 +25,20 @@ const VALID_TYPES: NotificationType[] = [
   'missed_ping',
   'late_clock_in',
   'missed_report',
+  // A3 additions — swap + handoff family.
+  'swap_request_received',
+  'swap_request_sent',
+  'swap_accepted',
+  'swap_declined',
+  'swap_expired',
+  'handoff_request_received',
+  'handoff_request_sent',
+  'handoff_accepted',
+  'handoff_declined',
+  'handoff_cancelled',
+  'handoff_complete',
+  'handoff_nudge',
+  'handoff_expired',
 ];
 
 // Shared WHERE fragment for the Notifications tab (GET /) and its badge
@@ -43,7 +57,22 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
     -- late_clock_in fires BEFORE clock-in exists, so it can't link to an
     -- active shift_session_id — allow it through the scope gate and let
     -- the CASE below auto-erase it the moment the guard clocks in.
-    notifications.type IN ('chat', 'late_clock_in')
+    -- swap/handoff types (A3) also bypass — recipients typically have
+    -- no active session at receive time, and outcome pushes can fire
+    -- after the original session ended. Insert-time shift_session_id
+    -- is null on these rows by design (see services/swapPush.ts).
+    notifications.type IN (
+      'chat',
+      'late_clock_in',
+      'shift_assigned',
+      'pre_shift_reminder',
+      'shift_start_reminder',
+      'swap_request_received', 'swap_request_sent',
+      'swap_accepted', 'swap_declined', 'swap_expired',
+      'handoff_request_received', 'handoff_request_sent',
+      'handoff_accepted', 'handoff_declined', 'handoff_cancelled',
+      'handoff_complete', 'handoff_nudge', 'handoff_expired'
+    )
     OR notifications.shift_session_id = (
       SELECT id FROM shift_sessions
       WHERE guard_id = $1 AND clocked_out_at IS NULL
@@ -98,6 +127,26 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
       )
     )
     WHEN 'late_clock_in' THEN NOT (
+      notifications.data ? 'shiftId' AND EXISTS (
+        SELECT 1 FROM shift_sessions ss
+        WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid
+          AND ss.clocked_in_at IS NOT NULL
+      )
+    )
+    -- Commit 2: Pre-shift and shift-start reminders auto-erase the moment
+    -- the guard clocks in for the referenced shift — same shape and
+    -- rationale as late_clock_in above. Both crons stamp their respective
+    -- *_reminder_sent_at columns so a repeat notification for the same
+    -- shift is impossible; auto-erase is what hides yesterday's reminder
+    -- from today's Alerts tab.
+    WHEN 'pre_shift_reminder' THEN NOT (
+      notifications.data ? 'shiftId' AND EXISTS (
+        SELECT 1 FROM shift_sessions ss
+        WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid
+          AND ss.clocked_in_at IS NOT NULL
+      )
+    )
+    WHEN 'shift_start_reminder' THEN NOT (
       notifications.data ? 'shiftId' AND EXISTS (
         SELECT 1 FROM shift_sessions ss
         WHERE ss.shift_id = (notifications.data->>'shiftId')::uuid

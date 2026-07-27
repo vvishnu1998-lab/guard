@@ -1,4 +1,5 @@
 'use client';
+import { formatHoursHHMM } from '../../lib/formatHours';
 
 interface GuardOnDuty {
   id: string;
@@ -27,7 +28,7 @@ export default function GuardsOnDuty({ guards = [] }: { guards?: GuardOnDuty[] }
               <p className="text-gray-500 text-xs mt-0.5">{guard.site_name}</p>
             </div>
             <div className="text-right">
-              <p className="text-gray-400 text-xs">{guard.hours_worked.toFixed(1)}h</p>
+              <p className="text-gray-400 text-xs">{formatHoursHHMM(guard.hours_worked)}</p>
               <div className="flex gap-1 mt-1 justify-end">
                 {guard.on_break && (
                   <span className="text-xs bg-yellow-900 text-yellow-400 px-1.5 py-0.5 rounded">BREAK</span>

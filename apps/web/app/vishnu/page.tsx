@@ -66,11 +66,11 @@ export default function VishnuOverview() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <h1 className="text-3xl font-bold tracking-widest text-gray-300">SUPER ADMIN</h1>
         <Link
           href="/vishnu/companies"
-          className="bg-gray-600 text-white text-xs tracking-widest font-bold px-4 py-2 rounded-lg hover:bg-gray-500 transition-colors"
+          className="self-start md:self-auto bg-gray-600 text-white text-xs tracking-widest font-bold px-4 py-2 rounded-lg hover:bg-gray-500 transition-colors whitespace-nowrap"
         >
           + NEW COMPANY
         </Link>
@@ -103,7 +103,15 @@ export default function VishnuOverview() {
             MANAGE →
           </Link>
         </div>
-        <table className="w-full text-sm">
+        {/*
+         * 7-column table clips at <md. Wrap in overflow-x-auto and floor the
+         * inner width at 540px so the table scrolls horizontally as a unit
+         * inside the panel instead of pushing body scroll. Matches the
+         * pattern already in /vishnu/compliance. Desktop unaffected — min-w
+         * floors, doesn't cap.
+         */}
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[540px] text-sm">
           <thead>
             <tr className="text-gray-600 text-xs tracking-widest border-b border-[#1A3050]">
               <th className="text-left p-4">COMPANY</th>
@@ -150,6 +158,7 @@ export default function VishnuOverview() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

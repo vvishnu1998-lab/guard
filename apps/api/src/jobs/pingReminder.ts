@@ -34,6 +34,7 @@ import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification, NotificationType } from '../services/notifications';
+import { Sentry } from '../services/sentry';
 
 interface ActiveGuardRow {
   guard_id: string;
@@ -54,6 +55,17 @@ async function sendReminder(
   data: Record<string, unknown> = {},
 ): Promise<void> {
   const payload = { type, ...data };
+  if (!row.fcm_token) {
+    Sentry.captureMessage('push_skip_null_token', {
+      level: 'warning',
+      tags: { flow: 'ping_reminder' },
+      extra: {
+        guard_id:         row.guard_id,
+        shift_session_id: row.shift_session_id,
+        type,
+      },
+    });
+  }
   await Promise.allSettled([
     row.fcm_token
       ? sendPushNotification({ token: row.fcm_token, title, body, data: payload as Record<string, string> }).catch(

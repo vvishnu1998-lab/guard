@@ -40,6 +40,7 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
 import { sendMissedShiftAlert } from '../services/email';
+import { Sentry } from '../services/sentry';
 
 interface LateCandidateRow {
   shift_id: string;
@@ -58,8 +59,27 @@ async function fireGuardPush(row: LateCandidateRow, rung: 10 | 15): Promise<bool
   const title = `You're ${rung} min late`;
   const body  = `Clock in at ${row.site_name} to start your shift.`;
 
-  try {
-    if (row.fcm_token) {
+  // Commit 4 restructure (same shape as preShiftReminder / shiftStartReminder):
+  //   1. Always write the Alerts-tab row first (source of truth).
+  //   2. Best-effort push wrapped in inner try — throw does not skip stamp.
+  //   3. Return true unconditionally — caller advances late_*_reminder_sent_at.
+  //
+  // shift_session_id is NULL because no session exists yet;
+  // routes/notifications.ts special-cases late_clock_in in the outer
+  // scope filter to let it through the "active session" gate.
+  if (row.guard_id) {
+    await insertNotification({
+      guardId:        row.guard_id,
+      type:           'late_clock_in',
+      title,
+      body,
+      data:           { shiftId: row.shift_id, rung, minutesLate: row.minutes_late, siteName: row.site_name },
+      shiftSessionId: null,
+    });
+  }
+
+  if (row.fcm_token) {
+    try {
       await sendPushNotification({
         token: row.fcm_token,
         title,
@@ -71,29 +91,23 @@ async function fireGuardPush(row: LateCandidateRow, rung: 10 | 15): Promise<bool
           minutesLate:  String(row.minutes_late),
         },
       });
-    } else {
-      console.warn(`[lateClockIn] shift=${row.shift_id} rung=T+${rung} — no fcm_token; notification row still written`);
+    } catch (err) {
+      console.error(`[lateClockIn] FCM failed for shift ${row.shift_id} rung=T+${rung}:`, err);
     }
-    // Mirror to notifications table — always, even when fcm_token is
-    // missing (so the Alerts tab renders the row once the guard opens
-    // the app). shift_session_id is NULL because no session exists
-    // yet; routes/notifications.ts special-cases late_clock_in in the
-    // outer scope filter to let it through the "active session" gate.
-    if (row.guard_id) {
-      await insertNotification({
-        guardId:        row.guard_id,
-        type:           'late_clock_in',
-        title,
-        body,
-        data:           { shiftId: row.shift_id, rung, minutesLate: row.minutes_late, siteName: row.site_name },
-        shiftSessionId: null,
-      });
-    }
-    return true;
-  } catch (err) {
-    console.error(`[lateClockIn] guard push T+${rung} failed for shift ${row.shift_id}:`, err);
-    return false;
+  } else {
+    console.warn(`[lateClockIn] shift=${row.shift_id} rung=T+${rung} — no fcm_token; notification row still written`);
+    Sentry.captureMessage('push_skip_null_token', {
+      level: 'warning',
+      tags: { flow: 'late_clock_in' },
+      extra: {
+        guard_id: row.guard_id,
+        shift_id: row.shift_id,
+        rung,
+      },
+    });
   }
+
+  return true;
 }
 
 cron.schedule('*/5 * * * *', async () => {
