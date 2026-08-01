@@ -105,8 +105,7 @@ export default function LandingPage() {
         <div className="max-w-6xl mx-auto">
           <FadeSection>
             <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold text-center mb-4">CAPABILITIES</p>
-            <h2 className="text-center text-4xl md:text-5xl font-black tracking-tight text-white mb-4"
-              style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.04em' }}>
+            <h2 className="font-display uppercase text-center text-4xl md:text-5xl font-bold tracking-[0.02em] text-white mb-4">
               Built for Operations That Can&apos;t Afford to Miss
             </h2>
             <p className="text-center text-white/40 max-w-xl mx-auto mb-16 text-base" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
@@ -133,7 +132,7 @@ export default function LandingPage() {
                   <div className="text-[#C9A84C] w-10 h-10 flex items-center justify-center rounded-lg bg-[#C9A84C]/10 border border-[#C9A84C]/20">
                     {f.icon}
                   </div>
-                  <h3 className="text-white font-bold text-lg tracking-tight">{f.title}</h3>
+                  <h3 className="font-display uppercase text-white font-bold text-lg tracking-normal">{f.title}</h3>
                   <p className="text-white/45 text-sm leading-relaxed" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>{f.body}</p>
                   {/* gold accent line on hover */}
                   <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#C9A84C]/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity rounded-b-xl" />
@@ -149,8 +148,7 @@ export default function LandingPage() {
         <div className="max-w-5xl mx-auto">
           <FadeSection>
             <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold text-center mb-4">PROCESS</p>
-            <h2 className="text-center text-4xl md:text-5xl font-black text-white mb-16"
-              style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.04em' }}>
+            <h2 className="font-display uppercase text-center text-4xl md:text-5xl font-bold tracking-[0.02em] text-white mb-16">
               Simple Setup. Powerful Results.
             </h2>
           </FadeSection>
@@ -178,11 +176,11 @@ export default function LandingPage() {
             ].map((step, i) => (
               <FadeSection key={i} className="relative z-10 flex flex-col items-center text-center px-6">
                 <div className="w-16 h-16 rounded-full border-2 border-[#C9A84C]/60 bg-[#0B1526] flex items-center justify-center mb-6">
-                  <span className="text-[#C9A84C] font-black text-xl" style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.05em' }}>
+                  <span className="font-display text-[#C9A84C] font-bold text-xl tracking-[0.05em]">
                     {step.n}
                   </span>
                 </div>
-                <h3 className="text-white font-bold text-lg mb-3 tracking-tight">{step.title}</h3>
+                <h3 className="font-display uppercase text-white font-bold text-lg mb-3 tracking-normal">{step.title}</h3>
                 <p className="text-white/40 text-sm leading-relaxed" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>{step.body}</p>
               </FadeSection>
             ))}
@@ -195,8 +193,7 @@ export default function LandingPage() {
         <div className="max-w-3xl mx-auto">
           <FadeSection>
             <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold text-center mb-4">FAQ</p>
-            <h2 className="text-center text-4xl md:text-5xl font-black text-white mb-16"
-              style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.04em' }}>
+            <h2 className="font-display uppercase text-center text-4xl md:text-5xl font-bold tracking-[0.02em] text-white mb-16">
               Frequently Asked Questions
             </h2>
           </FadeSection>
@@ -212,8 +209,7 @@ export default function LandingPage() {
         <div className="max-w-2xl mx-auto">
           <FadeSection>
             <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold text-center mb-4">CONTACT</p>
-            <h2 className="text-center text-4xl md:text-5xl font-black text-white mb-3"
-              style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.04em' }}>
+            <h2 className="font-display uppercase text-center text-4xl md:text-5xl font-bold tracking-[0.02em] text-white mb-3">
               Ready to See It in Action?
             </h2>
             <p className="text-center text-white/40 mb-12 text-base" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>

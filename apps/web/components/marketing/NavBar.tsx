@@ -14,10 +14,7 @@ export default function NavBar() {
         {/* Logo + name */}
         <div className="flex items-center gap-3">
           <LogoImage size={30} className="object-contain" />
-          <span
-            className="text-white font-black tracking-[0.25em] text-lg"
-            style={{ fontFamily: 'var(--font-bebas), sans-serif', letterSpacing: '0.18em' }}
-          >
+          <span className="font-display text-white font-bold tracking-[0.18em] text-lg">
             NETRAOPS
           </span>
         </div>

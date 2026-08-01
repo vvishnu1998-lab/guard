@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { Inter, Bebas_Neue, DM_Sans } from 'next/font/google';
+import { Inter, Barlow_Condensed, DM_Sans } from 'next/font/google';
 import { Analytics } from '@vercel/analytics/react';
 import './globals.css';
 
@@ -10,10 +10,10 @@ const inter = Inter({
   display: 'swap',
 });
 
-const bebasNeue = Bebas_Neue({
+const barlowCondensed = Barlow_Condensed({
   subsets: ['latin'],
-  weight: ['400'],
-  variable: '--font-bebas',
+  weight: ['500', '700'],
+  variable: '--font-display',
   display: 'swap',
 });
 
@@ -50,7 +50,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${bebasNeue.variable} ${dmSans.variable}`} style={{ scrollBehavior: 'smooth' }}>
+    <html lang="en" className={`${inter.variable} ${barlowCondensed.variable} ${dmSans.variable}`} style={{ scrollBehavior: 'smooth' }}>
       <body className={inter.className}>
         {children}
         <Analytics />

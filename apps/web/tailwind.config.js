@@ -7,6 +7,9 @@ module.exports = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        display: ['var(--font-display)', 'sans-serif'],
+      },
       colors: {
         structure: '#1A1A2E',
         surface:   '#242436',

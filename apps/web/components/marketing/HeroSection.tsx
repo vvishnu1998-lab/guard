@@ -23,10 +23,8 @@ export default function HeroSection() {
 
       {/* Main headline */}
       <h1
-        className="text-5xl sm:text-7xl md:text-8xl font-black text-white leading-none mb-8 max-w-4xl"
+        className="font-display uppercase text-5xl sm:text-7xl md:text-8xl font-bold text-white leading-none tracking-[-0.01em] mb-8 max-w-4xl"
         style={{
-          fontFamily: 'var(--font-bebas), sans-serif',
-          letterSpacing: '0.04em',
           animation: 'fadeInUp 0.9s ease 0.1s forwards',
           opacity: 0,
         }}

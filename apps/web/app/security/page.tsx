@@ -28,7 +28,7 @@ export default function Security() {
       {/* Content */}
       <main className="max-w-3xl mx-auto px-6 py-16">
         <div className="space-y-4 mb-12">
-          <h1 className="text-4xl md:text-5xl font-bold text-white tracking-tight">Security at NetraOps</h1>
+          <h1 className="font-display text-4xl md:text-5xl font-bold text-white tracking-tight">Security at NetraOps</h1>
           <p className="text-gray-400 text-lg">
             Security companies trust NetraOps with their operations, their people, and their clients&apos; sites.
             We take that seriously. Here is how the platform protects your data.
@@ -37,7 +37,7 @@ export default function Security() {
 
         <div className="space-y-12">
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">Your data stays yours</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Your data stays yours</h2>
             <p>
               NetraOps is built for multiple security companies operating side by side, and the platform is
               designed so they never see each other. Every record — every guard, shift, site, report, and
@@ -47,7 +47,7 @@ export default function Security() {
           </section>
 
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">Sign-in you can rely on</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Sign-in you can rely on</h2>
             <p className="mb-4">
               Sessions use signed tokens that the server can revoke at any time — signing out means signed
               out. Accounts are protected against password guessing with automatic lockout and cooldown
@@ -57,7 +57,7 @@ export default function Security() {
           </section>
 
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">The right access for the right role</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">The right access for the right role</h2>
             <p>
               Admins, guards, and clients each get their own portal with their own permissions. Guards can
               act only on their own assigned shifts and sites — never anyone else&apos;s. Clients see the
@@ -67,7 +67,7 @@ export default function Security() {
           </section>
 
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">Encrypted in transit</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Encrypted in transit</h2>
             <p>
               All traffic between the mobile app, the web portals, and our servers is encrypted with TLS.
               There are no unencrypted paths into the platform.
@@ -75,7 +75,7 @@ export default function Security() {
           </section>
 
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">Private media storage</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Private media storage</h2>
             <p>
               Incident photos, verification photos, and generated PDFs are stored in private cloud storage
               buckets that are not publicly accessible. Files are served only through short-lived, signed
@@ -84,7 +84,7 @@ export default function Security() {
           </section>
 
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">Location data that can&apos;t be faked</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Location data that can&apos;t be faked</h2>
             <p>
               Geofence compliance is verified on our servers, not on the phone. The platform independently
               checks every clock-in and location ping against the site&apos;s boundary — a modified app or
@@ -93,7 +93,7 @@ export default function Security() {
           </section>
 
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">Monitored around the clock</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Monitored around the clock</h2>
             <p>
               The platform runs with industry-standard error monitoring and alerting, so problems are
               surfaced to our team quickly.
@@ -101,7 +101,7 @@ export default function Security() {
           </section>
 
           <section>
-            <h2 className="text-2xl font-bold text-white mb-4">Built on trusted infrastructure</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Built on trusted infrastructure</h2>
             <p>
               NetraOps runs on managed cloud infrastructure — Vercel, Railway, and AWS — with encrypted
               storage and the operational security practices of those platforms behind it.
@@ -109,7 +109,7 @@ export default function Security() {
           </section>
 
           <section className="rounded-2xl border border-[#00C8FF]/30 bg-[#00C8FF]/5 p-6">
-            <h2 className="text-2xl font-bold text-white mb-4">Responsible disclosure</h2>
+            <h2 className="font-display text-2xl font-bold text-white mb-4">Responsible disclosure</h2>
             <p>
               Found something that doesn&apos;t look right? We want to hear about it. Report security concerns
               to{' '}
