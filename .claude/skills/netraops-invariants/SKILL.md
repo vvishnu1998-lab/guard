@@ -56,6 +56,9 @@ Verified ground truth for the NetraOps platform. When live state may have change
 - Vercel/Railway env vars: `printf "%s" | vercel env add` only; verify with pull + length check.
 - Super-admin auth uses `VISHNU_JWT_SECRET`; `CLIENT_JWT_SECRET` on Railway is stale legacy (`secretForRole('client')` returns `JWT_SECRET`).
 - Secrets appearing in screenshots/chats get rotated immediately (SendGrid key precedent).
+- DB credentials rotated 2026-07-31. The `guard-postgres` superuser MCP was deleted that day — NEVER re-add it; `postgres-readonly` (user scope) is the only DB MCP.
+- `railway variable set` supports `--skip-deploys` (use it for Postgres-service var updates — a mid-rotation Postgres restart is never acceptable).
+- Postgres-service vars `PGPASSWORD` / `DATABASE_URL` / `DATABASE_PUBLIC_URL` are template references off `POSTGRES_PASSWORD` — setting that one var propagates all four. The guard API's `DATABASE_URL` is a LITERAL copy — on rotation it must be set explicitly, which auto-triggers the API redeploy.
 
 ## Verification norms for this project
 
