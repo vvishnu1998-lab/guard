@@ -23,6 +23,46 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ── Marketing hero: ambient radar sweep ──────────────────────────────
+   Decorative only. Under prefers-reduced-motion the wedge is hidden
+   entirely (a frozen sweep reads as an artifact) and the blip pulse
+   stops; the static rings remain. */
+@keyframes radar-sweep-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes radar-blip-pulse {
+  0%, 100% { opacity: 0.08; }
+  50%      { opacity: 0.3; }
+}
+
+.radar-sweep-wedge {
+  background: conic-gradient(
+    from 0deg,
+    rgba(0, 200, 255, 0.09) 0deg,
+    rgba(0, 200, 255, 0.03) 45deg,
+    transparent 75deg
+  );
+  animation: radar-sweep-rotate 10s linear infinite;
+}
+
+.radar-blip {
+  animation: radar-blip-pulse 4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .radar-sweep-wedge,
+  .radar-blip {
+    animation: none;
+  }
+  .radar-sweep-wedge {
+    opacity: 0;
+  }
+  .radar-blip {
+    opacity: 0.12;
+  }
+}
+
 /* Native date/time pickers: force readable colors against dark surfaces.
    Without these, Chrome renders the typed value and picker icon in near-black
    on near-black, making the field appear empty. Use literal color values

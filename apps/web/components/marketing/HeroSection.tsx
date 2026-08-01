@@ -5,7 +5,21 @@ import Image from 'next/image';
 // ── Hero section ──────────────────────────────────────────────────────────────
 export default function HeroSection() {
   return (
-    <section className="relative z-10 min-h-screen flex flex-col items-center justify-center px-6 pt-24 pb-20 text-center">
+    <section className="relative z-10 overflow-hidden min-h-screen flex flex-col items-center justify-center px-6 pt-24 pb-20 text-center">
+      {/* Ambient radar sweep — decorative; -z-10 keeps it under all hero content */}
+      <div
+        aria-hidden="true"
+        className="absolute -z-10 pointer-events-none left-1/2 -translate-x-1/2 bottom-[-12rem] md:bottom-[-20rem] w-[48rem] h-[48rem] md:w-[72rem] md:h-[72rem]"
+      >
+        <div className="absolute inset-0 rounded-full border border-[#00C8FF]/[0.07]" />
+        <div className="absolute inset-[12%] rounded-full border border-[#00C8FF]/[0.06]" />
+        <div className="absolute inset-[26%] rounded-full border border-[#00C8FF]/[0.05]" />
+        <div className="absolute inset-[40%] rounded-full border border-[#00C8FF]/[0.04]" />
+        <div className="absolute inset-0 rounded-full radar-sweep-wedge" />
+        <span className="absolute left-[30%] top-[26%] w-1.5 h-1.5 rounded-full bg-[#00C8FF] radar-blip" />
+        <span className="absolute left-[68%] top-[38%] w-1.5 h-1.5 rounded-full bg-[#00C8FF] radar-blip" style={{ animationDelay: '2s' }} />
+      </div>
+
       {/* Radial glow behind headline */}
       <div
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[400px] rounded-full pointer-events-none"
