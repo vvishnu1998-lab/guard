@@ -65,7 +65,7 @@ const features = [
 //    components/marketing/* client islands) ───────────────────────────────────
 export default function LandingPage() {
   return (
-    <div className="min-h-screen bg-[#0B1526] text-white overflow-x-hidden">
+    <div className="mkt min-h-screen bg-[#0B1526] text-white overflow-x-hidden">
 
       {/* ── BACKGROUND GRID PATTERN ─────────────────────────────────────────── */}
       <div
@@ -116,7 +116,7 @@ export default function LandingPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {features.map((f, i) => (
               <FadeSection key={i}>
-                <div className="relative group h-full rounded-xl border border-white/[0.07] bg-white/[0.03] hover:bg-white/[0.055] hover:border-[#C9A84C]/30 transition-all duration-300 p-7 flex flex-col gap-4">
+                <div className="relative group h-full rounded-xl border border-white/[0.07] bg-white/[0.03] hover:bg-white/[0.055] hover:border-[#00C8FF]/25 hover:-translate-y-1 hover:shadow-lg hover:shadow-[#00C8FF]/10 motion-reduce:hover:translate-y-0 transition-all duration-200 ease-out p-7 flex flex-col gap-4">
                   {/* UI preview */}
                   <div className="relative rounded-lg border border-white/10 overflow-hidden">
                     <Image
@@ -135,7 +135,7 @@ export default function LandingPage() {
                   <h3 className="font-display uppercase text-white font-bold text-lg tracking-normal">{f.title}</h3>
                   <p className="text-white/45 text-sm leading-relaxed" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>{f.body}</p>
                   {/* gold accent line on hover */}
-                  <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#C9A84C]/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity rounded-b-xl" />
+                  <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#00C8FF]/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity rounded-b-xl" />
                 </div>
               </FadeSection>
             ))}

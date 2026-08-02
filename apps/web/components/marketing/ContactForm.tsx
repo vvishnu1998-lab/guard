@@ -59,7 +59,7 @@ export default function ContactForm() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="John Smith"
-            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
+            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:border-[#00C8FF]/50 transition-colors"
             style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
           />
         </div>
@@ -72,7 +72,7 @@ export default function ContactForm() {
             value={company}
             onChange={(e) => setCompany(e.target.value)}
             placeholder="Apex Security Ltd."
-            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
+            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:border-[#00C8FF]/50 transition-colors"
             style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
           />
         </div>
@@ -88,7 +88,7 @@ export default function ContactForm() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="john@apexsecurity.com"
-            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors"
+            className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:border-[#00C8FF]/50 transition-colors"
             style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
           />
         </div>
@@ -98,7 +98,7 @@ export default function ContactForm() {
             name="sites"
             value={sites}
             onChange={(e) => setSites(e.target.value)}
-            className="bg-[#0B1526] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:border-[#C9A84C]/50 transition-colors appearance-none cursor-pointer"
+            className="bg-[#0B1526] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm focus:border-[#00C8FF]/50 transition-colors appearance-none cursor-pointer"
             style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
           >
             {SITE_OPTIONS.map((opt) => (
@@ -116,7 +116,7 @@ export default function ContactForm() {
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           placeholder="Tell us about your security operations..."
-          className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:outline-none focus:border-[#C9A84C]/50 transition-colors resize-none"
+          className="bg-white/[0.04] border border-white/[0.1] rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/20 focus:border-[#00C8FF]/50 transition-colors resize-none"
           style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
         />
       </div>

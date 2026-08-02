@@ -23,6 +23,19 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ── Marketing interaction states (scoped to .mkt page roots) ─────────
+   Feedback is cyan, brand is gold. Keyboard-visible focus ring that
+   reads on navy; scoped so portal/admin surfaces are untouched. */
+.mkt a:focus-visible,
+.mkt button:focus-visible,
+.mkt summary:focus-visible,
+.mkt input:focus-visible,
+.mkt select:focus-visible,
+.mkt textarea:focus-visible {
+  outline: 2px solid rgba(0, 200, 255, 0.7);
+  outline-offset: 2px;
+}
+
 /* ── Marketing hero: ambient radar sweep ──────────────────────────────
    Decorative only. Under prefers-reduced-motion the wedge is hidden
    entirely (a frozen sweep reads as an artifact) and the blip pulse
