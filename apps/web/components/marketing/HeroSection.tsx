@@ -28,8 +28,8 @@ export default function HeroSection() {
 
       {/* Pill badge */}
       <div
-        className="flex items-center gap-2 border border-[#C9A84C]/30 rounded-full px-4 py-2 mb-10"
-        style={{ background: 'rgba(201,168,76,0.06)', animation: 'fadeInDown 0.8s ease forwards' }}
+        className="hero-entrance flex items-center gap-2 border border-[#C9A84C]/30 rounded-full px-4 py-2 mb-10"
+        style={{ background: 'rgba(201,168,76,0.06)', animation: 'fadeInDown 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards' }}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-[#C9A84C] animate-pulse" />
         <span className="text-[#C9A84C] text-xs tracking-[0.25em] font-semibold">LIVE GUARD MANAGEMENT PLATFORM</span>
@@ -37,9 +37,9 @@ export default function HeroSection() {
 
       {/* Main headline */}
       <h1
-        className="font-display uppercase text-5xl sm:text-7xl md:text-8xl font-bold text-white leading-none tracking-[-0.01em] mb-8 max-w-4xl"
+        className="hero-entrance font-display uppercase text-5xl sm:text-7xl md:text-8xl font-bold text-white leading-none tracking-[-0.01em] mb-8 max-w-4xl"
         style={{
-          animation: 'fadeInUp 0.9s ease 0.1s forwards',
+          animation: 'fadeInUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.1s forwards',
           opacity: 0,
         }}
       >
@@ -50,10 +50,10 @@ export default function HeroSection() {
 
       {/* Sub-headline */}
       <p
-        className="text-white/45 text-base sm:text-lg max-w-2xl leading-relaxed mb-12"
+        className="hero-entrance text-white/45 text-base sm:text-lg max-w-2xl leading-relaxed mb-12"
         style={{
           fontFamily: 'var(--font-dm-sans), sans-serif',
-          animation: 'fadeInUp 0.9s ease 0.2s forwards',
+          animation: 'fadeInUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.2s forwards',
           opacity: 0,
         }}
       >
@@ -63,8 +63,8 @@ export default function HeroSection() {
 
       {/* CTAs */}
       <div
-        className="flex flex-col sm:flex-row gap-4 items-center"
-        style={{ animation: 'fadeInUp 0.9s ease 0.3s forwards', opacity: 0 }}
+        className="hero-entrance flex flex-col sm:flex-row gap-4 items-center"
+        style={{ animation: 'fadeInUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.3s forwards', opacity: 0 }}
       >
         <a
           href="#contact"
@@ -82,10 +82,10 @@ export default function HeroSection() {
 
       {/* Trust line */}
       <p
-        className="text-white/35 text-sm mt-5 text-center"
+        className="hero-entrance text-white/35 text-sm mt-5 text-center"
         style={{
           fontFamily: 'var(--font-dm-sans), sans-serif',
-          animation: 'fadeInUp 0.9s ease 0.35s forwards',
+          animation: 'fadeInUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.35s forwards',
           opacity: 0,
         }}
       >
@@ -94,8 +94,8 @@ export default function HeroSection() {
 
       {/* Product visual — browser-framed dashboard with phone overlay */}
       <div
-        className="relative w-full max-w-4xl mt-20 md:mb-10"
-        style={{ animation: 'fadeInUp 0.9s ease 0.45s forwards', opacity: 0 }}
+        className="hero-entrance relative w-full max-w-4xl mt-20 md:mb-10"
+        style={{ animation: 'fadeInUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.45s forwards', opacity: 0 }}
       >
         {/* Browser frame */}
         <div className="rounded-xl border border-white/10 bg-[#0B1526] shadow-2xl shadow-black/50 overflow-hidden">
@@ -104,15 +104,22 @@ export default function HeroSection() {
             <span className="w-2.5 h-2.5 rounded-full bg-white/[0.15]" />
             <span className="w-2.5 h-2.5 rounded-full bg-white/[0.15]" />
           </div>
-          <Image
-            src="/product/dashboard.webp"
-            alt="NetraOps admin dashboard showing active sites, guards on duty, weekly hours, and a missed-shift alert"
-            width={1920}
-            height={1067}
-            priority
-            sizes="(max-width: 960px) 100vw, 896px"
-            className="w-full h-auto block"
-          />
+          <div className="relative">
+            <Image
+              src="/product/dashboard.webp"
+              alt="NetraOps admin dashboard showing active sites, guards on duty, weekly hours, and a missed-shift alert"
+              width={1920}
+              height={1067}
+              priority
+              sizes="(max-width: 960px) 100vw, 896px"
+              className="w-full h-auto block"
+            />
+            {/* Live ping — anchored to the GUARDS ON DUTY stat card */}
+            <span aria-hidden="true" className="absolute left-[41%] top-[15%] w-2 h-2 pointer-events-none">
+              <span className="absolute inset-0 rounded-full bg-[#00C8FF]/80" />
+              <span className="absolute inset-0 rounded-full bg-[#00C8FF] hero-ping-ring" />
+            </span>
+          </div>
         </div>
 
         {/* Phone overlay — desktop only, no overlap on mobile */}
@@ -130,8 +137,8 @@ export default function HeroSection() {
 
       {/* Scroll indicator */}
       <div
-        className="absolute bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 opacity-30"
-        style={{ animation: 'fadeIn 1.5s ease 1s forwards' }}
+        className="hero-fade absolute bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 opacity-30"
+        style={{ animation: 'fadeIn 1.5s cubic-bezier(0.22, 1, 0.36, 1) 1s forwards' }}
       >
         <div className="w-px h-10 bg-gradient-to-b from-transparent to-white/60" />
         <span className="text-white/60 text-[10px] tracking-[0.3em]">SCROLL</span>
@@ -149,6 +156,19 @@ export default function HeroSection() {
         @keyframes fadeIn {
           from { opacity: 0; }
           to   { opacity: 0.3; }
+        }
+        @keyframes pingRing {
+          0%        { transform: scale(1); opacity: 0.45; }
+          70%, 100% { transform: scale(3.2); opacity: 0; }
+        }
+        .hero-ping-ring {
+          opacity: 0;
+          animation: pingRing 2.8s cubic-bezier(0.22, 1, 0.36, 1) 1.4s infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .hero-entrance { animation: none !important; opacity: 1 !important; }
+          .hero-fade { animation: none !important; }
+          .hero-ping-ring { animation: none; }
         }
       `}</style>
     </section>
