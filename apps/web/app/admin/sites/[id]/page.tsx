@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { adminGet } from '../../../../lib/adminApi';
+import { adminFetch, adminGet, adminPatch, adminPost } from '../../../../lib/adminApi';
 import { fmtTime } from '../../../../lib/shiftFormat';
 import { formatHoursHHMM } from '../../../../lib/formatHours';
 
@@ -49,6 +49,28 @@ interface Shift {
   status:           'unassigned' | 'scheduled' | 'active' | 'completed' | 'cancelled' | 'missed';
 }
 
+interface Checkpoint {
+  id:            string;
+  site_id:       string;
+  label:         string;
+  code_value:    string | null;
+  code_type:     string | null;
+  lat:           number | null;
+  lng:           number | null;
+  linked_at:     string | null;
+  radius_meters: number;
+  sort_order:    number;
+  is_active:     boolean;
+  created_at:    string;
+  linked:        boolean;
+}
+
+const EMPTY_CP_FORM = { label: '', radius_meters: '50', sort_order: '0', is_active: true };
+
+const ANCHOR_DATE = new Intl.DateTimeFormat('en-US', {
+  month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/Los_Angeles',
+});
+
 const DAY_LABEL = new Intl.DateTimeFormat('en-US', {
   weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles',
 });
@@ -66,6 +88,25 @@ export default function SiteDetailPage() {
   const [shifts,  setShifts]  = useState<Shift[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
+
+  // ── Checkpoints (C4a) ──────────────────────────────────────────────────
+  const [checkpoints,  setCheckpoints]  = useState<Checkpoint[]>([]);
+  const [cpLoading,    setCpLoading]    = useState(true);
+  const [cpError,      setCpError]      = useState('');
+  const [cpModalMode,  setCpModalMode]  = useState<'add' | 'edit' | null>(null);
+  const [editingCp,    setEditingCp]    = useState<Checkpoint | null>(null);
+  const [cpForm,       setCpForm]       = useState(EMPTY_CP_FORM);
+  const [cpSaving,     setCpSaving]     = useState(false);
+  const [cpFormError,  setCpFormError]  = useState('');
+  const [unlinkCp,     setUnlinkCp]     = useState<Checkpoint | null>(null);
+  const [unlinkBusy,   setUnlinkBusy]   = useState(false);
+  const [unlinkError,  setUnlinkError]  = useState('');
+  // deleteCp is set AFTER the first (confirm-less) DELETE call returns the
+  // 409 carrying scan_count — the modal copy depends on that number.
+  const [deleteCp,     setDeleteCp]     = useState<{ cp: Checkpoint; scanCount: number } | null>(null);
+  const [deleteBusy,   setDeleteBusy]   = useState(false);
+  const [deleteError,  setDeleteError]  = useState('');
+  const [cpToggling,   setCpToggling]   = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!siteId) return;
@@ -87,6 +128,161 @@ export default function SiteDetailPage() {
   }, [siteId]);
 
   useEffect(() => { load(); }, [load]);
+
+  const loadCheckpoints = useCallback(async () => {
+    if (!siteId) return;
+    try {
+      const rows = await adminGet<Checkpoint[]>(`/api/checkpoints?site_id=${siteId}`);
+      setCheckpoints(rows);
+      setCpError('');
+    } catch (e: any) {
+      setCpError(e.message ?? 'Failed to load checkpoints');
+    } finally {
+      setCpLoading(false);
+    }
+  }, [siteId]);
+
+  useEffect(() => { loadCheckpoints(); }, [loadCheckpoints]);
+
+  const awaitingCount = useMemo(
+    () => checkpoints.filter((c) => c.is_active && !c.linked).length,
+    [checkpoints],
+  );
+
+  // ── Checkpoint modal handlers ──────────────────────────────────────────
+  function openAddCpModal() {
+    setCpModalMode('add');
+    setEditingCp(null);
+    setCpForm(EMPTY_CP_FORM);
+    setCpFormError('');
+  }
+  function openEditCpModal(cp: Checkpoint) {
+    setCpModalMode('edit');
+    setEditingCp(cp);
+    setCpForm({
+      label: cp.label,
+      radius_meters: String(cp.radius_meters),
+      sort_order: String(cp.sort_order),
+      is_active: cp.is_active,
+    });
+    setCpFormError('');
+  }
+  function closeCpModal() {
+    setCpModalMode(null);
+    setEditingCp(null);
+    setCpFormError('');
+  }
+
+  async function saveCheckpoint() {
+    const label = cpForm.label.trim();
+    if (label.length < 1 || label.length > 120) {
+      setCpFormError('Label is required (1-120 characters).');
+      return;
+    }
+    const radius = Number(cpForm.radius_meters);
+    if (!Number.isInteger(radius) || radius < 10 || radius > 500) {
+      setCpFormError('Radius must be a whole number between 10 and 500 meters.');
+      return;
+    }
+    setCpSaving(true);
+    setCpFormError('');
+    try {
+      if (cpModalMode === 'add') {
+        await adminPost(`/api/checkpoints`, { site_id: siteId, label, radius_meters: radius });
+      } else if (editingCp) {
+        const sortOrder = Number(cpForm.sort_order);
+        if (!Number.isInteger(sortOrder)) {
+          setCpFormError('Sort order must be a whole number.');
+          setCpSaving(false);
+          return;
+        }
+        // Only the four mutable fields — the API 400s on any link-state key.
+        await adminPatch(`/api/checkpoints/${editingCp.id}`, {
+          label, radius_meters: radius, sort_order: sortOrder, is_active: cpForm.is_active,
+        });
+      }
+      closeCpModal();
+      await loadCheckpoints();
+    } catch (e: any) {
+      setCpFormError(e.message ?? 'Save failed');
+    } finally {
+      setCpSaving(false);
+    }
+  }
+
+  async function toggleCpActive(cp: Checkpoint) {
+    setCpToggling(cp.id);
+    try {
+      await adminPatch(`/api/checkpoints/${cp.id}`, { is_active: !cp.is_active });
+      await loadCheckpoints();
+      setCpError('');
+    } catch (e: any) {
+      setCpError(e.message ?? 'Update failed');
+    } finally {
+      setCpToggling(null);
+    }
+  }
+
+  async function confirmUnlink() {
+    if (!unlinkCp) return;
+    setUnlinkBusy(true);
+    setUnlinkError('');
+    try {
+      await adminPost(`/api/checkpoints/${unlinkCp.id}/unlink`, {});
+      setUnlinkCp(null);
+      await loadCheckpoints();
+    } catch (e: any) {
+      setUnlinkError(e.message ?? 'Unlink failed');
+    } finally {
+      setUnlinkBusy(false);
+    }
+  }
+
+  // Step 1 of the two-step delete: call WITHOUT the confirm param. The API
+  // always answers 409 with scan_count; that number drives the modal copy.
+  async function beginDelete(cp: Checkpoint) {
+    setCpToggling(cp.id);
+    setCpError('');
+    try {
+      const res = await adminFetch(`/api/checkpoints/${cp.id}`, { method: 'DELETE' });
+      if (res.status === 409) {
+        const body = await res.json().catch(() => ({}));
+        setDeleteCp({ cp, scanCount: (body as any).scan_count ?? 0 });
+        setDeleteError('');
+      } else if (res.ok) {
+        await loadCheckpoints(); // future-proofing: API deleted without confirm
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setCpError((body as any).error ?? `Delete failed: ${res.status}`);
+      }
+    } catch (e: any) {
+      setCpError(e.message ?? 'Delete failed');
+    } finally {
+      setCpToggling(null);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteCp) return;
+    setDeleteBusy(true);
+    setDeleteError('');
+    try {
+      const res = await adminFetch(
+        `/api/checkpoints/${deleteCp.cp.id}?confirm=delete_scans`,
+        { method: 'DELETE' },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as any).error ?? `Delete failed: ${res.status}`);
+      }
+      setDeleteCp(null);
+      await loadCheckpoints();
+    } catch (e: any) {
+      setDeleteError(e.message ?? 'Delete failed');
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
 
   const presentGuards = useMemo(() => {
     if (!site) return [];
@@ -240,6 +436,285 @@ export default function SiteDetailPage() {
           </div>
         )}
       </section>
+
+      {/* Checkpoints (C4a) */}
+      <section>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
+          <h2 className="text-amber-400 font-bold tracking-widest text-sm">CHECKPOINTS</h2>
+          <button
+            onClick={openAddCpModal}
+            className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors self-start md:self-auto"
+          >
+            + ADD CHECKPOINT
+          </button>
+        </div>
+
+        {cpError && (
+          <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-3">{cpError}</div>
+        )}
+
+        {/* Setup banner — derived from linked flags, no stored state. */}
+        {!cpLoading && awaitingCount > 0 && (
+          <div className="bg-amber-400/10 border border-amber-400/40 text-amber-300 text-sm rounded-lg px-4 py-3 mb-3">
+            {awaitingCount} checkpoint{awaitingCount === 1 ? '' : 's'} awaiting setup. A guard on an
+            active shift must scan each physical tag to anchor its location.
+          </div>
+        )}
+
+        {cpLoading ? (
+          <p className="text-gray-500 text-sm">Loading checkpoints…</p>
+        ) : checkpoints.length === 0 ? (
+          <div className="space-y-3">
+            <p className="text-gray-500 text-sm">
+              Checkpoints are physical NFC/QR tags guards scan on patrol rounds to prove presence.
+              Add one here, then a guard on an active shift scans the tag once to anchor its location.
+            </p>
+            <button
+              onClick={openAddCpModal}
+              className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors"
+            >
+              + ADD CHECKPOINT
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {checkpoints.map((cp) => (
+              <div
+                key={cp.id}
+                className={`bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 flex flex-col md:flex-row md:items-center gap-2 md:gap-3 ${!cp.is_active ? 'opacity-60' : ''}`}
+              >
+                <div className="min-w-0 md:flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-gray-200 font-medium text-sm break-words">{cp.label}</span>
+                    {cp.linked ? (
+                      <span className="text-[10px] tracking-widest text-green-400 bg-green-400/10 border border-green-400/30 px-1.5 py-0.5 rounded">
+                        LINKED
+                      </span>
+                    ) : (
+                      <span className="text-[10px] tracking-widest text-amber-400 bg-amber-400/10 border border-amber-400/30 px-1.5 py-0.5 rounded">
+                        AWAITING SETUP
+                      </span>
+                    )}
+                    {!cp.is_active && (
+                      <span className="text-[10px] tracking-widest text-red-400 bg-red-400/10 border border-red-400/30 px-1.5 py-0.5 rounded">
+                        INACTIVE
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-gray-500 text-xs mt-0.5">
+                    {cp.radius_meters}m radius
+                    {cp.linked && cp.linked_at && (
+                      <>
+                        <span className="text-gray-600"> · </span>
+                        Anchored {ANCHOR_DATE.format(new Date(cp.linked_at))}
+                      </>
+                    )}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 md:gap-2 md:shrink-0 flex-wrap">
+                  <button
+                    onClick={() => openEditCpModal(cp)}
+                    className="text-xs text-gray-400 hover:text-amber-400 tracking-widest"
+                  >
+                    EDIT
+                  </button>
+                  {cp.linked && (
+                    <button
+                      onClick={() => { setUnlinkCp(cp); setUnlinkError(''); }}
+                      className="text-xs text-amber-400 hover:text-amber-300 tracking-widest"
+                    >
+                      UNLINK
+                    </button>
+                  )}
+                  <button
+                    onClick={() => toggleCpActive(cp)}
+                    disabled={cpToggling === cp.id}
+                    className={`text-xs tracking-widest disabled:opacity-40 ${
+                      cp.is_active ? 'text-red-400 hover:text-red-300' : 'text-green-400 hover:text-green-300'
+                    }`}
+                  >
+                    {cpToggling === cp.id ? '…' : cp.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
+                  </button>
+                  <button
+                    onClick={() => beginDelete(cp)}
+                    disabled={cpToggling === cp.id}
+                    className="text-xs text-red-400 hover:text-red-300 tracking-widest disabled:opacity-40"
+                  >
+                    DELETE
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* ADD / EDIT checkpoint modal */}
+      {cpModalMode !== null && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60">
+          <div className="w-full sm:max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-t-2xl sm:rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">
+                {cpModalMode === 'add' ? 'ADD CHECKPOINT' : 'EDIT CHECKPOINT'}
+              </h2>
+              <button onClick={closeCpModal} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            {cpFormError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{cpFormError}</div>
+            )}
+            <div className="space-y-4">
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                  LABEL <span className="text-amber-400">*</span>
+                </label>
+                <input
+                  type="text" placeholder="e.g. North Gate"
+                  value={cpForm.label}
+                  onChange={(e) => setCpForm((f) => ({ ...f, label: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">RADIUS (METERS)</label>
+                <input
+                  type="number" min={10} max={500}
+                  value={cpForm.radius_meters}
+                  onChange={(e) => setCpForm((f) => ({ ...f, radius_meters: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+                <p className="text-gray-600 text-[10px] mt-1">
+                  How close a guard must be for a scan to count. 10–500, default 50.
+                </p>
+              </div>
+              {cpModalMode === 'edit' && (
+                <>
+                  <div>
+                    <label className="block text-gray-500 text-xs tracking-widest mb-1">SORT ORDER</label>
+                    <input
+                      type="number"
+                      value={cpForm.sort_order}
+                      onChange={(e) => setCpForm((f) => ({ ...f, sort_order: e.target.value }))}
+                      className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                    />
+                    <p className="text-gray-600 text-[10px] mt-1">Display position in lists. Lower numbers first.</p>
+                  </div>
+                  <label className="flex items-center gap-2 text-gray-300 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={cpForm.is_active}
+                      onChange={(e) => setCpForm((f) => ({ ...f, is_active: e.target.checked }))}
+                      className="accent-amber-400"
+                    />
+                    Active
+                  </label>
+                </>
+              )}
+              {cpModalMode === 'add' && (
+                <p className="text-gray-500 text-xs">
+                  You never enter a code or coordinates here. After adding the checkpoint, a guard on
+                  an active shift scans the physical tag once — that scan anchors its code and location.
+                </p>
+              )}
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={closeCpModal}
+                className="flex-1 bg-[#0B1526] border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={saveCheckpoint}
+                disabled={cpSaving}
+                className="flex-1 bg-amber-400 text-[#0B1526] font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 transition-colors disabled:opacity-50"
+              >
+                {cpSaving ? 'SAVING…' : cpModalMode === 'add' ? 'ADD' : 'SAVE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* UNLINK confirm modal */}
+      {unlinkCp && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60">
+          <div className="w-full sm:max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-t-2xl sm:rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">UNLINK CHECKPOINT</h2>
+              <button onClick={() => setUnlinkCp(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            {unlinkError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{unlinkError}</div>
+            )}
+            <p className="text-gray-300 text-sm mb-2">
+              Unlink <span className="text-gray-100 font-medium">{unlinkCp.label}</span>?
+            </p>
+            <p className="text-gray-500 text-xs mb-6">
+              This clears the tag and its anchored location so a guard can re-scan it at the correct
+              position. Past scans are kept — they remain valid history.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setUnlinkCp(null)}
+                className="flex-1 bg-[#0B1526] border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={confirmUnlink}
+                disabled={unlinkBusy}
+                className="flex-1 bg-amber-400 text-[#0B1526] font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 transition-colors disabled:opacity-50"
+              >
+                {unlinkBusy ? 'UNLINKING…' : 'UNLINK'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DELETE confirm modal — copy depends on the 409's scan_count */}
+      {deleteCp && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60">
+          <div className="w-full sm:max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-t-2xl sm:rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-red-400 font-bold tracking-widest text-lg">DELETE CHECKPOINT</h2>
+              <button onClick={() => setDeleteCp(null)} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            {deleteError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{deleteError}</div>
+            )}
+            <p className="text-gray-300 text-sm mb-2">
+              Delete <span className="text-gray-100 font-medium">{deleteCp.cp.label}</span>?
+            </p>
+            {deleteCp.scanCount > 0 ? (
+              <p className="text-red-300 text-xs mb-6">
+                This permanently destroys {deleteCp.scanCount} scan record{deleteCp.scanCount === 1 ? '' : 's'} for
+                this checkpoint. If you only want to retire it, use DEACTIVATE instead — that keeps
+                the scan history.
+              </p>
+            ) : (
+              <p className="text-gray-500 text-xs mb-6">
+                This checkpoint has no scans. Deleting it cannot be undone.
+              </p>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDeleteCp(null)}
+                className="flex-1 bg-[#0B1526] border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleteBusy}
+                className="flex-1 bg-red-500/90 text-white font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-red-500 transition-colors disabled:opacity-50"
+              >
+                {deleteBusy ? 'DELETING…' : deleteCp.scanCount > 0 ? `DELETE ${deleteCp.scanCount} SCANS` : 'DELETE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

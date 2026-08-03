@@ -305,6 +305,36 @@ export default function SitesPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // C4a discoverability — awaiting-setup checkpoint count per site, surfaced
+  // on the collapsed row so an unfinished setup is visible without drilling
+  // into the detail page. One GET per site (no batch endpoint); tenant site
+  // counts are single-digit today. Failures (403 for vishnu role, network)
+  // leave the entry undefined and no badge renders.
+  const [cpCountsPerSite, setCpCountsPerSite] = useState<Record<string, { total: number; awaiting: number } | undefined>>({});
+  useEffect(() => {
+    if (sites.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(
+        sites.map(async (s) => {
+          try {
+            const rows = await adminGet<Array<{ linked: boolean; is_active: boolean }>>(
+              `/api/checkpoints?site_id=${s.id}`,
+            );
+            return [s.id, {
+              total: rows.length,
+              awaiting: rows.filter((r) => r.is_active && !r.linked).length,
+            }] as const;
+          } catch {
+            return [s.id, undefined] as const;
+          }
+        }),
+      );
+      if (!cancelled) setCpCountsPerSite(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [sites]);
+
   // Vishnu multi-company label — show company_name inline when the returned
   // set spans more than one company (same conditional pattern as Guards + Shifts).
   const showCompanyLabel = useMemo(() => {
@@ -839,6 +869,16 @@ export default function SitesPage() {
                   {showCompanyLabel && site.company_name && (
                     <p className="text-gray-600 text-[10px] tracking-widest mt-0.5">{site.company_name.toUpperCase()}</p>
                   )}
+                  {/* C4a — awaiting-setup badge lives in the name cell so the
+                      md 4-column grid template stays untouched. */}
+                  {(cpCountsPerSite[site.id]?.awaiting ?? 0) > 0 && (
+                    <Link
+                      href={`/admin/sites/${site.id}`}
+                      className="inline-block text-[10px] tracking-widest text-amber-400 bg-amber-400/10 border border-amber-400/30 px-1.5 py-0.5 rounded mt-1 hover:bg-amber-400/20 transition-colors"
+                    >
+                      {cpCountsPerSite[site.id]!.awaiting} CHECKPOINT{cpCountsPerSite[site.id]!.awaiting === 1 ? '' : 'S'} AWAITING SETUP
+                    </Link>
+                  )}
                 </div>
                 {/* FIX 2: no "no end date" filler. When contract_end is null,
                     show just the start date; when present, show start → end. */}
@@ -968,6 +1008,28 @@ export default function SitesPage() {
                       </p>
                     </div>
                   )}
+
+                  {/* C4a — CHECKPOINTS deep link, Session D pattern: the
+                      management surface is the site detail page. Count line
+                      renders once the per-site fetch resolves. */}
+                  <div>
+                    <p className="text-gray-500 text-xs tracking-widest mb-1">CHECKPOINTS</p>
+                    <Link
+                      href={`/admin/sites/${site.id}`}
+                      className="inline-flex items-center gap-2 bg-[#0B1526] text-blue-300 border border-blue-500/40 rounded px-3 py-1.5 text-xs tracking-widest hover:bg-blue-500/10 hover:border-blue-500 transition-colors"
+                    >
+                      Manage on site page →
+                    </Link>
+                    {cpCountsPerSite[site.id] && (
+                      <p className="text-gray-600 text-[10px] mt-1">
+                        {cpCountsPerSite[site.id]!.total === 0
+                          ? 'No checkpoints yet.'
+                          : cpCountsPerSite[site.id]!.awaiting > 0
+                            ? `${cpCountsPerSite[site.id]!.total} checkpoint${cpCountsPerSite[site.id]!.total === 1 ? '' : 's'} — ${cpCountsPerSite[site.id]!.awaiting} awaiting setup.`
+                            : `${cpCountsPerSite[site.id]!.total} checkpoint${cpCountsPerSite[site.id]!.total === 1 ? '' : 's'}, all linked.`}
+                      </p>
+                    )}
+                  </div>
 
                   {/* Session S6 — SCHEDULING PROFILES. Lazy-fetched with
                       clients on expand. Shows one row per profile with an
