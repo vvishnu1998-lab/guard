@@ -65,11 +65,35 @@ interface Checkpoint {
   linked:        boolean;
 }
 
+interface CheckpointScan {
+  id:               string;
+  checkpoint_id:    string;
+  checkpoint_label: string;
+  guard_name:       string;
+  scanned_at:       string;
+  distance_m:       number;
+}
+
 const EMPTY_CP_FORM = { label: '', radius_meters: '50', sort_order: '0', is_active: true };
 
 const ANCHOR_DATE = new Intl.DateTimeFormat('en-US', {
   month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/Los_Angeles',
 });
+
+// Same Pacific anchoring as the page's existing DAY_LABEL / DATE_KEY.
+const SCAN_TS = new Intl.DateTimeFormat('en-US', {
+  month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  hour12: false, timeZone: 'America/Los_Angeles',
+});
+
+/** YYYY-MM-DD for <input type="date">, offset by `days` from today. */
+function dateInputValue(daysAgo: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  return d.toISOString().slice(0, 10);
+}
+
+const MAX_RANGE_DAYS = 92;
 
 const DAY_LABEL = new Intl.DateTimeFormat('en-US', {
   weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles',
@@ -107,6 +131,30 @@ export default function SiteDetailPage() {
   const [deleteBusy,   setDeleteBusy]   = useState(false);
   const [deleteError,  setDeleteError]  = useState('');
   const [cpToggling,   setCpToggling]   = useState<string | null>(null);
+
+  // ── Scan history (C4b) ─────────────────────────────────────────────────
+  const [scanFrom,      setScanFrom]      = useState(() => dateInputValue(7));
+  const [scanTo,        setScanTo]        = useState(() => dateInputValue(0));
+  const [scans,         setScans]         = useState<CheckpointScan[]>([]);
+  const [scansLoading,  setScansLoading]  = useState(true);
+  const [scansError,    setScansError]    = useState('');
+  const [scansTruncated, setScansTruncated] = useState(false);
+  // Bumped after a confirmed delete so the history reflects the cascade.
+  const [scanRefresh,   setScanRefresh]   = useState(0);
+
+  // Client-side range validation — invalid ranges show a message instead of
+  // firing a request the API would 400.
+  const scanRangeError = useMemo(() => {
+    if (!scanFrom || !scanTo) return 'Pick both dates.';
+    const from = new Date(scanFrom);
+    const to   = new Date(scanTo);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 'Invalid date.';
+    if (from > to) return 'FROM must be on or before TO.';
+    if (to.getTime() - from.getTime() > MAX_RANGE_DAYS * 24 * 60 * 60 * 1000) {
+      return `Range is limited to ${MAX_RANGE_DAYS} days — narrow the dates.`;
+    }
+    return '';
+  }, [scanFrom, scanTo]);
 
   const load = useCallback(async () => {
     if (!siteId) return;
@@ -148,6 +196,31 @@ export default function SiteDetailPage() {
     () => checkpoints.filter((c) => c.is_active && !c.linked).length,
     [checkpoints],
   );
+
+  useEffect(() => {
+    if (!siteId || scanRangeError) return;
+    let cancelled = false;
+    (async () => {
+      setScansLoading(true);
+      try {
+        // Whole-day bounds: FROM at 00:00 UTC, TO at end of day.
+        const fromIso = `${scanFrom}T00:00:00.000Z`;
+        const toIso   = `${scanTo}T23:59:59.999Z`;
+        const data = await adminGet<{ scans: CheckpointScan[]; truncated: boolean }>(
+          `/api/checkpoints/scans?site_id=${siteId}&from=${fromIso}&to=${toIso}`,
+        );
+        if (cancelled) return;
+        setScans(data.scans);
+        setScansTruncated(data.truncated);
+        setScansError('');
+      } catch (e: any) {
+        if (!cancelled) setScansError(e.message ?? 'Failed to load scan history');
+      } finally {
+        if (!cancelled) setScansLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [siteId, scanFrom, scanTo, scanRangeError, scanRefresh]);
 
   // ── Checkpoint modal handlers ──────────────────────────────────────────
   function openAddCpModal() {
@@ -277,6 +350,7 @@ export default function SiteDetailPage() {
       }
       setDeleteCp(null);
       await loadCheckpoints();
+      setScanRefresh((n) => n + 1); // cascade removed this checkpoint's scans
     } catch (e: any) {
       setDeleteError(e.message ?? 'Delete failed');
     } finally {
@@ -546,6 +620,100 @@ export default function SiteDetailPage() {
               </div>
             ))}
           </div>
+        )}
+      </section>
+
+      {/* Scan history (C4b) */}
+      <section>
+        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">SCAN HISTORY</h2>
+
+        {/* Date range — billing-page pattern: paired native date inputs. */}
+        <div className="flex flex-wrap gap-4 mb-3">
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1">FROM</label>
+            <input
+              type="date" value={scanFrom} onChange={(e) => setScanFrom(e.target.value)}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            />
+          </div>
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1">TO</label>
+            <input
+              type="date" value={scanTo} onChange={(e) => setScanTo(e.target.value)}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            />
+          </div>
+        </div>
+
+        {scanRangeError && (
+          <div className="bg-amber-400/10 border border-amber-400/40 text-amber-300 text-sm rounded-lg px-4 py-2 mb-3">
+            {scanRangeError}
+          </div>
+        )}
+        {scansError && (
+          <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-3">{scansError}</div>
+        )}
+        {scansTruncated && (
+          <div className="bg-amber-400/10 border border-amber-400/40 text-amber-300 text-sm rounded-lg px-4 py-2 mb-3">
+            Showing the first 1000 scans in this range — narrow the dates to see the rest.
+          </div>
+        )}
+
+        {scansLoading && !scanRangeError ? (
+          <p className="text-gray-500 text-sm">Loading scan history…</p>
+        ) : !scanRangeError && scans.length === 0 ? (
+          <p className="text-gray-500 text-sm">
+            {checkpoints.length === 0
+              ? 'This site has no checkpoints yet — history will appear once checkpoints are set up and scanned.'
+              : 'No scans in this range.'}
+          </p>
+        ) : !scanRangeError && (
+          <>
+            {/* Desktop (md+): table. distance_m gets its own column — the
+                anti-fraud signal. Plain number, no thresholds: there is no
+                data yet to justify one. */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
+                    <th className="py-2 pr-4 font-normal">CHECKPOINT</th>
+                    <th className="py-2 pr-4 font-normal">GUARD</th>
+                    <th className="py-2 pr-4 font-normal">SCANNED AT</th>
+                    <th className="py-2 font-normal">DISTANCE (M)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1A3050]">
+                  {scans.map((s) => (
+                    <tr key={s.id}>
+                      <td className="py-2.5 pr-4 text-gray-200">{s.checkpoint_label}</td>
+                      <td className="py-2.5 pr-4 text-gray-300">{s.guard_name}</td>
+                      <td className="py-2.5 pr-4 text-gray-400 font-mono text-xs">
+                        {SCAN_TS.format(new Date(s.scanned_at))}
+                      </td>
+                      <td className="py-2.5 text-gray-300 font-mono text-xs">{Math.round(s.distance_m)} m</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Mobile (<md): cards, per docs/mobile-responsive.md. */}
+            <div className="md:hidden space-y-2">
+              {scans.map((s) => (
+                <div key={s.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-gray-200 text-sm font-medium break-words min-w-0">{s.checkpoint_label}</span>
+                    <span className="text-gray-300 font-mono text-xs shrink-0">{Math.round(s.distance_m)} m</span>
+                  </div>
+                  <p className="text-gray-500 text-xs mt-0.5">
+                    {s.guard_name}
+                    <span className="text-gray-600"> · </span>
+                    <span className="font-mono">{SCAN_TS.format(new Date(s.scanned_at))}</span>
+                  </p>
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </section>
 
