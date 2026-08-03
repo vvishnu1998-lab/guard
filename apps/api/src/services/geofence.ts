@@ -79,6 +79,43 @@ type Queryable = {
 // three-times-bigger virtual one.
 const SAFETY_MARGIN_M = 20;
 
+/**
+ * Per-checkpoint radius validation for checkpoint scans (schema_v44).
+ * Standalone by design — checkpoints are radius-only anchors linked by a
+ * guard's scan, so no polygon logic and no DB access: the caller fetches
+ * the site_checkpoints row and passes the anchor in.
+ *
+ * Same budget rule as validateAtSite's radius arm (radius + accuracy +
+ * SAFETY_MARGIN_M) so a checkpoint fence behaves like a small site fence.
+ * Returns distance_m for the persisted admin drift column and budget_m so
+ * the route can log a one-line reject without recomputing.
+ *
+ * Fails closed on bad anchors (null/non-finite lat/lng/radius — e.g. an
+ * unlinked checkpoint that slipped past the route layer) with
+ * distance_m: Infinity rather than throwing.
+ */
+export function validateAtCheckpoint(
+  point: GeofenceValidationInput,
+  checkpoint: { lat: number; lng: number; radius_meters: number },
+): { allowed: boolean; distance_m: number; budget_m: number } {
+  const accuracy =
+    Number.isFinite(point.accuracy_m) && point.accuracy_m > 0 ? point.accuracy_m : 0;
+  const budget = checkpoint?.radius_meters + accuracy + SAFETY_MARGIN_M;
+
+  if (
+    !Number.isFinite(checkpoint?.lat) ||
+    !Number.isFinite(checkpoint?.lng) ||
+    !Number.isFinite(checkpoint?.radius_meters) ||
+    !Number.isFinite(point.lat) ||
+    !Number.isFinite(point.lng)
+  ) {
+    return { allowed: false, distance_m: Infinity, budget_m: Number.isFinite(budget) ? budget : Infinity };
+  }
+
+  const distance = haversineDistance(point.lat, point.lng, checkpoint.lat, checkpoint.lng);
+  return { allowed: distance <= budget, distance_m: distance, budget_m: budget };
+}
+
 export async function validateAtSite(
   point: GeofenceValidationInput,
   siteId: string,
