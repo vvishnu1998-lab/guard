@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
+import { validateAtCheckpoint } from '../services/geofence';
 
 const router = Router();
 
@@ -244,6 +245,237 @@ router.get('/scans', requireAuth('company_admin'), async (req, res) => {
   res.json({
     scans: truncated ? result.rows.slice(0, CAP) : result.rows,
     truncated,
+  });
+});
+
+// ── Guard-facing routes (C3b) ───────────────────────────────────────────────
+//
+// No client-supplied session id: the active session is resolved server-side
+// (reports.ts / notifications.ts convention — guard_id + clocked_out_at IS
+// NULL) and site_id comes from the session row, never the body.
+//
+// round_window is computed SERVER-SIDE, in SQL, per site: the current
+// instant floored to the hour in the site's own timezone (sites.timezone,
+// v21), stored as the UTC instant of that boundary — v40's double
+// AT TIME ZONE form. The INSERT computes it inline so there is no
+// read-then-write race, and the counter queries use the identical
+// expression so both always agree.
+
+const ROUND_WINDOW_SQL = `date_trunc('hour', NOW() AT TIME ZONE s.timezone) AT TIME ZONE s.timezone`;
+
+async function activeSession(guardId: string): Promise<{ id: string; site_id: string } | null> {
+  const r = await pool.query(
+    'SELECT id, site_id FROM shift_sessions WHERE guard_id = $1 AND clocked_out_at IS NULL LIMIT 1',
+    [guardId]
+  );
+  return r.rows[0] ?? null;
+}
+
+/** { total, scanned, round_window } for a session's current window.
+ *  total = active LINKED checkpoints (the scannable set); scanned =
+ *  distinct ones scanned this window. */
+async function windowCounter(siteId: string, sessionId: string) {
+  const r = await pool.query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM site_checkpoints sc
+         WHERE sc.site_id = s.id AND sc.is_active = true AND sc.code_value IS NOT NULL) AS total,
+       (SELECT COUNT(DISTINCT cs.checkpoint_id)::int FROM checkpoint_scans cs
+         JOIN site_checkpoints sc2 ON sc2.id = cs.checkpoint_id
+         WHERE cs.shift_session_id = $2 AND sc2.is_active = true
+           AND cs.round_window = ${ROUND_WINDOW_SQL}) AS scanned,
+       ${ROUND_WINDOW_SQL} AS round_window
+     FROM sites s WHERE s.id = $1`,
+    [siteId, sessionId]
+  );
+  return r.rows[0] as { total: number; scanned: number; round_window: Date };
+}
+
+// GET /api/checkpoints/mine — active checkpoints at the guard's current
+// site, with per-checkpoint scanned_this_window and the window counter.
+router.get('/mine', requireAuth('guard'), async (req, res) => {
+  const session = await activeSession(req.user!.sub);
+  if (!session) return res.status(403).json({ error: 'Active session not found' });
+
+  const result = await pool.query(
+    `SELECT sc.id, sc.label, sc.sort_order,
+            (sc.code_value IS NOT NULL) AS linked,
+            EXISTS (
+              SELECT 1 FROM checkpoint_scans cs
+              WHERE cs.checkpoint_id = sc.id
+                AND cs.shift_session_id = $2
+                AND cs.round_window = ${ROUND_WINDOW_SQL}
+            ) AS scanned_this_window
+     FROM site_checkpoints sc
+     JOIN sites s ON s.id = sc.site_id
+     WHERE sc.site_id = $1 AND sc.is_active = true
+     ORDER BY sc.sort_order ASC, sc.created_at ASC`,
+    [session.site_id, session.id]
+  );
+
+  const counter = await windowCounter(session.site_id, session.id);
+  res.json({
+    site_id: session.site_id,
+    round_window: counter.round_window,
+    total: counter.total,
+    scanned: counter.scanned,
+    unlinked: result.rows.filter((r) => !r.linked).length,
+    checkpoints: result.rows,
+  });
+});
+
+// POST /api/checkpoints/link — anchor an unlinked checkpoint at the
+// guard's current position. Link fields are set here and nowhere else.
+router.post('/link', requireAuth('guard'), async (req, res) => {
+  const { checkpoint_id, code_value, code_type, latitude, longitude, accuracy } = req.body;
+
+  const session = await activeSession(req.user!.sub);
+  if (!session) return res.status(403).json({ error: 'Active session not found' });
+
+  const cpResult = await pool.query(
+    `SELECT id, code_value FROM site_checkpoints
+     WHERE id = $1 AND site_id = $2 AND is_active = true`,
+    [checkpoint_id, session.site_id]
+  );
+  const cp = cpResult.rows[0];
+  if (!cp) return res.status(404).json({ error: 'Checkpoint not found' });
+  if (cp.code_value !== null) return res.status(409).json({ error: 'Checkpoint already linked' });
+
+  if (typeof code_value !== 'string' || code_value.length < 1 || code_value.length > 512) {
+    return res.status(400).json({ error: 'code_value is required (1-512 characters)' });
+  }
+  if (typeof code_type !== 'string' || code_type.length < 1 || code_type.length > 20) {
+    return res.status(400).json({ error: 'code_type is required (1-20 characters)' });
+  }
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return res.status(400).json({ error: 'Invalid coordinates.' });
+  }
+  if (Math.abs(latitude) < 1e-6 && Math.abs(longitude) < 1e-6) {
+    return res.status(400).json({ error: 'Invalid coordinates. GPS lock required.' });
+  }
+  if (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 30) {
+    return res.status(422).json({
+      error: 'GPS signal too weak to anchor this checkpoint',
+      accuracy_m: Number.isFinite(accuracy) ? accuracy : null,
+      required_m: 30,
+    });
+  }
+
+  try {
+    // `AND code_value IS NULL` re-checks linkage inside the UPDATE so a
+    // concurrent link can't be overwritten; rowCount 0 = the race lost.
+    const updated = await pool.query(
+      `UPDATE site_checkpoints
+       SET code_value = $1, code_type = $2, lat = $3, lng = $4,
+           link_accuracy_m = $5, linked_at = NOW(), linked_by_guard_id = $6
+       WHERE id = $7 AND code_value IS NULL
+       RETURNING *, (code_value IS NOT NULL) AS linked`,
+      [code_value, code_type, latitude, longitude, accuracy, req.user!.sub, checkpoint_id]
+    );
+    if (updated.rowCount === 0) {
+      return res.status(409).json({ error: 'Checkpoint already linked' });
+    }
+    res.json(updated.rows[0]);
+  } catch (err: any) {
+    // uq_site_checkpoints_site_code — this physical tag is already
+    // registered to a different checkpoint at this site.
+    if (err?.code === '23505') {
+      return res.status(409).json({ error: 'This tag is already linked to another checkpoint' });
+    }
+    throw err;
+  }
+});
+
+// POST /api/checkpoints/scan — record a scan. The tag identifies itself
+// (no checkpoint_id from the client); duplicates within a window are
+// absorbed by the uq_checkpoint_scans_round ON CONFLICT, not errored.
+router.post('/scan', requireAuth('guard'), async (req, res) => {
+  const { code_value, latitude, longitude, accuracy, note } = req.body;
+
+  const session = await activeSession(req.user!.sub);
+  if (!session) return res.status(403).json({ error: 'Active session not found' });
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return res.status(400).json({ error: 'Invalid coordinates.' });
+  }
+  if (Math.abs(latitude) < 1e-6 && Math.abs(longitude) < 1e-6) {
+    return res.status(400).json({ error: 'Invalid coordinates. GPS lock required.' });
+  }
+
+  const cpResult = await pool.query(
+    `SELECT id, label, lat, lng, radius_meters FROM site_checkpoints
+     WHERE site_id = $1 AND code_value = $2 AND is_active = true`,
+    [session.site_id, code_value ?? null]
+  );
+  const cp = cpResult.rows[0];
+  if (!cp) return res.status(404).json({ error: "This tag isn't registered at this site" });
+
+  const accuracyM: number | null =
+    typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0 ? accuracy : null;
+
+  const fence = validateAtCheckpoint(
+    { lat: latitude, lng: longitude, accuracy_m: accuracyM ?? 0 },
+    { lat: cp.lat, lng: cp.lng, radius_meters: cp.radius_meters }
+  );
+  if (!fence.allowed) {
+    console.log(
+      `[checkpoint.reject] checkpoint=${cp.id} session=${session.id} guard=${req.user!.sub} ` +
+      `distance=${fence.distance_m.toFixed(1)}m budget=${fence.budget_m.toFixed(1)}m`
+    );
+    return res.status(422).json({
+      error: 'You are too far from this checkpoint',
+      checkpoint_label: cp.label,
+      distance_m: Math.round(fence.distance_m),
+      allowed_m: Math.round(fence.budget_m),
+    });
+  }
+
+  let cleanNote: string | null = null;
+  if (note !== undefined && note !== null) {
+    if (typeof note !== 'string' || note.trim().length > 500) {
+      return res.status(400).json({ error: 'note must be a string of 500 characters or fewer' });
+    }
+    cleanNote = note.trim() || null;
+  }
+
+  // round_window computed inside the INSERT (no read-then-write race);
+  // expires_at intentionally omitted — column DEFAULT applies.
+  const inserted = await pool.query(
+    `INSERT INTO checkpoint_scans
+       (checkpoint_id, shift_session_id, guard_id, site_id, round_window,
+        scan_lat, scan_lng, accuracy_m, distance_m, note)
+     SELECT $1, $2, $3, $4, ${ROUND_WINDOW_SQL}, $5, $6, $7, $8, $9
+     FROM sites s WHERE s.id = $4
+     ON CONFLICT (checkpoint_id, shift_session_id, round_window) DO NOTHING
+     RETURNING scanned_at`,
+    [cp.id, session.id, req.user!.sub, session.site_id,
+     latitude, longitude, accuracyM, fence.distance_m, cleanNote]
+  );
+
+  const duplicate = inserted.rowCount === 0;
+  let scannedAt: Date;
+  if (duplicate) {
+    const existing = await pool.query(
+      `SELECT cs.scanned_at FROM checkpoint_scans cs
+       JOIN sites s ON s.id = cs.site_id
+       WHERE cs.checkpoint_id = $1 AND cs.shift_session_id = $2
+         AND cs.round_window = ${ROUND_WINDOW_SQL}`,
+      [cp.id, session.id]
+    );
+    scannedAt = existing.rows[0]?.scanned_at ?? null;
+  } else {
+    scannedAt = inserted.rows[0].scanned_at;
+  }
+
+  const counter = await windowCounter(session.site_id, session.id);
+  res.status(duplicate ? 200 : 201).json({
+    ok: true,
+    duplicate,
+    checkpoint_id: cp.id,
+    checkpoint_label: cp.label,
+    scanned_at: scannedAt,
+    distance_m: Math.round(fence.distance_m),
+    scanned: counter.scanned,
+    total: counter.total,
   });
 });
 
