@@ -540,7 +540,7 @@ export default function SiteDetailPage() {
         ) : checkpoints.length === 0 ? (
           <div className="space-y-3">
             <p className="text-gray-500 text-sm">
-              Checkpoints are physical NFC/QR tags guards scan on patrol rounds to prove presence.
+              Checkpoints are physical QR code or barcode tags guards scan on patrol rounds to prove presence.
               Add one here, then a guard on an active shift scans the tag once to anchor its location.
             </p>
             <button
