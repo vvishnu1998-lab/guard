@@ -15,9 +15,12 @@
  *
  * Dry-run: `RETENTION_DRY_RUN` env var, code-default = TRUE. Only the
  * literal string 'false' flips it off. During the initial 30-day
- * observation window Vishnu keeps it TRUE and inspects Sentry
- * breadcrumbs; flipping to 'false' in Railway env after that window
- * is a manual toggle (deliberately not a code change).
+ * observation window Vishnu keeps it TRUE and inspects the per-run
+ * `retention_run_summary` event (see emitRunSummary) — one info-level
+ * event per run carrying per-step candidate counts, emitted on dry-run
+ * and live alike, so "nothing to purge" reads as a positive signal
+ * rather than as silence. Flipping to 'false' in Railway env after that
+ * window is a manual toggle (deliberately not a code change).
  *
  * Legal hold: partial indexes (schema_v33) exclude held rows from the
  * purge scan. All delete-eligible tables read
@@ -47,7 +50,19 @@ interface StepResult {
   error?:    string;
 }
 
-cron.schedule('0 0 * * *', async () => {
+cron.schedule('0 0 * * *', runNightlyPurge);
+
+/**
+ * One purge run. Exported so a local harness can invoke it directly
+ * against a throwaway DB; the cron registration above is the only
+ * production caller.
+ *
+ * Exceptions are deliberately not caught here. Each step already has its
+ * own try/catch feeding errorStep(), so anything escaping this function is
+ * a genuine failure that must surface as an error rather than be swallowed
+ * to force a summary event out.
+ */
+export async function runNightlyPurge(): Promise<StepResult[]> {
   const start = Date.now();
   console.log(`[retention] starting nightly purge (dry_run=${DRY_RUN})`);
   Sentry.addBreadcrumb({
@@ -66,7 +81,8 @@ cron.schedule('0 0 * * *', async () => {
   results.push(await step6_expiredShiftSessions());
   results.push(await step7_expiredShifts());
 
-  const dur = ((Date.now() - start) / 1000).toFixed(1);
+  const durationMs = Date.now() - start;
+  const dur = (durationMs / 1000).toFixed(1);
   const totalCandidate = results.reduce((s, r) => s + r.candidate, 0);
   const totalDeleted   = results.reduce((s, r) => s + r.deleted,   0);
   console.log(`[retention] complete in ${dur}s — candidate=${totalCandidate} deleted=${totalDeleted}`);
@@ -76,7 +92,10 @@ cron.schedule('0 0 * * *', async () => {
     data:     { duration_s: dur, results },
     level:    'info',
   });
-});
+
+  emitRunSummary(results, durationMs);
+  return results;
+}
 
 // ── Step 1 ── Ping photos at 7 days (unchanged) ──────────────────────────────
 async function step1_pingPhotos(): Promise<StepResult> {
@@ -308,4 +327,70 @@ function errorStep(step: string, err: unknown): StepResult {
     tags: { flow: 'retention', step },
   } as unknown as Parameters<typeof Sentry.captureException>[1]);
   return { step, candidate: 0, deleted: 0, error: msg };
+}
+
+/**
+ * Stable message string + matching fingerprint. Sentry groups captureMessage
+ * events by message text, so every varying number MUST stay out of it —
+ * interpolating a row count here would mint a fresh issue nightly and
+ * recreate, in a louder shape, the noise problem this event exists to avoid.
+ * The explicit fingerprint pins grouping even if the string is ever reworded.
+ */
+const RUN_SUMMARY_MSG = 'retention_run_summary';
+
+/**
+ * The single event every run emits — dry-run or live, rows or no rows.
+ *
+ * Before this, a healthy dry-run night produced only breadcrumbs, and
+ * breadcrumbs are discarded unless some later capture attaches them. That
+ * made a clean run indistinguishable from the job never firing, which is not
+ * a signal RETENTION_DRY_RUN=false can be flipped on. One event per run, not
+ * one per step: seven nightly events would get muted, and a muted issue is
+ * the same silence with extra steps.
+ */
+function emitRunSummary(results: StepResult[], durationMs: number): void {
+  const haltedSteps  = results.filter((r) => r.halted).map((r) => r.step);
+  const erroredSteps = results.filter((r) => r.error).map((r) => r.step);
+
+  // Per-step counts as structured data, keyed by step name — never
+  // concatenated into the message.
+  const perStep: Record<string, Omit<StepResult, 'step'>> = {};
+  for (const r of results) {
+    perStep[r.step] = {
+      candidate: r.candidate,
+      deleted:   r.deleted,
+      halted:    r.halted === true,
+      ...(r.error ? { error: r.error } : {}),
+    };
+  }
+
+  const totalCandidate = results.reduce((s, r) => s + r.candidate, 0);
+  const totalDeleted   = results.reduce((s, r) => s + r.deleted,   0);
+
+  Sentry.captureMessage(RUN_SUMMARY_MSG, {
+    level:       'info',
+    fingerprint: [RUN_SUMMARY_MSG],
+    // Low-cardinality only, so the issue stays searchable by shape
+    // (`flow:retention dry_run:true any_halted:true`) without exploding tags.
+    tags: {
+      flow:       'retention',
+      dry_run:    String(DRY_RUN),
+      any_halted: String(haltedSteps.length > 0),
+      any_error:  String(erroredSteps.length > 0),
+    },
+    extra: {
+      dry_run:         DRY_RUN,
+      cap:             STEP_ROW_CAP,
+      duration_s:      Number((durationMs / 1000).toFixed(1)),
+      steps_total:     results.length,
+      steps_executed:  results.length - erroredSteps.length,
+      steps_halted:    haltedSteps.length,
+      steps_errored:   erroredSteps.length,
+      halted_steps:    haltedSteps,
+      errored_steps:   erroredSteps,
+      total_candidate: totalCandidate,
+      total_deleted:   totalDeleted,
+      per_step:        perStep,
+    },
+  } as unknown as Parameters<typeof Sentry.captureMessage>[1]);
 }
