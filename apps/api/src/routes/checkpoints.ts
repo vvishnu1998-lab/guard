@@ -402,7 +402,7 @@ router.post('/scan', requireAuth('guard'), async (req, res) => {
   }
 
   const cpResult = await pool.query(
-    `SELECT id, label, lat, lng, radius_meters FROM site_checkpoints
+    `SELECT id, label, lat, lng, radius_meters, link_accuracy_m FROM site_checkpoints
      WHERE site_id = $1 AND code_value = $2 AND is_active = true`,
     [session.site_id, code_value ?? null]
   );
@@ -414,12 +414,19 @@ router.post('/scan', requireAuth('guard'), async (req, res) => {
 
   const fence = validateAtCheckpoint(
     { lat: latitude, lng: longitude, accuracy_m: accuracyM ?? 0 },
-    { lat: cp.lat, lng: cp.lng, radius_meters: cp.radius_meters }
+    { lat: cp.lat, lng: cp.lng, radius_meters: cp.radius_meters, link_accuracy_m: cp.link_accuracy_m }
   );
   if (!fence.allowed) {
+    // A 422 writes no row, so this line is the ONLY record of a rejected
+    // scan — log every budget component and the reported coordinates or
+    // field failures become unfalsifiable (2026-08-04 walk-test lesson).
     console.log(
-      `[checkpoint.reject] checkpoint=${cp.id} session=${session.id} guard=${req.user!.sub} ` +
-      `distance=${fence.distance_m.toFixed(1)}m budget=${fence.budget_m.toFixed(1)}m`
+      `[checkpoint.reject] checkpoint=${cp.id} label=${JSON.stringify(cp.label)} ` +
+      `session=${session.id} guard=${req.user!.sub} ` +
+      `distance=${fence.distance_m.toFixed(1)}m budget=${fence.budget_m.toFixed(1)}m ` +
+      `radius=${fence.radius_m}m scan_accuracy=${fence.scan_accuracy_m.toFixed(1)}m ` +
+      `link_accuracy=${fence.link_accuracy_m.toFixed(1)}m ` +
+      `scan_lat=${latitude} scan_lng=${longitude}`
     );
     return res.status(422).json({
       error: 'You are too far from this checkpoint',

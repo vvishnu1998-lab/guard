@@ -85,17 +85,26 @@ const SAFETY_MARGIN_M = 20;
  * guard's scan, so no polygon logic and no DB access: the caller fetches
  * the site_checkpoints row and passes the anchor in.
  *
- * Budget = radius_meters + accuracy. Checkpoints deliberately do NOT
- * carry validateAtSite's fixed SAFETY_MARGIN_M: that 20 m cushion is
- * proportionate on 60 m+ site fences but at checkpoint scale it dwarfs
- * the admin's setting — a 10 m checkpoint became an effective ~36 m
- * circle and accepted a 33.7 m scan in the 2026-08-04 prod walk-test.
- * The accuracy term already scales tolerance to real signal conditions;
- * an admin who sets 10 m must get approximately 10 m. Do not "restore
- * consistency" with validateAtSite here — the scales are different on
- * purpose.
- * Returns distance_m for the persisted admin drift column and budget_m so
- * the route can log a one-line reject without recomputing.
+ * Budget = radius_meters + scan accuracy + anchor (link) accuracy. The
+ * anchor is not ground truth — it is itself a GPS estimate captured at
+ * link time (site_checkpoints.link_accuracy_m). Both positions estimate
+ * the same physical point, so BOTH error terms belong in the budget:
+ * in the 2026-08-04 prod walk-test a guard standing AT a tag anchored
+ * at ±7.9 m was rejected at 19.1 m vs a budget of 13.9 m because the
+ * anchor's error was ignored. link_accuracy_m may be NULL on rows
+ * anchored before it was recorded — treated as 0, never fail-closed.
+ *
+ * Checkpoints deliberately do NOT carry validateAtSite's fixed
+ * SAFETY_MARGIN_M: that 20 m cushion is proportionate on 60 m+ site
+ * fences but at checkpoint scale it dwarfs the admin's setting — a
+ * 10 m checkpoint became an effective ~36 m circle and accepted a
+ * 33.7 m scan in the same walk-test. The two accuracy terms already
+ * scale tolerance to real signal conditions; an admin who sets 10 m
+ * must get approximately 10 m. Do not "restore consistency" with
+ * validateAtSite here — the scales are different on purpose.
+ *
+ * Returns distance_m for the persisted admin drift column plus every
+ * budget component so the route can log a reject without recomputing.
  *
  * Fails closed on bad anchors (null/non-finite lat/lng/radius — e.g. an
  * unlinked checkpoint that slipped past the route layer) with
@@ -103,11 +112,24 @@ const SAFETY_MARGIN_M = 20;
  */
 export function validateAtCheckpoint(
   point: GeofenceValidationInput,
-  checkpoint: { lat: number; lng: number; radius_meters: number },
-): { allowed: boolean; distance_m: number; budget_m: number } {
-  const accuracy =
+  checkpoint: { lat: number; lng: number; radius_meters: number; link_accuracy_m?: number | null },
+): {
+  allowed: boolean;
+  distance_m: number;
+  budget_m: number;
+  radius_m: number;
+  scan_accuracy_m: number;
+  link_accuracy_m: number;
+} {
+  const scanAccuracy =
     Number.isFinite(point.accuracy_m) && point.accuracy_m > 0 ? point.accuracy_m : 0;
-  const budget = checkpoint?.radius_meters + accuracy;
+  const linkAccuracy =
+    typeof checkpoint?.link_accuracy_m === 'number' &&
+    Number.isFinite(checkpoint.link_accuracy_m) &&
+    checkpoint.link_accuracy_m > 0
+      ? checkpoint.link_accuracy_m
+      : 0;
+  const budget = checkpoint?.radius_meters + scanAccuracy + linkAccuracy;
 
   if (
     !Number.isFinite(checkpoint?.lat) ||
@@ -116,11 +138,25 @@ export function validateAtCheckpoint(
     !Number.isFinite(point.lat) ||
     !Number.isFinite(point.lng)
   ) {
-    return { allowed: false, distance_m: Infinity, budget_m: Number.isFinite(budget) ? budget : Infinity };
+    return {
+      allowed: false,
+      distance_m: Infinity,
+      budget_m: Number.isFinite(budget) ? budget : Infinity,
+      radius_m: Number.isFinite(checkpoint?.radius_meters) ? checkpoint.radius_meters : Infinity,
+      scan_accuracy_m: scanAccuracy,
+      link_accuracy_m: linkAccuracy,
+    };
   }
 
   const distance = haversineDistance(point.lat, point.lng, checkpoint.lat, checkpoint.lng);
-  return { allowed: distance <= budget, distance_m: distance, budget_m: budget };
+  return {
+    allowed: distance <= budget,
+    distance_m: distance,
+    budget_m: budget,
+    radius_m: checkpoint.radius_meters,
+    scan_accuracy_m: scanAccuracy,
+    link_accuracy_m: linkAccuracy,
+  };
 }
 
 export async function validateAtSite(
