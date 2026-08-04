@@ -51,19 +51,22 @@ interface Shift {
 }
 
 interface Checkpoint {
-  id:            string;
-  site_id:       string;
-  label:         string;
-  code_value:    string | null;
-  code_type:     string | null;
-  lat:           number | null;
-  lng:           number | null;
-  linked_at:     string | null;
-  radius_meters: number;
-  sort_order:    number;
-  is_active:     boolean;
-  created_at:    string;
-  linked:        boolean;
+  id:              string;
+  site_id:         string;
+  label:           string;
+  code_value:      string | null;
+  code_type:       string | null;
+  lat:             number | null;
+  lng:             number | null;
+  // GPS accuracy at the linking scan. Nullable even on a linked row — the
+  // v44 CHECK constraint only ties code_value/lat/lng together.
+  link_accuracy_m: number | null;
+  linked_at:       string | null;
+  radius_meters:   number;
+  sort_order:      number;
+  is_active:       boolean;
+  created_at:      string;
+  linked:          boolean;
 }
 
 interface CheckpointScan {
@@ -212,6 +215,13 @@ export default function SiteDetailPage() {
 
   const awaitingCount = useMemo(
     () => checkpoints.filter((c) => c.is_active && !c.linked).length,
+    [checkpoints],
+  );
+
+  // Gates the anchor-accuracy explainer: only worth showing once at least one
+  // row actually displays an anchor accuracy figure.
+  const anyAnchored = useMemo(
+    () => checkpoints.some((c) => c.linked && Number.isFinite(c.link_accuracy_m)),
     [checkpoints],
   );
 
@@ -582,6 +592,18 @@ export default function SiteDetailPage() {
           </div>
         )}
 
+        {/* Explains what the per-row anchor accuracy figure means. Section-level,
+            not per row — the number is only interpretable alongside the radius
+            and the guard's own GPS accuracy. Deliberately uncoloured and
+            unbanded: there is no field data yet to say what a bad anchor is. */}
+        {!cpLoading && anyAnchored && (
+          <p className="text-gray-500 text-xs mb-3">
+            A scan is accepted within roughly the radius plus the anchor accuracy plus the
+            guard&apos;s own GPS accuracy at that moment — UNLINK a checkpoint to re-anchor it
+            on a better fix.
+          </p>
+        )}
+
         {cpLoading ? (
           <p className="text-gray-500 text-sm">Loading checkpoints…</p>
         ) : checkpoints.length === 0 ? (
@@ -624,6 +646,12 @@ export default function SiteDetailPage() {
                   </div>
                   <p className="text-gray-500 text-xs mt-0.5">
                     {cp.radius_meters}m radius
+                    {cp.linked && Number.isFinite(cp.link_accuracy_m) && (
+                      <>
+                        <span className="text-gray-600"> · </span>
+                        ±{Math.round(cp.link_accuracy_m as number)}m anchor accuracy
+                      </>
+                    )}
                     {cp.linked && cp.linked_at && (
                       <>
                         <span className="text-gray-600"> · </span>
