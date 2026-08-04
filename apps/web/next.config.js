@@ -1,3 +1,5 @@
+const { withSentryConfig } = require('@sentry/nextjs');
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   images: {
@@ -12,6 +14,10 @@ const nextConfig = {
   // crash in monorepo local builds — no effect on Vercel)
   experimental: {
     missingSuspenseWithCSRBailout: false,
+    // Next 14.2 defaults this to false, and without it instrumentation.ts is
+    // never loaded — the server and edge runtimes would report nothing.
+    // Stable (no flag needed) from Next 15.
+    instrumentationHook: true,
   },
 
   // Route renames (task #5, 2026-07-08). Permanent 301 so:
@@ -47,4 +53,49 @@ const nextConfig = {
   },
 };
 
-module.exports = nextConfig;
+/**
+ * Sentry build-time wiring. Option names verified against the installed
+ * @sentry/nextjs 10.69.0 type definitions, not carried over from older docs:
+ *   - `hideSourceMaps` no longer exists; the current equivalent is
+ *     `sourcemaps.deleteSourcemapsAfterUpload` (default true, set explicitly
+ *     here so the intent is on the page): maps are uploaded to Sentry for
+ *     readable stack traces, then removed from the build output so they are
+ *     never served to a browser.
+ *   - `disableLogger` is deprecated in favour of
+ *     `webpack.treeshake.removeDebugLogging`.
+ *
+ * `authToken` is intentionally absent — the plugin reads SENTRY_AUTH_TOKEN
+ * from the environment, which is set in Vercel Production only. Local builds
+ * skip the upload rather than failing.
+ */
+module.exports = withSentryConfig(nextConfig, {
+  org: 'netraopscom',
+  project: 'netraops-web',
+
+  // Upload client source maps for the whole build, including framework
+  // chunks, so App Router stack traces resolve.
+  widenClientFileUpload: true,
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true,
+  },
+
+  // Ad blockers block ingest.sentry.io outright, and admin users
+  // disproportionately run them — without tunnelling, errors from exactly
+  // the users most likely to hit edge cases are lost silently. `true`
+  // auto-generates a randomised, ad-blocker-resistant route per build,
+  // which is stronger than a fixed well-known path like /monitoring.
+  // Not covered by middleware.ts's matcher, so it is never auth-gated.
+  tunnelRoute: true,
+
+  webpack: {
+    treeshake: {
+      // Strip SDK debug logging from production bundles.
+      removeDebugLogging: true,
+      // Drop the tracing/performance code path entirely. These portals are
+      // used on phones, and the tracing bundle cost most of the SDK's weight
+      // for 5%-sampled data nobody consumes. Error reporting is the point of
+      // this integration and is unaffected.
+      removeTracing: true,
+    },
+  },
+});
