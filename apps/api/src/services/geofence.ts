@@ -85,8 +85,15 @@ const SAFETY_MARGIN_M = 20;
  * guard's scan, so no polygon logic and no DB access: the caller fetches
  * the site_checkpoints row and passes the anchor in.
  *
- * Same budget rule as validateAtSite's radius arm (radius + accuracy +
- * SAFETY_MARGIN_M) so a checkpoint fence behaves like a small site fence.
+ * Budget = radius_meters + accuracy. Checkpoints deliberately do NOT
+ * carry validateAtSite's fixed SAFETY_MARGIN_M: that 20 m cushion is
+ * proportionate on 60 m+ site fences but at checkpoint scale it dwarfs
+ * the admin's setting — a 10 m checkpoint became an effective ~36 m
+ * circle and accepted a 33.7 m scan in the 2026-08-04 prod walk-test.
+ * The accuracy term already scales tolerance to real signal conditions;
+ * an admin who sets 10 m must get approximately 10 m. Do not "restore
+ * consistency" with validateAtSite here — the scales are different on
+ * purpose.
  * Returns distance_m for the persisted admin drift column and budget_m so
  * the route can log a one-line reject without recomputing.
  *
@@ -100,7 +107,7 @@ export function validateAtCheckpoint(
 ): { allowed: boolean; distance_m: number; budget_m: number } {
   const accuracy =
     Number.isFinite(point.accuracy_m) && point.accuracy_m > 0 ? point.accuracy_m : 0;
-  const budget = checkpoint?.radius_meters + accuracy + SAFETY_MARGIN_M;
+  const budget = checkpoint?.radius_meters + accuracy;
 
   if (
     !Number.isFinite(checkpoint?.lat) ||
