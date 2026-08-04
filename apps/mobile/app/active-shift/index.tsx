@@ -13,12 +13,13 @@
  *   pings are notification-driven now; the client can't initiate one).
  * - Clock-Out button (amber, bottom of scroll)
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   ScrollView, Alert, AppState,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
+import { apiClient } from '../../lib/apiClient';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
 import { useBatteryThrottle } from '../../lib/batteryThrottle';
@@ -57,6 +58,29 @@ export default function ActiveShiftScreen() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [nextPingMs,     setNextPingMs]     = useState(0);
   const [clockingOut,    setClockingOut]    = useState(false);
+
+  // ── Checkpoints (C6) ──────────────────────────────────────────────────
+  // null = not loaded / fetch failed / site has none → render NOTHING, so
+  // guards at sites without checkpoints see zero change to this screen.
+  // Refetched on every focus so the counter updates after each scan.
+  const [cpMine, setCpMine] = useState<{
+    total: number; scanned: number; unlinked: number;
+    checkpoints: { id: string }[];
+  } | null>(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!activeSession) return;
+      let cancelled = false;
+      apiClient
+        .get<{ total: number; scanned: number; unlinked: number; checkpoints: { id: string }[] }>('/checkpoints/mine')
+        .then((mine) => { if (!cancelled) setCpMine(mine); })
+        .catch(() => { if (!cancelled) setCpMine(null); }); // silent — section just hides
+      return () => { cancelled = true; };
+    }, [activeSession?.id]),
+  );
+
+  const hasCheckpoints = (cpMine?.checkpoints.length ?? 0) > 0;
 
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingRef     = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -168,6 +192,31 @@ export default function ActiveShiftScreen() {
           {formatCountdown(nextPingMs)}
         </Text>
       </View>
+
+      {/* ── Checkpoints (C6) — hidden entirely when the site has none ── */}
+      {hasCheckpoints && cpMine && (
+        <>
+          {cpMine.unlinked > 0 && (
+            <TouchableOpacity
+              style={styles.cpSetupBanner}
+              onPress={() => router.push('/checkpoints/setup')}
+            >
+              <Text style={styles.cpSetupBannerText}>
+                Set up {cpMine.unlinked} checkpoint{cpMine.unlinked === 1 ? '' : 's'} — tap to anchor tags at their positions.
+              </Text>
+            </TouchableOpacity>
+          )}
+          <View style={styles.cpCard}>
+            <Text style={styles.cpLabel}>CHECKPOINTS — {cpMine.scanned} OF {cpMine.total} THIS HOUR</Text>
+            <TouchableOpacity
+              style={styles.cpScanBtn}
+              onPress={() => router.push('/checkpoints/scan')}
+            >
+              <Text style={styles.cpScanBtnText}>SCAN CHECKPOINT</Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      )}
 
       {/* ── Action grid ─────────────────────────────────────────────── */}
       {/* Build 34: PING NOW removed. Pings are notification-driven
@@ -285,6 +334,37 @@ const styles = StyleSheet.create({
   pingValue:      { fontFamily: 'monospace', color: Colors.base, fontSize: 36, marginVertical: Spacing.xs },
   pingValueUrgent:{ color: Colors.action },
   pingNote:       { color: Colors.muted, fontSize: 11, letterSpacing: 2 },
+
+  // Checkpoints (C6) — banner mirrors throttleBanner; card mirrors pingCard.
+  cpSetupBanner: {
+    width: '92%',
+    backgroundColor: '#3A2410',
+    borderRadius: Radius.md,
+    borderLeftWidth: 4,
+    borderLeftColor: Colors.warning,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+  },
+  cpSetupBannerText: { color: Colors.warning, fontSize: 12, lineHeight: 16, letterSpacing: 0.5 },
+  cpCard: {
+    width: '92%',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.border,
+    alignItems: 'center',
+    paddingVertical: Spacing.lg,
+    marginTop: Spacing.lg,
+    gap: Spacing.md,
+  },
+  cpLabel: { color: Colors.muted, fontSize: 11, letterSpacing: 3 },
+  cpScanBtn: {
+    backgroundColor: Colors.action,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.xl,
+  },
+  cpScanBtnText: { color: Colors.structure, fontFamily: Fonts.heading, fontSize: 15, letterSpacing: 3 },
 
   // Action grid
   grid: {

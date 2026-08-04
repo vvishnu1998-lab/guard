@@ -50,6 +50,9 @@ interface OfflineState {
   submitPing:     (payload: LocationPingRequest)       => Promise<string>;
   completeTask:   (taskInstanceId: string, payload: Record<string, unknown>) => Promise<string>;
   postViolation:  (payload: GeofenceViolationRequest)  => Promise<string>;
+  submitCheckpointScan: (payload: {
+    code_value: string; latitude: number; longitude: number; accuracy?: number; note?: string;
+  }) => Promise<{ synced: true; data: any } | { synced: false; localId: string }>;
 }
 
 export const useOfflineStore = create<OfflineState>((set) => ({
@@ -108,6 +111,25 @@ export const useOfflineStore = create<OfflineState>((set) => ({
     set({ pendingCount: count });
     syncQueue().catch(console.error);
     return localId;
+  },
+
+  // C6 — checkpoint scans. 4xx (404 unknown tag / 422 too far / 403 no
+  // session) surfaces to the scanner UI; only network/5xx failures queue.
+  // The payload's coords were captured at scan time, so a queued replay
+  // validates against where the guard actually stood.
+  submitCheckpointScan: async (payload) => {
+    try {
+      const data = await apiClient.post<any>('/checkpoints/scan', payload);
+      return { synced: true, data };
+    } catch (err) {
+      if (shouldSurfaceInsteadOfQueue(err)) throw err;
+      console.error('[submitCheckpointScan] Direct submit failed, queuing:', (err as any)?.message);
+    }
+    const localId = await enqueue('checkpoint_scan', payload as unknown as Record<string, unknown>);
+    const count = await pendingCount();
+    set({ pendingCount: count });
+    syncQueue().catch(console.error);
+    return { synced: false, localId };
   },
 
   postViolation: async (payload) => {
