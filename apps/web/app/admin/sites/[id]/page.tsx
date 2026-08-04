@@ -17,14 +17,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { adminFetch, adminGet, adminPatch, adminPost } from '../../../../lib/adminApi';
+import { adminFetch, adminGet, adminPatch, adminPost, triggerBlobDownload } from '../../../../lib/adminApi';
 import { fmtTime } from '../../../../lib/shiftFormat';
 import { formatHoursHHMM } from '../../../../lib/formatHours';
 
 interface Site {
-  id:      string;
-  name:    string;
-  address: string;
+  id:       string;
+  name:     string;
+  address:  string;
+  timezone: string;   // IANA zone (sites.timezone, NOT NULL) — CSV timestamps render in it
 }
 
 interface LiveGuard {
@@ -94,6 +95,23 @@ function dateInputValue(daysAgo: number): string {
 }
 
 const MAX_RANGE_DAYS = 92;
+
+// ── CSV helpers (C5) ─────────────────────────────────────────────────────────
+// Client-built by design: the export must be exactly the rows on screen.
+// No client-side CSV utility exists in apps/web (the API's rowsToCsv isn't
+// importable here), so escaping is implemented fresh:
+//   • every field is quoted; embedded quotes doubled (commas/newlines safe)
+//   • CSV-injection guard: fields starting with = + - @ tab or CR get a
+//     leading apostrophe — labels are admin-entered and open in Excel.
+function csvField(v: unknown): string {
+  let s = v == null ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'site';
+}
 
 const DAY_LABEL = new Intl.DateTimeFormat('en-US', {
   weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles',
@@ -221,6 +239,35 @@ export default function SiteDetailPage() {
     })();
     return () => { cancelled = true; };
   }, [siteId, scanFrom, scanTo, scanRangeError, scanRefresh]);
+
+  // C5 — CSV export of exactly the rows on screen. Oldest first,
+  // deliberately the reverse of the on-screen DESC order: a patrol log
+  // handed to a property manager reads chronologically forward.
+  // Timestamps render in the SITE's timezone with the zone abbreviation on
+  // every value (not just the header) so rows crossing a DST flip stay
+  // unambiguous. Distance is whole meters; the unit lives in the header.
+  function exportScansCsv() {
+    if (!site || scans.length === 0 || scansTruncated || !!scanRangeError) return;
+    const tsFmt = new Intl.DateTimeFormat('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+      timeZone: site.timezone, timeZoneName: 'short',
+    });
+    const header = ['Checkpoint', 'Guard', 'Scanned At', 'Distance (m)'].map(csvField).join(',');
+    const rows = [...scans].reverse().map((s) =>
+      [
+        s.checkpoint_label,
+        s.guard_name,
+        tsFmt.format(new Date(s.scanned_at)),
+        Math.round(s.distance_m),
+      ].map(csvField).join(','),
+    );
+    // BOM so Excel decodes UTF-8 names correctly (this file's whole purpose
+    // is being opened in Excel by a property manager).
+    const csv = '\uFEFF' + [header, ...rows].join('\r\n') + '\r\n';
+    const filename = `checkpoint-scans_${slugify(site.name)}_${scanFrom}_to_${scanTo}.csv`;
+    triggerBlobDownload(new Blob([csv], { type: 'text/csv;charset=utf-8' }), filename);
+  }
 
   // ── Checkpoint modal handlers ──────────────────────────────────────────
   function openAddCpModal() {
@@ -625,7 +672,21 @@ export default function SiteDetailPage() {
 
       {/* Scan history (C4b) */}
       <section>
-        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">SCAN HISTORY</h2>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
+          <h2 className="text-amber-400 font-bold tracking-widest text-sm">SCAN HISTORY</h2>
+          <button
+            onClick={exportScansCsv}
+            disabled={scans.length === 0 || scansLoading || scansTruncated || !!scanRangeError}
+            title={
+              scansTruncated
+                ? 'Export is disabled while the view is capped at 1000 rows — narrow the date range.'
+                : scans.length === 0 ? 'No scans in the current range.' : undefined
+            }
+            className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:border-amber-400/40 self-start md:self-auto"
+          >
+            EXPORT CSV
+          </button>
+        </div>
 
         {/* Date range — billing-page pattern: paired native date inputs. */}
         <div className="flex flex-wrap gap-4 mb-3">
@@ -656,6 +717,8 @@ export default function SiteDetailPage() {
         {scansTruncated && (
           <div className="bg-amber-400/10 border border-amber-400/40 text-amber-300 text-sm rounded-lg px-4 py-2 mb-3">
             Showing the first 1000 scans in this range — narrow the dates to see the rest.
+            CSV export is disabled while the view is capped, so a partial file is never
+            handed off as a complete log.
           </div>
         )}
 

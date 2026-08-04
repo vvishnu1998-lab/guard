@@ -92,7 +92,8 @@ export async function adminDownloadPost(path: string, body: unknown, filename: s
   triggerBlobDownload(blob, filename);
 }
 
-function triggerBlobDownload(blob: Blob, filename: string): void {
+/** Exported for client-built blobs (checkpoint scan CSV). Unchanged behavior. */
+export function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   try {
     const a = document.createElement('a');
