@@ -16,7 +16,7 @@ import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore }  from '../../store/shiftStore';
 import { apiClient }      from '../../lib/apiClient';
-import { isPointInPolygon, haversineDistance } from '../../utils/geofence';
+import { isInsideGeofence, haversineDistance } from '../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
@@ -61,7 +61,7 @@ export default function ViolationScreen() {
     async function checkLocation() {
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        const { latitude, longitude } = loc.coords;
+        const { latitude, longitude, accuracy } = loc.coords;
         setLat(latitude);
         setLng(longitude);
 
@@ -75,10 +75,13 @@ export default function ViolationScreen() {
         );
         setDist(Math.round(dist));
 
-        // Check if back inside
-        const inside = isPointInPolygon(
+        // Check if back inside. Falls back to the radius check when the site
+        // has no polygon drawn, matching the server rather than stranding the
+        // guard on this screen with no way to clear the violation.
+        const inside = isInsideGeofence(
           { lat: latitude, lng: longitude },
-          geofence.polygon_coordinates
+          geofence,
+          accuracy ?? 0
         );
 
         if (inside) {

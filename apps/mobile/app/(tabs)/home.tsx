@@ -329,7 +329,7 @@ export default function HomeScreen() {
         scheduled_end: string;
         instructions_pdf_url?: string | null;
         geofence: {
-          polygon_coordinates: { lat: number; lng: number }[];
+          polygon_coordinates: { lat: number; lng: number }[] | null;  // API sends null for a site with no polygon drawn
           center_lat:     number;
           center_lng:     number;
           radius_meters:  number;

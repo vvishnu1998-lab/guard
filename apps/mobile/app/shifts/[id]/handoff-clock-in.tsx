@@ -40,14 +40,14 @@ import { apiClient } from '../../../lib/apiClient';
 import { uploadToS3 } from '../../../lib/uploadToS3';
 import { uuidv4 } from '../../../lib/uuid';
 import { useAuthStore } from '../../../store/authStore';
-import { isPointInPolygon, haversineDistance } from '../../../utils/geofence';
+import { isInsideGeofence, hasUsablePolygon, haversineDistance } from '../../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 import SelfieCapture, { SelfieProof } from '../../../components/SelfieCapture';
 
 type Step = 'loading' | 'gps' | 'selfie' | 'submit' | 'error';
 
 interface Geofence {
-  polygon_coordinates: { lat: number; lng: number }[];
+  polygon_coordinates: { lat: number; lng: number }[] | null;  // API sends null for a site with no polygon drawn
   center_lat:          number;
   center_lng:          number;
   radius_meters:       number;
@@ -179,7 +179,11 @@ export default function HandoffClockInWizard() {
       if (!geofence) return;
       setGpsCoords(point);
       const distance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
-      if (distance > geofence.radius_meters * 1.5) {
+      // Skipped when there is no usable polygon — see the matching note in
+      // app/clock-in/step1.tsx. The radius check below is then the whole
+      // decision and must use the server's budget, not this tighter one.
+      const polygonUsable = hasUsablePolygon(geofence.polygon_coordinates);
+      if (polygonUsable && distance > geofence.radius_meters * 1.5) {
         if (lastInsideRef.current !== false) {
           Sentry.addBreadcrumb({
             category: 'handoff_clock_in',
@@ -192,7 +196,7 @@ export default function HandoffClockInWizard() {
         setGpsState('outside');
         return;
       }
-      const inside = isPointInPolygon(point, geofence.polygon_coordinates);
+      const inside = isInsideGeofence(point, geofence, accuracy);
       if (inside && lastInsideRef.current !== true) {
         Sentry.addBreadcrumb({
           category: 'handoff_clock_in',

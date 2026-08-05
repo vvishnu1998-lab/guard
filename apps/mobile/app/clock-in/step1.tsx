@@ -10,7 +10,7 @@ import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-import { isPointInPolygon, haversineDistance } from '../../utils/geofence';
+import { isInsideGeofence, hasUsablePolygon, haversineDistance } from '../../utils/geofence';
 
 type CheckState = 'checking' | 'inside' | 'outside' | 'error';
 
@@ -58,7 +58,13 @@ export default function ClockInStep1() {
     }
     setCoords(point);
     const approxDistance = haversineDistance(point.lat, point.lng, geofence.center_lat, geofence.center_lng);
-    if (approxDistance > geofence.radius_meters * 1.5) {
+    // The 1.5x pre-check is a cheap short-circuit ahead of the polygon test.
+    // It is skipped when there is no usable polygon, because then the radius
+    // check below IS the decision and must match the server's budget
+    // (radius + accuracy + margin) rather than being pre-empted by a tighter
+    // local rule that could block a guard the server would allow.
+    const polygonUsable = hasUsablePolygon(geofence.polygon_coordinates);
+    if (polygonUsable && approxDistance > geofence.radius_meters * 1.5) {
       if (lastInsideRef.current !== false) {
         Sentry.addBreadcrumb({
           category: 'clock_in_wizard',
@@ -71,7 +77,7 @@ export default function ClockInStep1() {
       setState('outside');
       return;
     }
-    const inside = isPointInPolygon(point, geofence.polygon_coordinates);
+    const inside = isInsideGeofence(point, geofence, accuracy);
     if (inside && lastInsideRef.current !== true) {
       // Boundary crossing from outside/unknown to inside — the key
       // observability point for this bug.
