@@ -96,6 +96,39 @@ function fmtInTz(iso: string, tz: string | null, opts: Intl.DateTimeFormatOption
   }).format(new Date(iso));
 }
 
+/**
+ * Short timezone label for display, e.g. "PDT".
+ *
+ * The API sends the raw IANA zone (site_tz) and that is correct — it is what
+ * every fmtInTz call above needs as Intl input. It is only unfit for display:
+ * the previous `site_tz.split('/').pop()` rendered "Los_Angeles", underscore
+ * and all, next to the shift times.
+ *
+ * For zones with no common abbreviation Intl returns an offset instead
+ * ("GMT+5:30" for Asia/Kolkata). That is correct, useful output and is
+ * deliberately not special-cased.
+ *
+ * Returns null when the zone is absent or rejected by Intl, so the caller
+ * renders nothing rather than a broken fragment. Uses 'en-US' rather than the
+ * 'en-GB' above because en-GB yields offsets where en-US yields the familiar
+ * North American abbreviations, and every current site is US-based.
+ */
+function tzAbbreviation(iso: string, tz: string | null): string | null {
+  if (!tz) return null;
+  try {
+    const part = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, timeZoneName: 'short',
+    })
+      .formatToParts(new Date(iso))
+      .find((p) => p.type === 'timeZoneName');
+    return part?.value ?? null;
+  } catch {
+    // Invalid/unknown IANA zone — Intl throws a RangeError. Show nothing
+    // rather than crashing the shift screen over a cosmetic label.
+    return null;
+  }
+}
+
 function duration(start: string, end: string): string {
   const h = (new Date(end).getTime() - new Date(start).getTime()) / 3_600_000;
   // Phase 3 — D2: scheduled duration in HH:MM. 0-length shifts render "—".
@@ -183,6 +216,9 @@ export default function ShiftDetailScreen() {
   const endTime     = fmtInTz(shift.scheduled_end, shift.site_tz, {
     hour: '2-digit', minute: '2-digit',
   });
+  // Resolved against the shift's own start instant so the label reflects the
+  // DST state in force during the shift (PST vs PDT), not today's.
+  const tzLabel     = tzAbbreviation(shift.scheduled_start, shift.site_tz);
 
   return (
     <View style={styles.container}>
@@ -220,7 +256,7 @@ export default function ShiftDetailScreen() {
           <Text style={styles.timeText}>
             {startTime} — {endTime}
             {'  ·  '}{duration(shift.scheduled_start, shift.scheduled_end)}
-            {shift.site_tz ? `  ·  ${shift.site_tz.split('/').pop()}` : ''}
+            {tzLabel ? `  ·  ${tzLabel}` : ''}
           </Text>
 
           {shift.guard_name ? (
