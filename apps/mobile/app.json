@@ -2,7 +2,16 @@
   "expo": {
     "name": "NetraOps",
     "slug": "guard",
-    "version": "1.0.12",
+    "version": "1.0.13",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/5fd28125-2461-4165-b9df-7f34ced8b194",
+      "enabled": true,
+      "fallbackToCacheTimeout": 0,
+      "checkAutomatically": "ON_LOAD"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
