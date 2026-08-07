@@ -76,6 +76,20 @@ interface CheckpointScan {
   guard_name:       string;
   scanned_at:       string;
   distance_m:       number;
+  // The round this scan belongs to: the site-local hour floor stored as a
+  // UTC instant (schema_v44). Already on every row the API returns — the
+  // /scans handler selects `cs.*` — this client just never read it before.
+  round_window:     string;
+}
+
+/** One hourly round: its scans plus completeness against the CURRENT roster. */
+interface Round {
+  key:       string;   // normalized round_window ISO — the group key
+  label:     string;   // "Aug 4, 5-6 PM", rendered in the site's zone
+  scans:     CheckpointScan[];  // chronologically forward within the round
+  scanned:   number;   // distinct currently-active+linked checkpoints scanned
+  expected:  number;   // count of currently-active+linked checkpoints
+  missing:   string[]; // labels of active+linked checkpoints with no scan
 }
 
 const EMPTY_CP_FORM = { label: '', radius_meters: '50', sort_order: '0', is_active: true };
@@ -84,11 +98,61 @@ const ANCHOR_DATE = new Intl.DateTimeFormat('en-US', {
   month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/Los_Angeles',
 });
 
-// Same Pacific anchoring as the page's existing DAY_LABEL / DATE_KEY.
-const SCAN_TS = new Intl.DateTimeFormat('en-US', {
-  month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-  hour12: false, timeZone: 'America/Los_Angeles',
-});
+/**
+ * Scan timestamps render in the SITE's zone, built per site rather than fixed
+ * at module scope.
+ *
+ * This column was previously pinned to America/Los_Angeles like the page's
+ * other formatters. Round grouping makes that untenable: the round header is
+ * necessarily site-local, so a Pacific scan time under it reads as a flat
+ * contradiction — a Kolkata round labelled "5-6 PM" listing a scan at "04:39".
+ * exportScansCsv() already formatted in site.timezone, so this brings the table
+ * into line with the file it exports rather than inventing a new convention.
+ */
+function makeScanTsFormat(timeZone: string) {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    hour12: false, timeZone,
+  });
+}
+
+const ROUND_MS = 60 * 60 * 1000;
+
+/**
+ * Builds a round labeller for one site: "Aug 4, 5-6 PM".
+ *
+ * round_window is the site-local hour floor stored as its UTC instant, and a
+ * round is [w, w + 1h). Both ends are rendered in the SITE's zone, never the
+ * browser's — an admin in New York reading a Phoenix site must see Phoenix
+ * hours or the log means nothing.
+ *
+ * NOTE: the schema_v44 DDL comment describes round_window as an
+ * America/Los_Angeles floor. That comment is stale — the API computes it with
+ * `AT TIME ZONE s.timezone` per site (ROUND_WINDOW_SQL in routes/checkpoints.ts),
+ * so it is genuinely per-site and hardcoding Pacific here would be wrong.
+ *
+ * The meridiem is printed once when both ends share it ("5-6 PM") and on both
+ * ends when they differ ("11 AM-12 PM"). The date is always the round's START
+ * date, so a 11 PM-12 AM round stays filed under the day it began.
+ */
+function makeRoundLabeller(timeZone: string) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    month: 'short', day: 'numeric', hour: 'numeric', hour12: true, timeZone,
+  });
+  const partsOf = (d: Date) => {
+    const parts = fmt.formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+    return { month: get('month'), day: get('day'), hour: get('hour'), period: get('dayPeriod') };
+  };
+  return (windowStartIso: string): string => {
+    const start = new Date(windowStartIso);
+    if (Number.isNaN(start.getTime())) return 'Unknown round';
+    const s = partsOf(start);
+    const e = partsOf(new Date(start.getTime() + ROUND_MS));
+    const startHour = s.period === e.period ? s.hour : `${s.hour} ${s.period}`;
+    return `${s.month} ${s.day}, ${startHour}-${e.hour} ${e.period}`;
+  };
+}
 
 /** YYYY-MM-DD for <input type="date">, offset by `days` from today. */
 function dateInputValue(daysAgo: number): string {
@@ -122,6 +186,39 @@ const DAY_LABEL = new Intl.DateTimeFormat('en-US', {
 const DATE_KEY = new Intl.DateTimeFormat('en-CA', {
   year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'America/Los_Angeles',
 });
+
+/** "3 of 5" for a round. Green when the round is whole, amber when it isn't —
+ *  the same LINKED / AWAITING SETUP colour language the checkpoint list uses. */
+function RoundCount({ scanned, expected }: { scanned: number; expected: number }) {
+  const complete = expected > 0 && scanned >= expected;
+  return (
+    <span
+      title="Measured against the current checkpoint list, not the list as it stood during this round."
+      className={
+        'text-[10px] tracking-widest px-1.5 py-0.5 rounded border shrink-0 ' +
+        (complete
+          ? 'text-green-400 bg-green-400/10 border-green-400/30'
+          : 'text-amber-400 bg-amber-400/10 border-amber-400/30')
+      }
+    >
+      {scanned} OF {expected}
+    </span>
+  );
+}
+
+/** Marks a scan whose checkpoint has since been deactivated or unlinked. The
+ *  row still counts as history but not toward the round's numerator, so
+ *  without this tag "3 rows but 2 of 5" would look like an arithmetic bug. */
+function NotInRosterTag() {
+  return (
+    <span
+      title="This checkpoint is no longer active and linked, so it is not counted in this round's total."
+      className="ml-2 text-[10px] tracking-widest text-gray-500 border border-gray-600 px-1.5 py-0.5 rounded whitespace-nowrap"
+    >
+      NOT IN CURRENT LIST
+    </span>
+  );
+}
 
 export default function SiteDetailPage() {
   const params = useParams<{ id: string }>();
@@ -250,12 +347,90 @@ export default function SiteDetailPage() {
     return () => { cancelled = true; };
   }, [siteId, scanFrom, scanTo, scanRangeError, scanRefresh]);
 
-  // C5 — CSV export of exactly the rows on screen. Oldest first,
+  // ── Round grouping (C7) ────────────────────────────────────────────────
+  // The scannable set, using the SERVER's own definition from windowCounter
+  // in routes/checkpoints.ts: `is_active = true AND code_value IS NOT NULL`.
+  // `linked` is exactly `(code_value IS NOT NULL)` as computed by GET
+  // /api/checkpoints, so this is the same set, not a second definition.
+  const activeLinked = useMemo(
+    () => checkpoints.filter((c) => c.is_active && c.linked),
+    [checkpoints],
+  );
+
+  const activeLinkedIds = useMemo(
+    () => new Set(activeLinked.map((c) => c.id)),
+    [activeLinked],
+  );
+
+  // Falls back to Pacific only while `site` is still loading; every rendered
+  // row uses the real zone because the scan table renders under `site`.
+  const scanTs = useMemo(
+    () => makeScanTsFormat(site?.timezone ?? 'America/Los_Angeles'),
+    [site?.timezone],
+  );
+
+  // Scans grouped into rounds, newest round first; scans within a round run
+  // chronologically forward (the API hands them back DESC).
+  //
+  // Completeness is measured against the CURRENT roster — see the explainer
+  // rendered above the table. `scanned` counts only checkpoints still in that
+  // roster, matching windowCounter's `sc2.is_active = true` filter: if a scan
+  // of a since-removed checkpoint counted toward a denominator built from the
+  // current list, a round could read "6 of 5". Those scans still render as
+  // rows (history stays visible) and are flagged inline so the arithmetic is
+  // legible rather than mysterious.
+  //
+  // Rounds with zero scans cannot appear here — there is no row to group.
+  // Surfacing them needs session-window enumeration in the API and is
+  // deliberately out of scope for this commit.
+  const rounds = useMemo<Round[]>(() => {
+    if (scans.length === 0 || !site) return [];
+    const labelFor = makeRoundLabeller(site.timezone);
+
+    const byWindow = new Map<string, CheckpointScan[]>();
+    for (const s of scans) {
+      // Normalize through Date so any serialization drift in round_window
+      // can't split one round across two groups.
+      const parsed = new Date(s.round_window);
+      const key = Number.isNaN(parsed.getTime()) ? String(s.round_window) : parsed.toISOString();
+      const bucket = byWindow.get(key);
+      if (bucket) bucket.push(s);
+      else byWindow.set(key, [s]);
+    }
+
+    // Array.from, not spread: this tsconfig targets below ES2015, where
+    // spreading a Map iterator needs --downlevelIteration.
+    return Array.from(byWindow.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))   // newest round first
+      .map(([key, group]) => {
+        const ordered = [...group].sort(
+          (a, b) => new Date(a.scanned_at).getTime() - new Date(b.scanned_at).getTime(),
+        );
+        const hitIds = new Set(
+          ordered.map((s) => s.checkpoint_id).filter((id) => activeLinkedIds.has(id)),
+        );
+        return {
+          key,
+          label:    labelFor(key),
+          scans:    ordered,
+          scanned:  hitIds.size,
+          expected: activeLinked.length,
+          missing:  activeLinked.filter((c) => !hitIds.has(c.id)).map((c) => c.label),
+        };
+      });
+  }, [scans, site, activeLinked, activeLinkedIds]);
+
+  // C5/C7 — CSV export of exactly the rows on screen. Oldest first,
   // deliberately the reverse of the on-screen DESC order: a patrol log
   // handed to a property manager reads chronologically forward.
   // Timestamps render in the SITE's timezone with the zone abbreviation on
   // every value (not just the header) so rows crossing a DST flip stay
   // unambiguous. Distance is whole meters; the unit lives in the header.
+  //
+  // C7: one row per scan, with the round label repeated on every row of its
+  // round. Repetition is deliberate — Excel sorts and filters a flat column
+  // correctly, whereas a label printed once per group breaks the moment
+  // anyone re-sorts the sheet.
   function exportScansCsv() {
     if (!site || scans.length === 0 || scansTruncated || !!scanRangeError) return;
     const tsFmt = new Intl.DateTimeFormat('en-US', {
@@ -263,14 +438,19 @@ export default function SiteDetailPage() {
       hour: '2-digit', minute: '2-digit', hour12: false,
       timeZone: site.timezone, timeZoneName: 'short',
     });
-    const header = ['Checkpoint', 'Guard', 'Scanned At', 'Distance (m)'].map(csvField).join(',');
-    const rows = [...scans].reverse().map((s) =>
-      [
-        s.checkpoint_label,
-        s.guard_name,
-        tsFmt.format(new Date(s.scanned_at)),
-        Math.round(s.distance_m),
-      ].map(csvField).join(','),
+    const header = ['Round', 'Checkpoint', 'Guard', 'Scanned At', 'Distance (m)'].map(csvField).join(',');
+    // `rounds` is newest-first for the screen; the file reads oldest-first.
+    // Scans are already chronological within each round.
+    const rows = [...rounds].reverse().flatMap((r) =>
+      r.scans.map((s) =>
+        [
+          r.label,
+          s.checkpoint_label,
+          s.guard_name,
+          tsFmt.format(new Date(s.scanned_at)),
+          Math.round(s.distance_m),
+        ].map(csvField).join(','),
+      ),
     );
     // BOM so Excel decodes UTF-8 names correctly (this file's whole purpose
     // is being opened in Excel by a property manager).
@@ -760,9 +940,20 @@ export default function SiteDetailPage() {
           </p>
         ) : !scanRangeError && (
           <>
-            {/* Desktop (md+): table. distance_m gets its own column — the
-                anti-fraud signal. Plain number, no thresholds: there is no
-                data yet to justify one. */}
+            {/* The honesty note. Completeness is derived from the roster as it
+                stands right now, not as it stood during the round — say so
+                plainly rather than letting "3 of 5" imply a historical
+                guarantee the data cannot support. Roster snapshotting is
+                deferred Phase 2 work. */}
+            <p className="text-gray-500 text-xs mb-3 leading-relaxed">
+              Counts are measured against the <span className="text-gray-400">current checkpoint list</span>
+              {' '}({activeLinked.length} active and linked). A checkpoint added, deactivated
+              or unlinked later changes what past rounds appear to have missed.
+            </p>
+
+            {/* Desktop (md+): one tbody per round, each opened by a header row.
+                distance_m keeps its own column — the anti-fraud signal. Plain
+                number, no thresholds: there is no data yet to justify one. */}
             <div className="hidden md:block overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
@@ -773,34 +964,78 @@ export default function SiteDetailPage() {
                     <th className="py-2 font-normal">DISTANCE (M)</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#1A3050]">
-                  {scans.map((s) => (
-                    <tr key={s.id}>
-                      <td className="py-2.5 pr-4 text-gray-200">{s.checkpoint_label}</td>
-                      <td className="py-2.5 pr-4 text-gray-300">{s.guard_name}</td>
-                      <td className="py-2.5 pr-4 text-gray-400 font-mono text-xs">
-                        {SCAN_TS.format(new Date(s.scanned_at))}
+                {rounds.map((r) => (
+                  <tbody key={r.key} className="divide-y divide-[#1A3050]">
+                    <tr>
+                      <td colSpan={4} className="pt-4 pb-2">
+                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                          <span className="text-amber-400 font-bold tracking-widest text-xs">{r.label}</span>
+                          <RoundCount scanned={r.scanned} expected={r.expected} />
+                          {r.missing.length > 0 && (
+                            <span className="text-gray-500 text-xs min-w-0 break-words">
+                              Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
+                            </span>
+                          )}
+                        </div>
                       </td>
-                      <td className="py-2.5 text-gray-300 font-mono text-xs">{Math.round(s.distance_m)} m</td>
                     </tr>
-                  ))}
-                </tbody>
+                    {r.scans.map((s) => (
+                      <tr key={s.id}>
+                        <td className="py-2.5 pr-4 text-gray-200">
+                          {s.checkpoint_label}
+                          {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
+                        </td>
+                        <td className="py-2.5 pr-4 text-gray-300">{s.guard_name}</td>
+                        <td className="py-2.5 pr-4 text-gray-400 font-mono text-xs">
+                          {scanTs.format(new Date(s.scanned_at))}
+                        </td>
+                        <td className="py-2.5 text-gray-300 font-mono text-xs">{Math.round(s.distance_m)} m</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                ))}
               </table>
             </div>
 
-            {/* Mobile (<md): cards, per docs/mobile-responsive.md. */}
-            <div className="md:hidden space-y-2">
-              {scans.map((s) => (
-                <div key={s.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-gray-200 text-sm font-medium break-words min-w-0">{s.checkpoint_label}</span>
-                    <span className="text-gray-300 font-mono text-xs shrink-0">{Math.round(s.distance_m)} m</span>
+            {/* Mobile (<md): cards, per docs/mobile-responsive.md. At 375px the
+                round header stacks — label on its own line, count beneath it,
+                missing checkpoints wrapping below — so nothing is squeezed into
+                a shared row and truncated. The header is a filled bar rather
+                than a text line so the group boundary survives scrolling. */}
+            <div className="md:hidden space-y-4">
+              {rounds.map((r) => (
+                <div key={r.key}>
+                  <div className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 mb-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-amber-400 font-bold tracking-widest text-xs break-words min-w-0">
+                        {r.label}
+                      </span>
+                      <RoundCount scanned={r.scanned} expected={r.expected} />
+                    </div>
+                    {r.missing.length > 0 && (
+                      <p className="text-gray-500 text-xs mt-1 break-words">
+                        Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
+                      </p>
+                    )}
                   </div>
-                  <p className="text-gray-500 text-xs mt-0.5">
-                    {s.guard_name}
-                    <span className="text-gray-600"> · </span>
-                    <span className="font-mono">{SCAN_TS.format(new Date(s.scanned_at))}</span>
-                  </p>
+                  <div className="space-y-2 pl-2 border-l border-[#1A3050]">
+                    {r.scans.map((s) => (
+                      <div key={s.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-200 text-sm font-medium break-words min-w-0">
+                            {s.checkpoint_label}
+                            {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
+                          </span>
+                          <span className="text-gray-300 font-mono text-xs shrink-0">{Math.round(s.distance_m)} m</span>
+                        </div>
+                        <p className="text-gray-500 text-xs mt-0.5">
+                          {s.guard_name}
+                          <span className="text-gray-600"> · </span>
+                          <span className="font-mono">{scanTs.format(new Date(s.scanned_at))}</span>
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>
