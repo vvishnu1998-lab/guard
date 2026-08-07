@@ -25,6 +25,16 @@
  *   activity_report         → blue  "Activity Report"
  *   incident_report         → red   "Incident Report"
  *   maintenance_report      → amber "Maintenance Report"
+ *   checkpoint_round_complete → green "Round Complete"
+ *   checkpoint_round_partial  → amber "Round Partial"
+ *
+ * Patrol rounds (kind 'checkpoint_round') are one row per site-hour. They
+ * render their hour label and scan times in the ROW'S OWN timezone, unlike
+ * every other kind, which uses the fixed Pacific formatters — see the
+ * comment above fmtRoundLabel. Expanding a round lists its scans; distance
+ * is deliberately absent here and lives only on the site detail page.
+ * Clients see the round, its status and its scan list, but never the
+ * expected_count ratio (the server nulls it for them).
  *
  * Filter modes:
  *   admin  → search + site + shift + range picker + DOWNLOAD PDF
@@ -51,11 +61,23 @@ type StatusKind =
   | 'clocked_in_on_time'
   | 'clocked_in_late'
   | 'missed_clock_in'
-  | 'missed_report';
+  | 'missed_report'
+  | 'checkpoint_round_complete'
+  | 'checkpoint_round_partial';
+
+/** One scan inside a patrol round. Note there is deliberately no distance
+ *  field: distance is an anti-fraud diagnostic and lives on the site detail
+ *  page, not in a log a client reads. */
+interface RoundCheckpoint {
+  checkpoint_id:     string;
+  label:             string;
+  scanned_at:        string;
+  in_current_roster: boolean;
+}
 
 interface ActivityRow {
   id:              string;
-  kind:            'ping' | 'report';
+  kind:            'ping' | 'report' | 'checkpoint_round';
   guard_id:        string;
   guard_name:      string;
   site_id:         string;
@@ -83,6 +105,16 @@ interface ActivityRow {
   accuracy_m:         number  | null;
   is_within_geofence: boolean | null;
   ping_type:          string  | null;
+  // Patrol-round only (null/[] on the six other kinds).
+  round_window:   string | null;
+  /** The SITE's IANA zone — see fmtRoundLabel for why rounds carry their own. */
+  timezone:       string | null;
+  checkpoints:    RoundCheckpoint[] | null;
+  // Server-nulled for client role, same as the ping coordinates above: the
+  // ratio is a comparison against the CURRENT roster, which can change and
+  // retroactively alter a past round. Complete/Partial is safe for clients.
+  scanned_count:  number | null;
+  expected_count: number | null;
 }
 
 interface ActivityLogResponse {
@@ -124,6 +156,64 @@ const PT_DATE_LONG = new Intl.DateTimeFormat('en-GB', {
   hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
 });
 const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// ── Patrol-round formatters (per-row timezone, NOT Pacific) ─────────────────
+//
+// Two timezone approaches now coexist in this component, deliberately:
+//
+//   • pings / reports / clock-ins → the PT_* formatters above, fixed to
+//     America/Los_Angeles. Pre-existing, and left exactly as it was.
+//   • patrol rounds              → the row's own `timezone` field.
+//
+// Rounds differ because a round IS an hour in the site's local day — "the
+// 5 PM round" is the thing being asserted — so rendering it in Pacific for a
+// non-Pacific site would state something false rather than merely
+// inconvenient. Round rows carry the zone per row because the admin feed
+// spans sites and no single zone is safe to assume.
+//
+// Converting the rest of the component to per-row timezones is a separate
+// commit. Until then, expect a Pacific ping and a site-local round to sit
+// side by side in the same feed.
+
+const ROUND_MS = 60 * 60 * 1000;
+
+/**
+ * "Patrol round, 5-6 PM" in the SITE's zone. The meridiem is printed once
+ * when both ends share it and on both ends when they differ ("11 AM-12 PM").
+ * The date belongs to the round's START, so an 11 PM-12 AM round stays filed
+ * under the day it began.
+ */
+function fmtRoundLabel(roundWindow: string | null, timeZone: string | null): string {
+  if (!roundWindow) return 'Patrol round';
+  const start = new Date(roundWindow);
+  if (Number.isNaN(start.getTime())) return 'Patrol round';
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', hour12: true, timeZone: timeZone ?? 'America/Los_Angeles',
+  });
+  const partsOf = (d: Date) => {
+    const parts = fmt.formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+    return { hour: get('hour'), period: get('dayPeriod') };
+  };
+  const s = partsOf(start);
+  const e = partsOf(new Date(start.getTime() + ROUND_MS));
+  const startHour = s.period === e.period ? s.hour : `${s.hour} ${s.period}`;
+  return `Patrol round, ${startHour}-${e.hour} ${e.period}`;
+}
+
+/** Scan time inside an expanded round, in the site's zone with the zone
+ *  abbreviation so it can't be misread as the viewer's local time. */
+function fmtScanTime(iso: string, timeZone: string | null): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  // en-US (with hour12 off) rather than en-GB: both give 24-hour times, but
+  // en-GB renders the zone as "GMT-7" where en-US gives "PDT". Matches the
+  // site-detail CSV export, which already formats scan times this way.
+  return new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+    timeZone: timeZone ?? 'America/Los_Angeles', timeZoneName: 'short',
+  }).format(d);
+}
 
 /**
  * Format a YYYY-MM-DD string as "Mon D" without any Date roundtrip.
@@ -240,6 +330,12 @@ function statusPresentation(r: ActivityRow): StatusPresentation {
         textClass: 'text-rose-400',
         pillClass: RED_PILL,
       };
+    // Complete vs partial is shown in BOTH modes — it is a fact about the
+    // round, not a roster comparison. The counts behind it are admin-only.
+    case 'checkpoint_round_complete':
+      return { label: 'Round Complete', textClass: 'text-emerald-400', pillClass: GREEN_PILL };
+    case 'checkpoint_round_partial':
+      return { label: 'Round Partial',  textClass: 'text-amber-400',   pillClass: AMBER_PILL };
     case 'activity_report':
       return { label: 'Activity Report',    textClass: 'text-sky-400',   pillClass: BLUE_PILL };
     case 'incident_report':
@@ -695,6 +791,11 @@ export default function ActivityLogTable({
           const photos  = r.log_media_urls ?? [];
           const isFlash = r.id === flashId;
           const isOpen  = expandedId === r.id;
+          const isRound = r.kind === 'checkpoint_round';
+          const scans   = r.checkpoints ?? [];
+          // expected_count arrives null for clients (server-gated), so this is
+          // false in client mode regardless of what the UI asks for.
+          const showRatio = mode === 'admin' && r.expected_count !== null;
 
           return (
             <div key={r.id}>
@@ -725,12 +826,31 @@ export default function ActivityLogTable({
                   </span>
                 </div>
 
-                {/* LOG TIME */}
-                <span className="text-xs text-gray-400">{fmtLogTime(r.log_time)}</span>
+                {/* LOG TIME — rounds print their own site-local hour label
+                    instead of the Pacific timestamp; see fmtRoundLabel. */}
+                <span className="text-xs text-gray-400">
+                  {isRound ? fmtRoundLabel(r.round_window, r.timezone) : fmtLogTime(r.log_time)}
+                </span>
 
-                {/* LOG MEDIA (first thumbnail if any, else em-dash) */}
+                {/* LOG MEDIA — rounds never carry media, so this cell shows
+                    the scan count instead of an em-dash. Admin additionally
+                    sees the ratio, with the qualifier inline rather than in a
+                    tooltip: it changes how the number should be read. */}
                 <div>
-                  {photos.length === 0 ? (
+                  {isRound ? (
+                    <div className="min-w-0">
+                      <span className="text-xs text-gray-300">
+                        {showRatio
+                          ? `${r.scanned_count} of ${r.expected_count}`
+                          : `${r.scanned_count ?? scans.length} scanned`}
+                      </span>
+                      {showRatio && (
+                        <span className="block text-[10px] text-gray-500 leading-tight">
+                          vs current list
+                        </span>
+                      )}
+                    </div>
+                  ) : photos.length === 0 ? (
                     <span className="text-gray-600 text-xs">—</span>
                   ) : (
                     <button
@@ -796,12 +916,68 @@ export default function ActivityLogTable({
                       }
                     />
                     <ExpandedField label="Site" value={<span className="text-gray-200">{r.site_name}</span>} />
-                    <ExpandedField label="Timestamp" value={
-                      <span className="text-gray-400 font-mono">
-                        {r.log_time ? PT_DATE_LONG.format(new Date(r.log_time)) + ' PT' : '—'}
-                      </span>
+                    <ExpandedField label={isRound ? 'Round' : 'Timestamp'} value={
+                      isRound ? (
+                        <span className="text-gray-400 font-mono">
+                          {fmtRoundLabel(r.round_window, r.timezone)}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400 font-mono">
+                          {r.log_time ? PT_DATE_LONG.format(new Date(r.log_time)) + ' PT' : '—'}
+                        </span>
+                      )
                     } />
                   </div>
+
+                  {/* Patrol round — the individual scans. Shown in BOTH modes:
+                      this is what actually happened, and it is the same list
+                      either way. Times are in the site's zone. No distance
+                      column by design. */}
+                  {isRound && (
+                    <div className="mt-4">
+                      <p className="text-[10px] text-gray-500 tracking-widest mb-2">
+                        CHECKPOINTS SCANNED ({scans.length})
+                      </p>
+                      {scans.length === 0 ? (
+                        <p className="text-xs text-gray-600 italic">No scans recorded for this round.</p>
+                      ) : (
+                        <ul className="space-y-1.5">
+                          {scans.map((c) => (
+                            <li
+                              key={c.checkpoint_id + c.scanned_at}
+                              className="flex items-baseline justify-between gap-3 border-b border-[#1A3050]/60 pb-1.5 last:border-0"
+                            >
+                              <span className="text-sm text-gray-200 min-w-0 break-words">
+                                {c.label}
+                                {/* Admin-only: explains why this scan does not
+                                    count toward the ratio above. Meaningless to
+                                    a client, who never sees a ratio. */}
+                                {mode === 'admin' && !c.in_current_roster && (
+                                  <span
+                                    title="This checkpoint is no longer active and linked, so it is not counted in this round's total."
+                                    className="ml-2 text-[10px] tracking-widest text-gray-500 border border-gray-600 px-1.5 py-0.5 rounded whitespace-nowrap"
+                                  >
+                                    NOT IN CURRENT LIST
+                                  </span>
+                                )}
+                              </span>
+                              <span className="text-xs text-gray-400 font-mono shrink-0">
+                                {fmtScanTime(c.scanned_at, r.timezone)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {showRatio && (
+                        <p className="text-[11px] text-gray-500 mt-3 leading-relaxed">
+                          {r.scanned_count} of {r.expected_count} checkpoints on this site&apos;s
+                          {' '}<span className="text-gray-400">current</span> list were scanned in this
+                          round. The list can change — a checkpoint added or deactivated later will
+                          alter this ratio for past rounds.
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   {r.description && (
                     <div className="mt-4">
@@ -830,7 +1006,7 @@ export default function ActivityLogTable({
                     </div>
                   )}
 
-                  {!r.description && photos.length === 0 && (
+                  {!isRound && !r.description && photos.length === 0 && (
                     <p className="text-xs text-gray-600 italic mt-3">
                       {r.kind === 'ping' && r.status_kind === 'missed'
                         ? 'No ping was received in this half-hour window.'
