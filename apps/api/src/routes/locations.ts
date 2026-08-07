@@ -483,14 +483,46 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
 router.post('/violation', requireAuth('guard'), async (req, res) => {
   const { shift_session_id, latitude, longitude, photo_url } = req.body;
 
-  const sessionResult = await pool.query(
-    'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+  const sessionResult = await pool.query<{ site_id: string; clocked_out_at: Date | null }>(
+    'SELECT site_id, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
     [shift_session_id, req.user!.sub]
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Session not found' });
 
-  const siteId   = sessionResult.rows[0].site_id;
-  const guardId  = req.user!.sub;
+  const siteId       = sessionResult.rows[0].site_id;
+  const clockedOutAt = sessionResult.rows[0].clocked_out_at;
+  const guardId      = req.user!.sub;
+
+  // Liveness gate (2026-08-07). Ownership alone is not enough: the
+  // autoCompleteShifts cron closes a session server-side at scheduled_end,
+  // and the mobile app has no channel to learn that — its registered
+  // geofence region stays armed until the store next transitions. On
+  // 2026-08-06 that produced two boundary reports 3 and 28 minutes after
+  // clock-out, each writing a violation row + a notifications row + a guard
+  // push + an email to every active admin.
+  //
+  // Distinct from the 403 above so the two failure modes are separable in
+  // logs: 403 = not your session / no such session, 409 = your session, but
+  // it has ended. Matches the code+message shape of the 422 geofence
+  // rejections on the other endpoints in this file.
+  //
+  // Open violations are unaffected — they stay resolvable via PATCH
+  // /violation/:id/resolve, the clock-out sweeps in shifts.ts and
+  // jobs/autoCompleteShifts.ts, and the onsite-ping auto-resolve above.
+  if (clockedOutAt) {
+    console.warn('[violation.reject.session_closed]', {
+      shift_session_id,
+      guard_id:       guardId,
+      clocked_out_at: clockedOutAt.toISOString(),
+      latitude,
+      longitude,
+    });
+    return res.status(409).json({
+      error:   'SESSION_CLOSED',
+      message: 'This shift has already ended. Boundary reports are only accepted during an open session.',
+      clocked_out_at: clockedOutAt.toISOString(),
+    });
+  }
 
   const insertResult = await pool.query(
     `INSERT INTO geofence_violations
