@@ -33,8 +33,11 @@ Verified ground truth for the NetraOps platform. When live state may have change
 ## Geofence behavior
 
 - Server validation: `polygonOk OR radiusOk`.
-- Mobile diverges: radius-gate 1.5× AND `isPointInPolygon`; null polygon crashes mobile (`apps/mobile/utils/geofence.ts:8`, no null guard).
-- Mobile caches `pendingShift.geofence` at shift load — server-side changes don't propagate to open apps. Refresh path: force-quit + re-login; nuclear: reinstall.
+- **DETECTION ≠ VALIDATION on mobile — do not conflate them.** Background boundary detection is native OS region monitoring (`Location.startGeofencingAsync`, `tasks/locationBackground.ts:176`): ONE circular region, `identifier: 'active_post'`, centre + `radius_meters`, Enter/Exit. **No polygon and no JS math are involved in detection.** Reading the JS containment helpers as the breach detector is the misreading that made an audit describe code no user runs.
+- JS containment (`utils/geofence.ts`) is a client-side PRE-FLIGHT on submission screens only, never a detector. `isInsideGeofence` (:71) mirrors the server — polygon OR radius, never AND: usable polygon (≥3 verts) → polygon test alone; otherwise `distance <= radius + accuracy + 20m`. Deliberately does not fail closed; the server is the authority. Callers: `clock-in/step1.tsx:80`, `shifts/[id]/handoff-clock-in.tsx:199`, `violation/[violationId].tsx:81`.
+- The 1.5× radius figure is a cheap short-circuit ahead of the polygon test on two screens only (`clock-in/step1.tsx:67`, `handoff-clock-in.tsx:186`), both gated on `polygonUsable` — it is not a general radius gate and is not ANDed with the polygon test.
+- Null polygon no longer crashes mobile (fixed `f2eab42`, on main since `c9cb986`). `hasUsablePolygon()` at `utils/geofence.ts:13`; `isPointInPolygon` guards on it at :28, `isInsideGeofence` at :81.
+- Mobile caches `activeShift.geofence` at clock-in — server-side geofence edits do NOT propagate to an app with a shift in progress. `refreshFromServer` (`store/shiftStore.ts:127`, fired on AppState→active `_layout.tsx:254` w/ 2s throttle, and home `useFocusEffect` `home.tsx:173`) only ever CLEARS a dead session; it deliberately never rewrites `activeShift`, or it would tear down region monitoring. Only `setActiveSession` rehydrates the fence: clock-in (`clock-in/step4.tsx:190`) or `restoreOrFetchShift`, which runs only `if (!isOnShift)` (`home.tsx:268`). Refresh path: force-quit is enough (the store is in-memory, so relaunch re-fetches) — re-login is NOT required; nuclear: reinstall.
 
 ## Build/release invariants
 
