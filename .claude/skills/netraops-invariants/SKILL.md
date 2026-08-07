@@ -39,7 +39,10 @@ Verified ground truth for the NetraOps platform. When live state may have change
 ## Build/release invariants
 
 - EAS remote versioning (`appVersionSource: 'remote'` + `autoIncrement`) is source of truth — `app.json` buildNumber/versionCode are ignored and lag.
-- `batch/mobile-N+1` is cut off `batch/mobile-N`, NEVER off main (cutting off main regressed Build 34's scope once).
+- Mobile accumulates on `batch/mobile-N`; no builds until explicitly triggered. Once a build from that branch ships to TestFlight, merge the branch to main (`--no-ff`, NEVER squash — the individual commits are the record of what shipped in each build), then cut `batch/mobile-N+1` **from main**. Caps drift at one build. (Merge `c9cb986` closed the backlog; `batch/mobile-10` is the first branch cut under this rule.)
+- The rule this replaced was "never cut from main", which existed because cutting from a STALE main once regressed Build 34's scope. That failure mode is real and is NOT reintroduced: cutting from main is safe only because main now absorbs each shipped batch. Cutting from a main that has NOT absorbed the last shipped batch regresses exactly as before — verify absorption first.
+- Cost of the old rule, for anyone tempted to reinstate it: apps/mobile on main went four weeks stale and carried a DIFFERENT architecture from every shipped binary (periodic `startLocationUpdatesAsync` vs native `startGeofencingAsync`). An audit read main, described code no user runs, and produced a wrong conclusion about an Apple App Review submission. The failure is silent — `git status` clean, file present, compiles.
+- Standing check: any audit of mobile BEHAVIOUR must state which ref it read. The working tree is NOT authoritative for mobile unless main has absorbed the last shipped batch — otherwise read the build commit via `git show <sha>:<path>`.
 - `babel.config.js`: `react-native-worklets/plugin` must be the LAST Babel transform or the app crashes pre-splash.
 - iOS `eas submit` auto-resolves ASC keys from Expo server storage; Android needs local `google-service-account.json` (manual Console upload is the fallback).
 - `npm start` does NOT run migrations. Run via `railway run npm run db:migrate` or `DATABASE_PUBLIC_URL` from workstation; `postgres.railway.internal` resolves only inside Railway.

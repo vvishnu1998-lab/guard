@@ -11,8 +11,8 @@ Four disciplines: **branch/build strategy**, **build gates**, **app store ops**,
 
 - Backend/API changes ship to `main` immediately (cheap deploys).
 - Expensive-build targets (mobile) accumulate on a long-lived `batch/<target>-N` branch; no builds until explicitly triggered.
-- **Critical rule: `batch/<target>-N+1` is cut off `batch/<target>-N`'s tip, NEVER off main.** Cutting off main silently drops every accumulated commit on the previous batch — a build from the new branch regresses shipped features.
-- Mixed commits (server + mobile in one change): commit together on the batch branch, then cherry-pick the server paths (`apps/api/**`) to main path-scoped. Mobile portion stays on the batch.
+- **Critical rule — the full cycle: accumulate on `batch/<target>-N` → ship a build from it → merge that branch to main (`--no-ff`, NEVER squash; the individual commits are the record of what shipped in each build) → cut `batch/<target>-N+1` off main.** The danger was never "main", it was **stale main**: cutting a new batch off a main that has NOT absorbed the last shipped batch silently drops every accumulated commit, and a build from the new branch regresses shipped features. Merging back before cutting is what makes main safe to cut from, and caps drift at one build. If the merge hasn't happened, cut off `batch/<target>-N`'s tip instead.
+- Mixed commits (server + mobile in one change): commit together on the batch branch, then cherry-pick the server paths (`apps/api/**`) to main path-scoped. The mobile portion stays on the batch **until a build from it ships — then the branch merges to main per the cycle above.** Without that merge-back step, main's copy of the expensive-build target drifts arbitrarily far from what actually ships, and any audit reading it describes code no user runs.
 - Flag breaking API↔client coupling before shipping the API half: will old deployed clients break against the new API?
 - Hotfix override: on "emergency build", branch from main directly — don't route through the batch.
 
@@ -24,7 +24,7 @@ pwd                      # correct repo
 git rev-parse HEAD       # note the exact sha
 git status               # clean tree
 ```
-Confirm HEAD is the intended batch tip, not main or a stale branch.
+Confirm HEAD is the intended ref for this build and contains the accumulated work you expect — equalling main is fine on a freshly cut batch; being behind the last shipped batch is not.
 
 **Post-build gate:** query the build system for the built artifact's commit hash and assert it equals the pre-build HEAD. A build from the wrong sha ships silently otherwise.
 
@@ -63,7 +63,7 @@ Confirm HEAD is the intended batch tip, not main or a stale branch.
 
 ## Anti-patterns
 
-- Cutting a new batch branch off main (regression time bomb).
+- Cutting a new batch branch off a main that has not absorbed the last shipped batch (regression time bomb).
 - Triggering a build without the pre-build gate, or skipping the post-build hash assertion.
 - Hand-editing local build numbers under remote versioning.
 - Modifying reviewer-facing data mid-review.
