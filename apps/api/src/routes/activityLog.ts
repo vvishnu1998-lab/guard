@@ -1,7 +1,8 @@
 /**
- * Activity Log — unified feed of pings (with missed/late synthesized rows)
- * and full reports (activity / incident / maintenance). Drives the admin
- * "Activity Logs" page and the client portal's site activity view.
+ * Activity Log — unified feed of pings (with missed/late synthesized rows),
+ * full reports (activity / incident / maintenance), and patrol rounds.
+ * Drives the admin "Activity Logs" page and the client portal's site
+ * activity view.
  *
  * GET /api/activity-log
  *   ?from=ISO  (default: now - 7 days)
@@ -30,8 +31,18 @@
  *   - Ping arrived < 10 min late  → "Ping (X minutes)"
  *   - Ping arrived ≥ 10 min late  → "Late Ping (X minutes)"
  *
+ * Patrol rounds: one row per (site, round_window) from checkpoint_scans,
+ * sorted into the timeline by round_window. Only rounds whose hour has
+ * elapsed appear. Complete vs partial is visible to both roles; the
+ * underlying counts are admin-only (see ActivityRow.scanned_count).
+ * Zero-scan rounds are NOT synthesized — that needs session-window
+ * enumeration and is deliberately out of scope.
+ *
  * Pagination is computed after merge+sort in memory. Fine for typical
- * volumes (a few hundred rows); revisit if it grows.
+ * volumes (a few hundred rows); revisit if it grows. Rounds add ~25% to
+ * row counts and do not scale with checkpoints-per-site, but note the
+ * caveat is already strained for multi-site admins on wide ranges —
+ * pushing pagination into SQL is tracked separately.
  */
 import { Router, Request, Response } from 'express';
 import PDFDocument from 'pdfkit';
@@ -99,6 +110,18 @@ interface ReportRow {
   legal_hold:      boolean;
 }
 
+interface RoundQueryRow {
+  site_id:        string;
+  site_name:      string;
+  timezone:       string;
+  round_window:   string;
+  first_guard_id: string;
+  guard_names:    string[];
+  scanned_count:  number;
+  expected_count: number;
+  checkpoints:    RoundCheckpoint[];
+}
+
 type StatusKind =
   | 'on_time'
   | 'late'
@@ -109,11 +132,25 @@ type StatusKind =
   | 'clocked_in_on_time'
   | 'clocked_in_late'
   | 'missed_clock_in'
-  | 'missed_report';
+  | 'missed_report'
+  | 'checkpoint_round_complete'
+  | 'checkpoint_round_partial';
+
+/** One scan inside a patrol round, for expanding a round row without a
+ *  second request. */
+export interface RoundCheckpoint {
+  checkpoint_id: string;
+  label:         string;
+  scanned_at:    string;
+  /** False once the checkpoint is deactivated or unlinked. Such scans stay
+   *  in the list as history but do not count toward scanned_count — see the
+   *  round query for why the two must be drawn from the same set. */
+  in_current_roster: boolean;
+}
 
 export interface ActivityRow {
   id:             string;
-  kind:           'ping' | 'report';
+  kind:           'ping' | 'report' | 'checkpoint_round';
   guard_id:       string;
   guard_name:     string;
   site_id:        string;
@@ -151,7 +188,36 @@ export interface ActivityRow {
   accuracy_m:         number  | null;
   is_within_geofence: boolean | null;
   ping_type:          string  | null;
+
+  // ── Patrol-round fields (null on every other kind) ──────────────────────
+  /** Round start: the site-local hour floor stored as its UTC instant. */
+  round_window: string | null;
+  /** The SITE's IANA zone. Per row, not per response: the admin feed spans
+   *  sites, so there is no single zone the client could assume. */
+  timezone:     string | null;
+  /** Every scan in the round, oldest first. */
+  checkpoints:  RoundCheckpoint[] | null;
+
+  // Counts are admin-only, null for clients — same server-side gating as the
+  // ping coordinates above. "3 of 5" is a comparison against the CURRENT
+  // roster, which can change retroactively, so it is not something to put in
+  // front of a client. The complete/partial status_kind is safe for both:
+  // a round where the guard scanned every currently-linked checkpoint
+  // genuinely was complete.
+  scanned_count:  number | null;
+  expected_count: number | null;
 }
+
+/** Patrol-round fields as they appear on every NON-round row. Spread rather
+ *  than repeated six times — the surrounding rows already list ~20 fields
+ *  each and five more nulls apiece would bury the parts that differ. */
+const NO_ROUND = {
+  round_window:   null,
+  timezone:       null,
+  checkpoints:    null,
+  scanned_count:  null,
+  expected_count: null,
+} as const;
 
 /** Round up to the next UTC :00 or :30 boundary. */
 function nextHalfHour(ms: number): number {
@@ -334,6 +400,78 @@ export async function fetchActivityRows(
   reportQuery += ' GROUP BY r.id, r.legal_hold, ss.id, ss.guard_id, g.name, si.name, sh.id, sh.scheduled_start, sh.scheduled_end';
   const reportsResult = await pool.query<ReportRow>(reportQuery, reportParams);
 
+  // ── Pull patrol rounds in range (scoped) ─────────────────────────────────
+  // One row per (site, round_window) — not per scan. A client cares that the
+  // 5 PM round happened, not that the lobby tag was read at 17:08, and round
+  // granularity keeps this source ~1/Nth the volume of scan granularity.
+  //
+  // Grouping is by SITE + window, deliberately not by session: a round that
+  // straddles a shift handover is still one round at that site, which is why
+  // round rows carry no shift_id.
+  //
+  // expected_count reuses windowCounter's definition verbatim
+  // (routes/checkpoints.ts) — is_active AND code_value IS NOT NULL — rather
+  // than inventing a second one. scanned_count is filtered to that same set:
+  // counting a scan of a since-removed checkpoint against a denominator built
+  // from the current roster could produce "6 of 5". Those scans stay in the
+  // checkpoints array flagged in_current_roster:false so the arithmetic is
+  // still explicable.
+  //
+  // Only COMPLETE rounds appear. A round whose hour has not elapsed is still
+  // in progress, and labelling it "partial" would be premature — the same
+  // rule the ping loop applies via its `isComplete` check.
+  let roundQuery = `
+    SELECT
+      cs.site_id,
+      si.name                                          AS site_name,
+      si.timezone,
+      cs.round_window,
+      (array_agg(cs.guard_id ORDER BY cs.scanned_at))[1]::text AS first_guard_id,
+      array_agg(DISTINCT g.name)                       AS guard_names,
+      COUNT(DISTINCT cs.checkpoint_id) FILTER (
+        WHERE sc.is_active = true AND sc.code_value IS NOT NULL
+      )::int                                           AS scanned_count,
+      (SELECT COUNT(*)::int FROM site_checkpoints x
+        WHERE x.site_id = cs.site_id
+          AND x.is_active = true
+          AND x.code_value IS NOT NULL)                AS expected_count,
+      json_agg(json_build_object(
+        'checkpoint_id',     cs.checkpoint_id,
+        'label',             sc.label,
+        -- Formatted explicitly rather than handed to json_build_object raw:
+        -- inside a json_ constructor a timestamptz is rendered by Postgres
+        -- as "...-07:00", bypassing node-pg's Date conversion, so it would
+        -- be the only timestamp in the payload not in Z form.
+        'scanned_at',        to_char(cs.scanned_at AT TIME ZONE 'UTC',
+                                     'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'in_current_roster', (sc.is_active AND sc.code_value IS NOT NULL)
+      ) ORDER BY cs.scanned_at)                        AS checkpoints
+    FROM checkpoint_scans cs
+    JOIN site_checkpoints sc ON sc.id = cs.checkpoint_id
+    JOIN sites  si           ON si.id = cs.site_id
+    JOIN shift_sessions ss   ON ss.id = cs.shift_session_id
+    JOIN guards g            ON g.id  = cs.guard_id
+    WHERE ${scopeWhere}
+      AND cs.round_window >= $${scopeParams.length + 1}
+      AND cs.round_window <= $${scopeParams.length + 2}
+      AND cs.round_window + INTERVAL '1 hour' <= NOW()`;
+  const roundParams: unknown[] = [...scopeParams, fromIso, toIso];
+
+  if (guardId && isAdmin) {
+    roundQuery += ` AND cs.guard_id = $${roundParams.length + 1}`;
+    roundParams.push(guardId);
+  }
+  if (siteId && isAdmin) {
+    roundQuery += ` AND cs.site_id = $${roundParams.length + 1}`;
+    roundParams.push(siteId);
+  }
+  if (sessionId && isAdmin) {
+    roundQuery += ` AND cs.shift_session_id = $${roundParams.length + 1}`;
+    roundParams.push(sessionId);
+  }
+  roundQuery += ' GROUP BY cs.site_id, si.name, si.timezone, cs.round_window';
+  const roundsResult = await pool.query<RoundQueryRow>(roundQuery, roundParams);
+
   // ── Build merged feed ────────────────────────────────────────────────────
   const rows: ActivityRow[] = [];
 
@@ -399,6 +537,7 @@ export async function fetchActivityRows(
         accuracy_m:      null,
         is_within_geofence: null,
         ping_type:       null,
+        ...NO_ROUND,
       });
     }
 
@@ -446,6 +585,7 @@ export async function fetchActivityRows(
             accuracy_m:         isAdmin ? ping.accuracy_meters    : null,
             is_within_geofence: isAdmin ? ping.is_within_geofence : null,
             ping_type:          isAdmin ? ping.ping_type          : null,
+            ...NO_ROUND,
           });
         } else {
           rows.push({
@@ -474,6 +614,7 @@ export async function fetchActivityRows(
             accuracy_m:         null,
             is_within_geofence: null,
             ping_type:          null,
+            ...NO_ROUND,
           });
         }
       }
@@ -519,6 +660,7 @@ export async function fetchActivityRows(
             accuracy_m:      null,
             is_within_geofence: null,
             ping_type:       null,
+            ...NO_ROUND,
           });
         }
       }
@@ -609,6 +751,7 @@ export async function fetchActivityRows(
         accuracy_m:      null,
         is_within_geofence: null,
         ping_type:       null,
+        ...NO_ROUND,
       });
     }
   }
@@ -643,6 +786,52 @@ export async function fetchActivityRows(
       accuracy_m:         null,
       is_within_geofence: null,
       ping_type:          null,
+      ...NO_ROUND,
+    });
+  }
+
+  // Add patrol-round rows
+  for (const rd of roundsResult.rows) {
+    // expected_count === 0 means every checkpoint at the site has since been
+    // removed. Nothing was expected, so nothing was missed — treat as
+    // complete rather than crying wolf on a round nobody can act on.
+    const complete = rd.scanned_count >= rd.expected_count;
+    rows.push({
+      // Deterministic, matching the `missed-${session}-${window}` precedent —
+      // the id must survive a refetch once the web layer expands rows.
+      id:             `round-${rd.site_id}-${Date.parse(rd.round_window)}`,
+      kind:           'checkpoint_round',
+      // A round can span guards at a handover; guard_name carries all of
+      // them, guard_id the first to scan.
+      guard_id:       rd.first_guard_id,
+      guard_name:     rd.guard_names.join(', '),
+      site_id:        rd.site_id,
+      site_name:      rd.site_name,
+      status:         complete ? 'Patrol Round Complete' : 'Patrol Round Partial',
+      status_kind:    complete ? 'checkpoint_round_complete' : 'checkpoint_round_partial',
+      log_time:       rd.round_window,
+      log_media_url:  null,
+      log_media_urls: [],
+      event_time:     rd.round_window,
+      detail_id:      null,
+      // Rounds are site+hour scoped, not session scoped — see the query.
+      shift_id:        null,
+      scheduled_start: null,
+      scheduled_end:   null,
+      report_type:  null,
+      severity:     null,
+      description:  null,
+      legal_hold:   false,
+      latitude:           null,
+      longitude:          null,
+      accuracy_m:         null,
+      is_within_geofence: null,
+      ping_type:          null,
+      round_window:   rd.round_window,
+      timezone:       rd.timezone,
+      checkpoints:    rd.checkpoints,
+      scanned_count:  isAdmin ? rd.scanned_count  : null,
+      expected_count: isAdmin ? rd.expected_count : null,
     });
   }
 
