@@ -12,7 +12,8 @@
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "http://localhost:3001"
-      }
+      },
+      "channel": "development"
     },
     "preview": {
       "distribution": "internal",
@@ -25,20 +26,22 @@
       "env": {
         "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app",
         "EXPO_PUBLIC_SENTRY_ENV": "preview"
-      }
+      },
+      "channel": "preview"
     },
     "production": {
-  "autoIncrement": true,
-  "ios": {
-    "simulator": false
-  },
+      "autoIncrement": true,
+      "ios": {
+        "simulator": false
+      },
       "android": {
         "buildType": "app-bundle"
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app",
         "EXPO_PUBLIC_SENTRY_ENV": "production"
-      }
+      },
+      "channel": "production"
     }
   },
   "submit": {

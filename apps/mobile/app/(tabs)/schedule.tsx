@@ -7,9 +7,10 @@ import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   RefreshControl, ActivityIndicator, Dimensions,
 } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../lib/apiClient';
+import { formatScheduledHours } from '../../lib/formatHours';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -89,7 +90,10 @@ function fmtTime(iso: string) {
 
 function duration(start: string, end: string) {
   const h = (new Date(end).getTime() - new Date(start).getTime()) / 3_600_000;
-  return `${h.toFixed(1)}h`;
+  // Phase 3 — D2: scheduled duration displayed as HH:MM. A 0-length shift
+  // is a data error, so formatScheduledHours renders it as "—" rather
+  // than "0h 00m".
+  return formatScheduledHours(h);
 }
 
 export default function ScheduleScreen() {
@@ -243,7 +247,12 @@ export default function ScheduleScreen() {
                   selectedDayShifts.map(shift => {
                     const color = STATUS_COLOR[shift.status] ?? Colors.muted;
                     return (
-                      <View key={shift.id} style={[styles.shiftCard, { borderLeftColor: color }]}>
+                      <TouchableOpacity
+                        key={shift.id}
+                        style={[styles.shiftCard, { borderLeftColor: color }]}
+                        onPress={() => router.push(`/shifts/${shift.id}`)}
+                        activeOpacity={0.7}
+                      >
                         <View style={styles.shiftCardRow}>
                           <View style={{ flex: 1 }}>
                             <Text style={styles.siteName}>{shift.site_name.toUpperCase()}</Text>
@@ -257,8 +266,9 @@ export default function ScheduleScreen() {
                               {shift.status.toUpperCase()}
                             </Text>
                           </View>
+                          <Ionicons name="chevron-forward" size={18} color={Colors.muted} style={{ marginLeft: 4 }} />
                         </View>
-                      </View>
+                      </TouchableOpacity>
                     );
                   })
                 )}

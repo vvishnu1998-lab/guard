@@ -24,7 +24,29 @@ type NotificationType =
   | 'activity_report_reminder'
   | 'task_reminder'
   | 'chat'
-  | 'geofence_breach';
+  | 'geofence_breach'
+  // Phase 1A / A2 additions.
+  | 'off_post_report'
+  | 'off_post_task'
+  | 'missed_ping'
+  | 'missed_report'
+  | 'late_clock_in'
+  // Merged from batch/mobile-3 for the unified-feed model (option B).
+  // Swap family — pre-shift guard-to-guard swap invites + outcomes.
+  | 'swap_request_received'
+  | 'swap_request_sent'
+  | 'swap_accepted'
+  | 'swap_declined'
+  | 'swap_expired'
+  // Handoff family — mid-shift transfer.
+  | 'handoff_request_received'
+  | 'handoff_request_sent'
+  | 'handoff_accepted'
+  | 'handoff_declined'
+  | 'handoff_cancelled'
+  | 'handoff_complete'
+  | 'handoff_nudge'
+  | 'handoff_expired';
 
 interface NotificationRow {
   id:         string;
@@ -42,12 +64,39 @@ interface VisualSpec {
   borderColor: string;
 }
 
+// Amber = user needs to know but nothing is on fire (off-post accepted,
+// late clock-in reminder). Red = an obligation is UNMET RIGHT NOW
+// (active breach, missed ping/report window).
+const AMBER = Colors.action;
+const RED   = Colors.danger;
+
 const VISUAL_BY_TYPE: Record<NotificationType, VisualSpec> = {
-  ping_reminder:            { icon: '📍', titleColor: Colors.action,  borderColor: Colors.action },
-  activity_report_reminder: { icon: '📝', titleColor: Colors.action,  borderColor: Colors.action },
-  task_reminder:            { icon: '✅', titleColor: Colors.action,  borderColor: Colors.action },
-  chat:                     { icon: '💬', titleColor: Colors.action,  borderColor: Colors.action },
-  geofence_breach:          { icon: '🔴', titleColor: Colors.danger,  borderColor: Colors.danger },
+  ping_reminder:            { icon: '📍', titleColor: AMBER, borderColor: AMBER },
+  activity_report_reminder: { icon: '📝', titleColor: AMBER, borderColor: AMBER },
+  task_reminder:            { icon: '✅', titleColor: AMBER, borderColor: AMBER },
+  chat:                     { icon: '💬', titleColor: AMBER, borderColor: AMBER },
+  geofence_breach:          { icon: '🚨', titleColor: RED,   borderColor: RED   },
+  off_post_report:          { icon: '⚠️', titleColor: AMBER, borderColor: AMBER },
+  off_post_task:            { icon: '⚠️', titleColor: AMBER, borderColor: AMBER },
+  missed_ping:              { icon: '📍', titleColor: RED,   borderColor: RED   },
+  missed_report:            { icon: '📝', titleColor: RED,   borderColor: RED   },
+  late_clock_in:            { icon: '⏰', titleColor: AMBER, borderColor: AMBER },
+  // Swap family — 🔄 amber. All variants share the icon so the row
+  // header can still say the actual status (title comes from server).
+  swap_request_received:    { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_request_sent:        { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_accepted:            { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_declined:            { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  swap_expired:             { icon: '🔄', titleColor: AMBER, borderColor: AMBER },
+  // Handoff family — 🤝 amber. Same convention.
+  handoff_request_received: { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_request_sent:     { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_accepted:         { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_declined:         { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_cancelled:        { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_complete:         { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_nudge:            { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  handoff_expired:          { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
 };
 
 function timeAgo(iso: string) {

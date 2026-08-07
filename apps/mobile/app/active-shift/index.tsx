@@ -9,18 +9,19 @@
  *   longer drive the countdown — the server fires every aligned tick
  *   regardless — but the battery hook still runs so its `throttleReason`
  *   continues to stamp ping rows for the client portal.
- * - Action grid: Ping Now / Report / Tasks / Break
+ * - Action grid: Report / Tasks / Break (Build 34 removed PING NOW —
+ *   pings are notification-driven now; the client can't initiate one).
  * - Clock-Out button (amber, bottom of scroll)
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   ScrollView, Alert, AppState,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
+import { apiClient } from '../../lib/apiClient';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
-import { pingState }     from '../../lib/pingState';
 import { useBatteryThrottle } from '../../lib/batteryThrottle';
 import { nextPingAt, remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
@@ -58,6 +59,29 @@ export default function ActiveShiftScreen() {
   const [nextPingMs,     setNextPingMs]     = useState(0);
   const [clockingOut,    setClockingOut]    = useState(false);
 
+  // ── Checkpoints (C6) ──────────────────────────────────────────────────
+  // null = not loaded / fetch failed / site has none → render NOTHING, so
+  // guards at sites without checkpoints see zero change to this screen.
+  // Refetched on every focus so the counter updates after each scan.
+  const [cpMine, setCpMine] = useState<{
+    total: number; scanned: number; unlinked: number;
+    checkpoints: { id: string }[];
+  } | null>(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!activeSession) return;
+      let cancelled = false;
+      apiClient
+        .get<{ total: number; scanned: number; unlinked: number; checkpoints: { id: string }[] }>('/checkpoints/mine')
+        .then((mine) => { if (!cancelled) setCpMine(mine); })
+        .catch(() => { if (!cancelled) setCpMine(null); }); // silent — section just hides
+      return () => { cancelled = true; };
+    }, [activeSession?.id]),
+  );
+
+  const hasCheckpoints = (cpMine?.checkpoints.length ?? 0) > 0;
+
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const appStateRef = useRef(AppState.currentState);
@@ -78,9 +102,8 @@ export default function ActiveShiftScreen() {
 
   // ── Ping countdown ─────────────────────────────────────────────────────
   // Aligned to wall-clock :00 / :30 via shared helper in lib/pingSchedule.ts.
-  // Detect rollover by watching the target slot timestamp — when the next
-  // slot changes, the previous one just fired.
-  const pingSnoozedUntilRef = useRef(0); // epoch ms — suppress re-alert until this time
+  // Informational-only readout; the server's schedule-anchored
+  // ping_reminder push is what actually prompts the guard to submit.
   const trackedSlotRef = useRef<number>(0);
 
   useEffect(() => {
@@ -94,27 +117,12 @@ export default function ActiveShiftScreen() {
       const now = new Date();
       const slot = nextPingAt(clockedInDate, now).getTime();
       setNextPingMs(Math.max(0, slot - now.getTime()));
-
-      // Slot changed → the previous aligned tick just passed → ping due
-      if (trackedSlotRef.current !== 0 && slot !== trackedSlotRef.current) {
-        trackedSlotRef.current = slot;
-        const snoozed = Date.now() < pingSnoozedUntilRef.current || Date.now() < pingState.suppressAlertUntil;
-        if (!snoozed) {
-          Alert.alert(
-            'PING DUE',
-            'Your check-in is due. Submit your location now.',
-            [
-              { text: 'Later', style: 'cancel', onPress: () => {
-                pingSnoozedUntilRef.current = Date.now() + 5 * 60 * 1000;
-              }},
-              { text: 'PING NOW', onPress: () => router.push('/ping') },
-            ],
-            { cancelable: false }
-          );
-        }
-      } else {
-        trackedSlotRef.current = slot;
-      }
+      // Build 34: no in-app "PING DUE" prompt on rollover. The server
+      // ping_reminder push (Commit A pingReminder.ts, schedule-anchored)
+      // is the trigger now; guards submit by tapping the notification
+      // and are deep-linked to /ping. The countdown display stays as
+      // an informational readout.
+      trackedSlotRef.current = slot;
     }, 1000);
 
     return () => { if (pingRef.current) clearInterval(pingRef.current); };
@@ -185,13 +193,35 @@ export default function ActiveShiftScreen() {
         </Text>
       </View>
 
+      {/* ── Checkpoints (C6) — hidden entirely when the site has none ── */}
+      {hasCheckpoints && cpMine && (
+        <>
+          {cpMine.unlinked > 0 && (
+            <TouchableOpacity
+              style={styles.cpSetupBanner}
+              onPress={() => router.push('/checkpoints/setup')}
+            >
+              <Text style={styles.cpSetupBannerText}>
+                Set up {cpMine.unlinked} checkpoint{cpMine.unlinked === 1 ? '' : 's'} — tap to anchor tags at their positions.
+              </Text>
+            </TouchableOpacity>
+          )}
+          <View style={styles.cpCard}>
+            <Text style={styles.cpLabel}>CHECKPOINTS — {cpMine.scanned} OF {cpMine.total} THIS HOUR</Text>
+            <TouchableOpacity
+              style={styles.cpScanBtn}
+              onPress={() => router.push('/checkpoints/scan')}
+            >
+              <Text style={styles.cpScanBtnText}>SCAN CHECKPOINT</Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      )}
+
       {/* ── Action grid ─────────────────────────────────────────────── */}
+      {/* Build 34: PING NOW removed. Pings are notification-driven
+          (schedule-anchored ping_reminder or missed_ping deep-links). */}
       <View style={styles.grid}>
-        <ActionTile
-          icon="📍"
-          label="PING NOW"
-          onPress={() => router.push('/ping')}
-        />
         <ActionTile
           icon="📋"
           label="REPORT"
@@ -304,6 +334,37 @@ const styles = StyleSheet.create({
   pingValue:      { fontFamily: 'monospace', color: Colors.base, fontSize: 36, marginVertical: Spacing.xs },
   pingValueUrgent:{ color: Colors.action },
   pingNote:       { color: Colors.muted, fontSize: 11, letterSpacing: 2 },
+
+  // Checkpoints (C6) — banner mirrors throttleBanner; card mirrors pingCard.
+  cpSetupBanner: {
+    width: '92%',
+    backgroundColor: '#3A2410',
+    borderRadius: Radius.md,
+    borderLeftWidth: 4,
+    borderLeftColor: Colors.warning,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+  },
+  cpSetupBannerText: { color: Colors.warning, fontSize: 12, lineHeight: 16, letterSpacing: 0.5 },
+  cpCard: {
+    width: '92%',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.border,
+    alignItems: 'center',
+    paddingVertical: Spacing.lg,
+    marginTop: Spacing.lg,
+    gap: Spacing.md,
+  },
+  cpLabel: { color: Colors.muted, fontSize: 11, letterSpacing: 3 },
+  cpScanBtn: {
+    backgroundColor: Colors.action,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.xl,
+  },
+  cpScanBtnText: { color: Colors.structure, fontFamily: Fonts.heading, fontSize: 15, letterSpacing: 3 },
 
   // Action grid
   grid: {

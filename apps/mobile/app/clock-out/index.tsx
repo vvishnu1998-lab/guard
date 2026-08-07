@@ -9,10 +9,13 @@ import {
   View, Text, StyleSheet, TouchableOpacity,
   TextInput, ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
+import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { apiClient }     from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+
+const GPS_TIMEOUT_MS = 3000;
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
 
@@ -45,8 +48,42 @@ export default function ClockOutScreen() {
     if (submitting) return;
     setSubmitting(true);
     try {
+      // C1 (T2-A) — capture GPS so the server's validateAtSite can verify the
+      // guard is on-post before closing the session. Hard-fail on no lock —
+      // same pattern as photo.tsx (T1-C-client). Outer catch surfaces the
+      // user-facing message via the existing "Clock-Out Failed" alert.
+      let lat: number | null = null;
+      let lng: number | null = null;
+      let acc: number | null = null;
+      try {
+        const last = await Location.getLastKnownPositionAsync();
+        if (last) {
+          lat = last.coords.latitude;
+          lng = last.coords.longitude;
+          acc = last.coords.accuracy;
+        } else {
+          const live = await Promise.race([
+            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+            new Promise<null>((r) => setTimeout(() => r(null), GPS_TIMEOUT_MS)),
+          ]);
+          if (live) {
+            lat = (live as Location.LocationObject).coords.latitude;
+            lng = (live as Location.LocationObject).coords.longitude;
+            acc = (live as Location.LocationObject).coords.accuracy;
+          }
+        }
+      } catch (err) {
+        console.warn('[clock-out] GPS read threw:', err);
+      }
+      if (lat === null || lng === null) {
+        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+      }
+
       await apiClient.post(`/shifts/${activeShift!.id}/clock-out`, {
         handover_notes: notes.trim() || null,
+        lat,
+        lng,
+        accuracy: acc ?? 30, // null-accuracy iOS sim / coarse-grant → conservative 30m
       });
       clearSession();
       router.replace('/(tabs)/home');

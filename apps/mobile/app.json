@@ -2,7 +2,16 @@
   "expo": {
     "name": "NetraOps",
     "slug": "guard",
-    "version": "1.0.0",
+    "version": "1.0.13",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/5fd28125-2461-4165-b9df-7f34ced8b194",
+      "enabled": true,
+      "fallbackToCacheTimeout": 0,
+      "checkAutomatically": "ON_LOAD"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -14,9 +23,9 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.netraops.guard",
-      "buildNumber": "1",
+      "buildNumber": "41",
       "config": {
-        "googleMapsApiKey": "AIzaSyDnKeFghQFa0q5rAJeDXdW09iwzI9KVcSU",
+        "googleMapsApiKey": "AIzaSyDTHH3yWZVpuxISFd5pHxE2dmZtyU9VN-I",
         "usesNonExemptEncryption": false
       },
       "entitlements": {
@@ -24,8 +33,9 @@
       },
       "infoPlist": {
         "NSCameraUsageDescription": "NetraOps uses the camera to capture incident report photos and location verification pings during your shift.",
-        "NSLocationWhenInUseUsageDescription": "NetraOps uses your location to verify clock-ins, geofence patrols, and send location pings to your supervisor during active shifts.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "NetraOps uses your location in the background during active shifts to send periodic location pings to your supervisor for safety monitoring.",
+        "NSLocationWhenInUseUsageDescription": "NetraOps uses your location while the app is open to confirm you are at your assigned site when you clock in or out, submit a report, complete a task, or scan a patrol checkpoint.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "While you are clocked in to a shift, NetraOps watches the boundary of that one site so it can alert you on this device if you leave it, and clear that alert when you return. This applies only during an active shift.",
+        "NSLocationAlwaysUsageDescription": "While you are clocked in to a shift, NetraOps watches the boundary of that one site so it can alert you on this device if you leave it, and clear that alert when you return. This applies only during an active shift.",
         "NSPhotoLibraryUsageDescription": "NetraOps may save report photos to your library.",
         "NSPhotoLibraryAddUsageDescription": "NetraOps saves photos you capture during incident reports.",
         "NSFaceIDUsageDescription": "NetraOps uses Face ID for secure biometric login.",
@@ -35,10 +45,11 @@
     },
     "android": {
       "package": "com.netraops.guard",
-      "versionCode": 1,
+      "versionCode": 17,
+      "googleServicesFile": "./google-services.json",
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyDg14tf3PyiJT83PzRwUXqwIDZ79oCFRB0"
+          "apiKey": "AIzaSyDstXR7ThtM6WPlhqBR-6RKWB2mNyqx3QE"
         }
       },
       "adaptiveIcon": {
@@ -55,7 +66,8 @@
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
-        "com.google.android.gms.permission.AD_ID"
+        "com.google.android.gms.permission.AD_ID",
+        "POST_NOTIFICATIONS"
       ]
     },
     "plugins": [
@@ -65,7 +77,9 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "NetraOps monitors your location during shifts for geofence compliance."
+          "locationAlwaysAndWhenInUsePermission": "While you are clocked in to a shift, NetraOps watches the boundary of that one site so it can alert you on this device if you leave it, and clear that alert when you return. This applies only during an active shift.",
+          "locationAlwaysPermission": "While you are clocked in to a shift, NetraOps watches the boundary of that one site so it can alert you on this device if you leave it, and clear that alert when you return. This applies only during an active shift.",
+          "locationWhenInUsePermission": "NetraOps uses your location while the app is open to confirm you are at your assigned site when you clock in or out, submit a report, complete a task, or scan a patrol checkpoint."
         }
       ],
       [
@@ -80,6 +94,13 @@
           "organization": "netraopscom",
           "project": "netraops-mobile",
           "url": "https://sentry.io/"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#00C8FF",
+          "defaultChannel": "default"
         }
       ]
     ],

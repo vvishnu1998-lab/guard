@@ -108,27 +108,38 @@ export default function TaskCompleteScreen() {
         uploadedUrl = public_url;
       }
 
+      // C2 (T2-C) — GPS hard-fail on no lock (mirrors T1-C-client photo.tsx
+      // pattern). Server's validateAtSite rejects 422 off-post; this stops
+      // the wasted S3 upload + round-trip on local GPS failures.
       setStatusMsg('Getting location…');
       let lat: number | null = null;
       let lng: number | null = null;
+      let acc: number | null = null;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         lat = loc.coords.latitude;
         lng = loc.coords.longitude;
-      } catch { /* GPS optional */ }
+        acc = loc.coords.accuracy;
+      } catch (err) {
+        console.warn('[task] GPS read threw:', err);
+      }
+      if (lat === null || lng === null) {
+        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+      }
 
       setStatusMsg('Submitting…');
       await apiClient.post(`/tasks/instances/${task.id}/complete`, {
         shift_session_id: activeSession.id,
         completion_lat:   lat,
         completion_lng:   lng,
+        accuracy:         acc ?? 30,
         photo_url:        uploadedUrl,
       });
 
       setPhase('done');
       setTimeout(() => router.back(), 1200);
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Could not complete task');
+      Alert.alert('Task Submission Failed', err?.message ?? 'Could not complete task');
       setPhase('review');
     }
   }

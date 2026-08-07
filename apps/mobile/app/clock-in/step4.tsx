@@ -6,14 +6,16 @@
  *   2. POST /api/shifts/:id/clock-in  → creates session + generates task instances
  *   3. POST /api/locations/clock-in-verification  → stores S3 photo proofs
  */
-import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, Modal, Linking } from 'react-native';
+import { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator } from 'react-native';
+import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient }       from '../../lib/apiClient';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { uuidv4 }          from '../../lib/uuid';
+import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const STEPS = ['Uploading selfie…', 'Starting shift…', 'Saving verification…'];
@@ -22,6 +24,9 @@ export default function ClockInStep4() {
   const [submitting,  setSubmitting]  = useState(false);
   const [statusStep,  setStatusStep]  = useState(0);
   const [showInstructions, setShowInstructions] = useState(false);
+  // pdfUrl captured at clock-in success — pendingShift is cleared by
+  // setActiveSession, so we can't read pendingShift.instructions_pdf_url
+  // at modal render time.
   const [instructionsPdfUrl, setInstructionsPdfUrl] = useState<string | null>(null);
 
   // Idempotency key for the clock-in POST. Generated once per mount via
@@ -31,6 +36,14 @@ export default function ClockInStep4() {
   // a network blip) reuses the same key → server replays the cached
   // response instead of double-creating a session.
   const [clockInIdempotencyKey] = useState(() => uuidv4());
+
+  useEffect(() => {
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'entered step4 (Submit)',
+      level: 'info',
+    });
+  }, []);
 
   const {
     verifiedLatitude,
@@ -43,10 +56,19 @@ export default function ClockInStep4() {
     reset: resetClockIn,
   } = useClockInStore();
 
-  const { pendingShift, setActiveSession } = useShiftStore();
+  const { pendingShift, setActiveSession, activeSession } = useShiftStore();
 
   // ── Guard: selfie proof must be present ──────────────────────────────
-  if (!verifiedLatitude || !selfie || !pendingShiftId) {
+  // Bypass the "INCOMPLETE DATA" screen once a session has been committed
+  // (activeSession set) — startShift → setActiveSession → resetClockIn
+  // used to null the three fields below WHILE step 4 was still mounted
+  // on the PDF-instructions branch (that branch doesn't navigate away),
+  // so the next re-render would flash "INCOMPLETE DATA" on top of a
+  // just-committed clock-in. Belt-and-suspenders alongside the reordered
+  // reset in startShift + dismissInstructions. RESTART still works: it
+  // takes the guard back to home where handleClockIn refreshes the store
+  // on wizard re-entry.
+  if (!activeSession && (!verifiedLatitude || !selfie || !pendingShiftId)) {
     return (
       <View style={styles.container}>
         <Text style={styles.errorTitle}>INCOMPLETE DATA</Text>
@@ -57,6 +79,15 @@ export default function ClockInStep4() {
       </View>
     );
   }
+  // Post-dismiss transitional state: session committed AND clockInStore
+  // already reset (dismissInstructions ran). If Expo Router hasn't fully
+  // unmounted step 4 yet, the JSX below would crash on
+  // verifiedLatitude!.toFixed(6) / selfie.uri. Return null until unmount
+  // completes — no user-visible flash because the modal already closed
+  // and navigation to /(tabs)/home is in flight.
+  if (activeSession && (!verifiedLatitude || !selfie || !pendingShiftId)) {
+    return null;
+  }
 
   async function startShift() {
     if (submitting) return;
@@ -66,14 +97,38 @@ export default function ClockInStep4() {
     const lng = verifiedLongitude!;
     const accuracy = verifiedAccuracy ?? 30; // step1 defaults null → 30; keep parity
     setSubmitting(true);
+    Sentry.addBreadcrumb({
+      category: 'clock_in_wizard',
+      message: 'step4: submit initiated',
+      level: 'info',
+      data: { shift_id: pendingShiftId, idempotency_key: clockInIdempotencyKey },
+    });
     try {
       // Step 1 — upload selfie (S3 optional; use placeholder if not configured)
       setStatusStep(0);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: selfie upload started',
+        level: 'info',
+      });
       let selfieUrl = 'pending';
       try {
         const selfieUpload = await uploadToS3(selfie!.uri, 'clock_in');
         selfieUrl = selfieUpload.public_url;
-      } catch { /* S3 not configured — continue without photo URL */ }
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step4: selfie upload complete',
+          level: 'info',
+        });
+      } catch (err) {
+        Sentry.addBreadcrumb({
+          category: 'clock_in_wizard',
+          message: 'step4: selfie upload failed (falling back to "pending")',
+          level: 'warning',
+          data: { error: (err as any)?.message ?? String(err) },
+        });
+        /* S3 not configured — continue without photo URL */
+      }
 
       // Step 2 — clock in (creates shift_session + triggers task instance generation)
       // Server validates lat/lng/accuracy against the site geofence inside the
@@ -82,6 +137,11 @@ export default function ClockInStep4() {
       // the 10-min server window returns the cached response instead of
       // re-running the transaction.
       setStatusStep(1);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: POST /shifts/:id/clock-in',
+        level: 'info',
+      });
       const session = await apiClient.post<{ id: string; site_id: string; clocked_in_at: string }>(
         `/shifts/${pendingShiftId}/clock-in`,
         {
@@ -98,6 +158,12 @@ export default function ClockInStep4() {
       // computes its own truth from verified_lat/lng/accuracy and overrides
       // whatever we claim here.
       setStatusStep(2);
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: POST /locations/clock-in-verification',
+        level: 'info',
+        data: { session_id: session.id },
+      });
       await apiClient.post('/locations/clock-in-verification', {
         shift_session_id:   session.id,
         selfie_url:         selfieUrl,
@@ -106,6 +172,11 @@ export default function ClockInStep4() {
         verified_lng:       lng,
         accuracy,
         is_within_geofence: true,
+      });
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: submit complete',
+        level: 'info',
       });
 
       // Use the stored pendingShift object; fall back to a minimal shape
@@ -117,16 +188,31 @@ export default function ClockInStep4() {
         scheduled_end:   session.clocked_in_at,
       };
       setActiveSession(shiftForStore, { ...session, shift_id: pendingShiftId });
-      resetClockIn();
+      // resetClockIn intentionally NOT called here — deferring it fixes the
+      // step-4 race on the PDF-instructions branch. See dismissInstructions
+      // (PDF branch cleanup) and the non-PDF branch below (immediate cleanup).
 
+      // Field is populated with the JWT-scoped streaming URL when the
+      // site has a PDF configured (Build 38 API #1 + followup). Pass it
+      // through to the modal — no client-side URL construction, so there
+      // is a single source of truth for the endpoint path.
       const pdfUrl = pendingShift?.instructions_pdf_url ?? null;
       if (pdfUrl) {
         setInstructionsPdfUrl(pdfUrl);
         setShowInstructions(true);
+        // Deferred to dismissInstructions — see comment above the guard.
       } else {
+        resetClockIn();
         router.replace('/(tabs)/home');
       }
     } catch (err: any) {
+      Sentry.addBreadcrumb({
+        category: 'clock_in_wizard',
+        message: 'step4: submit failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'clockin.step4.startShift' } });
       if (err?.message === 'GEOFENCE_FAILED') {
         // Server-side geofence rejected this clock-in. Send the guard back to
         // step 1 so they re-fetch GPS at the post entrance rather than retry
@@ -149,37 +235,23 @@ export default function ClockInStep4() {
 
   function dismissInstructions() {
     setShowInstructions(false);
+    // Deferred from startShift so the clockInStore's verifiedLatitude /
+    // selfie / pendingShiftId stay populated while the modal is open —
+    // step 4 stays mounted on the PDF branch and would otherwise flash
+    // INCOMPLETE DATA on the re-render after resetClockIn.
+    resetClockIn();
     router.replace('/(tabs)/home');
   }
 
   return (
     <>
-    <Modal
-      visible={showInstructions}
-      transparent
-      animationType="fade"
-      onRequestClose={dismissInstructions}
-    >
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalCard}>
-          <Text style={styles.modalIcon}>📄</Text>
-          <Text style={styles.modalTitle}>SITE INSTRUCTIONS{'\n'}AVAILABLE</Text>
-          <Text style={styles.modalSub}>This site has instructions for your shift. Would you like to view them now?</Text>
-          <TouchableOpacity
-            style={styles.modalPrimaryBtn}
-            onPress={() => {
-              if (instructionsPdfUrl) Linking.openURL(instructionsPdfUrl);
-              dismissInstructions();
-            }}
-          >
-            <Text style={styles.modalPrimaryText}>VIEW INSTRUCTIONS</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.modalSkipBtn} onPress={dismissInstructions}>
-            <Text style={styles.modalSkipText}>SKIP</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
+    {instructionsPdfUrl ? (
+      <SiteInstructionsModal
+        pdfUrl={instructionsPdfUrl}
+        visible={showInstructions}
+        onClose={dismissInstructions}
+      />
+    ) : null}
     <ScrollView contentContainerStyle={styles.scroll} style={styles.bg}>
       <Text style={styles.step}>CLOCK IN · STEP 3 OF 3</Text>
       <Text style={styles.title}>CONFIRM & START</Text>
@@ -316,56 +388,4 @@ const styles = StyleSheet.create({
   errorSub:   { color: Colors.muted, fontSize: 14, marginBottom: Spacing.xl },
   button:     { backgroundColor: Colors.action, borderRadius: Radius.md, padding: Spacing.md },
   buttonText: { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 16, letterSpacing: 2 },
-
-  // Instructions modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: Spacing.xl,
-  },
-  modalCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: Spacing.xl,
-    alignItems: 'center',
-    width: '100%',
-  },
-  modalIcon: { fontSize: 40, marginBottom: Spacing.md },
-  modalTitle: {
-    fontFamily: Fonts.heading,
-    color: Colors.base,
-    fontSize: 20,
-    letterSpacing: 3,
-    textAlign: 'center',
-    marginBottom: Spacing.md,
-    lineHeight: 28,
-  },
-  modalSub: {
-    color: Colors.muted,
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: Spacing.xl,
-  },
-  modalPrimaryBtn: {
-    backgroundColor: Colors.action,
-    borderRadius: Radius.md,
-    paddingVertical: Spacing.md,
-    paddingHorizontal: Spacing.xl,
-    width: '100%',
-    alignItems: 'center',
-    marginBottom: Spacing.sm,
-  },
-  modalPrimaryText: {
-    fontFamily: Fonts.heading,
-    color: Colors.structure,
-    fontSize: 15,
-    letterSpacing: 2,
-  },
-  modalSkipBtn: { padding: Spacing.sm },
-  modalSkipText: { color: Colors.muted, fontSize: 14, letterSpacing: 1 },
 });

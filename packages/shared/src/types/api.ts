@@ -35,6 +35,15 @@ export interface SubmitReportRequest {
   photo_urls?: { url: string; size_kb: number }[];
   latitude?: number;
   longitude?: number;
+  /** GPS horizontal accuracy in meters (T2-D C3, Q8 hybrid off-post).
+   *  Older builds without accuracy get the fence's SAFETY_MARGIN as
+   *  their only slack; new builds get an accuracy-aware check. */
+  accuracy?: number;
+  /** Site-local HH:MM label of a missed_reports window the guard is
+   *  backfilling (set via a missed_report notification deep-link).
+   *  Server matches (shift_session_id, window_label) to resolve the
+   *  open row + stamp submitted_late on the reports row. */
+  window_label?: string;
 }
 
 export interface LocationPingRequest {
@@ -47,6 +56,11 @@ export interface LocationPingRequest {
    *  was multiplied (low battery or low-power-mode). Server writes to
    *  location_pings.throttle_reason. Absent / undefined = normal cadence. */
   throttle_reason?: 'low_battery' | 'low_power_mode';
+  /** Site-local HH:MM label of a missed_pings window the guard is
+   *  backfilling (set via a missed_ping notification deep-link).
+   *  Server matches (shift_session_id, window_label) to resolve the
+   *  open row + stamp submitted_late on the location_pings row. */
+  window_label?: string;
 }
 
 export interface GeofenceViolationRequest {

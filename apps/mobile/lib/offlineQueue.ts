@@ -39,7 +39,8 @@ export type QueueActionType =
   | 'report_submit'
   | 'location_ping'
   | 'task_complete'
-  | 'violation_post';
+  | 'violation_post'
+  | 'checkpoint_scan';
 
 export interface QueuedAction {
   localId:    string;          // uuid — client-assigned, used for optimistic UI
@@ -106,10 +107,13 @@ export async function pendingCount(): Promise<number> {
 // ── Sync logic ────────────────────────────────────────────────────────────────
 
 const ENDPOINT: Record<QueueActionType, string> = {
-  report_submit:  '/reports',
-  location_ping:  '/locations/ping',
-  task_complete:  '/tasks/instances/{id}/complete',
-  violation_post: '/locations/violation',
+  report_submit:   '/reports',
+  location_ping:   '/locations/ping',
+  task_complete:   '/tasks/instances/{id}/complete',
+  violation_post:  '/locations/violation',
+  // Payload carries the GPS captured AT SCAN TIME; a replay that already
+  // landed is absorbed by the server's round-window ON CONFLICT (200).
+  checkpoint_scan: '/checkpoints/scan',
 };
 
 async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead'> {

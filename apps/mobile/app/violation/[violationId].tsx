@@ -3,13 +3,20 @@
  * Full-screen red takeover. Cannot be dismissed by swiping.
  * Blocks report submission. Resolves when guard returns inside boundary.
  * Polls GPS every 10 seconds — clears automatically when back inside.
+ *
+ * Route: /violation/[violationId]. The violationId comes from the
+ * geofence_breach push payload's `data.violationId` (server-side dispatch
+ * in apps/api/src/routes/locations.ts fireBreachAlerts) and is needed
+ * for the re-entry PATCH /api/locations/violation/:id/resolve call
+ * (T1-E.B, follow-up commit).
  */
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, BackHandler, Animated, Easing } from 'react-native';
 import * as Location from 'expo-location';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore }  from '../../store/shiftStore';
-import { isPointInPolygon, haversineDistance } from '../../utils/geofence';
+import { apiClient }      from '../../lib/apiClient';
+import { isInsideGeofence, haversineDistance } from '../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
@@ -18,6 +25,10 @@ const RED    = '#EF4444';
 const DARKRED = '#7F1D1D';
 
 export default function ViolationScreen() {
+  // Route param. Expo Router guarantees the segment is present (dynamic
+  // route would 404 otherwise), but type as optional for defensive use.
+  const { violationId } = useLocalSearchParams<{ violationId: string }>();
+
   const [lat, setLat]         = useState<number | null>(null);
   const [lng, setLng]         = useState<number | null>(null);
   const [distance, setDist]   = useState<number | null>(null);
@@ -50,7 +61,7 @@ export default function ViolationScreen() {
     async function checkLocation() {
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        const { latitude, longitude } = loc.coords;
+        const { latitude, longitude, accuracy } = loc.coords;
         setLat(latitude);
         setLng(longitude);
 
@@ -64,16 +75,32 @@ export default function ViolationScreen() {
         );
         setDist(Math.round(dist));
 
-        // Check if back inside
-        const inside = isPointInPolygon(
+        // Check if back inside. Falls back to the radius check when the site
+        // has no polygon drawn, matching the server rather than stranding the
+        // guard on this screen with no way to clear the violation.
+        const inside = isInsideGeofence(
           { lat: latitude, lng: longitude },
-          geofence.polygon_coordinates
+          geofence,
+          accuracy ?? 0
         );
 
         if (inside) {
           // Guard is back — clear violation and return to shift
           setRes(true);
           if (pollRef.current) clearInterval(pollRef.current);
+
+          // T1-E.B — tell the server the violation is resolved. Fire-and-
+          // forget: don't block the 1.5s redirect on network latency. On
+          // failure the violation stays open on the server, which means
+          // /alerts will show it and the next breach won't fire a fresh
+          // alert (ON CONFLICT de-dups). That's a known downside of the
+          // best-effort approach; spec said don't block the user, and
+          // there's no foreground-event retry infra to plug into here.
+          if (violationId) {
+            apiClient.patch(`/locations/violation/${violationId}/resolve`)
+              .catch((err) => console.warn('[violation] resolve PATCH failed:', err));
+          }
+
           setTimeout(() => router.replace('/active-shift'), 1500);
         }
       } catch {
