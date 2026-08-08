@@ -140,7 +140,7 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
     const apiUrl = process.env.EXPO_PUBLIC_API_URL;
     if (!apiUrl) return;
     try {
-      await fetch(`${apiUrl}/api/locations/violation`, {
+      const res = await fetch(`${apiUrl}/api/locations/violation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({
@@ -149,6 +149,36 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
           longitude: region.longitude,
         }),
       });
+
+      // 409 SESSION_CLOSED — the server is telling us this session is over
+      // (api b703902). Disarm so a SECOND stale exit cannot fire.
+      //
+      // DEFENCE IN DEPTH, not the fix. Two hard limits, both deliberate:
+      //   * It cannot suppress THIS alert. The notification above was already
+      //     delivered before the request was even sent, and that ordering is
+      //     intentional — it is what keeps breach alerts working with no
+      //     network. Do not reorder it to make this check stronger.
+      //   * It does nothing without network. A dead zone is exactly where a
+      //     guard is most likely to trip a geofence, and there the fetch
+      //     rejects and we never see a status at all.
+      // The local expiry gate above is the primary mechanism; this is the
+      // backstop that happens to be what stops the 2026-08-06 repeat, since
+      // both of those exits fell inside the grace window.
+      if (res.status === 409) {
+        Sentry.addBreadcrumb({
+          category: 'geofence',
+          message: 'server reports session closed — disarming region',
+          level: 'warning',
+          data: { session_id: sessionId, status: res.status },
+        });
+        await stopBackgroundLocation().catch((err) =>
+          console.warn('[geofence] stop after 409 failed:', err),
+        );
+        await Promise.all([
+          SecureStore.deleteItemAsync('active_session_id').catch(() => {}),
+          SecureStore.deleteItemAsync('active_shift_end').catch(() => {}),
+        ]);
+      }
     } catch (err) {
       console.error('[geofence] Failed to post violation', err);
       Sentry.captureException(err, { tags: { flow: 'geofence_exit_post' } });
