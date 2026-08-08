@@ -12,7 +12,7 @@ import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
 import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
-import { apiClient }       from '../../lib/apiClient';
+import { apiClient, ApiError } from '../../lib/apiClient';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { uuidv4 }          from '../../lib/uuid';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
@@ -213,7 +213,10 @@ export default function ClockInStep4() {
         data: { error: err?.message ?? String(err) },
       });
       Sentry.captureException(err, { extra: { where: 'clockin.step4.startShift' } });
-      if (err?.message === 'GEOFENCE_FAILED') {
+      // ApiError puts the server's code in .code and the friendly sentence in
+      // .message, so the old `err.message === 'GEOFENCE_FAILED'` test could
+      // never be true and this branch never ran. Match ping/photo.tsx.
+      if (err instanceof ApiError && err.code === 'GEOFENCE_FAILED') {
         // Server-side geofence rejected this clock-in. Send the guard back to
         // step 1 so they re-fetch GPS at the post entrance rather than retry
         // with stale coords. 3-strike escalation flow is a follow-up commit.
