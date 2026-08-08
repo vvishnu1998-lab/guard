@@ -14,6 +14,7 @@ import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../../store/shiftStore';
 import { apiClient }     from '../../../lib/apiClient';
+import { isSessionClosed, handleSessionClosed } from '../../../lib/sessionClosed';
 import { uploadToS3 }    from '../../../lib/uploadToS3';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 
@@ -139,6 +140,10 @@ export default function TaskCompleteScreen() {
       setPhase('done');
       setTimeout(() => router.back(), 1200);
     } catch (err: any) {
+      if (isSessionClosed(err)) {
+        await handleSessionClosed(err, 'tasks.complete');
+        return;
+      }
       Alert.alert('Task Submission Failed', err?.message ?? 'Could not complete task');
       setPhase('review');
     }

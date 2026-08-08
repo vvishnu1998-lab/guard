@@ -23,6 +23,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
+import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
 import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
@@ -215,6 +216,13 @@ export default function PhotoPing() {
       );
     } catch (err: any) {
       console.error('[ping] capture failed:', err);
+      // Shift ended under the guard (usually the autoCompleteShifts cron
+      // closing the session at scheduled_end). Repairs local state, tears the
+      // region down, and routes home — see lib/sessionClosed.ts.
+      if (isSessionClosed(err)) {
+        await handleSessionClosed(err, 'ping.photo');
+        return;
+      }
       // PING_OFF_POST is expected under the Commit A hybrid policy (Q8) —
       // pings prove presence, so the server 422s any offsite submission.
       // Show the user-readable copy instead of the raw enum string, and

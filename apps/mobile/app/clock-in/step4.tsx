@@ -13,6 +13,7 @@ import { router } from 'expo-router';
 import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
+import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { uuidv4 }          from '../../lib/uuid';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
@@ -212,6 +213,10 @@ export default function ClockInStep4() {
         level: 'error',
         data: { error: err?.message ?? String(err) },
       });
+      if (isSessionClosed(err)) {
+        await handleSessionClosed(err, 'clockin.step4');
+        return;
+      }
       Sentry.captureException(err, { extra: { where: 'clockin.step4.startShift' } });
       // ApiError puts the server's code in .code and the friendly sentence in
       // .message, so the old `err.message === 'GEOFENCE_FAILED'` test could
