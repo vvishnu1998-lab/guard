@@ -1818,7 +1818,8 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
     // Replaces the mobile profile's old (scheduled_end - scheduled_start)
     // calculation, which credited no-show shifts with the full scheduled time.
     result = await pool.query(
-      `SELECT s.*, si.name as site_name, si.is_active AS site_is_active, si.instructions_pdf_url,
+      `SELECT s.*, si.name as site_name, si.timezone AS site_tz,
+              si.is_active AS site_is_active, si.instructions_pdf_url,
               COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit,
               COALESCE(ss_agg.sum_completed_hours, 0)
                 + CASE
