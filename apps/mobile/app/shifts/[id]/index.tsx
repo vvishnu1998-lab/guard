@@ -22,6 +22,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../../lib/apiClient';
 import { useAuthStore } from '../../../store/authStore';
 import { formatScheduledHours } from '../../../lib/formatHours';
+import { tzAbbreviation } from '../../../lib/shiftTime';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 import RequestSwapModal from '../../../components/RequestSwapModal';
 import HandoffRequestModal from '../../../components/HandoffRequestModal';
@@ -96,38 +97,8 @@ function fmtInTz(iso: string, tz: string | null, opts: Intl.DateTimeFormatOption
   }).format(new Date(iso));
 }
 
-/**
- * Short timezone label for display, e.g. "PDT".
- *
- * The API sends the raw IANA zone (site_tz) and that is correct — it is what
- * every fmtInTz call above needs as Intl input. It is only unfit for display:
- * the previous `site_tz.split('/').pop()` rendered "Los_Angeles", underscore
- * and all, next to the shift times.
- *
- * For zones with no common abbreviation Intl returns an offset instead
- * ("GMT+5:30" for Asia/Kolkata). That is correct, useful output and is
- * deliberately not special-cased.
- *
- * Returns null when the zone is absent or rejected by Intl, so the caller
- * renders nothing rather than a broken fragment. Uses 'en-US' rather than the
- * 'en-GB' above because en-GB yields offsets where en-US yields the familiar
- * North American abbreviations, and every current site is US-based.
- */
-function tzAbbreviation(iso: string, tz: string | null): string | null {
-  if (!tz) return null;
-  try {
-    const part = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz, timeZoneName: 'short',
-    })
-      .formatToParts(new Date(iso))
-      .find((p) => p.type === 'timeZoneName');
-    return part?.value ?? null;
-  } catch {
-    // Invalid/unknown IANA zone — Intl throws a RangeError. Show nothing
-    // rather than crashing the shift screen over a cosmetic label.
-    return null;
-  }
-}
+// tzAbbreviation moved to lib/shiftTime.ts so the home NEXT SHIFT card renders
+// the same label this screen does. Behaviour unchanged — see that module.
 
 function duration(start: string, end: string): string {
   const h = (new Date(end).getTime() - new Date(start).getTime()) / 3_600_000;
