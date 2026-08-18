@@ -20,7 +20,7 @@ import {
   type ActivityRow,
   type UserScope,
 } from './activityLog';
-import { SHIFT_HOURS_SQL_FIELDS, type ShiftHours } from '../services/shiftHours';
+import { SHIFT_HOURS_SQL_FIELDS, BREAK_OVERRUN_SQL_FIELDS, type ShiftHours } from '../services/shiftHours';
 
 const router = Router();
 
@@ -1349,7 +1349,8 @@ router.get('/sites/:site_id/sessions', requireAuth('company_admin'), async (req,
 
   const result = await pool.query(
     `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at, g.name AS guard_name,
-            ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
+            ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
+            ${BREAK_OVERRUN_SQL_FIELDS('ss')}
      FROM shift_sessions ss
      JOIN shifts sh ON sh.id = ss.shift_id
      JOIN guards g ON g.id = ss.guard_id
@@ -1365,10 +1366,16 @@ router.get('/sites/:site_id/sessions', requireAuth('company_admin'), async (req,
       break_hours:     Number(row.break_hours)     || 0,
       violation_hours: Number(row.violation_hours) || 0,
     } satisfies ShiftHours;
+    row.break_overrun = {
+      flagged_count:   Number(row.overrun_flagged) || 0,
+      overrun_minutes: Number(row.overrun_minutes) || 0,
+    };
     delete row.scheduled_hours;
     delete row.actual_hours;
     delete row.break_hours;
     delete row.violation_hours;
+    delete row.overrun_flagged;
+    delete row.overrun_minutes;
   }
   res.json(result.rows);
 });
@@ -1395,7 +1402,8 @@ router.get('/sessions', requireAuth('company_admin'), async (req, res) => {
        ss.clocked_out_at,
        sh.scheduled_start,
        sh.scheduled_end,
-       ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
+       ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
+       ${BREAK_OVERRUN_SQL_FIELDS('ss')}
      FROM shift_sessions ss
      JOIN guards g  ON g.id  = ss.guard_id
      JOIN sites  si ON si.id = ss.site_id
@@ -1414,10 +1422,16 @@ router.get('/sessions', requireAuth('company_admin'), async (req, res) => {
       break_hours:     Number(row.break_hours)     || 0,
       violation_hours: Number(row.violation_hours) || 0,
     } satisfies ShiftHours;
+    row.break_overrun = {
+      flagged_count:   Number(row.overrun_flagged) || 0,
+      overrun_minutes: Number(row.overrun_minutes) || 0,
+    };
     delete row.scheduled_hours;
     delete row.actual_hours;
     delete row.break_hours;
     delete row.violation_hours;
+    delete row.overrun_flagged;
+    delete row.overrun_minutes;
   }
   res.json(result.rows);
 });

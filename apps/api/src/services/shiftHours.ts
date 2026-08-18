@@ -119,6 +119,27 @@ export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string)
   `.trim();
 }
 
+/**
+ * SQL fragment: break-overrun review fields for a session (schema_v46
+ * package). `overrun_flagged` counts breaks awaiting/needing admin review;
+ * `overrun_minutes` totals recorded off-post-after-expiry time. Recorded
+ * for human wage review only — deliberately absent from every hours field
+ * above (overrun is never auto-deducted).
+ */
+export function BREAK_OVERRUN_SQL_FIELDS(sessionAlias: string): string {
+  const s = sessionAlias;
+  return `
+    COALESCE((
+      SELECT COUNT(*) FROM break_sessions bs
+       WHERE bs.shift_session_id = ${s}.id AND bs.overrun_flagged_at IS NOT NULL
+    ), 0) AS overrun_flagged,
+    COALESCE((
+      SELECT SUM(bs.overrun_minutes) FROM break_sessions bs
+       WHERE bs.shift_session_id = ${s}.id
+    ), 0) AS overrun_minutes
+  `.trim();
+}
+
 export interface ShiftHoursInput {
   shift_session_id: string;
 }

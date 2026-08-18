@@ -38,10 +38,14 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     const breaks = await client.query(
       `UPDATE break_sessions
        SET break_end = NOW(),
-           duration_minutes = GREATEST(
-             0,
-             ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT
-           )
+           duration_minutes = LEAST(
+             GREATEST(
+               0,
+               ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT
+             ),
+             planned_duration_minutes
+           ),
+           ended_by = 'auto_complete'
        WHERE break_end IS NULL
          AND shift_session_id IN (
            SELECT ss.id

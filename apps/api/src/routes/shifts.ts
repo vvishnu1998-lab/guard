@@ -10,7 +10,7 @@ import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { expiresAtFor } from '../services/retention';
-import { BREAK_DURATIONS, isBreakType } from '../constants/breakDurations';
+import { BREAK_DURATIONS, BREAK_QUOTAS, BREAK_MISTAP_SECONDS, isBreakType } from '../constants/breakDurations';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
   pushSwapRequestToRecipient,
@@ -1630,10 +1630,15 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       return res.status(500).json({ error: 'Original session id missing — cannot close.' });
     }
     // Close any open break on A's session so break-minutes math is consistent.
+    // Deduction capped at the plan (overrun is flagged, never auto-deducted).
     await client.query(
       `UPDATE break_sessions
           SET break_end = NOW(),
-              duration_minutes = GREATEST(0, ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT)
+              duration_minutes = LEAST(
+                GREATEST(0, ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT),
+                planned_duration_minutes
+              ),
+              ended_by = 'handoff'
         WHERE break_end IS NULL
           AND shift_session_id = $1`,
       [hist.from_session_id],
@@ -1979,6 +1984,28 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       }
     : null;
 
+  // Break quotas (schema_v46 package) — used/limit per type so the break
+  // screen can render "Lunch 1/2" and pre-disable exhausted types. Same
+  // counting rule as the break-start gate: open rows count, mis-taps
+  // (closed within BREAK_MISTAP_SECONDS) don't.
+  const quotaUsage = await pool.query<{ break_type: string; n: string }>(
+    `SELECT break_type, COUNT(*) AS n
+       FROM break_sessions
+      WHERE shift_session_id = $1
+        AND (break_end IS NULL
+             OR break_end >= break_start + make_interval(secs => $2))
+      GROUP BY break_type`,
+    [r.session_id, BREAK_MISTAP_SECONDS]
+  );
+  const usedByType: Record<string, number> = {};
+  for (const row of quotaUsage.rows) usedByType[row.break_type] = Number(row.n);
+  const breakQuotas = Object.fromEntries(
+    (Object.keys(BREAK_QUOTAS) as Array<keyof typeof BREAK_QUOTAS>).map((t) => [
+      t,
+      { used: usedByType[t] ?? 0, limit: BREAK_QUOTAS[t] },
+    ])
+  );
+
   // Phase 1 — 4-field live hours for the active session. break_hours /
   // violation_hours count open intervals up to NOW() so the mobile can
   // display a running total without a second endpoint.
@@ -1998,6 +2025,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
     },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },
     current_break: currentBreak,
+    break_quotas: breakQuotas,
     hours,
   });
 });
@@ -2253,13 +2281,27 @@ router.get('/:id/instructions.pdf', requireAuth('guard'), async (req, res) => {
 // row's type is a Sentry warning (visibility into UI double-taps hitting
 // different buttons) but still returns the existing row.
 router.post('/break-start', requireAuth('guard'), async (req, res) => {
-  const { session_id, break_type } = req.body;
+  const { session_id, break_type, lat, lng, accuracy } = req.body;
   if (!session_id || !break_type) {
     return res.status(400).json({ error: 'session_id and break_type are required' });
   }
   if (!isBreakType(break_type)) {
     return res.status(400).json({ error: 'break_type must be one of meal, rest, other' });
   }
+
+  // schema_v46 — break-start coordinates. Optional on the wire (a pre-v46
+  // binary sends none) but recorded as explicit nulls, never guessed. The
+  // expiry+10 "is the guard off post?" check reads these as the fallback
+  // position signal.
+  const startLat: number | null =
+    typeof lat === 'number' && Number.isFinite(lat) ? lat : null;
+  const startLng: number | null =
+    typeof lng === 'number' && Number.isFinite(lng) ? lng : null;
+  const startAccuracyM: number | null =
+    typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0
+      ? accuracy
+      : null;
+
   try {
     // Verify session belongs to this guard and is open
     const sessionResult = await pool.query(
@@ -2298,11 +2340,37 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
       });
     }
 
+    // Per-shift quota by type (schema_v46 package). Counted AFTER the
+    // idempotent open-break return above — a re-mount fetching its own open
+    // break must never see a quota error. Mis-taps (closed within
+    // BREAK_MISTAP_SECONDS of starting) don't burn allowance.
+    const quota = BREAK_QUOTAS[break_type];
+    const usedResult = await pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n
+         FROM break_sessions
+        WHERE shift_session_id = $1
+          AND break_type = $2
+          AND (break_end IS NULL
+               OR break_end >= break_start + make_interval(secs => $3))`,
+      [session_id, break_type, BREAK_MISTAP_SECONDS]
+    );
+    const used = Number(usedResult.rows[0].n);
+    if (used >= quota) {
+      return res.status(422).json({
+        error: 'BREAK_QUOTA_EXCEEDED',
+        message: `You have used all ${quota} ${break_type} break${quota === 1 ? '' : 's'} for this shift.`,
+        break_type,
+        used,
+        limit: quota,
+      });
+    }
+
     const planned = BREAK_DURATIONS[break_type];
     const result = await pool.query(
-      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes)
-       VALUES ($1, $2, $3, NOW(), $4, $5) RETURNING id, break_start, break_type, planned_duration_minutes`,
-      [session_id, req.user!.sub, site_id, break_type, planned]
+      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes,
+                                   start_lat, start_lng, start_accuracy_m)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING id, break_start, break_type, planned_duration_minutes`,
+      [session_id, req.user!.sub, site_id, break_type, planned, startLat, startLng, startAccuracyM]
     );
     const row = result.rows[0];
     res.status(201).json({
@@ -2323,10 +2391,19 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
   if (!break_id) return res.status(400).json({ error: 'break_id is required' });
 
   try {
+    // Deducted minutes are capped at planned_duration_minutes: overrun past
+    // the plan is never auto-deducted (admin review decides — schema_v46
+    // package). In practice the 1-minute breakExpiryCron closes the break
+    // AT the plan, so this cap only matters in the sub-minute race between
+    // expiry and the next tick.
     const result = await pool.query(
       `UPDATE break_sessions
        SET break_end = NOW(),
-           duration_minutes = EXTRACT(EPOCH FROM (NOW() - break_start)) / 60
+           duration_minutes = LEAST(
+             GREATEST(0, ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT),
+             planned_duration_minutes
+           ),
+           ended_by = 'guard'
        WHERE id = $1 AND guard_id = $2 AND break_end IS NULL
        RETURNING *`,
       [break_id, req.user!.sub]
@@ -2523,14 +2600,16 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
       }
     }
 
-    // Close any break that was still open when the guard clocked out
+    // Close any break that was still open when the guard clocked out.
+    // Deduction capped at the plan (overrun is flagged, never auto-deducted).
     await client.query(
       `UPDATE break_sessions
        SET break_end = NOW(),
-           duration_minutes = GREATEST(
-             0,
-             ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT
-           )
+           duration_minutes = LEAST(
+             GREATEST(0, ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT),
+             planned_duration_minutes
+           ),
+           ended_by = 'clock_out'
        WHERE shift_session_id = $1 AND break_end IS NULL`,
       [session.id]
     );

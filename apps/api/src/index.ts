@@ -46,6 +46,7 @@ import './jobs/lateClockInReminder';
 import './jobs/missedPingCron';
 import './jobs/missedReportCron';
 import './jobs/taskDueCron';
+import './jobs/breakExpiryCron';
 
 const app = express();
 app.set('trust proxy', 1);
