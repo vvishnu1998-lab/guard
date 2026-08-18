@@ -27,6 +27,7 @@ import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
 import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
+import { currentPingWindow } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const CAMERA_READY_FALLBACK_MS = 3000;
@@ -48,7 +49,7 @@ export default function PhotoPing() {
   const [cameraReady, setCameraReady]   = useState(false);
   const [capturing, setCapturing]       = useState(false);
 
-  const { activeSession } = useShiftStore();
+  const { activeSession, activeShift, markWindowPinged } = useShiftStore();
   // Missed-ping backfill window — set via deep-link from a missed_ping
   // notification tap (navigateForNotification.ts). When present, the
   // server sets submitted_late + resolves the matching missed_pings
@@ -205,6 +206,28 @@ export default function PhotoPing() {
         message: 'submit succeeded',
         level: 'info',
       });
+
+      // Record which window this satisfied so the active-shift PING NOW tile
+      // greys out instead of inviting a duplicate. A backfill (windowLabel
+      // from a missed_ping deep-link) marks the window it backfilled, NOT the
+      // current one — answering 21:00 late leaves the 22:30 tile live, which
+      // is correct. With no label the ping lands in whatever window is open
+      // now, so resolve that one.
+      {
+        const satisfied =
+          windowLabel ??
+          (activeShift?.scheduled_start && activeShift?.scheduled_end
+            ? (() => {
+                const w = currentPingWindow({
+                  scheduledStart: activeShift.scheduled_start,
+                  scheduledEnd:   activeShift.scheduled_end,
+                  clockedInAt:    activeSession.clocked_in_at,
+                });
+                return w.status === 'open' ? w.window.label : null;
+              })()
+            : null);
+        if (satisfied) markWindowPinged(activeSession.id, satisfied);
+      }
 
       pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
       // Confirmation to the guard (was missing — submit used to silently

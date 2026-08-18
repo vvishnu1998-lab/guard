@@ -591,7 +591,11 @@ export default function HomeScreen() {
                 </View>
               </View>
               <Text style={styles.activeShiftTap}>TAP FOR DETAILS ›</Text>
-              <PingCountdownBanner clockedInAt={activeSession?.clocked_in_at} />
+              <PingCountdownBanner
+                clockedInAt={activeSession?.clocked_in_at}
+                scheduledStart={activeShift?.scheduled_start}
+                scheduledEnd={activeShift?.scheduled_end}
+              />
             </TouchableOpacity>
 
             {/* Clock out button */}
@@ -689,18 +693,29 @@ function BreakBanner({ breakType, breakStartMs, durationMs }: {
   );
 }
 
-function PingCountdownBanner({ clockedInAt }: { clockedInAt?: string }) {
-  const [remaining, setRemaining] = useState(0);
+// Countdown is anchored to the shift's scheduled_start, matching the server
+// cron and the active-shift screen (both go through lib/pingSchedule.ts).
+// Renders nothing once no further boundary can fire — a shift in its last
+// partial window has no next ping to count down to, and "0:00" forever was
+// the old behaviour's way of saying that.
+function PingCountdownBanner({
+  clockedInAt, scheduledStart, scheduledEnd,
+}: {
+  clockedInAt?: string; scheduledStart?: string; scheduledEnd?: string;
+}) {
+  const [remaining, setRemaining] = useState<number | null>(null);
   const ref = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!clockedInAt) return;
-    const clockedInDate = new Date(clockedInAt);
-    const compute = () => remainingMsUntilNextPing(clockedInDate);
+    if (!clockedInAt || !scheduledStart || !scheduledEnd) return;
+    const compute = () =>
+      remainingMsUntilNextPing({ scheduledStart, scheduledEnd, clockedInAt });
     setRemaining(compute());
     ref.current = setInterval(() => setRemaining(compute()), 1000);
     return () => { if (ref.current) clearInterval(ref.current); };
-  }, [clockedInAt]);
+  }, [clockedInAt, scheduledStart, scheduledEnd]);
+
+  if (remaining === null) return null;
 
   const mins = Math.floor(remaining / 60000);
   const secs = Math.floor((remaining % 60000) / 1000);

@@ -52,10 +52,23 @@ interface ShiftState {
   activeShift: Shift | null;
   activeSession: ShiftSession | null;
   currentBreak: CurrentBreak | null;
+  /** Last ping window this device successfully submitted, as
+   *  { sessionId, label }. Read by the PING NOW gate on the active-shift
+   *  screen to grey the tile once the current window is satisfied.
+   *
+   *  Deliberately NOT authoritative: this store is not persisted, so a cold
+   *  start mid-shift forgets it. The gate therefore fails OPEN (tile stays
+   *  enabled) rather than closed. A redundant ping writes one extra
+   *  location_pings row; a wrongly-disabled tile recreates the dead end
+   *  that left 17 windows unanswered on STARNET shift b8d23d66. There is no
+   *  server endpoint that reports pings for the current window — adding one
+   *  is the real fix and is an API change. */
+  lastPingedWindow: { sessionId: string; label: string } | null;
   setPendingShift: (shift: Shift) => void;
   setActiveSession: (shift: Shift, session: ShiftSession) => void;
   clearSession: () => void;
   setCurrentBreak: (b: CurrentBreak | null) => void;
+  markWindowPinged: (sessionId: string, label: string) => void;
   /** Reconcile cached server-derived state with the server. Non-throwing:
    *  see the body comment for the drift scenarios and the silent-fail
    *  semantics. */
@@ -67,20 +80,29 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   activeShift: null,
   activeSession: null,
   currentBreak: null,
+  lastPingedWindow: null,
 
   setPendingShift: (shift) => set({ pendingShift: shift }),
 
   setActiveSession: (shift, session) => {
-    set({ activeShift: shift, activeSession: session, pendingShift: null });
+    // lastPingedWindow is scoped to a session id, but clear it on every
+    // session swap anyway so a handoff rotation can never inherit the
+    // outgoing guard's answered window.
+    set({ activeShift: shift, activeSession: session, pendingShift: null, lastPingedWindow: null });
     setShiftTag(session.id);
   },
 
   clearSession: () => {
-    set({ activeShift: null, activeSession: null, pendingShift: null, currentBreak: null });
+    set({
+      activeShift: null, activeSession: null, pendingShift: null,
+      currentBreak: null, lastPingedWindow: null,
+    });
     setShiftTag(null);
   },
 
   setCurrentBreak: (b) => set({ currentBreak: b }),
+
+  markWindowPinged: (sessionId, label) => set({ lastPingedWindow: { sessionId, label } }),
 
   // Walk-test 2026-07-10 BUG H tail. Build 30 wired clearSession() into
   // both the foreground push receiver (_layout.tsx addNotificationReceived
@@ -132,7 +154,10 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
       } | null>('/shifts/active-session');
       const state = get();
       if (!active && state.activeSession) {
-        set({ activeShift: null, activeSession: null, pendingShift: null, currentBreak: null });
+        set({
+          activeShift: null, activeSession: null, pendingShift: null,
+          currentBreak: null, lastPingedWindow: null,
+        });
         setShiftTag(null);
         Sentry.addBreadcrumb({
           category: 'session_refresh',
