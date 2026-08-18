@@ -598,13 +598,23 @@ export default function HomeScreen() {
               />
             </TouchableOpacity>
 
-            {/* Clock out button */}
+            {/* Clock out button — blocked while a break is open (break
+                enforcement package 5.2): end the break first so the
+                deduction is visible before the shift closes. */}
             <TouchableOpacity
-              style={styles.clockOutBtn}
+              style={[styles.clockOutBtn, currentBreak !== null && styles.clockOutBtnDisabled]}
               onPress={() => router.push('/clock-out')}
+              disabled={currentBreak !== null}
             >
               <Text style={styles.clockOutText}>CLOCK OUT</Text>
             </TouchableOpacity>
+            {currentBreak !== null && (
+              <TouchableOpacity onPress={() => router.push('/break')}>
+                <Text style={styles.clockOutBlockedNote}>
+                  Break in progress — end your break before clocking out
+                </Text>
+              </TouchableOpacity>
+            )}
           </>
         ) : (
           /* Not on shift */
@@ -1017,6 +1027,12 @@ const styles = StyleSheet.create({
     height: 54,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  clockOutBtnDisabled: { opacity: 0.4 },
+  clockOutBlockedNote: {
+    color: Colors.muted, fontSize: 12, letterSpacing: 1,
+    textAlign: 'center', marginBottom: Spacing.md,
+    textDecorationLine: 'underline',
   },
   clockOutText: {
     fontFamily: Fonts.heading,

@@ -21,8 +21,9 @@ import {
   Alert, Animated, Easing, AppState,
 } from 'react-native';
 import { router } from 'expo-router';
+import * as Location from 'expo-location';
 import { useShiftStore } from '../../store/shiftStore';
-import { apiClient }     from '../../lib/apiClient';
+import { apiClient, ApiError } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BREAK_DURATIONS, BreakType } from '../../constants/breakDurations';
 
@@ -46,6 +47,32 @@ interface BreakStartResponse {
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
 
+const GPS_TIMEOUT_MS = 5000;
+
+/** Best-effort position for break-start (schema_v46: server records explicit
+ *  nulls when absent). Unlike clock-out this NEVER hard-fails — a guard must
+ *  always be able to start a legitimate break, GPS lock or not. The server's
+ *  expiry+10 check simply has one fewer signal to work with. */
+async function bestEffortPosition(): Promise<{ lat: number; lng: number; accuracy: number | null } | null> {
+  try {
+    const last = await Location.getLastKnownPositionAsync();
+    if (last) {
+      return { lat: last.coords.latitude, lng: last.coords.longitude, accuracy: last.coords.accuracy };
+    }
+    const live = await Promise.race([
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+      new Promise<null>((r) => setTimeout(() => r(null), GPS_TIMEOUT_MS)),
+    ]);
+    if (live) {
+      const l = live as Location.LocationObject;
+      return { lat: l.coords.latitude, lng: l.coords.longitude, accuracy: l.coords.accuracy };
+    }
+  } catch (err) {
+    console.warn('[break] GPS read threw:', err);
+  }
+  return null;
+}
+
 export default function BreakScreen() {
   const [phase,   setPhase]   = useState<'select' | 'timer'>('select');
   const [breakId, setBreakId] = useState<string | null>(null);
@@ -62,7 +89,7 @@ export default function BreakScreen() {
   const [starting, setStarting] = useState(false);
   const [ending,   setEnding]   = useState(false);
 
-  const { activeSession, currentBreak, setCurrentBreak, refreshFromServer } = useShiftStore();
+  const { activeSession, currentBreak, setCurrentBreak, refreshFromServer, breakQuotas } = useShiftStore();
   const rotAnim = useRef(new Animated.Value(0)).current;
   const hydrated = useRef(false);
 
@@ -152,6 +179,24 @@ export default function BreakScreen() {
     return () => clearInterval(id);
   }, [phase]);
 
+  // 5.4 — the server auto-closes the break at plan (1-min breakExpiryCron),
+  // so once the countdown hits zero start polling active-session; the
+  // refetch lands currentBreak = null → applyServerBreak flips us off the
+  // dead timer. 15s cadence bounds the wait to ~cron-lag + one poll.
+  const expiredPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if (!expired) {
+      if (expiredPollRef.current) { clearInterval(expiredPollRef.current); expiredPollRef.current = null; }
+      return;
+    }
+    refreshFromServer();
+    expiredPollRef.current = setInterval(() => refreshFromServer(), 15_000);
+    return () => {
+      if (expiredPollRef.current) { clearInterval(expiredPollRef.current); expiredPollRef.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expired]);
+
   async function startBreak(option: typeof BREAK_OPTIONS[0]) {
     if (!activeSession) {
       Alert.alert('No Active Shift', 'You must be clocked in to take a break.');
@@ -159,9 +204,13 @@ export default function BreakScreen() {
     }
     setStarting(true);
     try {
+      // 5.1 — break-start coordinates (best-effort; server records explicit
+      // nulls when we have nothing).
+      const pos = await bestEffortPosition();
       const data = await apiClient.post<BreakStartResponse>('/shifts/break-start', {
         session_id: activeSession.id,
         break_type: option.type,
+        ...(pos ? { lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy ?? 30 } : {}),
       });
       const cb = {
         break_id: data.break_id,
@@ -172,8 +221,15 @@ export default function BreakScreen() {
       setCurrentBreak(cb);
       applyServerBreak(cb);
       setNow(Date.now());
+      // Quota state changed server-side; re-pull so "1/2" is current.
+      refreshFromServer();
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Could not start break.');
+      if (err instanceof ApiError && err.status === 422 && err.code === 'BREAK_QUOTA_EXCEEDED') {
+        Alert.alert('Break Limit Reached', err.message);
+        refreshFromServer(); // sync the counts that gated us
+      } else {
+        Alert.alert('Error', err?.message ?? 'Could not start break.');
+      }
     } finally {
       setStarting(false);
     }
@@ -188,6 +244,15 @@ export default function BreakScreen() {
       setCurrentBreak(null);
       router.replace('/active-shift');
     } catch (err: any) {
+      // 5.4 — 404 means the server already closed this break (1-min expiry
+      // cron, clock-out sweep, …). That's a success state for the guard:
+      // don't strand them on a dead timer, just leave the screen.
+      if (err instanceof ApiError && err.status === 404) {
+        setCurrentBreak(null);
+        refreshFromServer();
+        router.replace('/active-shift');
+        return;
+      }
       Alert.alert('Error', err?.message ?? 'Could not end break. Please try again.');
       setEnding(false);
     }
@@ -204,21 +269,33 @@ export default function BreakScreen() {
         <Text style={styles.subtitle}>Select break type</Text>
 
         <View style={styles.optionList}>
-          {BREAK_OPTIONS.map((opt) => (
-            <TouchableOpacity
-              key={opt.type}
-              style={[styles.optionCard, starting && styles.disabled]}
-              onPress={() => startBreak(opt)}
-              disabled={starting}
-            >
-              <Text style={styles.optionIcon}>{opt.icon}</Text>
-              <View style={styles.optionInfo}>
-                <Text style={styles.optionLabel}>{opt.label}</Text>
-                <Text style={styles.optionDuration}>{opt.duration} MINUTES</Text>
-              </View>
-              <Text style={styles.chevron}>›</Text>
-            </TouchableOpacity>
-          ))}
+          {BREAK_OPTIONS.map((opt) => {
+            // 5.3 — server-truth quota state ("1/2 USED"). Absent quotas
+            // (pre-v46 API) → no row shown, nothing disabled; the server
+            // still enforces and the 422 handler explains.
+            const q = breakQuotas?.[opt.type] ?? null;
+            const exhausted = q !== null && q.used >= q.limit;
+            return (
+              <TouchableOpacity
+                key={opt.type}
+                style={[styles.optionCard, (starting || exhausted) && styles.disabled]}
+                onPress={() => startBreak(opt)}
+                disabled={starting || exhausted}
+              >
+                <Text style={styles.optionIcon}>{opt.icon}</Text>
+                <View style={styles.optionInfo}>
+                  <Text style={styles.optionLabel}>{opt.label}</Text>
+                  <Text style={styles.optionDuration}>{opt.duration} MINUTES</Text>
+                  {q !== null && (
+                    <Text style={[styles.optionQuota, exhausted && styles.optionQuotaUsed]}>
+                      {exhausted ? 'NONE LEFT THIS SHIFT' : `${q.used}/${q.limit} USED`}
+                    </Text>
+                  )}
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
         <TouchableOpacity style={styles.cancelBtn} onPress={() => router.back()}>
@@ -258,7 +335,10 @@ export default function BreakScreen() {
         <Text style={styles.endBtnText}>{ending ? 'ENDING…' : 'END BREAK'}</Text>
       </TouchableOpacity>
 
-      <Text style={styles.footer}>GPS tracking paused during break</Text>
+      {/* Accuracy fix bundled with the enforcement package: tracking was
+          never paused during breaks (pings, reports, geofence all stay
+          live — locked design), and the old label claimed otherwise. */}
+      <Text style={styles.footer}>Pings and geofence stay active during break</Text>
     </View>
   );
 }
@@ -285,6 +365,8 @@ const styles = StyleSheet.create({
   optionInfo:     { flex: 1 },
   optionLabel:    { color: Colors.base, fontFamily: Fonts.heading, fontSize: 15, letterSpacing: 2 },
   optionDuration: { color: Colors.muted, fontSize: 11, letterSpacing: 2, marginTop: 2 },
+  optionQuota:    { color: Colors.action, fontSize: 10, letterSpacing: 2, marginTop: 4 },
+  optionQuotaUsed:{ color: '#EF4444' },
   chevron:        { color: Colors.action, fontSize: 22 },
 
   cancelBtn:  { padding: Spacing.md },

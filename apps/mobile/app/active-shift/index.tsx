@@ -46,7 +46,7 @@ function formatCountdown(ms: number): string {
 }
 
 export default function ActiveShiftScreen() {
-  const { activeShift, activeSession, lastPingedWindow } = useShiftStore();
+  const { activeShift, activeSession, lastPingedWindow, currentBreak } = useShiftStore();
   const { guardId } = useAuthStore();
 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -303,13 +303,24 @@ export default function ActiveShiftScreen() {
       </View>
 
       {/* ── Clock-out ───────────────────────────────────────────────── */}
+      {/* 5.2 (break enforcement package) — clocking out mid-break is
+          blocked with the reason on screen, not silently greyed. Ending
+          the break first keeps the ended_by stamp truthful ('guard', not
+          'clock_out') and the deduction visible before the shift closes. */}
       <TouchableOpacity
-        style={[styles.clockOutBtn, clockingOut && styles.disabled]}
+        style={[styles.clockOutBtn, (clockingOut || currentBreak !== null) && styles.disabled]}
         onPress={confirmClockOut}
-        disabled={clockingOut}
+        disabled={clockingOut || currentBreak !== null}
       >
         <Text style={styles.clockOutText}>CLOCK OUT</Text>
       </TouchableOpacity>
+      {currentBreak !== null && (
+        <TouchableOpacity onPress={() => router.push('/break')}>
+          <Text style={styles.clockOutBlockedNote}>
+            Break in progress — end your break before clocking out
+          </Text>
+        </TouchableOpacity>
+      )}
 
       <Text style={styles.footer}>GPS tracking active in background</Text>
     </ScrollView>
@@ -465,6 +476,11 @@ const styles = StyleSheet.create({
     marginTop: Spacing.xl,
   },
   clockOutText: { fontFamily: Fonts.heading, color: Colors.action, fontSize: 18, letterSpacing: 4 },
+  clockOutBlockedNote: {
+    color: Colors.muted, fontSize: 12, letterSpacing: 1,
+    textAlign: 'center', marginTop: Spacing.sm,
+    textDecorationLine: 'underline',
+  },
   disabled:     { opacity: 0.4 },
 
   footer:     { color: Colors.muted, fontSize: 11, letterSpacing: 2, marginTop: Spacing.lg },

@@ -63,7 +63,10 @@ type NotificationType =
   | 'handoff_cancelled'
   | 'handoff_complete'
   | 'handoff_nudge'
-  | 'handoff_expired';
+  | 'handoff_expired'
+  // Break enforcement package (server jobs/breakExpiryCron.ts).
+  | 'break_ended'
+  | 'break_return_overdue';
 
 interface NotificationRow {
   id:         string;
@@ -114,6 +117,10 @@ const VISUAL_BY_TYPE: Record<NotificationType, VisualSpec> = {
   handoff_complete:         { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
   handoff_nudge:            { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
   handoff_expired:          { icon: '🤝', titleColor: AMBER, borderColor: AMBER },
+  // Break family — ended is informational (amber); return_overdue means
+  // the guard is off post past break end, an obligation unmet now (red).
+  break_ended:              { icon: '☕', titleColor: AMBER, borderColor: AMBER },
+  break_return_overdue:     { icon: '☕', titleColor: RED,   borderColor: RED   },
 };
 
 function timeAgo(iso: string) {
