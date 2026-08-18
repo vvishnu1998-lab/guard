@@ -53,7 +53,7 @@ export default function ActiveShiftScreen() {
   // `throttleReason` is stamped onto each ping row so the client portal can
   // show "throttled" instead of "missed" when battery is low.
   const baseIntervalMs = (activeShift?.ping_interval_minutes ?? 30) * 60 * 1000;
-  const { intervalMs: throttledIntervalMs, isThrottled } = useBatteryThrottle(baseIntervalMs);
+  useBatteryThrottle(baseIntervalMs);
 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [nextPingMs,     setNextPingMs]     = useState(0);
@@ -176,15 +176,6 @@ export default function ActiveShiftScreen() {
         <Text style={styles.siteName}>{activeShift.site_name?.toUpperCase()}</Text>
       </View>
 
-      {/* ── Battery-throttle banner (Item 7) ────────────────────────── */}
-      {isThrottled && (
-        <View style={styles.throttleBanner}>
-          <Text style={styles.throttleBannerText}>
-            Low battery — pings reduced to every {Math.round(throttledIntervalMs / 60000)} minutes. Plug in when possible.
-          </Text>
-        </View>
-      )}
-
       {/* ── Ping countdown ──────────────────────────────────────────── */}
       <View style={[styles.pingCard, pingUrgent && styles.pingCardUrgent]}>
         <Text style={styles.pingLabel}>NEXT PING IN</Text>
@@ -301,24 +292,6 @@ const styles = StyleSheet.create({
   timerValue: { fontFamily: 'monospace', color: Colors.base, fontSize: 52, letterSpacing: 4 },
   siteName:   { color: Colors.action, fontSize: 13, letterSpacing: 3, marginTop: Spacing.xs, fontFamily: Fonts.heading },
 
-  // Battery-throttle banner (Item 7) — amber, persistent, not dismissible.
-  throttleBanner: {
-    width: '92%',
-    backgroundColor: '#3A2410', // dark amber tint compatible with the dark theme
-    borderRadius: Radius.md,
-    borderLeftWidth: 4,
-    borderLeftColor: Colors.action,
-    paddingVertical: Spacing.sm,
-    paddingHorizontal: Spacing.md,
-    marginTop: Spacing.md,
-  },
-  throttleBannerText: {
-    color: Colors.action,
-    fontSize: 12,
-    lineHeight: 16,
-    letterSpacing: 0.5,
-  },
-
   // Ping countdown
   pingCard: {
     width: '92%',
@@ -335,7 +308,7 @@ const styles = StyleSheet.create({
   pingValueUrgent:{ color: Colors.action },
   pingNote:       { color: Colors.muted, fontSize: 11, letterSpacing: 2 },
 
-  // Checkpoints (C6) — banner mirrors throttleBanner; card mirrors pingCard.
+  // Checkpoints (C6) — banner and card both mirror pingCard's width + radius.
   cpSetupBanner: {
     width: '92%',
     backgroundColor: '#3A2410',
