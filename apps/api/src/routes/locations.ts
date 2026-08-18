@@ -344,12 +344,33 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       ? window_label
       : null;
 
-  const sessionResult = await pool.query(
-    'SELECT site_id, clocked_in_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+  const sessionResult = await pool.query<{ site_id: string; clocked_in_at: Date; clocked_out_at: Date | null }>(
+    'SELECT site_id, clocked_in_at, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
     [shift_session_id, req.user!.sub]
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Session not found' });
-  const { site_id } = sessionResult.rows[0];
+  const { site_id, clocked_out_at: pingClockedOutAt } = sessionResult.rows[0];
+
+  // Liveness gate — same shape as POST /violation (5a6de20). A ping against
+  // a closed session is not merely a spurious location_pings row: the
+  // transaction below also auto-resolves every open geofence_violations row
+  // for the session, stamping resolved_at + duration_minutes for a return to
+  // post that never happened. That is evidence corruption in the same table
+  // 5a6de20 was protecting, reached through a different door.
+  if (pingClockedOutAt) {
+    console.warn('[ping.reject.session_closed]', {
+      shift_session_id,
+      guard_id:       req.user!.sub,
+      clocked_out_at: pingClockedOutAt.toISOString(),
+      latitude,
+      longitude,
+    });
+    return res.status(409).json({
+      error:   'SESSION_CLOSED',
+      message: 'This shift has already ended. Pings are only accepted during an open session.',
+      clocked_out_at: pingClockedOutAt.toISOString(),
+    });
+  }
 
   const photoValidation = await validatePhotoOrQuarantine(photo_url, {
     guardId: req.user!.sub,
@@ -614,14 +635,33 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
 
   // Resolve site_id from the session (NEVER trust a client-supplied site_id —
   // that would be a tampering vector per Q15).
-  const sessionRow = await pool.query(
-    `SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2`,
+  const sessionRow = await pool.query<{ site_id: string; clocked_out_at: Date | null }>(
+    `SELECT site_id, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2`,
     [shift_session_id, req.user!.sub],
   );
   if (!sessionRow.rows[0]) {
     return res.status(404).json({ error: 'Shift session not found' });
   }
   const siteId = sessionRow.rows[0].site_id;
+  const civClockedOutAt = sessionRow.rows[0].clocked_out_at;
+
+  // Liveness gate — same shape as POST /violation (5a6de20). The 404 above
+  // is this route's pre-existing ownership shape and is deliberately left
+  // alone; only the liveness rejection is normalised across routes.
+  if (civClockedOutAt) {
+    console.warn('[clock_in_verification.reject.session_closed]', {
+      shift_session_id,
+      guard_id:       req.user!.sub,
+      clocked_out_at: civClockedOutAt.toISOString(),
+      latitude:  verified_lat,
+      longitude: verified_lng,
+    });
+    return res.status(409).json({
+      error:   'SESSION_CLOSED',
+      message: 'This shift has already ended. Clock-in verification is only accepted during an open session.',
+      clocked_out_at: civClockedOutAt.toISOString(),
+    });
+  }
 
   // Item 6 — magic-byte validation on the selfie and site photo. Sentinel
   // values ('pending', null) are skipped. Run before geofence + INSERT so

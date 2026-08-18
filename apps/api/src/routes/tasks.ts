@@ -92,8 +92,8 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
     // unvalidated, attacker-supplied shift_session_id. The session must
     // belong to the caller AND to the same shift as the task, so a
     // completion can't be attached to an arbitrary session.
-    const ssr = await client.query(
-      'SELECT site_id, shift_id FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+    const ssr = await client.query<{ site_id: string; shift_id: string; clocked_out_at: Date | null }>(
+      'SELECT site_id, shift_id, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
       [shift_session_id, req.user!.sub],
     );
     if (!ssr.rows[0]) {
@@ -103,6 +103,29 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
     if (ssr.rows[0].shift_id !== task.shift_id) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'Session does not match task shift' });
+    }
+    // Liveness gate — same shape as POST /violation (5a6de20). The shift_id
+    // match above only prevents attaching a completion to a DIFFERENT shift's
+    // session; it says nothing about a closed one, since clock-out does not
+    // change shift_id. No cron moves task_instances off 'pending' at shift
+    // end either (taskDueCron only stamps notified_at, autoCompleteShifts
+    // does not touch the table), so without this a pending task stays
+    // completable against a dead session indefinitely.
+    if (ssr.rows[0].clocked_out_at) {
+      await client.query('ROLLBACK');
+      console.warn('[task_complete.reject.session_closed]', {
+        task_instance_id: req.params.id,
+        shift_session_id,
+        guard_id:         req.user!.sub,
+        clocked_out_at:   ssr.rows[0].clocked_out_at.toISOString(),
+        latitude:  completion_lat,
+        longitude: completion_lng,
+      });
+      return res.status(409).json({
+        error:   'SESSION_CLOSED',
+        message: 'This shift has already ended. Task completions are only accepted during an open session.',
+        clocked_out_at: ssr.rows[0].clocked_out_at.toISOString(),
+      });
     }
     const sessionSiteId = ssr.rows[0].site_id;
 
