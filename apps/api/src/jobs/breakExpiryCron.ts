@@ -39,6 +39,9 @@ import cron from 'node-cron';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 import { Sentry } from '../services/sentry';
+import { insertNotification } from '../services/notifications';
+import { sendPushNotification } from '../services/firebase';
+import { validateAtSite } from '../services/geofence';
 
 export interface ExpiredBreak {
   id: string;
@@ -156,24 +159,215 @@ function minutesBetween(a: Date, b: Date): number {
   return Math.max(0, Math.round((b.getTime() - a.getTime()) / 60_000));
 }
 
+/**
+ * Shared push helper — Alerts row FIRST (the DB feed is the source of
+ * truth; the swap/handoff audit found FCM-only pushes that could never
+ * render in-app — not repeated here), then FCM, then stale-token cleanup.
+ * Mirrors services/shiftPush.ts.
+ */
+async function pushWithAlertRow(params: {
+  guardId: string;
+  shiftSessionId: string;
+  type: 'break_ended' | 'break_return_overdue';
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+}): Promise<void> {
+  await insertNotification({
+    guardId: params.guardId,
+    type: params.type,
+    title: params.title,
+    body: params.body,
+    data: params.data,
+    shiftSessionId: params.shiftSessionId,
+  });
+
+  const tokRow = await pool.query<{ fcm_token: string | null }>(
+    'SELECT fcm_token FROM guards WHERE id = $1',
+    [params.guardId],
+  );
+  const token = tokRow.rows[0]?.fcm_token;
+  if (!token) return; // Alerts row already written — feed stays truthful
+
+  const { staleToken } = await sendPushNotification({
+    token,
+    title: params.title,
+    body: params.body,
+    data: Object.fromEntries(
+      Object.entries(params.data).map(([k, v]) => [k, String(v)]),
+    ) as Record<string, string>,
+  });
+  if (staleToken) {
+    await pool.query(
+      'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
+      [params.guardId, token],
+    );
+  }
+}
+
+/**
+ * Push 1 of 2 — at expiry, for every break Step 1 just closed. Driven off
+ * the close UPDATE's RETURNING rows, and that UPDATE matches a row exactly
+ * once (break_end IS NULL), so this cannot double-fire per break.
+ */
+export async function notifyBreakEnded(closed: ExpiredBreak[]): Promise<void> {
+  for (const b of closed) {
+    try {
+      await pushWithAlertRow({
+        guardId: b.guard_id,
+        shiftSessionId: b.shift_session_id,
+        type: 'break_ended',
+        title: 'Break ended',
+        body: 'Your break time is up — return to post.',
+        data: {
+          break_id: b.id,
+          break_type: b.break_type,
+          planned_duration_minutes: b.planned_duration_minutes,
+        },
+      });
+    } catch (err) {
+      console.error('[breakExpiry] break_ended push failed for break', b.id, err);
+    }
+  }
+}
+
+/**
+ * Push 2 of 2 — at expiry+10, ONLY if the guard is off post. Position is
+ * the most recent signal since break start: onsite ping, off-post ping
+ * rejection (off_post_events), violation occurred/resolved, falling back
+ * to the break-start coordinates re-evaluated against the site fence. No
+ * signal at all → no push, and the decision is logged explicitly — we
+ * don't guess.
+ *
+ * Dedup: each auto-closed break is evaluated exactly once; return_check_at
+ * is stamped in the same pass regardless of outcome.
+ */
+export async function sendReturnOverduePushes(client: PoolClient): Promise<{
+  checked: number;
+  pushed: number;
+}> {
+  const due = await client.query<{
+    id: string;
+    guard_id: string;
+    shift_session_id: string;
+    site_id: string;
+    break_type: string;
+    break_start: Date;
+    break_end: Date;
+    start_lat: number | null;
+    start_lng: number | null;
+    start_accuracy_m: number | null;
+    clocked_out_at: Date | null;
+  }>(
+    `SELECT bs.id, bs.guard_id, bs.shift_session_id, bs.site_id, bs.break_type,
+            bs.break_start, bs.break_end, bs.start_lat, bs.start_lng,
+            bs.start_accuracy_m, ss.clocked_out_at
+       FROM break_sessions bs
+       JOIN shift_sessions ss ON ss.id = bs.shift_session_id
+      WHERE bs.ended_by = 'break_expiry'
+        AND bs.return_check_at IS NULL
+        AND bs.break_end + INTERVAL '10 minutes' <= NOW()`
+  );
+
+  let pushed = 0;
+  for (const b of due.rows) {
+    let outcome: 'off_post_pushed' | 'onsite' | 'unknown' | 'session_closed';
+
+    if (b.clocked_out_at) {
+      outcome = 'session_closed';
+    } else {
+      const signal = await client.query<{ verdict: 'onsite' | 'offpost'; t: Date }>(
+        `SELECT verdict, t FROM (
+           SELECT 'onsite'::text AS verdict, MAX(lp.pinged_at) AS t
+             FROM location_pings lp
+            WHERE lp.shift_session_id = $1 AND lp.pinged_at > $2
+           UNION ALL
+           SELECT 'offpost', MAX(ope.occurred_at)
+             FROM off_post_events ope
+            WHERE ope.shift_session_id = $1 AND ope.occurred_at > $2
+           UNION ALL
+           SELECT 'offpost', MAX(gv.occurred_at)
+             FROM geofence_violations gv
+            WHERE gv.shift_session_id = $1 AND gv.occurred_at > $2
+           UNION ALL
+           SELECT 'onsite', MAX(gv.resolved_at)
+             FROM geofence_violations gv
+            WHERE gv.shift_session_id = $1 AND gv.resolved_at > $2
+         ) signals
+         WHERE t IS NOT NULL
+         ORDER BY t DESC
+         LIMIT 1`,
+        [b.shift_session_id, b.break_start]
+      );
+
+      if (signal.rows[0]) {
+        outcome = signal.rows[0].verdict === 'offpost' ? 'off_post_pushed' : 'onsite';
+      } else if (b.start_lat !== null && b.start_lng !== null) {
+        // Fallback: only position we ever got is where the break started.
+        const fence = await validateAtSite(
+          { lat: b.start_lat, lng: b.start_lng, accuracy_m: b.start_accuracy_m ?? 0 },
+          b.site_id,
+          client,
+        );
+        outcome = fence.allowed ? 'onsite' : 'off_post_pushed';
+      } else {
+        outcome = 'unknown';
+        console.log(
+          `[breakExpiry.return_check] break=${b.id} outcome=unknown — ` +
+          `no position signal since break start and no break-start coords; not pushing`,
+        );
+      }
+
+      if (outcome === 'off_post_pushed') {
+        try {
+          await pushWithAlertRow({
+            guardId: b.guard_id,
+            shiftSessionId: b.shift_session_id,
+            type: 'break_return_overdue',
+            title: 'Return to post',
+            body: 'Your break ended 10 minutes ago and you appear to be off post.',
+            data: { break_id: b.id, break_type: b.break_type },
+          });
+          pushed++;
+        } catch (err) {
+          console.error('[breakExpiry] return_overdue push failed for break', b.id, err);
+        }
+      }
+    }
+
+    await client.query(
+      `UPDATE break_sessions
+          SET return_check_at = NOW(), return_check_outcome = $1
+        WHERE id = $2 AND return_check_at IS NULL`,
+      [outcome, b.id]
+    );
+  }
+  return { checked: due.rows.length, pushed };
+}
+
 cron.schedule('* * * * *', async () => {
   const tickStart = Date.now();
   const client = await pool.connect();
   try {
     const closed = await closeExpiredBreaks(client);
+    await notifyBreakEnded(closed);
     const overruns = await finalizeOverruns(client);
+    const returnCheck = await sendReturnOverduePushes(client);
 
-    if (closed.length > 0 || overruns.finalized > 0) {
+    if (closed.length > 0 || overruns.finalized > 0 || returnCheck.checked > 0) {
       console.log(
         `[breakExpiry] auto-closed ${closed.length} break(s), ` +
-        `finalized ${overruns.finalized} overrun verdict(s) (${overruns.flagged} flagged)`
+        `finalized ${overruns.finalized} overrun verdict(s) (${overruns.flagged} flagged), ` +
+        `return-checked ${returnCheck.checked} (${returnCheck.pushed} pushed)`
       );
     }
     console.info('[break_expiry.tick]', {
-      breaks_closed:      closed.length,
-      overruns_finalized: overruns.finalized,
-      overruns_flagged:   overruns.flagged,
-      duration_ms:        Date.now() - tickStart,
+      breaks_closed:        closed.length,
+      overruns_finalized:   overruns.finalized,
+      overruns_flagged:     overruns.flagged,
+      return_checks:        returnCheck.checked,
+      return_pushes:        returnCheck.pushed,
+      duration_ms:          Date.now() - tickStart,
     });
   } catch (err) {
     console.error('[breakExpiry] Error:', err);

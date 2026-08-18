@@ -72,7 +72,17 @@ export type NotificationType =
   // column advances regardless of push outcome so the cron never
   // retries the same row.
   | 'pre_shift_reminder'
-  | 'shift_start_reminder';
+  | 'shift_start_reminder'
+  // Break enforcement package (schema_v46, 2026-08-18). Both emitted by
+  // jobs/breakExpiryCron.ts, Alerts-row-first per the shiftPush pattern:
+  //   break_ended — the server auto-closed a break at its plan. Data:
+  //     { break_id, break_type, planned_duration_minutes }.
+  //   break_return_overdue — expiry+10 check found the guard's most
+  //     recent position signal off post. Data: { break_id, break_type }.
+  //     Not emitted when position is unknown (logged instead — we don't
+  //     guess) or the session already closed.
+  | 'break_ended'
+  | 'break_return_overdue';
 
 export interface NotificationRow {
   id: string;

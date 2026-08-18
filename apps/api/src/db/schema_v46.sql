@@ -50,6 +50,12 @@ ALTER TABLE break_sessions ADD COLUMN IF NOT EXISTS ended_by           VARCHAR(1
 ALTER TABLE break_sessions ADD COLUMN IF NOT EXISTS overrun_minutes    INTEGER;
 ALTER TABLE break_sessions ADD COLUMN IF NOT EXISTS overrun_flagged_at TIMESTAMPTZ;
 
+-- Expiry+10 return check (breakExpiryCron): stamped exactly once per
+-- auto-closed break so the conditional "still off post" push can never
+-- double-fire. outcome ∈ off_post_pushed | onsite | unknown | session_closed.
+ALTER TABLE break_sessions ADD COLUMN IF NOT EXISTS return_check_at      TIMESTAMPTZ;
+ALTER TABLE break_sessions ADD COLUMN IF NOT EXISTS return_check_outcome VARCHAR(16);
+
 -- ended_by domain. DO block because ADD CONSTRAINT has no IF NOT EXISTS.
 DO $$
 BEGIN
