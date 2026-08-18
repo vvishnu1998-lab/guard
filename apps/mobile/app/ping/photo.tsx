@@ -26,7 +26,6 @@ import { apiClient, ApiError } from '../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
-import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
 import { currentPingWindow } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -197,7 +196,6 @@ export default function PhotoPing() {
         accuracy:         acc ?? 30, // T2-H — server expands fence by (radius + accuracy + 50m safety)
         ping_type:        'gps_photo',
         photo_url:        public_url,
-        throttle_reason:  getCurrentThrottleReason() ?? undefined,
         window_label:     windowLabel ?? undefined,
       });
       console.log('[ping] submit complete');

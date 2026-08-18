@@ -25,7 +25,6 @@ import { router, useFocusEffect } from 'expo-router';
 import { apiClient } from '../../lib/apiClient';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
-import { useBatteryThrottle } from '../../lib/batteryThrottle';
 import { currentPingWindow, remainingMsUntilNextPing, type PingWindowState } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -49,14 +48,6 @@ function formatCountdown(ms: number): string {
 export default function ActiveShiftScreen() {
   const { activeShift, activeSession, lastPingedWindow } = useShiftStore();
   const { guardId } = useAuthStore();
-
-  // Item 7 — battery-aware throttling hook. The server now pings every active
-  // session at wall-clock :00/:30 regardless of cadence, so `intervalMs` no
-  // longer drives the countdown. The hook still runs because its
-  // `throttleReason` is stamped onto each ping row so the client portal can
-  // show "throttled" instead of "missed" when battery is low.
-  const baseIntervalMs = (activeShift?.ping_interval_minutes ?? 30) * 60 * 1000;
-  useBatteryThrottle(baseIntervalMs);
 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [nextPingMs,     setNextPingMs]     = useState<number | null>(null);
