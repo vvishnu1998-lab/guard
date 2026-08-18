@@ -390,6 +390,25 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     pool,
   );
   if (!fence.allowed) {
+    // schema_v46 — persist the rejection as evidence. Until now this
+    // console.log was the ONLY trace: a session with repeated off-post
+    // ping attempts had zero DB rows unless the device also fired a
+    // region-exit event (see session 94906fee — three rejections, no
+    // violations). Failure to persist must not block the 422 the guard
+    // is waiting on.
+    try {
+      await pool.query(
+        `INSERT INTO off_post_events
+           (shift_session_id, guard_id, site_id, source, lat, lng,
+            accuracy_m, distance_m, reason, expires_at)
+         VALUES ($1, $2, $3, 'ping_reject', $4, $5, $6, $7, $8, $9)`,
+        [shift_session_id, req.user!.sub, site_id, latitude, longitude,
+         accuracyM, fence.distance_m, fence.reason,
+         expiresAtFor('off_post_event')]
+      );
+    } catch (err) {
+      console.error('[ping.reject] off_post_events INSERT failed:', err);
+    }
     console.log(
       `[ping.reject] session=${shift_session_id} distance=${fence.distance_m?.toFixed(1) ?? 'null'}m ` +
       `accuracy=${accuracyM ?? 'null'}m reason=${fence.reason}`,

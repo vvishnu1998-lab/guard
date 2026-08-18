@@ -78,6 +78,7 @@ export async function runNightlyPurge(): Promise<StepResult[]> {
   results.push(await step3_expiredPings());
   results.push(await step4_expiredTaskCompletions());
   results.push(await step5_expiredGeofenceViolations());
+  results.push(await step5b_expiredOffPostEvents());
   results.push(await step6_expiredShiftSessions());
   results.push(await step7_expiredShifts());
 
@@ -231,6 +232,32 @@ async function step5_expiredGeofenceViolations(): Promise<StepResult> {
 
     const del = await pool.query(
       `DELETE FROM geofence_violations
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    return finishStep(step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Step 5b ── Expired off_post_events (schema_v46) ──────────────────────────
+// Runs before the shift_sessions step for the same child-before-parent
+// ordering as geofence_violations (the FK cascade would catch them anyway,
+// but off_post_events expire at 1095d vs the session's 1460d).
+async function step5b_expiredOffPostEvents(): Promise<StepResult> {
+  const step = 'step5b_off_post_events';
+  try {
+    const countQ = await pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM off_post_events
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = Number(countQ.rows[0].n);
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      `DELETE FROM off_post_events
        WHERE expires_at < NOW() AND legal_hold = false`,
     );
     return finishStep(step, candidate, del.rowCount ?? 0);
