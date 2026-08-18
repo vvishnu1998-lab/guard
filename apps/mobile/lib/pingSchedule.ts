@@ -21,9 +21,20 @@
  *       partial window at the tail of a shift (missedPingCron.ts:85).
  *   R4  A window whose START precedes clocked_in_at is not the guard's to
  *       answer for; they were not on shift yet (missedPingCron.ts:87).
- *   5m  The reminder cron skips sessions clocked in less than 5 minutes ago
- *       (pingReminder.ts:168), so a boundary landing inside that grace
- *       period never fires and the countdown must skip to the next one.
+ *
+ * R3 and R4 are the WHOLE test. The reminder cron's 5-minute post-clock-in
+ * grace (pingReminder.ts:168) is deliberately NOT mirrored here: it decides
+ * whether a PUSH goes out, not whether a window counts. missedPingCron
+ * applies no such grace, so a window inside it is still fully trackable and
+ * the guard is still marked down for it. Honouring the grace would have
+ * meant staying quiet about exactly the windows that carry an obligation
+ * but no notification — the worst case, and the one a manual button exists
+ * to cover.
+ *
+ * The same reasoning fixes what the countdown MEANS. It is not "time until
+ * the next push"; it is "time until your next window opens". Those differ
+ * whenever the cron suppresses a boundary, and the window opening is the
+ * one the guard can act on.
  *
  * TIMEZONE: the window BOUNDARIES are pure epoch arithmetic and carry no
  * timezone. Only the LABEL is formatted, and it must match the server's
@@ -44,9 +55,6 @@ const DEFAULT_SITE_TZ = 'America/Los_Angeles';
 /** 30-minute cadence. Server: `const stepMs = 30 * 60 * 1000` (pingReminder.ts:115)
  *  and `const WINDOW_MS = 30 * 60 * 1000` (missedPingCron.ts:52). */
 export const PING_WINDOW_MS = 30 * 60 * 1000;
-
-/** Server: `ss.clocked_in_at <= NOW() - INTERVAL '5 minutes'`. */
-const CLOCK_IN_GRACE_MS = 5 * 60 * 1000;
 
 export interface PingWindow {
   /** N in scheduled_start + N*30min. */
@@ -130,9 +138,19 @@ export function currentPingWindow(args: {
 }
 
 /**
- * The next instant a ping_reminder can fire: scheduled_start + N*30min for
- * N >= 1, capped at scheduled_end, skipping any boundary inside the 5-minute
- * post-clock-in grace. Returns null once no further boundary can fire.
+ * When the guard's next ping window OPENS: scheduled_start + N*30min for the
+ * smallest N whose window is still trackable and whose start is in the future.
+ *
+ * Returns null when no trackable window remains — the tail of a shift has no
+ * next window to count down to, and freezing at 0:00 was the old code's way
+ * of saying so.
+ *
+ * N starts at 0, not 1. Window 0 = [scheduled_start, +30min) is trackable
+ * whenever the guard clocked in before their shift, and it is the one window
+ * that NEVER gets a ping_reminder (pingReminder.ts returns null for n <= 0) —
+ * it only ever surfaces as a missed_ping after it has closed. On STARNET
+ * b8d23d66 that is precisely the 20:00 window: no reminder, missed row at
+ * 20:30. Counting down to it is the point.
  */
 export function nextPingAt(args: {
   scheduledStart: string | Date;
@@ -146,20 +164,20 @@ export function nextPingAt(args: {
   const nowMs          = (args.now ?? new Date()).getTime();
   const startMs        = scheduledStart.getTime();
 
-  // Server: `n <= 0` returns null, so the earliest boundary is N = 1.
-  let n = nowMs < startMs ? 1 : Math.floor((nowMs - startMs) / PING_WINDOW_MS) + 1;
+  let n = nowMs < startMs ? 0 : Math.floor((nowMs - startMs) / PING_WINDOW_MS) + 1;
 
   // Bounded: a shift cannot contain more steps than its own length.
   for (let guard = 0; guard < 512; guard += 1) {
-    const boundaryMs = startMs + n * PING_WINDOW_MS;
-    if (boundaryMs > scheduledEnd.getTime()) return null;
-    if (boundaryMs - clockedInAt.getTime() >= CLOCK_IN_GRACE_MS) return new Date(boundaryMs);
+    const openMs  = startMs + n * PING_WINDOW_MS;
+    const closeMs = openMs + PING_WINDOW_MS;
+    if (closeMs > scheduledEnd.getTime()) return null;          // R3
+    if (openMs >= clockedInAt.getTime()) return new Date(openMs); // R4
     n += 1;
   }
   return null;
 }
 
-/** Milliseconds until the next firing boundary, or null when none remains. */
+/** Milliseconds until the next window opens, or null when none remains. */
 export function remainingMsUntilNextPing(args: {
   scheduledStart: string | Date;
   scheduledEnd:   string | Date;
