@@ -25,6 +25,7 @@ import { useShiftStore } from '../store/shiftStore';
 import { apiClient } from '../lib/apiClient';
 import { navigateForNotification } from '../lib/navigateForNotification';
 import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locationBackground';
+import { isUsableShiftEnd } from '../lib/shiftExpiry';
 import { initSentry } from '../lib/sentry';
 import { setupAndroidChannels } from '../lib/notifications';
 
@@ -283,6 +284,10 @@ export default function RootLayout() {
       });
       stopBackgroundLocation().catch((err) => console.warn('[bg-loc] stop failed:', err));
       SecureStore.deleteItemAsync('active_session_id').catch(() => {});
+      // A stale shift end is its own hazard — it would let the task judge a
+      // NEW session against a PREVIOUS shift's clock. Always cleared with the
+      // session id it belongs to.
+      SecureStore.deleteItemAsync('active_shift_end').catch(() => {});
       // Legacy keys — safe to delete even when unused so a downgrade to
       // an older build doesn't rehydrate stale state.
       SecureStore.deleteItemAsync('active_geofence').catch(() => {});
@@ -318,6 +323,32 @@ export default function RootLayout() {
         await SecureStore.setItemAsync('active_session_id', activeSession.id, {
           keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
         });
+        // Persist the shift's end so the background task can decide, with no
+        // network and on an app the OS has killed, that a shift is over — see
+        // lib/shiftExpiry.ts. Written at the same moment as the session id and
+        // cleared with it, so the two can never describe different shifts.
+        //
+        // Rejected values are DELETED rather than left alone: clock-in/step4's
+        // fallback shape sets scheduled_end === scheduled_start, and persisting
+        // that would put expiry at clock-in + grace and silence real breaches
+        // mid-shift. isUsableShiftEnd rejects it; the task then falls back to
+        // notifying, which is the safe direction.
+        if (isUsableShiftEnd(activeShift.scheduled_start, activeShift.scheduled_end)) {
+          await SecureStore.setItemAsync('active_shift_end', activeShift.scheduled_end, {
+            keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+          });
+        } else {
+          Sentry.addBreadcrumb({
+            category: 'geofence',
+            message: 'shift end not persisted — unusable scheduled_start/end',
+            level: 'warning',
+            data: {
+              scheduled_start: activeShift.scheduled_start ?? null,
+              scheduled_end:   activeShift.scheduled_end ?? null,
+            },
+          });
+          await SecureStore.deleteItemAsync('active_shift_end').catch(() => {});
+        }
         if (cancelled) return;
         await startBackgroundLocation(activeShift.geofence);
       } catch (err) {

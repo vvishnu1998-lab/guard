@@ -23,9 +23,10 @@ import { router, useLocalSearchParams } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
+import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
-import { getCurrentThrottleReason } from '../../lib/batteryThrottle';
+import { currentPingWindow } from '../../lib/pingSchedule';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 const CAMERA_READY_FALLBACK_MS = 3000;
@@ -47,7 +48,7 @@ export default function PhotoPing() {
   const [cameraReady, setCameraReady]   = useState(false);
   const [capturing, setCapturing]       = useState(false);
 
-  const { activeSession } = useShiftStore();
+  const { activeSession, activeShift, markWindowPinged } = useShiftStore();
   // Missed-ping backfill window — set via deep-link from a missed_ping
   // notification tap (navigateForNotification.ts). When present, the
   // server sets submitted_late + resolves the matching missed_pings
@@ -195,7 +196,6 @@ export default function PhotoPing() {
         accuracy:         acc ?? 30, // T2-H — server expands fence by (radius + accuracy + 50m safety)
         ping_type:        'gps_photo',
         photo_url:        public_url,
-        throttle_reason:  getCurrentThrottleReason() ?? undefined,
         window_label:     windowLabel ?? undefined,
       });
       console.log('[ping] submit complete');
@@ -204,6 +204,28 @@ export default function PhotoPing() {
         message: 'submit succeeded',
         level: 'info',
       });
+
+      // Record which window this satisfied so the active-shift PING NOW tile
+      // greys out instead of inviting a duplicate. A backfill (windowLabel
+      // from a missed_ping deep-link) marks the window it backfilled, NOT the
+      // current one — answering 21:00 late leaves the 22:30 tile live, which
+      // is correct. With no label the ping lands in whatever window is open
+      // now, so resolve that one.
+      {
+        const satisfied =
+          windowLabel ??
+          (activeShift?.scheduled_start && activeShift?.scheduled_end
+            ? (() => {
+                const w = currentPingWindow({
+                  scheduledStart: activeShift.scheduled_start,
+                  scheduledEnd:   activeShift.scheduled_end,
+                  clockedInAt:    activeSession.clocked_in_at,
+                });
+                return w.status === 'open' ? w.window.label : null;
+              })()
+            : null);
+        if (satisfied) markWindowPinged(activeSession.id, satisfied);
+      }
 
       pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
       // Confirmation to the guard (was missing — submit used to silently
@@ -215,6 +237,13 @@ export default function PhotoPing() {
       );
     } catch (err: any) {
       console.error('[ping] capture failed:', err);
+      // Shift ended under the guard (usually the autoCompleteShifts cron
+      // closing the session at scheduled_end). Repairs local state, tears the
+      // region down, and routes home — see lib/sessionClosed.ts.
+      if (isSessionClosed(err)) {
+        await handleSessionClosed(err, 'ping.photo');
+        return;
+      }
       // PING_OFF_POST is expected under the Commit A hybrid policy (Q8) —
       // pings prove presence, so the server 422s any offsite submission.
       // Show the user-readable copy instead of the raw enum string, and

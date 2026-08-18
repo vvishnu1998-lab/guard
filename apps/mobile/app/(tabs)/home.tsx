@@ -15,6 +15,7 @@ import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
 import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { formatDurationMs, formatHoursHHMM, type ShiftHours } from '../../lib/formatHours';
+import { shiftDayLabel, fmtTimeInTz, tzAbbreviation } from '../../lib/shiftTime';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BreakType } from '../../constants/breakDurations';
@@ -29,6 +30,11 @@ interface ApiShift {
   scheduled_end: string;
   status: string;
   instructions_pdf_url?: string | null;
+  /** IANA site timezone from GET /shifts (api 41b9d62, `si.timezone AS
+   *  site_tz`). NOT NULL server-side, but typed optional: a response cached by
+   *  an older build, or a future change to the endpoint, could omit it and the
+   *  card must degrade to the device zone rather than break. */
+  site_tz?: string;
 }
 
 interface ActiveSessionResponse {
@@ -54,12 +60,9 @@ interface ActiveSessionResponse {
 // lib/formatHours.ts so the stat bar renders in the same "Nh MMm" style
 // (minutes zero-padded) that admin/client/emails use. See D2 contract.
 
-function fmtTime(iso: string | null | undefined) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
+// fmtTime removed 2026-08-08: it formatted in the DEVICE zone, which is only
+// correct while the guard's phone shares the site's zone. Replaced by
+// fmtTimeInTz from lib/shiftTime.ts, which takes the site zone explicitly.
 
 function getCurrentTimeStr() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -588,7 +591,11 @@ export default function HomeScreen() {
                 </View>
               </View>
               <Text style={styles.activeShiftTap}>TAP FOR DETAILS ›</Text>
-              <PingCountdownBanner clockedInAt={activeSession?.clocked_in_at} />
+              <PingCountdownBanner
+                clockedInAt={activeSession?.clocked_in_at}
+                scheduledStart={activeShift?.scheduled_start}
+                scheduledEnd={activeShift?.scheduled_end}
+              />
             </TouchableOpacity>
 
             {/* Clock out button */}
@@ -608,10 +615,20 @@ export default function HomeScreen() {
               <>
                 <Text style={styles.shiftLabel}>NEXT SHIFT</Text>
                 <Text style={styles.shiftSite}>{upcomingShift.site_name.toUpperCase()}</Text>
+                {/* Day + times resolved in the SITE's zone, not the device's —
+                    a 23:30 start is "today" in Pacific and "tomorrow" in UTC,
+                    so the device clock is only right while the phone shares
+                    the site's zone. tz label matches the shift-detail screen. */}
+                <Text style={styles.shiftDay}>
+                  {shiftDayLabel(upcomingShift.scheduled_start, upcomingShift.site_tz, Date.now())}
+                </Text>
                 <Text style={styles.shiftTime}>
-                  {fmtTime(upcomingShift.scheduled_start)}
-                  {upcomingShift.scheduled_end && fmtTime(upcomingShift.scheduled_end)
-                    ? ` – ${fmtTime(upcomingShift.scheduled_end)}`
+                  {fmtTimeInTz(upcomingShift.scheduled_start, upcomingShift.site_tz)}
+                  {upcomingShift.scheduled_end && fmtTimeInTz(upcomingShift.scheduled_end, upcomingShift.site_tz)
+                    ? ` – ${fmtTimeInTz(upcomingShift.scheduled_end, upcomingShift.site_tz)}`
+                    : ''}
+                  {tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)
+                    ? ` ${tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)}`
                     : ''}
                 </Text>
                 <TouchableOpacity style={styles.clockInBtn} onPress={handleClockIn}>
@@ -676,18 +693,29 @@ function BreakBanner({ breakType, breakStartMs, durationMs }: {
   );
 }
 
-function PingCountdownBanner({ clockedInAt }: { clockedInAt?: string }) {
-  const [remaining, setRemaining] = useState(0);
+// Countdown is anchored to the shift's scheduled_start, matching the server
+// cron and the active-shift screen (both go through lib/pingSchedule.ts).
+// Renders nothing once no further boundary can fire — a shift in its last
+// partial window has no next ping to count down to, and "0:00" forever was
+// the old behaviour's way of saying that.
+function PingCountdownBanner({
+  clockedInAt, scheduledStart, scheduledEnd,
+}: {
+  clockedInAt?: string; scheduledStart?: string; scheduledEnd?: string;
+}) {
+  const [remaining, setRemaining] = useState<number | null>(null);
   const ref = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!clockedInAt) return;
-    const clockedInDate = new Date(clockedInAt);
-    const compute = () => remainingMsUntilNextPing(clockedInDate);
+    if (!clockedInAt || !scheduledStart || !scheduledEnd) return;
+    const compute = () =>
+      remainingMsUntilNextPing({ scheduledStart, scheduledEnd, clockedInAt });
     setRemaining(compute());
     ref.current = setInterval(() => setRemaining(compute()), 1000);
     return () => { if (ref.current) clearInterval(ref.current); };
-  }, [clockedInAt]);
+  }, [clockedInAt, scheduledStart, scheduledEnd]);
+
+  if (remaining === null) return null;
 
   const mins = Math.floor(remaining / 60000);
   const secs = Math.floor((remaining % 60000) / 1000);
@@ -1014,6 +1042,7 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     marginBottom: 4,
   },
+  shiftDay: { color: Colors.textPrimary, fontSize: 15, letterSpacing: 1, marginBottom: 2 },
   shiftTime: { color: Colors.muted, fontSize: 16, marginBottom: Spacing.md },
   noShift: { color: Colors.muted, fontSize: 16, marginBottom: Spacing.sm },
   retryBtn: { alignSelf: 'flex-start' },

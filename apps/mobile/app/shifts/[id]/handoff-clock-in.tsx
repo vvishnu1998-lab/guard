@@ -36,7 +36,8 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as Sentry from '@sentry/react-native';
-import { apiClient } from '../../../lib/apiClient';
+import { apiClient, ApiError } from '../../../lib/apiClient';
+import { isSessionClosed, handleSessionClosed } from '../../../lib/sessionClosed';
 import { uploadToS3 } from '../../../lib/uploadToS3';
 import { uuidv4 } from '../../../lib/uuid';
 import { useAuthStore } from '../../../store/authStore';
@@ -373,9 +374,16 @@ export default function HandoffClockInWizard() {
         level: 'error',
         data: { error: err?.message ?? String(err) },
       });
+      if (isSessionClosed(err)) {
+        await handleSessionClosed(err, 'handoff-clock-in');
+        return;
+      }
       Sentry.captureException(err, { extra: { where: 'handoff-clock-in.submit' } });
       // 422 → geofence failed on server; bounce to gps step to re-check.
-      if (err?.message === 'GEOFENCE_FAILED') {
+      // ApiError puts the server's code in .code and the friendly sentence in
+      // .message, so the old `err.message === 'GEOFENCE_FAILED'` test could
+      // never be true and this branch never ran. Match ping/photo.tsx.
+      if (err instanceof ApiError && err.code === 'GEOFENCE_FAILED') {
         Alert.alert(
           'Outside Site',
           'You appear to be outside the site post. Move to the entrance and try again.',
