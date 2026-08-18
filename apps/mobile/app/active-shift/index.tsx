@@ -68,23 +68,52 @@ export default function ActiveShiftScreen() {
   // ── Checkpoints (C6) ──────────────────────────────────────────────────
   // null = not loaded / fetch failed / site has none → render NOTHING, so
   // guards at sites without checkpoints see zero change to this screen.
-  // Refetched on every focus so the counter updates after each scan.
-  const [cpMine, setCpMine] = useState<{
+  //
+  // round_window is the server's authority on WHICH hour the counts describe
+  // — date_trunc('hour', NOW() AT TIME ZONE site.timezone) from
+  // routes/checkpoints.ts. It has always been in the response and the client
+  // used to throw it away, which is what let "5 OF 5 THIS HOUR" survive into
+  // an hour in which nothing had been scanned: useFocusEffect keyed on the
+  // session id never refires while the screen stays mounted, and a shift
+  // spans ten hour boundaries.
+  interface CpMine {
     total: number; scanned: number; unlinked: number;
     checkpoints: { id: string }[];
-  } | null>(null);
+    /** ISO instant of the hour boundary these counts belong to. */
+    round_window: string;
+  }
+  const [cpMine, setCpMine] = useState<CpMine | null>(null);
+
+  const loadCheckpoints = useCallback(async () => {
+    if (!activeSession) return;
+    try {
+      setCpMine(await apiClient.get<CpMine>('/checkpoints/mine'));
+    } catch {
+      setCpMine(null); // silent — section just hides
+    }
+  }, [activeSession?.id]);
 
   useFocusEffect(
-    useCallback(() => {
-      if (!activeSession) return;
-      let cancelled = false;
-      apiClient
-        .get<{ total: number; scanned: number; unlinked: number; checkpoints: { id: string }[] }>('/checkpoints/mine')
-        .then((mine) => { if (!cancelled) setCpMine(mine); })
-        .catch(() => { if (!cancelled) setCpMine(null); }); // silent — section just hides
-      return () => { cancelled = true; };
-    }, [activeSession?.id]),
+    useCallback(() => { void loadCheckpoints(); }, [loadCheckpoints]),
   );
+
+  // Counts describe [round_window, round_window + 1h). Once now is past that
+  // they describe a window the guard has left, so they are not shown.
+  //
+  // Deliberately epoch arithmetic on the server's own value rather than
+  // re-deriving the boundary from a local clock: the window is site-local and
+  // /shifts/active-session does not carry site_tz, so any client-side
+  // date_trunc would be guessing. The length of an hour needs no timezone.
+  // The 1s countdown tick already re-renders this component, so the check is
+  // live without adding a poller.
+  const cpStale =
+    cpMine !== null &&
+    Date.now() >= new Date(cpMine.round_window).getTime() + 60 * 60 * 1000;
+
+  // Refetch once, on the transition into staleness — not on a schedule.
+  useEffect(() => {
+    if (cpStale) void loadCheckpoints();
+  }, [cpStale, loadCheckpoints]);
 
   const hasCheckpoints = (cpMine?.checkpoints.length ?? 0) > 0;
 
@@ -132,12 +161,19 @@ export default function ActiveShiftScreen() {
   }, [activeSession?.clocked_in_at, activeShift?.scheduled_start, activeShift?.scheduled_end]);
 
   // ── Resume correction when app comes back to foreground ───────────────
+  // Also the moment the checkpoint counter is most likely to be wrong: JS is
+  // frozen while backgrounded, so a phone pocketed at 20:50 and woken at
+  // 21:20 resumes holding the 20:00 window's counts. cpStale catches that on
+  // the first render too; this makes the corrected value arrive with it
+  // rather than a round-trip later.
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
+      const wasBackground = appStateRef.current.match(/inactive|background/);
       appStateRef.current = state;
+      if (wasBackground && state === 'active') void loadCheckpoints();
     });
     return () => sub.remove();
-  }, []);
+  }, [loadCheckpoints]);
 
   // ── Guard: no active session ───────────────────────────────────────────
   if (!activeShift || !activeSession) {
@@ -228,7 +264,9 @@ export default function ActiveShiftScreen() {
             </TouchableOpacity>
           )}
           <View style={styles.cpCard}>
-            <Text style={styles.cpLabel}>CHECKPOINTS — {cpMine.scanned} OF {cpMine.total} THIS HOUR</Text>
+            <Text style={styles.cpLabel}>
+              CHECKPOINTS — {cpStale ? '—' : cpMine.scanned} OF {cpMine.total} THIS HOUR
+            </Text>
             <TouchableOpacity
               style={styles.cpScanBtn}
               onPress={() => router.push('/checkpoints/scan')}
