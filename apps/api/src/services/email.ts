@@ -20,6 +20,7 @@ import { pool } from '../db/pool';
 import { haversineDistance } from './geofence';
 import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
+import { completedTrackableWindows } from './pingWindows';
 
 // Central SendGrid error tag helper. Called from every sgMail.send catch
 // site so a Sentry.setTag('service','sendgrid') + flow tag lets us slice
@@ -359,7 +360,7 @@ export async function sendDailyShiftReport(shiftId: string) {
   // Reply-To is the shared support address — client replies route to
   // NetraOps support rather than the per-tenant primary admin.
   const shiftResult = await pool.query(
-    `SELECT sh.id, sh.scheduled_start,
+    `SELECT sh.id, sh.scheduled_start, sh.scheduled_end,
             si.name     AS site_name,
             si.timezone AS site_tz,
             g.name      AS guard_name,
@@ -401,21 +402,59 @@ export async function sendDailyShiftReport(shiftId: string) {
   );
   const session = sessionResult.rows[0];
 
-  const [reportsResult, tasksResult, taskTotalResult] = await Promise.all([
-    pool.query(
-      `SELECT report_type, severity, description, reported_at
-       FROM reports WHERE shift_session_id = $1 ORDER BY reported_at ASC`,
-      [session?.id],
-    ),
-    pool.query(
-      `SELECT COUNT(*) AS completed FROM task_completions WHERE shift_session_id = $1`,
-      [session?.id],
-    ),
-    pool.query(
-      `SELECT COUNT(*) AS total FROM task_instances WHERE shift_id = $1`,
-      [shiftId],
-    ),
-  ]);
+  const [reportsResult, tasksResult, taskTotalResult, pingsResult, missedResult] =
+    await Promise.all([
+      pool.query(
+        `SELECT report_type, severity, description, reported_at
+         FROM reports WHERE shift_session_id = $1 ORDER BY reported_at ASC`,
+        [session?.id],
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS completed FROM task_completions WHERE shift_session_id = $1`,
+        [session?.id],
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM task_instances WHERE shift_id = $1`,
+        [shiftId],
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS submitted FROM location_pings WHERE shift_session_id = $1`,
+        [session?.id],
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS unresolved FROM missed_pings
+          WHERE shift_session_id = $1 AND resolved_at IS NULL`,
+        [session?.id],
+      ),
+    ]);
+
+  // Expected windows come from services/pingWindows.ts — the same function
+  // jobs/missedPingCron.ts uses to decide whether to write a missed_pings
+  // row. Counting them any other way would let the client's denominator
+  // drift from the rule the guard is actually judged by.
+  //
+  // `now` is the real clock: the daily cron only picks up shifts whose
+  // scheduled_end passed over an hour ago, so every window has closed and
+  // the count is the shift's full complement. Rendering mid-shift (the
+  // test-send script) would honestly count only closed windows.
+  const pingsExpected = session?.clocked_in_at
+    ? completedTrackableWindows(
+        new Date(sh.scheduled_start),
+        new Date(sh.scheduled_end),
+        new Date(session.clocked_in_at),
+        new Date(),
+      ).length
+    : 0;
+  const pingsSubmitted = parseInt(pingsResult.rows[0]?.submitted ?? 0);
+
+  // Unresolved missed windows are computed for the operations log only.
+  // They are deliberately NOT passed to the renderer: this email goes to the
+  // CLIENT, who gets the ratio and nothing else. A renderer that never
+  // receives the number cannot leak it into the template later.
+  console.log(
+    `[email] shift ${shiftId} ping compliance: ${pingsSubmitted}/${pingsExpected} ` +
+    `submitted, ${parseInt(missedResult.rows[0]?.unresolved ?? 0)} window(s) unresolved`,
+  );
 
   const { subject, html } = renderDailyShiftReport({
     site_name:       sh.site_name,
@@ -439,6 +478,8 @@ export async function sendDailyShiftReport(shiftId: string) {
     reports:         reportsResult.rows,
     tasks_completed: parseInt(tasksResult.rows[0]?.completed ?? 0),
     tasks_total:     parseInt(taskTotalResult.rows[0]?.total ?? 0),
+    pings_submitted: pingsSubmitted,
+    pings_expected:  pingsExpected,
   });
 
   const sendOpts: sgMail.MailDataRequired = {
@@ -487,12 +528,23 @@ export function renderDailyShiftReport(data: {
   reports:         Array<{ report_type: string; severity: string | null; description: string; reported_at: Date | string }>;
   tasks_completed: number;
   tasks_total:     number;
+  /** Pings the guard actually submitted during the session. */
+  pings_submitted?: number;
+  /** Trackable 30-min windows for the session, per services/pingWindows.ts. */
+  pings_expected?:  number;
 }): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
   const dateLabel  = fmtDateSite(data.scheduled_start, tz);
   const totalHours = data.hours
     ? formatHoursHHMM(data.hours.actual_hours)
     : (data.total_hours != null ? `${parseFloat(String(data.total_hours))}h` : '—');
+  // submitted/expected only — no per-window breakdown, no coordinates, no
+  // distances, no list of which windows were missed. A shift with no
+  // trackable windows (never clocked in, or too short to contain one)
+  // renders '—' rather than a misleading 0/0.
+  const pingsLabel = (data.pings_expected ?? 0) > 0
+    ? `${data.pings_submitted ?? 0}/${data.pings_expected}`
+    : '—';
   const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
   const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
@@ -530,6 +582,7 @@ export function renderDailyShiftReport(data: {
         <div class="kpi"><div class="n">${totalHours}</div><div class="l">HOURS</div></div>
         <div class="kpi"><div class="n">${data.reports.length}</div><div class="l">REPORTS</div></div>
         <div class="kpi"><div class="n">${data.tasks_completed}/${data.tasks_total}</div><div class="l">TASKS</div></div>
+        <div class="kpi"><div class="n">${pingsLabel}</div><div class="l">PINGS</div></div>
       </div>
 
       ${data.hours ? `

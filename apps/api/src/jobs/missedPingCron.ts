@@ -36,6 +36,10 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
 import { expiresAtFor } from '../services/retention';
+// Window rule lives in services/pingWindows.ts so the daily client report
+// (services/email.ts) counts expected windows with the SAME code that
+// decides whether a missed_pings row is written here.
+import { completedTrackableWindows } from '../services/pingWindows';
 
 interface SessionRow {
   session_id: string;
@@ -49,45 +53,12 @@ interface SessionRow {
   site_tz: string | null;
 }
 
-const WINDOW_MS = 30 * 60 * 1000;
-
 function siteLocalLabel(when: Date, siteTz: string | null): string {
   const tz = siteTz ?? 'America/Los_Angeles';
   return new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit', minute: '2-digit', hour12: false,
     timeZone: tz,
   }).format(when);
-}
-
-/**
- * Enumerate the [window_start, window_end] pairs for a session that
- * have COMPLETED as of `now` and that pass the window fit + clock-in
- * rules (R3 + R4). Returns oldest → newest.
- */
-function completedTrackableWindows(
-  scheduledStart: Date,
-  scheduledEnd:   Date,
-  clockedInAt:    Date,
-  now:            Date,
-): Array<{ windowStart: Date; windowEnd: Date }> {
-  const ssMs = scheduledStart.getTime();
-  const seMs = scheduledEnd.getTime();
-  const ciMs = clockedInAt.getTime();
-  const nowMs = now.getTime();
-
-  const out: Array<{ windowStart: Date; windowEnd: Date }> = [];
-  // We only inspect windows whose window_end has already passed.
-  // Cap the loop with a safety bound so a bad row (say, a
-  // scheduled_start way in the past) can't spin forever.
-  for (let n = 0; n < 250; n += 1) {
-    const wsMs = ssMs + n * WINDOW_MS;
-    const weMs = wsMs + WINDOW_MS;
-    if (weMs > seMs) break;             // R3 — end must fit within shift
-    if (weMs > nowMs) break;            // window hasn't closed yet
-    if (wsMs < ciMs) continue;          // R4/SD-D — skip pre-clock-in windows
-    out.push({ windowStart: new Date(wsMs), windowEnd: new Date(weMs) });
-  }
-  return out;
 }
 
 async function anyPingInWindow(
