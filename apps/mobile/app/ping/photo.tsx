@@ -1,7 +1,10 @@
 /**
  * GPS + Photo Ping (Section 5.4 — on-hour pings)
  * Rear camera. Posts location ping + photo to API.
- * Shows 7-day photo deletion notice (Section 11.4 — retain_as_evidence exemption).
+ *
+ * Note: the 7-day photo retention POLICY (Section 11.4 — retain_as_evidence
+ * exemption, enforced server-side in retention.ts / nightlyPurge.ts) still
+ * applies; only the guard-facing banner was removed (batch/mobile-11).
  *
  * Camera UX lives in components/CameraCapture (batch/mobile-11 rebuild —
  * full-bleed preview, instant shutter feedback, ref-based double-capture
@@ -14,7 +17,7 @@
  *  - window_label backfill semantics + markWindowPinged
  *  - PING_OFF_POST / session-closed error mapping
  */
-import { View, Text, StyleSheet, Alert } from 'react-native';
+import { Alert } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import CameraCapture, { CapturedPhoto } from '../../components/CameraCapture';
@@ -24,7 +27,6 @@ import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
 import { currentPingWindow } from '../../lib/pingSchedule';
-import { Colors, Spacing, Radius } from '../../constants/theme';
 
 export default function PhotoPing() {
   const { activeSession, activeShift, markWindowPinged } = useShiftStore();
@@ -163,29 +165,6 @@ export default function PhotoPing() {
       headerSubtitle="GPS + PHOTO"
       onCaptured={submit}
       validateBeforeCapture={validateBeforeCapture}
-      overlayExtra={
-        <View style={styles.noticeCard}>
-          <Text style={styles.noticeIcon}>🗑</Text>
-          <Text style={styles.noticeText}>
-            Ping photos are auto-deleted after 7 days unless flagged as evidence by admin.
-          </Text>
-        </View>
-      }
     />
   );
 }
-
-const styles = StyleSheet.create({
-  noticeCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: '100%',
-    backgroundColor: 'rgba(15,25,41,0.85)', // Colors.surface over the preview
-    borderRadius: Radius.md,
-    borderWidth: 1, borderColor: Colors.border,
-    padding: Spacing.md,
-    gap: Spacing.sm,
-  },
-  noticeIcon: { fontSize: 18 },
-  noticeText: { flex: 1, color: Colors.muted, fontSize: 12, lineHeight: 18 },
-});
