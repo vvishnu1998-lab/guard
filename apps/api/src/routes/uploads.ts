@@ -23,7 +23,7 @@ const ALLOWED_TYPES: Record<string, string> = {
   'image/webp': 'webp',
 };
 
-const ALLOWED_CONTEXTS = new Set(['report', 'ping', 'clock_in']);
+const ALLOWED_CONTEXTS = new Set(['report', 'ping', 'clock_in', 'inspection']);
 
 // POST /api/uploads/presign
 // Body: { content_type: string, context: 'report' | 'ping' | 'clock_in' }
@@ -41,7 +41,7 @@ router.post('/presign', requireAuth('guard'), async (req, res) => {
     return res.status(400).json({ error: 'content_type must be image/jpeg, image/png, or image/webp' });
   }
   if (!ALLOWED_CONTEXTS.has(context)) {
-    return res.status(400).json({ error: 'context must be report, ping, or clock_in' });
+    return res.status(400).json({ error: 'context must be report, ping, clock_in, or inspection' });
   }
 
   const ext = ALLOWED_TYPES[content_type];

@@ -30,6 +30,7 @@ export const RETENTION = {
   MISSED_PING_DAYS:        365,   // parity with ping metadata (audit trail)
   MISSED_REPORT_DAYS:      365,   // parity with activity report retention
   OFF_POST_EVENT_DAYS:     1095,  // parity with geofence_violation (evidence)
+  VEHICLE_INSPECTION_DAYS: 365,   // maintenance-report parity — inspection photos ARE the evidence artifact (not the 7-day ping_photo tier)
 } as const;
 
 /**
@@ -48,7 +49,8 @@ export type RetentionKind =
   | 'shift'
   | 'missed_ping'
   | 'missed_report'
-  | 'off_post_event';
+  | 'off_post_event'
+  | 'vehicle_inspection';
 
 const KIND_DAYS: Record<RetentionKind, number> = {
   activity_report:    RETENTION.ACTIVITY_REPORT_DAYS,
@@ -62,6 +64,7 @@ const KIND_DAYS: Record<RetentionKind, number> = {
   missed_ping:        RETENTION.MISSED_PING_DAYS,
   missed_report:      RETENTION.MISSED_REPORT_DAYS,
   off_post_event:     RETENTION.OFF_POST_EVENT_DAYS,
+  vehicle_inspection: RETENTION.VEHICLE_INSPECTION_DAYS,
 };
 
 /**

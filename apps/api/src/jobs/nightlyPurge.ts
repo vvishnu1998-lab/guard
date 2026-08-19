@@ -79,6 +79,7 @@ export async function runNightlyPurge(): Promise<StepResult[]> {
   results.push(await step4_expiredTaskCompletions());
   results.push(await step5_expiredGeofenceViolations());
   results.push(await step5b_expiredOffPostEvents());
+  results.push(await step5c_expiredVehicleInspections());
   results.push(await step6_expiredShiftSessions());
   results.push(await step7_expiredShifts());
 
@@ -259,6 +260,54 @@ async function step5b_expiredOffPostEvents(): Promise<StepResult> {
     const del = await pool.query(
       `DELETE FROM off_post_events
        WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    return finishStep(step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── Step 5c ── Expired vehicle inspections (S3 photos then DELETE) ───────────
+// schema_v48, 'vehicle_inspection' tier (365d). Runs BEFORE the
+// shift_sessions step: inspections FK shift_sessions WITHOUT cascade
+// (deliberate — a cascade would silently delete a legal_hold inspection
+// when its 4-year session purges; a blocked FK errors loudly instead).
+async function step5c_expiredVehicleInspections(): Promise<StepResult> {
+  const step = 'step5c_vehicle_inspections';
+  try {
+    const rowsQ = await pool.query<{
+      id: string;
+      photo_front_url: string | null;
+      photo_rear_url: string | null;
+      photo_driver_side_url: string | null;
+      photo_passenger_side_url: string | null;
+      photo_odometer_url: string | null;
+    }>(
+      `SELECT id, photo_front_url, photo_rear_url, photo_driver_side_url,
+              photo_passenger_side_url, photo_odometer_url
+       FROM vehicle_inspections
+       WHERE expires_at < NOW() AND legal_hold = false`,
+    );
+    const candidate = rowsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    for (const row of rowsQ.rows) {
+      const urls = [
+        row.photo_front_url, row.photo_rear_url, row.photo_driver_side_url,
+        row.photo_passenger_side_url, row.photo_odometer_url,
+      ];
+      for (const url of urls) {
+        if (url) {
+          try { await deleteS3Object(url); } catch { /* already gone */ }
+        }
+      }
+    }
+    const del = await pool.query(
+      `DELETE FROM vehicle_inspections
+       WHERE id = ANY($1::uuid[])`,
+      [rowsQ.rows.map((r) => r.id)],
     );
     return finishStep(step, candidate, del.rowCount ?? 0);
   } catch (err) {

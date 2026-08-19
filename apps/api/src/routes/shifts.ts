@@ -1877,6 +1877,15 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
               si.instructions_pdf_url, g.name as guard_name,
               co.name AS company_name,
               COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit,
+              -- schema_v48: true when this site requires vehicle inspection
+              -- and at least one session on the shift lacks a COMPLETED
+              -- inspection (no row, or completed_at IS NULL). Sessions are
+              -- per-guard (handoff shifts have several) — each owes its own.
+              (si.vehicle_inspection_required AND EXISTS (
+                 SELECT 1 FROM shift_sessions ss2
+                 LEFT JOIN vehicle_inspections vi ON vi.shift_session_id = ss2.id
+                 WHERE ss2.shift_id = s.id AND (vi.id IS NULL OR vi.completed_at IS NULL)
+              )) AS inspection_incomplete,
               -- 4-field canonical hours (Phase 1). Aggregates every session on
               -- this shift (handoff cases sum across guards).
               ROUND(CAST(EXTRACT(EPOCH FROM (s.scheduled_end - s.scheduled_start))/3600.0 AS NUMERIC), 2) AS h_scheduled,

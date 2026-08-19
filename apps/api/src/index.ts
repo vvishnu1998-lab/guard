@@ -29,6 +29,8 @@ import activityLogRoutes from './routes/activityLog';
 import geocodeRoutes from './routes/geocode';
 import schedulingRoutes from './routes/scheduling';
 import checkpointsRoutes from './routes/checkpoints';
+import vehiclesRoutes from './routes/vehicles';
+import inspectionsRoutes from './routes/inspections';
 
 // Cron jobs
 import './jobs/nightlyPurge';
@@ -138,6 +140,8 @@ app.use('/api/activity-log', activityLogRoutes);
 app.use('/api/geocode', geocodeRoutes);
 app.use('/api/scheduling', schedulingRoutes);
 app.use('/api/checkpoints', checkpointsRoutes);
+app.use('/api/vehicles', vehiclesRoutes);
+app.use('/api/inspections', inspectionsRoutes);
 
 // Sentry error handler — MUST come after all routes and BEFORE any other
 // error-handling middleware. It captures the error then calls next(err),
