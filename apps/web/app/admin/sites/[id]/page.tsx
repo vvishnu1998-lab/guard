@@ -26,6 +26,11 @@ interface Site {
   name:     string;
   address:  string;
   timezone: string;   // IANA zone (sites.timezone, NOT NULL) — CSV timestamps render in it
+  // schema_v47 site toggles. checkpoints_enabled gates the guard QR
+  // scanner; vehicle_inspection_required prompts (never blocks) a
+  // post-clock-in inspection.
+  checkpoints_enabled:         boolean;
+  vehicle_inspection_required: boolean;
 }
 
 interface LiveGuard {
@@ -231,6 +236,13 @@ export default function SiteDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
 
+  // ── Site toggles (schema_v47) ──────────────────────────────────────────
+  // Which flag has a PATCH in flight ('' = none). Optimistic UI would hide
+  // a failed write behind a lie — instead the switch disables while saving
+  // and re-renders from the server's RETURNING row.
+  const [toggleSaving, setToggleSaving] = useState<'' | 'checkpoints_enabled' | 'vehicle_inspection_required'>('');
+  const [toggleError,  setToggleError]  = useState('');
+
   // ── Checkpoints (C4a) ──────────────────────────────────────────────────
   const [checkpoints,  setCheckpoints]  = useState<Checkpoint[]>([]);
   const [cpLoading,    setCpLoading]    = useState(true);
@@ -309,6 +321,22 @@ export default function SiteDetailPage() {
   }, [siteId]);
 
   useEffect(() => { loadCheckpoints(); }, [loadCheckpoints]);
+
+  async function saveToggle(flag: 'checkpoints_enabled' | 'vehicle_inspection_required', value: boolean) {
+    if (!site || toggleSaving) return;
+    setToggleSaving(flag);
+    setToggleError('');
+    try {
+      const updated = await adminPatch<{ id: string; checkpoints_enabled: boolean; vehicle_inspection_required: boolean }>(
+        `/api/sites/${siteId}/toggles`, { [flag]: value },
+      );
+      setSite((s) => (s ? { ...s, checkpoints_enabled: updated.checkpoints_enabled, vehicle_inspection_required: updated.vehicle_inspection_required } : s));
+    } catch (e: any) {
+      setToggleError(e.message ?? 'Failed to save setting');
+    } finally {
+      setToggleSaving('');
+    }
+  }
 
   const awaitingCount = useMemo(
     () => checkpoints.filter((c) => c.is_active && !c.linked).length,
@@ -667,6 +695,53 @@ export default function SiteDetailPage() {
           <p className="text-gray-500 text-xs mt-2">{site.address}</p>
         )}
       </div>
+
+      {/* Site settings — schema_v47 feature toggles */}
+      <section>
+        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">SITE SETTINGS</h2>
+        {toggleError && (
+          <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-3">{toggleError}</div>
+        )}
+        <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
+          {([
+            {
+              flag: 'checkpoints_enabled' as const,
+              label: 'CHECKPOINT SCANNING',
+              desc: 'Guards see the QR scanner and hourly patrol rounds at this site.',
+              value: site.checkpoints_enabled,
+            },
+            {
+              flag: 'vehicle_inspection_required' as const,
+              label: 'VEHICLE INSPECTION',
+              desc: 'Guards are prompted (not blocked) to complete a vehicle inspection after clock-in.',
+              value: site.vehicle_inspection_required,
+            },
+          ]).map(({ flag, label, desc, value }) => (
+            <div key={flag} className="py-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-gray-200 text-sm tracking-wider">{label}</p>
+                <p className="text-gray-500 text-xs mt-0.5">{desc}</p>
+              </div>
+              <button
+                role="switch"
+                aria-checked={value}
+                aria-label={label}
+                disabled={toggleSaving !== ''}
+                onClick={() => saveToggle(flag, !value)}
+                className={`relative shrink-0 w-12 h-6 rounded-full transition-colors border ${
+                  value ? 'bg-amber-400/80 border-amber-400' : 'bg-[#0F1E35] border-[#1A3050]'
+                } ${toggleSaving === flag ? 'opacity-50' : ''} disabled:cursor-not-allowed`}
+              >
+                <span
+                  className={`absolute top-0.5 h-[18px] w-[18px] rounded-full bg-white transition-all ${
+                    value ? 'left-[26px]' : 'left-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
 
       {/* Guard on shift */}
       <section>
