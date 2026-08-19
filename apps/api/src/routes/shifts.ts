@@ -1938,6 +1938,7 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
             si.name as site_name, si.instructions_pdf_url,
             si.photo_limit_override,
             si.ping_interval_minutes,
+            si.checkpoints_enabled, si.vehicle_inspection_required,
             co.default_photo_limit,
             ss.id as session_id, ss.clocked_in_at,
             sg.polygon_coordinates, sg.center_lat, sg.center_lng, sg.radius_meters
@@ -2021,6 +2022,11 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       instructions_pdf_url: buildInstructionsUrl(r.shift_id, r.instructions_pdf_url),
       effective_photo_limit: effectivePhotoLimit,
       ping_interval_minutes: r.ping_interval_minutes,
+      // schema_v47 site toggles — mobile gates the QR scanner and the
+      // inspection card on these. Mobile fail-safe when ABSENT (older
+      // API): checkpoints_enabled ⇒ true, vehicle_inspection_required ⇒ false.
+      checkpoints_enabled:         r.checkpoints_enabled,
+      vehicle_inspection_required: r.vehicle_inspection_required,
       geofence,
     },
     session: { id: r.session_id, shift_id: r.shift_id, clocked_in_at: r.clocked_in_at },

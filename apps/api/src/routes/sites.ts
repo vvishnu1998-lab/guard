@@ -186,6 +186,47 @@ router.put('/:id', requireAuth('company_admin'), async (req, res) => {
   res.json(result.rows[0]);
 });
 
+// PATCH /api/sites/:id/toggles — site feature flags (schema_v47).
+// checkpoints_enabled gates the guard QR scanner; vehicle_inspection_required
+// prompts (never blocks) a post-clock-in vehicle inspection. Both admin-only;
+// dedicated PATCH per the /:id/geofence // /:id/client-access pattern.
+router.patch('/:id/toggles', requireAuth('company_admin'), async (req, res) => {
+  const { checkpoints_enabled, vehicle_inspection_required } = req.body as {
+    checkpoints_enabled?: unknown;
+    vehicle_inspection_required?: unknown;
+  };
+  const patch: Record<string, boolean> = {};
+  if (checkpoints_enabled !== undefined) {
+    if (typeof checkpoints_enabled !== 'boolean') {
+      return res.status(400).json({ error: 'checkpoints_enabled must be a boolean' });
+    }
+    patch.checkpoints_enabled = checkpoints_enabled;
+  }
+  if (vehicle_inspection_required !== undefined) {
+    if (typeof vehicle_inspection_required !== 'boolean') {
+      return res.status(400).json({ error: 'vehicle_inspection_required must be a boolean' });
+    }
+    patch.vehicle_inspection_required = vehicle_inspection_required;
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ error: 'Provide checkpoints_enabled and/or vehicle_inspection_required' });
+  }
+  const gate = await assertSiteActive(req.params.id, req.user!.company_id!);
+  if (!gate.ok) return res.status(gate.status).json(gate.body);
+
+  const result = await pool.query(
+    `UPDATE sites SET
+       checkpoints_enabled         = COALESCE($1, checkpoints_enabled),
+       vehicle_inspection_required = COALESCE($2, vehicle_inspection_required)
+     WHERE id = $3 AND company_id = $4
+     RETURNING id, checkpoints_enabled, vehicle_inspection_required`,
+    [patch.checkpoints_enabled ?? null, patch.vehicle_inspection_required ?? null,
+     req.params.id, req.user!.company_id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: 'Site not found' });
+  res.json(result.rows[0]);
+});
+
 // POST /api/sites/:id/instructions — server-side PDF upload with magic bytes validation
 router.post('/:id/instructions', requireAuth('company_admin'), upload.single('file'), async (req, res) => {
   const gate = await assertSiteActive(req.params.id, req.user!.company_id!);
