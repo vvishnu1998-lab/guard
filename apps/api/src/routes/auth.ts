@@ -471,8 +471,14 @@ router.post('/client/change-password', requireAuth('client'), async (req: Reques
   if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
 
   const newHash = await bcrypt.hash(new_password, 12);
+  // Finding #1 parity with the admin flow: a password change is
+  // session-invalidating. Stamp tokens_not_before = NOW() so any client
+  // JWT minted before this instant is rejected by the middleware +
+  // refresh nbf checks. The web change-password page clears its cookies
+  // and routes to login after this call, so the caller lands on a fresh
+  // session rather than the revoked one.
   await pool.query(
-    'UPDATE clients SET password_hash = $1, must_change_password = false WHERE id = $2',
+    'UPDATE clients SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
     [newHash, req.user!.sub]
   );
   await logEvent(req.user!.sub, 'client', 'password_changed', req);
