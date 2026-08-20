@@ -331,6 +331,11 @@ export default function HomeScreen() {
         scheduled_start: string;
         scheduled_end: string;
         instructions_pdf_url?: string | null;
+        // schema_v47 site flags — absent from a pre-v47 API; carried into
+        // pendingShift so the active-shift screen has them the moment it
+        // mounts after clock-in (no post-clock-in refetch delay).
+        checkpoints_enabled?: boolean;
+        vehicle_inspection_required?: boolean;
         geofence: {
           polygon_coordinates: { lat: number; lng: number }[] | null;  // API sends null for a site with no polygon drawn
           center_lat:     number;
@@ -360,6 +365,8 @@ export default function HomeScreen() {
         scheduled_start: detail.scheduled_start,
         scheduled_end: detail.scheduled_end,
         instructions_pdf_url: detail.instructions_pdf_url ?? null,
+        checkpoints_enabled: detail.checkpoints_enabled,
+        vehicle_inspection_required: detail.vehicle_inspection_required,
         geofence: detail.geofence,
       });
       setClockInPendingShift(detail.id);

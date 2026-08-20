@@ -26,6 +26,7 @@ import { apiClient } from '../../lib/apiClient';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
 import { currentPingWindow, remainingMsUntilNextPing, type PingWindowState } from '../../lib/pingSchedule';
+import { checkpointsEnabled, inspectionRequired } from '../../lib/siteFlags';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
@@ -107,6 +108,53 @@ export default function ActiveShiftScreen() {
   }, [cpStale, loadCheckpoints]);
 
   const hasCheckpoints = (cpMine?.checkpoints.length ?? 0) > 0;
+  // schema_v47 — admin can disable the scanner per site. Fail-safe: an
+  // absent flag (pre-v47 API) reads TRUE, so the scanner never vanishes
+  // behind an API version skew. See lib/siteFlags.ts.
+  const cpEnabled = checkpointsEnabled(activeShift);
+
+  // ── Vehicle inspection (schema_v48) ───────────────────────────────────
+  // PROMPTED, NOT BLOCKING: a card at the top of this screen until the
+  // inspection completes. Everything else on the screen stays live.
+  // Fail-safe: absent flag (pre-v47 API) → false → no card, no fetch.
+  //
+  // The flag arrives WITH the shift object at clock-in (pendingShift is
+  // hydrated from /shifts/:id) and at restore (/shifts/active-session),
+  // so the card renders on this screen's very first frame — no
+  // post-clock-in refetch delay. The fetch below only refines the card's
+  // copy (start vs resume) and hides it once the server says complete.
+  const needInspection = inspectionRequired(activeShift);
+  const INSPECTION_SLOTS = [
+    'photo_front_url', 'photo_rear_url', 'photo_driver_side_url',
+    'photo_passenger_side_url', 'photo_odometer_url',
+  ] as const;
+  const [inspStatus, setInspStatus] = useState<
+    | null                                                        // not fetched yet
+    | { exists: false }                                           // no row — not started
+    | { exists: true; done: number; odo: boolean; complete: boolean }
+  >(null);
+
+  const loadInspection = useCallback(async () => {
+    if (!activeSession || !needInspection) return;
+    try {
+      const row = await apiClient.get<Record<string, unknown>>(`/inspections/session/${activeSession.id}`);
+      setInspStatus({
+        exists:   true,
+        done:     INSPECTION_SLOTS.filter((k) => row[k]).length,
+        odo:      row.odometer_reading !== null && row.odometer_reading !== undefined,
+        complete: row.completed_at !== null && row.completed_at !== undefined,
+      });
+    } catch (err: any) {
+      // 404 = not started (expected). Anything else: keep whatever we
+      // had — the card fails toward showing itself, never toward hiding.
+      if (err?.status === 404) setInspStatus({ exists: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession?.id, needInspection]);
+
+  useFocusEffect(
+    useCallback(() => { void loadInspection(); }, [loadInspection]),
+  );
 
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const pingRef     = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -233,6 +281,21 @@ export default function ActiveShiftScreen() {
         <Text style={styles.siteName}>{activeShift.site_name?.toUpperCase()}</Text>
       </View>
 
+      {/* ── Vehicle inspection card (schema_v48) — prompted, not blocking ── */}
+      {needInspection && !(inspStatus?.exists === true && inspStatus.complete) && (
+        <TouchableOpacity style={styles.inspectionCard} onPress={() => router.push('/inspection')}>
+          <View style={styles.inspectionInfo}>
+            <Text style={styles.inspectionTitle}>🚗 VEHICLE INSPECTION</Text>
+            <Text style={styles.inspectionSub}>
+              {inspStatus?.exists === true
+                ? `${inspStatus.done} of 5 photos${inspStatus.odo ? ' · odometer saved' : ' · odometer pending'} — tap to continue`
+                : 'Required at this site — tap to start. You can ping and patrol meanwhile.'}
+            </Text>
+          </View>
+          <Text style={styles.inspectionChevron}>›</Text>
+        </TouchableOpacity>
+      )}
+
       {/* ── Ping countdown ──────────────────────────────────────────── */}
       <View style={[styles.pingCard, pingUrgent && styles.pingCardUrgent]}>
         <Text style={styles.pingLabel}>NEXT PING IN</Text>
@@ -241,8 +304,9 @@ export default function ActiveShiftScreen() {
         </Text>
       </View>
 
-      {/* ── Checkpoints (C6) — hidden entirely when the site has none ── */}
-      {hasCheckpoints && cpMine && (
+      {/* ── Checkpoints (C6) — hidden when the site has none OR the admin
+             disabled scanning (schema_v47; absent flag fails open) ── */}
+      {cpEnabled && hasCheckpoints && cpMine && (
         <>
           {cpMine.unlinked > 0 && (
             <TouchableOpacity
@@ -378,6 +442,22 @@ const styles = StyleSheet.create({
   timerLabel: { color: Colors.muted, fontSize: 11, letterSpacing: 3, marginBottom: Spacing.xs },
   timerValue: { fontFamily: 'monospace', color: Colors.base, fontSize: 52, letterSpacing: 4 },
   siteName:   { color: Colors.action, fontSize: 13, letterSpacing: 3, marginTop: Spacing.xs, fontFamily: Fonts.heading },
+
+  // Vehicle inspection (schema_v48) — same width/radius family as pingCard.
+  inspectionCard: {
+    width: '92%',
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1, borderColor: Colors.warning,
+    padding: Spacing.md,
+    marginTop: Spacing.lg,
+    gap: Spacing.sm,
+  },
+  inspectionInfo:    { flex: 1 },
+  inspectionTitle:   { color: Colors.warning, fontFamily: Fonts.heading, fontSize: 14, letterSpacing: 2 },
+  inspectionSub:     { color: Colors.muted, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  inspectionChevron: { color: Colors.warning, fontSize: 24 },
 
   // Ping countdown
   pingCard: {

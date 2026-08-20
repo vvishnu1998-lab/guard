@@ -24,6 +24,14 @@ interface Shift {
    *  backwards compat with pre-Item-8 API responses; consumers should
    *  fall back to 30 when absent. */
   ping_interval_minutes?: number;
+  /** Site feature flags (schema_v47). Cached at clock-in / restore like
+   *  ping_interval_minutes — admin edits mid-shift do NOT propagate (Q37
+   *  semantics; refreshFromServer never rewrites activeShift). Optional on
+   *  the wire: a pre-v47 API omits both. READ THEM ONLY through
+   *  lib/siteFlags.ts — absence fails safe (checkpoints TRUE,
+   *  inspection FALSE). */
+  checkpoints_enabled?: boolean;
+  vehicle_inspection_required?: boolean;
   geofence?: Geofence;
 }
 

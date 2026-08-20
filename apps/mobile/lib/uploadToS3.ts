@@ -34,11 +34,11 @@ interface PresignedPostResponse {
 /**
  * Upload a local file URI to S3 via pre-signed POST.
  * @param localUri  - expo file URI (e.g. file:///var/...)
- * @param context   - storage folder prefix: 'report' | 'ping' | 'clock_in'
+ * @param context   - storage folder prefix: 'report' | 'ping' | 'clock_in' | 'inspection'
  */
 export async function uploadToS3(
   localUri: string,
-  context: 'report' | 'ping' | 'clock_in' = 'report'
+  context: 'report' | 'ping' | 'clock_in' | 'inspection' = 'report'
 ): Promise<UploadResult> {
   // 1. Get presigned POST policy from API
   const presign = await apiClient.post<PresignedPostResponse>(
