@@ -12,7 +12,7 @@ import { useClockInStore } from '../../store/clockInStore';
 import { useOfflineStore } from '../../store/offlineStore';
 import { useDrawerStore } from '../../store/drawerStore';
 import { useAuthStore } from '../../store/authStore';
-import { apiClient } from '../../lib/apiClient';
+import { apiClient, ApiError, isNetworkError } from '../../lib/apiClient';
 import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
 import { formatDurationMs, formatHoursHHMM, type ShiftHours } from '../../lib/formatHours';
 import { shiftDayLabel, fmtTimeInTz, tzAbbreviation } from '../../lib/shiftTime';
@@ -21,6 +21,48 @@ import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BreakType } from '../../constants/breakDurations';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+/**
+ * Mirrors the server's clock-in eligibility window. apps/api shifts.ts
+ * rejects with 422 TOO_EARLY when
+ *   `Date.now() < scheduledStartMs - EARLY_CLOCK_IN_WINDOW_MS`.
+ * Same 30 minutes, same epoch-millis comparison against a UTC-anchored
+ * timestamptz — deliberately no local-date math, so the button and the
+ * endpoint cannot disagree across timezones or a DST boundary.
+ */
+const CLOCK_IN_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * Aug 18 incident — restore must fail LOUD.
+ *
+ * `restoreOrFetchShift` used to swallow every error from
+ * /shifts/active-session and fall through to the upcoming-shift card. A
+ * transient network drop therefore rendered as "you are not on shift",
+ * offering CLOCK IN to a guard who was already clocked in. Taking it
+ * produced the 23505 on idx_shift_sessions_one_open_per_guard and the
+ * "already clocked in on another device" dead end.
+ *
+ * The endpoint answers "no open session" as 200 + a null body
+ * (shifts.ts: `if (!result.rows[0]) return res.json(null)`), so a null body
+ * is the ONLY definitive negative. Every thrown error — network or status —
+ * means we do not know, and not-knowing must never render as not-on-shift.
+ */
+const RESTORE_MAX_ATTEMPTS = 3;
+/** Backoff before attempts 2 and 3. Short: this runs while the guard is
+ *  staring at a spinner on the home tab. */
+const RESTORE_BACKOFF_MS = [500, 1000];
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Retry only where a retry could plausibly change the answer: fetch-level
+ *  failures (offline, DNS, abort) and 5xx. A 4xx is the server answering
+ *  definitively — but "definitively an error" is still not "no active
+ *  session", so it stops retrying and raises the banner rather than falling
+ *  through to the card. */
+function isRetryableRestoreError(err: unknown): boolean {
+  if (err instanceof ApiError) return err.status >= 500;
+  return isNetworkError(err);
+}
 
 interface ApiShift {
   id: string;
@@ -78,8 +120,15 @@ export default function HomeScreen() {
 
   const [upcomingShift, setUpcomingShift] = useState<ApiShift | null>(null);
   const [loadingShift, setLoadingShift] = useState(false);
+  /** Set when we could not determine on-shift state. Renders the offline
+   *  banner INSTEAD of the upcoming-shift card, so CLOCK IN is unreachable
+   *  while the answer is unknown. */
+  const [restoreFailed, setRestoreFailed] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [currentTime, setCurrentTime] = useState(getCurrentTimeStr());
+  /** Epoch millis, ticked alongside the display clock, so the CLOCK IN gate
+   *  re-evaluates as the window approaches instead of freezing at mount. */
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [elapsed, setElapsed] = useState(0);
   // Phase 1 4-field hours for the active session. Populated from
   // /shifts/active-session on restore/focus. Break Time on the stat bar
@@ -155,7 +204,10 @@ export default function HomeScreen() {
 
   // Clock tick every minute
   useEffect(() => {
-    const id = setInterval(() => setCurrentTime(getCurrentTimeStr()), 60000);
+    const id = setInterval(() => {
+      setCurrentTime(getCurrentTimeStr());
+      setNowMs(Date.now());
+    }, 60000);
     return () => clearInterval(id);
   }, []);
 
@@ -280,17 +332,63 @@ export default function HomeScreen() {
 
   async function restoreOrFetchShift() {
     setLoadingShift(true);
-    try {
-      const active = await apiClient.get<ActiveSessionResponse | null>('/shifts/active-session');
-      if (active) {
-        setActiveSession(active.shift, active.session);
-        setActiveHours(active.hours ?? null);
+    setRestoreFailed(false);
+
+    for (let attempt = 1; attempt <= RESTORE_MAX_ATTEMPTS; attempt++) {
+      try {
+        const active = await apiClient.get<ActiveSessionResponse | null>('/shifts/active-session');
+        if (active) {
+          setActiveSession(active.shift, active.session);
+          setActiveHours(active.hours ?? null);
+          // Previously returned without clearing this, leaving the flag stuck
+          // true for the rest of the mount. Harmless while the on-shift view
+          // rendered instead, but it would have swallowed the banner below.
+          setLoadingShift(false);
+          return;
+        }
+        // 200 + null = server confirms no open session. The one and only
+        // path allowed to fall through to the upcoming-shift card.
+        setActiveHours(null);
+        fetchUpcomingShift();  // owns setLoadingShift(false) via its finally
         return;
+      } catch (err) {
+        // Terminal: apiClient already tried a token refresh, failed, and
+        // called logout(), so the app is routing to the login screen. More
+        // attempts would just burn requests against a dead session.
+        if (useAuthStore.getState().status !== 'authenticated') {
+          setLoadingShift(false);
+          return;
+        }
+
+        const retryable = isRetryableRestoreError(err);
+        Sentry.addBreadcrumb({
+          category: 'shift_restore',
+          message: 'restoreOrFetchShift: /shifts/active-session failed',
+          level: 'warning',
+          data: {
+            attempt,
+            max_attempts: RESTORE_MAX_ATTEMPTS,
+            retryable,
+            status: err instanceof ApiError ? err.status : null,
+            error: (err as any)?.message ?? String(err),
+          },
+        });
+
+        if (!retryable || attempt === RESTORE_MAX_ATTEMPTS) {
+          // Do NOT call fetchUpcomingShift here. Showing the card would
+          // re-create the Aug 18 failure: an unknown state rendered as
+          // not-on-shift, with CLOCK IN live.
+          Sentry.captureException(err, {
+            extra: { where: 'home.restoreOrFetchShift', attempts: attempt, retryable },
+          });
+          setRestoreFailed(true);
+          setLoadingShift(false);
+          return;
+        }
+
+        await sleep(RESTORE_BACKOFF_MS[attempt - 1] ?? 1000);
       }
-      // Session ended server-side. Clear the local hours cache too.
-      setActiveHours(null);
-    } catch { /* not on shift */ }
-    fetchUpcomingShift();
+    }
   }
 
   async function fetchUpcomingShift() {
@@ -388,6 +486,24 @@ export default function HomeScreen() {
       alert('Could not load shift details. Check your connection and try again.');
     }
   }
+
+  // ── CLOCK IN eligibility ────────────────────────────────────────────
+  // scheduled_start is an ISO timestamptz string; getTime() gives UTC millis.
+  const scheduledStartMs = upcomingShift ? new Date(upcomingShift.scheduled_start).getTime() : NaN;
+  const clockInOpensAtMs = Number.isNaN(scheduledStartMs) ? null : scheduledStartMs - CLOCK_IN_WINDOW_MS;
+  const clockInLocked = clockInOpensAtMs !== null && nowMs < clockInOpensAtMs;
+
+  // The minute tick alone would leave the button stale for up to 60s after
+  // the window opens. Fire once at the exact boundary instead. setTimeout
+  // delays are int32 millis, so anything beyond ~24 days overflows and fires
+  // immediately — cap at 24h and let the minute tick carry the rest.
+  useEffect(() => {
+    if (clockInOpensAtMs === null) return;
+    const delay = clockInOpensAtMs - Date.now();
+    if (delay <= 0 || delay > 24 * 60 * 60 * 1000) return;
+    const id = setTimeout(() => setNowMs(Date.now()), delay + 250);
+    return () => clearTimeout(id);
+  }, [clockInOpensAtMs]);
 
   const initials = guardId ? guardId.slice(0, 1).toUpperCase() : 'G';
 
@@ -628,6 +744,20 @@ export default function HomeScreen() {
           <View style={styles.shiftCard}>
             {loadingShift ? (
               <ActivityIndicator color={Colors.action} style={{ marginBottom: Spacing.md }} />
+            ) : restoreFailed ? (
+              /* Unknown state — deliberately renders neither the shift card
+                 nor "No scheduled shift", because both imply we know the
+                 guard is off shift and both put CLOCK IN within reach. */
+              <>
+                <Text style={styles.restoreFailTitle}>CAN'T REACH SERVER</Text>
+                <Text style={styles.restoreFailBody}>
+                  We couldn't confirm your shift status. If you're already clocked in,
+                  you still are — don't clock in again. Check your connection and retry.
+                </Text>
+                <TouchableOpacity onPress={restoreOrFetchShift} style={styles.retryBtn}>
+                  <Text style={styles.retryText}>Retry</Text>
+                </TouchableOpacity>
+              </>
             ) : upcomingShift ? (
               <>
                 <Text style={styles.shiftLabel}>NEXT SHIFT</Text>
@@ -648,9 +778,26 @@ export default function HomeScreen() {
                     ? ` ${tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)}`
                     : ''}
                 </Text>
-                <TouchableOpacity style={styles.clockInBtn} onPress={handleClockIn}>
-                  <Text style={styles.clockInText}>CLOCK IN</Text>
+                <TouchableOpacity
+                  style={[styles.clockInBtn, clockInLocked && styles.clockInBtnLocked]}
+                  onPress={handleClockIn}
+                  disabled={clockInLocked}
+                >
+                  <Text style={[styles.clockInText, clockInLocked && styles.clockInTextLocked]}>
+                    CLOCK IN
+                  </Text>
                 </TouchableOpacity>
+                {clockInLocked && clockInOpensAtMs !== null ? (
+                  /* Site zone, matching the times above — the device zone
+                     would contradict the line directly above it whenever the
+                     guard's phone is set to a different zone than the post. */
+                  <Text style={styles.clockInLockedNote}>
+                    {`Clock-in opens ${fmtTimeInTz(new Date(clockInOpensAtMs).toISOString(), upcomingShift.site_tz)}`}
+                    {tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)
+                      ? ` ${tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)}`
+                      : ''}
+                  </Text>
+                ) : null}
               </>
             ) : (
               <>
@@ -1070,6 +1217,29 @@ const styles = StyleSheet.create({
   noShift: { color: Colors.muted, fontSize: 16, marginBottom: Spacing.sm },
   retryBtn: { alignSelf: 'flex-start' },
   retryText: { color: Colors.action, fontSize: 14 },
+  restoreFailTitle: {
+    fontFamily: Fonts.heading,
+    color: Colors.danger,
+    fontSize: 16,
+    letterSpacing: 2,
+    marginBottom: 4,
+  },
+  restoreFailBody: {
+    color: Colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+    marginBottom: Spacing.sm,
+  },
+  clockInBtnLocked: {
+    backgroundColor: Colors.surface2,
+    opacity: 0.6,
+  },
+  clockInTextLocked: { color: Colors.muted },
+  clockInLockedNote: {
+    color: Colors.muted,
+    fontSize: 12,
+    marginTop: Spacing.xs,
+  },
   clockInBtn: {
     backgroundColor: Colors.action,
     borderRadius: Radius.md,

@@ -14,6 +14,7 @@ import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
+import { isOpenSessionConflict, handleOpenSessionConflict } from '../../lib/openSession';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { uuidv4 }          from '../../lib/uuid';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
@@ -217,6 +218,14 @@ export default function ClockInStep4() {
         await handleSessionClosed(err, 'clockin.step4');
         return;
       }
+      // 409 OPEN_SESSION_EXISTS — the guard already has an open session
+      // (usually their own, after a client state loss). Rehydrate rather
+      // than dead-ending on a raw error. Sits above captureException with
+      // isSessionClosed: expected behaviour, breadcrumb only.
+      if (isOpenSessionConflict(err)) {
+        await handleOpenSessionConflict(err, 'clockin.step4');
+        return;
+      }
       Sentry.captureException(err, { extra: { where: 'clockin.step4.startShift' } });
       // ApiError puts the server's code in .code and the friendly sentence in
       // .message, so the old `err.message === 'GEOFENCE_FAILED'` test could
@@ -229,6 +238,22 @@ export default function ClockInStep4() {
           'Outside Site',
           'You appear to be outside the site post. Move to the post entrance and try again.',
           [{ text: 'OK', onPress: () => router.replace('/clock-in/step1') }],
+          { cancelable: false },
+        );
+        return;
+      }
+      // Backstop for the home-screen time gate. The button is disabled until
+      // scheduled_start - 30min, but a stale card, a device clock skewed
+      // early, or a deep link into the wizard can still reach the POST.
+      // Unlike GEOFENCE_FAILED there is nothing to retry at step 1 — the
+      // guard simply has to wait — so this routes home rather than back into
+      // the wizard. err.code is populated here because the server sends
+      // `error: 'TOO_EARLY'`; ApiError derives .code from the error field.
+      if (err instanceof ApiError && err.code === 'TOO_EARLY') {
+        Alert.alert(
+          'Too Early',
+          err.message,
+          [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }],
           { cancelable: false },
         );
         return;

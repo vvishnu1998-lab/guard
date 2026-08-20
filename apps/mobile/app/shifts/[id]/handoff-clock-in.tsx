@@ -38,6 +38,7 @@ import * as Location from 'expo-location';
 import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../../lib/sessionClosed';
+import { isOpenSessionConflict, handleOpenSessionConflict } from '../../../lib/openSession';
 import { uploadToS3 } from '../../../lib/uploadToS3';
 import { uuidv4 } from '../../../lib/uuid';
 import { useAuthStore } from '../../../store/authStore';
@@ -376,6 +377,15 @@ export default function HandoffClockInWizard() {
       });
       if (isSessionClosed(err)) {
         await handleSessionClosed(err, 'handoff-clock-in');
+        return;
+      }
+      // 409 OPEN_SESSION_EXISTS — the incoming guard already holds an open
+      // session. Same server path as clock-in (api 9638dd7), same treatment:
+      // rehydrate from /shifts/active-session and route home, where the
+      // restored shift is what home renders. Above captureException with
+      // isSessionClosed — expected under state loss, not a crash.
+      if (isOpenSessionConflict(err)) {
+        await handleOpenSessionConflict(err, 'handoff-clock-in');
         return;
       }
       Sentry.captureException(err, { extra: { where: 'handoff-clock-in.submit' } });
