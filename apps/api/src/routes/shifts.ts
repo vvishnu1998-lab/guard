@@ -68,6 +68,72 @@ function buildInstructionsUrl(
 }
 
 /**
+ * 409 body for a 23505 on idx_shift_sessions_one_open_per_guard.
+ *
+ * Aug 18 incident: the old copy ("Already clocked in on another device")
+ * was wrong — the index fires for ANY open session on the guard, same
+ * device included, and the real-world trigger was a second wizard run
+ * against tomorrow's shift after a client state loss. Return the open
+ * session so the client can rehydrate instead of scaring the guard.
+ *
+ * Queries via pool, not the route's tx client: by the time the 23505
+ * catch runs the transaction is aborted/rolled back and unusable.
+ * The open session can vanish between the 23505 and this read (clock-out
+ * race) — fall back to a generic body rather than 500ing a conflict reply.
+ */
+async function openSessionConflictBody(guardId: string): Promise<{
+  code: 'OPEN_SESSION_EXISTS';
+  error: string;
+  message: string;
+  open_session: {
+    shift_id: string;
+    site_id: string;
+    site_name: string;
+    clocked_in_at: string;
+  } | null;
+}> {
+  try {
+    const open = await pool.query<{
+      shift_id: string;
+      site_id: string;
+      site_name: string;
+      clocked_in_at: Date;
+    }>(
+      `SELECT ss.shift_id, ss.site_id, s.name AS site_name, ss.clocked_in_at
+         FROM shift_sessions ss
+         JOIN sites s ON s.id = ss.site_id
+        WHERE ss.guard_id = $1 AND ss.clocked_out_at IS NULL
+        LIMIT 1`,
+      [guardId],
+    );
+    const row = open.rows[0];
+    if (row) {
+      const sincePt = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Los_Angeles',
+        hour: 'numeric',
+        minute: '2-digit',
+      }).format(row.clocked_in_at);
+      const message = `You're already clocked in at ${row.site_name} since ${sincePt} PT.`;
+      return {
+        code: 'OPEN_SESSION_EXISTS',
+        error: message,
+        message,
+        open_session: {
+          shift_id: row.shift_id,
+          site_id: row.site_id,
+          site_name: row.site_name,
+          clocked_in_at: row.clocked_in_at.toISOString(),
+        },
+      };
+    }
+  } catch (err) {
+    console.error('openSessionConflictBody lookup failed:', err);
+  }
+  const message = "You're already clocked in. Clock out first.";
+  return { code: 'OPEN_SESSION_EXISTS', error: message, message, open_session: null };
+}
+
+/**
  * Phase A enforcement: for a guard + site combo, scan a list of Pacific
  * calendar dates and return the first date the guard isn't assigned to
  * that site on. Returns null if all dates are covered. Caller uses the
@@ -1684,7 +1750,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
     } catch (err: any) {
       if (err?.code === '23505' && err?.constraint === 'idx_shift_sessions_one_open_per_guard') {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Already clocked in on another device. Clock out first.' });
+        return res.status(409).json(await openSessionConflictBody(user!.sub));
       }
       throw err;
     }
@@ -2553,9 +2619,7 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     await client.query('ROLLBACK');
     // 23505 = unique_violation on idx_shift_sessions_one_open_per_guard
     if (err?.code === '23505' && err?.constraint === 'idx_shift_sessions_one_open_per_guard') {
-      return res.status(409).json({
-        error: 'Already clocked in on another device. Clock out first.',
-      });
+      return res.status(409).json(await openSessionConflictBody(req.user!.sub));
     }
     throw err;
   } finally {
