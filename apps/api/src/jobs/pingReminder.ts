@@ -213,11 +213,19 @@ cron.schedule('* * * * *', async () => {
 
     for (const row of rows) {
       const taskCount = await pool.query<{ count: number }>(
+        // due_at horizon: only nag about tasks due within the next hour
+        // (or overdue). Without it this hourly leg counted EVERY pending
+        // instance regardless of due time — a guard on a morning shift got
+        // "You have 1 pending task" for a 9 PM task ~10 hours early
+        // (Mosser Towers, 2026-08-20). taskDueCron owns the at-due push;
+        // this leg is only the pre-due hourly nudge.
         `SELECT COUNT(*)::int AS count
          FROM task_instances ti
          JOIN shifts s ON s.id = ti.shift_id
          JOIN shift_sessions ss ON ss.shift_id = s.id
-         WHERE ss.id = $1 AND ti.status = 'pending'`,
+         WHERE ss.id = $1
+           AND ti.status = 'pending'
+           AND ti.due_at <= NOW() + interval '1 hour'`,
         [row.shift_session_id],
       );
       const n = taskCount.rows[0]?.count ?? 0;
