@@ -24,7 +24,38 @@
  * not whether a window counts against the guard.
  */
 
+import { pool } from '../db/pool';
+
 export const PING_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * Break-time quiet policy (locked 2026-08-20): a ping window is WAIVED when
+ * a break overlaps any part of [windowStart, windowEnd) — no reminder push,
+ * no missed_pings flag; duty resumes with the next full window.
+ *
+ * Overlap predicate: break_start < windowEnd AND
+ * COALESCE(break_end, NOW()) > windowStart — covers closed breaks and a
+ * still-open one (which extends to NOW). The SINGLE definition shared by
+ * jobs/pingReminder.ts (skip the reminder) and jobs/missedPingCron.ts
+ * (skip the flag); two copies of this predicate would be two policies the
+ * moment either drifted.
+ */
+export async function breakOverlapsWindow(
+  shiftSessionId: string,
+  windowStart: Date,
+  windowEnd: Date,
+): Promise<boolean> {
+  const { rows } = await pool.query<{ overlaps: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM break_sessions
+       WHERE shift_session_id = $1
+         AND break_start < $3
+         AND COALESCE(break_end, NOW()) > $2
+     ) AS overlaps`,
+    [shiftSessionId, windowStart, windowEnd],
+  );
+  return rows[0]?.overlaps === true;
+}
 
 /**
  * Enumerate the [window_start, window_end] pairs for a session that

@@ -39,7 +39,7 @@ import { expiresAtFor } from '../services/retention';
 // Window rule lives in services/pingWindows.ts so the daily client report
 // (services/email.ts) counts expected windows with the SAME code that
 // decides whether a missed_pings row is written here.
-import { completedTrackableWindows } from '../services/pingWindows';
+import { completedTrackableWindows, breakOverlapsWindow } from '../services/pingWindows';
 
 interface SessionRow {
   session_id: string;
@@ -118,6 +118,17 @@ cron.schedule('*/5 * * * *', async () => {
         // be a no-op but the SELECT here is cheaper than the
         // insert + conflict path.
         if (await anyPingInWindow(s.session_id, w.windowStart, w.windowEnd)) continue;
+
+        // Break-time quiet policy (locked 2026-08-20): a window any part
+        // of which overlapped a break is WAIVED — no missed_pings row.
+        // Same shared predicate pingReminder uses to skip the reminder.
+        if (await breakOverlapsWindow(s.session_id, w.windowStart, w.windowEnd)) {
+          console.log(
+            `[missedPing.waived.break] session=${s.session_id} ` +
+            `window=${w.windowStart.toISOString()}`,
+          );
+          continue;
+        }
 
         const label = siteLocalLabel(w.windowStart, s.site_tz);
 

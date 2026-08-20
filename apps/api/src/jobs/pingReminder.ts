@@ -34,6 +34,7 @@ import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification, NotificationType } from '../services/notifications';
+import { breakOverlapsWindow, PING_WINDOW_MS } from '../services/pingWindows';
 import { Sentry } from '../services/sentry';
 
 interface ActiveGuardRow {
@@ -179,6 +180,25 @@ cron.schedule('* * * * *', async () => {
       );
       if (!boundary) continue;
       if (await alreadyRemindedRecently(row.shift_session_id, row.guard_id)) continue;
+
+      // Break-time quiet policy (locked 2026-08-20): no reminder for a
+      // window a break overlaps. The boundary is the window START; the
+      // window it opens runs [boundary, boundary + 30min). Same shared
+      // predicate missedPingCron uses to waive the flag, so the reminder
+      // and the flag can never disagree about a window.
+      if (
+        await breakOverlapsWindow(
+          row.shift_session_id,
+          boundary.boundary,
+          new Date(boundary.boundary.getTime() + PING_WINDOW_MS),
+        )
+      ) {
+        console.log(
+          `[pingReminder.skipped.break] session=${row.shift_session_id} ` +
+          `window=${boundary.boundary.toISOString()}`,
+        );
+        continue;
+      }
 
       const label = siteLocalLabel(boundary.boundary, row.site_tz);
       await sendReminder(
