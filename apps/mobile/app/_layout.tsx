@@ -77,7 +77,10 @@ export default function RootLayout() {
       if (mustChangePassword) {
         // Force the user through change-password before any other route
         router.replace('/(auth)/change-password');
-      } else if (inAuth || !segments.length) {
+      } else if ((inAuth && !segments.includes('change-password')) || !segments.length) {
+        // Bounce authenticated users out of login/forgot-password — but NOT
+        // out of change-password, which is also reachable voluntarily from
+        // the drawer/profile while signed in (dead since April otherwise).
         router.replace('/(tabs)/home');
       }
     }
