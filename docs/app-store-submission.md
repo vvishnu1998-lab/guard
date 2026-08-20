@@ -36,9 +36,9 @@ Initial release.
 ## Review Information
 **Demo Account:**
 - **Admin Email:** talk2vvreddy@gmail.com
-- **Admin Password:** Aaaa@1234567
+- **Admin Password:** <stored separately — ask Vishnu>
 - **Guard Email:** jamesvince26@proton.me
-- **Guard Password:** Aaaa@1234567
+- **Guard Password:** <stored separately — ask Vishnu>
 
 **App Review Notes:**
 Hello Reviewer,
