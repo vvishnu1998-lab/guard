@@ -2063,6 +2063,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
             si.name AS site_name, si.is_active AS site_is_active,
             si.address AS site_address, si.timezone AS site_tz, si.company_id,
             si.instructions_pdf_url,
+            si.checkpoints_enabled, si.vehicle_inspection_required,
             g.name AS guard_name, g.badge_number, g.phone_number AS guard_phone
        FROM shifts sh
        JOIN sites  si ON si.id = sh.site_id
