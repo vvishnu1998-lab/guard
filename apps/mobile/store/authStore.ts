@@ -5,6 +5,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setUserTags } from '../lib/sentry';
 import { apiClient } from '../lib/apiClient';
 import { refreshTokens } from '../lib/refreshManager';
+import { stopQueueSync } from '../lib/offlineQueue';
+import { useShiftStore } from './shiftStore';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -90,7 +92,25 @@ export const useAuthStore = create<AuthState>((set) => ({
       current_password: current,
       new_password: next,
     });
-    set({ mustChangePassword: false });
+
+    // The server stamps tokens_not_before = NOW() and nulls fcm_token in the
+    // same UPDATE, so every token this device holds is already revoked. If we
+    // only flipped mustChangePassword (pre-Build-48 behaviour), home would
+    // mount and volley authenticated calls into 401 → refresh(401) → logout
+    // storms that burn the shared /api/auth rate-limit budget the guard needs
+    // for their re-login (deepak lockout, 2026-08-20). Tear the session down
+    // deliberately instead, mirroring logout's ordering — minus the fcm-null
+    // POST, which the server has already done for us and which would only
+    // spend a rate-limited request on a dead bearer token.
+    stopQueueSync();
+    useShiftStore.getState().clearSession();
+    const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
+    try {
+      await _request('/auth/logout', { refresh_token: refresh });
+    } catch { /* best-effort JTI revoke; the nbf stamp already covers us */ }
+    await Promise.all(Object.values(KEYS).map((k) => SecureStore.deleteItemAsync(k)));
+    set({ status: 'unauthenticated', guardId: null, companyId: null, mustChangePassword: false });
+    setUserTags({ guardId: null, companyId: null });
   },
 
   forgotPassword: async (email) => {

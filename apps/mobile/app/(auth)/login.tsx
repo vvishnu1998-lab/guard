@@ -8,7 +8,7 @@ import {
   StyleSheet, Alert, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as Notifications from 'expo-notifications';
 import * as Sentry from '@sentry/react-native';
 import { useAuthStore } from '../../store/authStore';
@@ -21,6 +21,11 @@ export default function LoginScreen() {
   const [loading, setLoading]   = useState(false);
 
   const { loginWithEmail } = useAuthStore();
+  // Set by change-password after a successful change (the server revokes
+  // every prior token, so the guard must sign in fresh). Copy matches the
+  // web portals' post-change notice (d2a2cba).
+  const { notice } = useLocalSearchParams<{ notice?: string }>();
+  const passwordChanged = notice === 'password-changed';
 
   async function handleEmailLogin() {
     if (!email.trim() || !password) return;
@@ -72,6 +77,15 @@ export default function LoginScreen() {
           <Text style={styles.logo}>NetraOps</Text>
           <Text style={styles.tagline}>SECURITY MANAGEMENT</Text>
         </View>
+
+        {passwordChanged && (
+          <View style={styles.noticeBanner}>
+            <Ionicons name="checkmark-circle-outline" size={18} color={Colors.success} />
+            <Text style={styles.noticeText}>
+              Password updated — sign in with your new password.
+            </Text>
+          </View>
+        )}
 
         <View style={styles.form}>
           <TextInput
@@ -136,6 +150,14 @@ const styles = StyleSheet.create({
   logoContainer: { alignItems: 'center', marginBottom: Spacing.xxl },
   logo:      { fontFamily: Fonts.heading, fontSize: 52, color: Colors.action, letterSpacing: 12 },
   tagline:   { color: Colors.muted, fontSize: 11, letterSpacing: 4, marginTop: Spacing.xs },
+
+  noticeBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.sm,
+    backgroundColor: Colors.success + '15', borderRadius: Radius.md,
+    borderWidth: 1, borderColor: Colors.success + '40',
+    padding: Spacing.md, marginBottom: Spacing.lg,
+  },
+  noticeText:  { color: Colors.success, fontSize: 13, flex: 1, lineHeight: 18 },
 
   form:        { gap: Spacing.md },
   input: {
