@@ -74,6 +74,42 @@ interface Guard {
   is_active?:   boolean;
 }
 
+// One shift_session row + its (possibly absent) vehicle inspection, from
+// GET /api/inspections/shift/:shiftId. Photo URLs arrive PRESIGNED (15-min
+// GET) — the API never returns raw S3 URLs on read paths.
+interface InspectionSessionRow {
+  session_id:               string;
+  clocked_in_at:            string;
+  clocked_out_at:           string | null;
+  guard_name:               string | null;
+  id:                       string | null;   // inspection id; null = not started
+  vehicle_id:               string | null;
+  odometer_reading:         number | null;
+  completed_at:             string | null;
+  photo_front_url:          string | null;
+  photo_rear_url:           string | null;
+  photo_driver_side_url:    string | null;
+  photo_passenger_side_url: string | null;
+  photo_odometer_url:       string | null;
+  vehicle_label:            string | null;
+  vehicle_plate:            string | null;
+  vehicle_make_model:       string | null;
+  odometer_unit:            'mi' | 'km' | null;
+}
+
+interface InspectionsResponse {
+  vehicle_inspection_required: boolean;
+  sessions: InspectionSessionRow[];
+}
+
+const PHOTO_SLOT_LABELS: Array<{ key: keyof InspectionSessionRow; label: string }> = [
+  { key: 'photo_front_url',          label: 'FRONT' },
+  { key: 'photo_rear_url',           label: 'REAR' },
+  { key: 'photo_driver_side_url',    label: 'DRIVER SIDE' },
+  { key: 'photo_passenger_side_url', label: 'PASSENGER SIDE' },
+  { key: 'photo_odometer_url',       label: 'ODOMETER' },
+];
+
 const STATUS_STYLES: Record<string, string> = {
   unassigned: 'bg-amber-400/20 text-amber-400 border border-amber-400/40',
   scheduled:  'bg-blue-500/20 text-blue-400 border border-blue-500/40',
@@ -104,6 +140,8 @@ export default function ShiftDetailPage() {
   const [guards,  setGuards]  = useState<Guard[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState('');
+  // null = endpoint unavailable / fetch failed → section hidden entirely.
+  const [inspections, setInspections] = useState<InspectionsResponse | null>(null);
 
   // Reassign modal
   const [showModal,   setShowModal]   = useState(false);
@@ -124,12 +162,14 @@ export default function ShiftDetailPage() {
     setLoading(true);
     setLoadErr('');
     try {
-      const [sh, gs] = await Promise.all([
+      const [sh, gs, insp] = await Promise.all([
         adminGet<ShiftDetail>(`/api/shifts/${shiftId}`),
         adminGet<Guard[]>('/api/guards'),
+        adminGet<InspectionsResponse>(`/api/inspections/shift/${shiftId}`).catch(() => null),
       ]);
       setShift(sh);
       setGuards(gs);
+      setInspections(insp);
     } catch (e: any) {
       setLoadErr(e?.message ?? 'Failed to load shift');
     } finally {
@@ -316,6 +356,100 @@ export default function ShiftDetailPage() {
           <p className="text-gray-500 text-sm">No guard assigned.</p>
         )}
       </div>
+
+      {/* Vehicle inspection (schema_v48) — one per session; handoff shifts
+          show several. Rendered only when the site requires inspection or
+          an inspection actually exists. Admin-only page; photos are
+          15-minute presigned GETs. */}
+      {inspections && (inspections.vehicle_inspection_required || inspections.sessions.some((s) => s.id)) && (
+        <div className="bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-5">
+          <h2 className="text-gray-500 text-xs tracking-widest mb-4">VEHICLE INSPECTION</h2>
+          {inspections.sessions.length === 0 ? (
+            <p className="text-gray-500 text-sm">No clock-in yet — inspection starts after the guard clocks in.</p>
+          ) : (
+            <div className="space-y-5">
+              {inspections.sessions.map((s) => (
+                <div key={s.session_id} className="border border-[#1A3050] rounded-lg p-4">
+                  <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                    <div className="min-w-0">
+                      <p className="text-gray-200 text-sm">{s.guard_name ?? 'Unknown guard'}</p>
+                      <p className="text-gray-500 text-xs font-mono mt-0.5">
+                        Session {fmtDTPacific(s.clocked_in_at)}
+                      </p>
+                    </div>
+                    <span
+                      className={`inline-block text-xs tracking-widest font-medium px-2 py-0.5 rounded border ${
+                        s.completed_at
+                          ? 'bg-green-500/20 text-green-400 border-green-500/40'
+                          : s.id
+                            ? 'bg-amber-400/20 text-amber-400 border-amber-400/40'
+                            : 'bg-gray-700/40 text-gray-400 border-gray-600/40'
+                      }`}
+                    >
+                      {s.completed_at ? 'COMPLETE' : s.id ? 'INCOMPLETE' : 'NOT STARTED'}
+                    </span>
+                  </div>
+
+                  {s.id ? (
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm mb-4">
+                        <div>
+                          <p className="text-gray-500 text-xs tracking-widest mb-1">VEHICLE</p>
+                          <p className="text-gray-200 text-xs">
+                            {s.vehicle_label}
+                            {s.vehicle_plate ? <span className="text-gray-500 font-mono"> · {s.vehicle_plate}</span> : null}
+                          </p>
+                          {s.vehicle_make_model && <p className="text-gray-500 text-xs mt-0.5">{s.vehicle_make_model}</p>}
+                        </div>
+                        <div>
+                          <p className="text-gray-500 text-xs tracking-widest mb-1">ODOMETER</p>
+                          <p className="text-gray-200 font-mono text-xs">
+                            {s.odometer_reading !== null
+                              ? `${s.odometer_reading.toLocaleString()} ${s.odometer_unit ?? 'mi'}`
+                              : '—'}
+                          </p>
+                        </div>
+                        {s.completed_at && (
+                          <div>
+                            <p className="text-gray-500 text-xs tracking-widest mb-1">COMPLETED</p>
+                            <p className="text-gray-200 font-mono text-xs">{fmtDTPacific(s.completed_at)}</p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+                        {PHOTO_SLOT_LABELS.map(({ key, label }) => {
+                          const url = s[key] as string | null;
+                          return (
+                            <div key={label}>
+                              <p className="text-gray-500 text-[10px] tracking-widest mb-1">{label}</p>
+                              {url ? (
+                                <a href={url} target="_blank" rel="noreferrer" className="block">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={url}
+                                    alt={`${label} inspection photo`}
+                                    className="w-full h-24 object-cover rounded border border-[#1A3050] hover:border-amber-400/60 transition-colors"
+                                  />
+                                </a>
+                              ) : (
+                                <div className="w-full h-24 rounded border border-dashed border-[#1A3050] flex items-center justify-center">
+                                  <span className="text-gray-600 text-[10px] tracking-widest">MISSING</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-gray-500 text-sm">Guard has not started the inspection.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Reassign + cancel actions */}
       <div className="flex items-center gap-3 flex-wrap">

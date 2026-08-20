@@ -35,6 +35,9 @@ interface Shift {
   scheduled_start:  string;
   scheduled_end:    string;
   status:           'unassigned' | 'scheduled' | 'active' | 'completed' | 'cancelled' | 'missed';
+  // schema_v48 — site requires vehicle inspection and a session on this
+  // shift lacks a completed one. Optional: absent until the API deploys.
+  inspection_incomplete?: boolean;
 }
 
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean; photo_url?: string | null; }
@@ -481,6 +484,14 @@ function ShiftsPageInner() {
                         <span className={`inline-block text-xs tracking-widest font-medium px-2 py-0.5 rounded ${STATUS_STYLES[s.status] ?? 'text-gray-500'}`}>
                           {s.status.toUpperCase()}
                         </span>
+                        {s.inspection_incomplete && (
+                          <span
+                            title="Vehicle inspection incomplete"
+                            className="inline-block ml-1.5 text-[9px] tracking-widest font-bold px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-400 border border-amber-400/40"
+                          >
+                            INSPECTION
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}

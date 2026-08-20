@@ -99,6 +99,20 @@ interface Round {
 
 const EMPTY_CP_FORM = { label: '', radius_meters: '50', sort_order: '0', is_active: true };
 
+// Vehicle roster (schema_v48) — per-site patrol vehicles for inspections.
+interface Vehicle {
+  id:            string;
+  site_id:       string;
+  label:         string;
+  plate:         string | null;
+  make_model:    string | null;
+  odometer_unit: 'mi' | 'km';
+  is_active:     boolean;
+  created_at:    string;
+}
+
+const EMPTY_VEHICLE_FORM = { label: '', plate: '', make_model: '', odometer_unit: 'mi' as 'mi' | 'km' };
+
 const ANCHOR_DATE = new Intl.DateTimeFormat('en-US', {
   month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/Los_Angeles',
 });
@@ -262,6 +276,17 @@ export default function SiteDetailPage() {
   const [deleteError,  setDeleteError]  = useState('');
   const [cpToggling,   setCpToggling]   = useState<string | null>(null);
 
+  // ── Vehicle roster (schema_v48) ────────────────────────────────────────
+  const [vehicles,        setVehicles]        = useState<Vehicle[]>([]);
+  const [vehLoading,      setVehLoading]      = useState(true);
+  const [vehError,        setVehError]        = useState('');
+  const [vehModalMode,    setVehModalMode]    = useState<'add' | 'edit' | null>(null);
+  const [editingVeh,      setEditingVeh]      = useState<Vehicle | null>(null);
+  const [vehForm,         setVehForm]         = useState(EMPTY_VEHICLE_FORM);
+  const [vehSaving,       setVehSaving]       = useState(false);
+  const [vehFormError,    setVehFormError]    = useState('');
+  const [vehToggling,     setVehToggling]     = useState<string | null>(null);
+
   // ── Scan history (C4b) ─────────────────────────────────────────────────
   const [scanFrom,      setScanFrom]      = useState(() => dateInputValue(7));
   const [scanTo,        setScanTo]        = useState(() => dateInputValue(0));
@@ -321,6 +346,85 @@ export default function SiteDetailPage() {
   }, [siteId]);
 
   useEffect(() => { loadCheckpoints(); }, [loadCheckpoints]);
+
+  const loadVehicles = useCallback(async () => {
+    if (!siteId) return;
+    try {
+      const rows = await adminGet<Vehicle[]>(`/api/vehicles?site_id=${siteId}`);
+      setVehicles(rows);
+      setVehError('');
+    } catch (e: any) {
+      setVehError(e.message ?? 'Failed to load vehicles');
+    } finally {
+      setVehLoading(false);
+    }
+  }, [siteId]);
+
+  useEffect(() => { loadVehicles(); }, [loadVehicles]);
+
+  function openAddVehicleModal() {
+    setVehForm(EMPTY_VEHICLE_FORM);
+    setEditingVeh(null);
+    setVehFormError('');
+    setVehModalMode('add');
+  }
+
+  function openEditVehicleModal(v: Vehicle) {
+    setVehForm({ label: v.label, plate: v.plate ?? '', make_model: v.make_model ?? '', odometer_unit: v.odometer_unit });
+    setEditingVeh(v);
+    setVehFormError('');
+    setVehModalMode('edit');
+  }
+
+  function closeVehicleModal() {
+    setVehModalMode(null);
+    setEditingVeh(null);
+  }
+
+  async function saveVehicle() {
+    const label = vehForm.label.trim();
+    if (label.length < 1 || label.length > 120) {
+      setVehFormError('Label is required (1-120 characters).');
+      return;
+    }
+    if (vehForm.plate.trim().length > 20) {
+      setVehFormError('Plate must be at most 20 characters.');
+      return;
+    }
+    setVehSaving(true);
+    setVehFormError('');
+    try {
+      const payload = {
+        label,
+        plate:         vehForm.plate.trim() || null,
+        make_model:    vehForm.make_model.trim() || null,
+        odometer_unit: vehForm.odometer_unit,
+      };
+      if (vehModalMode === 'add') {
+        await adminPost(`/api/vehicles`, { ...payload, site_id: siteId });
+      } else if (editingVeh) {
+        await adminPatch(`/api/vehicles/${editingVeh.id}`, payload);
+      }
+      closeVehicleModal();
+      await loadVehicles();
+    } catch (e: any) {
+      setVehFormError(e.message ?? 'Failed to save vehicle');
+    } finally {
+      setVehSaving(false);
+    }
+  }
+
+  async function toggleVehicleActive(v: Vehicle) {
+    setVehToggling(v.id);
+    try {
+      await adminPatch(`/api/vehicles/${v.id}`, { is_active: !v.is_active });
+      await loadVehicles();
+    } catch (e: any) {
+      setVehError(e.message ?? 'Failed to update vehicle');
+    } finally {
+      setVehToggling(null);
+    }
+  }
 
   async function saveToggle(flag: 'checkpoints_enabled' | 'vehicle_inspection_required', value: boolean) {
     if (!site || toggleSaving) return;
@@ -953,6 +1057,73 @@ export default function SiteDetailPage() {
         )}
       </section>
 
+      {/* Vehicle roster (schema_v48) — picker source for guard inspections */}
+      <section>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
+          <h2 className="text-amber-400 font-bold tracking-widest text-sm">VEHICLES</h2>
+          <button
+            onClick={openAddVehicleModal}
+            className="text-xs text-amber-400 tracking-widest border border-amber-400/40 rounded px-3 py-1.5 hover:bg-amber-400/10 hover:border-amber-400 transition-colors self-start md:self-auto"
+          >
+            + ADD VEHICLE
+          </button>
+        </div>
+
+        {vehError && (
+          <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-3">{vehError}</div>
+        )}
+
+        {vehLoading ? (
+          <p className="text-gray-500 text-sm">Loading vehicles…</p>
+        ) : vehicles.length === 0 ? (
+          <p className="text-gray-500 text-sm">
+            No vehicles yet. Add the site&apos;s patrol vehicles so guards can select one for their inspection.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {vehicles.map((v) => (
+              <div
+                key={v.id}
+                className={`bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 flex flex-col md:flex-row md:items-center gap-2 md:gap-3 ${!v.is_active ? 'opacity-60' : ''}`}
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-gray-200 text-sm">
+                    {v.label}
+                    {!v.is_active && (
+                      <span className="ml-2 text-[9px] tracking-widest font-bold px-1.5 py-0.5 rounded bg-gray-700/40 text-gray-400 border border-gray-600/40">
+                        RETIRED
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-gray-500 text-xs mt-0.5">
+                    {v.plate ? <span className="font-mono">{v.plate}</span> : 'No plate'}
+                    {v.make_model ? ` · ${v.make_model}` : ''}
+                    {` · odometer in ${v.odometer_unit}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button
+                    onClick={() => openEditVehicleModal(v)}
+                    className="text-xs tracking-widest text-amber-400 hover:underline"
+                  >
+                    EDIT
+                  </button>
+                  <button
+                    onClick={() => toggleVehicleActive(v)}
+                    disabled={vehToggling === v.id}
+                    className={`text-xs tracking-widest hover:underline ${
+                      v.is_active ? 'text-red-400 hover:text-red-300' : 'text-green-400 hover:text-green-300'
+                    }`}
+                  >
+                    {vehToggling === v.id ? '…' : v.is_active ? 'RETIRE' : 'REACTIVATE'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       {/* Scan history (C4b) */}
       <section>
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
@@ -1117,6 +1288,83 @@ export default function SiteDetailPage() {
           </>
         )}
       </section>
+
+      {/* ADD / EDIT vehicle modal */}
+      {vehModalMode !== null && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60">
+          <div className="w-full sm:max-w-md bg-[#0F1E35] border border-[#1A3050] rounded-t-2xl sm:rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-amber-400 font-bold tracking-widest text-lg">
+                {vehModalMode === 'add' ? 'ADD VEHICLE' : 'EDIT VEHICLE'}
+              </h2>
+              <button onClick={closeVehicleModal} className="text-gray-500 hover:text-gray-300 text-xl">✕</button>
+            </div>
+            {vehFormError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{vehFormError}</div>
+            )}
+            <div className="space-y-4">
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                  LABEL <span className="text-amber-400">*</span>
+                </label>
+                <input
+                  type="text" placeholder="e.g. Patrol Car 1"
+                  value={vehForm.label}
+                  onChange={(e) => setVehForm((f) => ({ ...f, label: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">PLATE</label>
+                <input
+                  type="text" placeholder="e.g. 8ABC123"
+                  value={vehForm.plate}
+                  onChange={(e) => setVehForm((f) => ({ ...f, plate: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+                <p className="text-gray-600 text-[10px] mt-1">
+                  Leave blank for unplated vehicles (golf carts, ATVs).
+                </p>
+              </div>
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">MAKE / MODEL</label>
+                <input
+                  type="text" placeholder="e.g. White Ford Explorer"
+                  value={vehForm.make_model}
+                  onChange={(e) => setVehForm((f) => ({ ...f, make_model: e.target.value }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">ODOMETER UNIT</label>
+                <select
+                  value={vehForm.odometer_unit}
+                  onChange={(e) => setVehForm((f) => ({ ...f, odometer_unit: e.target.value as 'mi' | 'km' }))}
+                  className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+                >
+                  <option value="mi">Miles (mi)</option>
+                  <option value="km">Kilometers (km)</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={closeVehicleModal}
+                className="flex-1 bg-[#0B1526] border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors"
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={saveVehicle}
+                disabled={vehSaving}
+                className="flex-1 bg-amber-400 text-[#0B1526] font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 transition-colors disabled:opacity-50"
+              >
+                {vehSaving ? 'SAVING…' : vehModalMode === 'add' ? 'ADD' : 'SAVE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ADD / EDIT checkpoint modal */}
       {cpModalMode !== null && (
