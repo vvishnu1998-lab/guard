@@ -62,6 +62,7 @@ type StatusKind =
   | 'clocked_in_late'
   | 'missed_clock_in'
   | 'missed_report'
+  | 'task_completed'
   | 'checkpoint_round_complete'
   | 'checkpoint_round_partial';
 
@@ -77,7 +78,7 @@ interface RoundCheckpoint {
 
 interface ActivityRow {
   id:              string;
-  kind:            'ping' | 'report' | 'checkpoint_round';
+  kind:            'ping' | 'report' | 'checkpoint_round' | 'task_completion';
   guard_id:        string;
   guard_name:      string;
   site_id:         string;
@@ -332,6 +333,8 @@ function statusPresentation(r: ActivityRow): StatusPresentation {
       };
     // Complete vs partial is shown in BOTH modes — it is a fact about the
     // round, not a roster comparison. The counts behind it are admin-only.
+    case 'task_completed':
+      return { label: 'Task Completed', textClass: 'text-emerald-400', pillClass: GREEN_PILL };
     case 'checkpoint_round_complete':
       return { label: 'Round Complete', textClass: 'text-emerald-400', pillClass: GREEN_PILL };
     case 'checkpoint_round_partial':

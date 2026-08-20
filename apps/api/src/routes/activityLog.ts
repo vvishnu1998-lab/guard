@@ -113,6 +113,25 @@ interface MissedPingRow {
   resolved_at:      string | null;
 }
 
+interface ClockInVerificationRow {
+  shift_session_id: string;
+  selfie_url:       string | null;
+  site_photo_url:   string | null;
+}
+
+interface TaskCompletionRow {
+  id:                         string;
+  shift_session_id:           string;
+  photo_url:                  string | null;
+  completed_at:               string;
+  completion_lat:             number | null;
+  completion_lng:             number | null;
+  completion_accuracy_meters: number | null;
+  completion_within_geofence: boolean | null;
+  /** Instance title (copied from the template at generation time). */
+  title:                      string;
+}
+
 interface ReportRow {
   id:           string;
   report_type:  'activity' | 'incident' | 'maintenance';
@@ -154,6 +173,7 @@ type StatusKind =
   | 'clocked_in_late'
   | 'missed_clock_in'
   | 'missed_report'
+  | 'task_completed'
   | 'checkpoint_round_complete'
   | 'checkpoint_round_partial';
 
@@ -171,7 +191,7 @@ export interface RoundCheckpoint {
 
 export interface ActivityRow {
   id:             string;
-  kind:           'ping' | 'report' | 'checkpoint_round';
+  kind:           'ping' | 'report' | 'checkpoint_round' | 'task_completion';
   guard_id:       string;
   guard_name:     string;
   site_id:        string;
@@ -389,6 +409,43 @@ export async function fetchActivityRows(
     misses.push(...missesResult.rows);
   }
 
+  // ── Clock-in verification media (selfie + site photo) per session ────────
+  // One row per session at most; keyed by shift_session_id for the clock-in
+  // row synthesis below. Raw S3 URLs — the shared presign pass signs them.
+  const civBySession = new Map<string, ClockInVerificationRow>();
+  if (sessionIds.length > 0) {
+    const civResult = await pool.query<ClockInVerificationRow>(
+      `SELECT shift_session_id, selfie_url, site_photo_url
+       FROM clock_in_verifications
+       WHERE shift_session_id = ANY($1::uuid[])`,
+      [sessionIds],
+    );
+    for (const c of civResult.rows) civBySession.set(c.shift_session_id, c);
+  }
+
+  // ── Task completions per session ─────────────────────────────────────────
+  const taskCompletionsBySession = new Map<string, TaskCompletionRow[]>();
+  if (sessionIds.length > 0) {
+    const tcResult = await pool.query<TaskCompletionRow>(
+      `SELECT tc.id, tc.shift_session_id, tc.photo_url, tc.completed_at,
+              tc.completion_lat, tc.completion_lng,
+              tc.completion_accuracy_meters, tc.completion_within_geofence,
+              ti.title
+       FROM task_completions tc
+       JOIN task_instances ti ON ti.id = tc.task_instance_id
+       WHERE tc.shift_session_id = ANY($1::uuid[])
+         AND tc.completed_at >= $2
+         AND tc.completed_at <= $3
+       ORDER BY tc.completed_at ASC`,
+      [sessionIds, fromIso, toIso],
+    );
+    for (const t of tcResult.rows) {
+      const arr = taskCompletionsBySession.get(t.shift_session_id) ?? [];
+      arr.push(t);
+      taskCompletionsBySession.set(t.shift_session_id, arr);
+    }
+  }
+
   // ── Pull reports in range (scoped) ───────────────────────────────────────
   let reportQuery = `
     SELECT
@@ -551,6 +608,13 @@ export async function fetchActivityRows(
     const clockedInLate  = clockInLateMin > LATE_THRESHOLD_MIN;
     // Only emit if clock-in falls in the caller's date-range window.
     if (sessionStartMs >= fromMs && sessionStartMs <= toMs) {
+      // Clock-in proof photos (selfie + site photo) from the verification
+      // row mobile writes right after clocking in. Filter the legacy
+      // 'pending' sentinel some older builds sent when S3 was unconfigured.
+      const civ = civBySession.get(s.session_id);
+      const civMedia = [civ?.selfie_url, civ?.site_photo_url].filter(
+        (u): u is string => typeof u === 'string' && u.length > 0 && u !== 'pending',
+      );
       rows.push({
         id:              `clockin-${s.session_id}`,
         kind:            'ping',
@@ -561,8 +625,8 @@ export async function fetchActivityRows(
         status:          'Clocked In',
         status_kind:     clockedInLate ? 'clocked_in_late' : 'clocked_in_on_time',
         log_time:        s.clocked_in_at,
-        log_media_url:   null,
-        log_media_urls:  [],
+        log_media_url:   civMedia[0] ?? null,
+        log_media_urls:  civMedia,
         event_time:      s.clocked_in_at,
         detail_id:       null,
         shift_id:        s.shift_id,
@@ -675,6 +739,41 @@ export async function fetchActivityRows(
         longitude:          null,
         accuracy_m:         null,
         is_within_geofence: null,
+        ping_type:          null,
+        ...NO_ROUND,
+      });
+    }
+
+    // 2b) Task completions — one row each, with the completion photo as
+    //     LOG MEDIA (admins previously had NO surface showing these at
+    //     all; the completion photo/geofence proof lived only in the DB).
+    //     Instance title goes in description so the row says WHICH task.
+    for (const tc of taskCompletionsBySession.get(s.session_id) ?? []) {
+      rows.push({
+        id:             `task-${tc.id}`,
+        kind:           'task_completion',
+        guard_id:       s.guard_id,
+        guard_name:     s.guard_name,
+        site_id:        s.site_id,
+        site_name:      s.site_name,
+        status:         'Task Completed',
+        status_kind:    'task_completed',
+        log_time:       tc.completed_at,
+        log_media_url:  tc.photo_url,
+        log_media_urls: tc.photo_url ? [tc.photo_url] : [],
+        event_time:     tc.completed_at,
+        detail_id:      tc.id,
+        shift_id:        s.shift_id,
+        scheduled_start: s.scheduled_start,
+        scheduled_end:   s.scheduled_end,
+        report_type:  null,
+        severity:     null,
+        description:  tc.title,
+        legal_hold:   false,
+        latitude:           isAdmin ? tc.completion_lat             : null,
+        longitude:          isAdmin ? tc.completion_lng             : null,
+        accuracy_m:         isAdmin ? tc.completion_accuracy_meters : null,
+        is_within_geofence: isAdmin ? tc.completion_within_geofence : null,
         ping_type:          null,
         ...NO_ROUND,
       });

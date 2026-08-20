@@ -1523,6 +1523,7 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
     maintenance_report:        AMBER,
     checkpoint_round_complete: NAVY,
     checkpoint_round_partial:  AMBER,
+    task_completed:            NAVY,
   };
   const STATUS_LABEL: Record<string, string> = {
     on_time:                   'PING',
@@ -1537,6 +1538,7 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
     // vs partial is a standalone fact and is safe to print.
     checkpoint_round_complete: 'ROUND COMPLETE',
     checkpoint_round_partial:  'ROUND PARTIAL',
+    task_completed:            'TASK COMPLETED',
   };
 
   // We don't know the true page total until the stream drains, so
