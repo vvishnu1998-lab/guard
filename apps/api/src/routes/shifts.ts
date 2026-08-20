@@ -2481,6 +2481,29 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     }
     const shift = shiftResult.rows[0];
 
+    // Eligibility window (Aug 18 incident): without this, any 'scheduled'
+    // shift is clockable arbitrarily early — the guard's home screen offered
+    // tomorrow's shift after a state-loss blip, and only the one-open-session
+    // unique index stopped a 22.5h-early clock-in. Compare epoch millis:
+    // scheduled_start is a timestamptz, pg returns it as a Date (UTC-anchored),
+    // so no local-date math is involved. Handoff clock-in intentionally has
+    // no window — a handoff is mid-shift by construction.
+    const EARLY_CLOCK_IN_WINDOW_MS = 30 * 60 * 1000;
+    const scheduledStartMs = new Date(shift.scheduled_start).getTime();
+    if (Date.now() < scheduledStartMs - EARLY_CLOCK_IN_WINDOW_MS) {
+      await client.query('ROLLBACK');
+      console.log(
+        `clock-in.too-early guard=${req.user!.sub} shift=${id} ` +
+        `scheduled_start=${new Date(scheduledStartMs).toISOString()}`,
+      );
+      return res.status(422).json({
+        code: 'TOO_EARLY',
+        error: 'TOO_EARLY',
+        message: 'This shift cannot be started yet. Clock-in opens 30 minutes before the scheduled start.',
+        scheduled_start: shift.scheduled_start,
+      });
+    }
+
     // Server-side geofence check. Inside the transaction so the fence read
     // is consistent with the session insert (and so we can ROLLBACK on fail
     // without leaving the shift row partially mutated).
