@@ -927,7 +927,12 @@ export default function SiteDetailPage() {
         )}
       </section>
 
-      {/* Checkpoints (C4a) */}
+      {/* Checkpoints (C4a) — DISPLAY-gated on the checkpoints_enabled toggle
+          (schema_v47). Purely presentational: rows stay in the DB and in this
+          component's state (loadCheckpoints still runs), so flipping the
+          toggle back shows the same roster intact, no reload. SCAN HISTORY
+          below is deliberately NOT gated — audit evidence. */}
+      {site.checkpoints_enabled && (
       <section>
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">CHECKPOINTS</h2>
@@ -1056,8 +1061,12 @@ export default function SiteDetailPage() {
           </div>
         )}
       </section>
+      )}
 
-      {/* Vehicle roster (schema_v48) — picker source for guard inspections */}
+      {/* Vehicle roster (schema_v48) — picker source for guard inspections.
+          DISPLAY-gated on vehicle_inspection_required; same non-destructive
+          semantics as the checkpoints gate above. */}
+      {site.vehicle_inspection_required && (
       <section>
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">VEHICLES</h2>
@@ -1123,8 +1132,11 @@ export default function SiteDetailPage() {
           </div>
         )}
       </section>
+      )}
 
-      {/* Scan history (C4b) */}
+      {/* Scan history (C4b) — NOT gated on checkpoints_enabled, on purpose:
+          scans are audit evidence; turning the feature off must never hide
+          what it already recorded. */}
       <section>
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">SCAN HISTORY</h2>
