@@ -21,15 +21,23 @@
  *   - company_admin → all shift_sessions within the company
  *   - client        → shift_sessions at the client's site
  *
- * Window anchoring: UTC half-hours (every :00 and :30) — matches the
- * reminder cron. Each window is [W, W+30min). A window appears in the
- * feed once it's "complete" — either the session ended OR the next
- * window has already started.
+ * Window anchoring: 30-min slots anchored at the shift's scheduled_start
+ * (scheduled_start + N*30min) — the SAME formula as pingReminder's
+ * currentBoundary and missedPingCron. A window is tracked only if it ends
+ * by scheduled_end. The feed previously re-derived clock-anchored
+ * half-hours from clocked_in_at, which disagreed with the crons and
+ * fabricated misses the server never flagged (Mosser Towers, 2026-08-20).
  *
  * Status rules:
- *   - No ping in window           → "Missed Ping"
- *   - Ping arrived < 10 min late  → "Ping (X minutes)"
- *   - Ping arrived ≥ 10 min late  → "Late Ping (X minutes)"
+ *   - missed_pings row, unresolved → "Missed Ping" (the authoritative
+ *     source — this route no longer infers misses itself). A resolved
+ *     row is NOT emitted: its resolving ping renders as a Late Ping.
+ *   - Ping arrived < 10 min late   → "Ping (X minutes)"
+ *   - Ping arrived ≥ 10 min late   → "Late Ping (X minutes)"
+ *   Lateness is measured from the start of the window the ping was
+ *   submitted FOR (matched by window_label; timestamp containment as the
+ *   fallback for legacy rows without labels). Every ping renders as its
+ *   own row — nothing is collapsed per window.
  *
  * Patrol rounds: one row per (site, round_window) from checkpoint_scans,
  * sorted into the timeline by round_window. Only rounds whose hour has
@@ -78,6 +86,8 @@ interface SessionRow {
   shift_id:        string;
   scheduled_start: string;
   scheduled_end:   string;
+  /** Site IANA zone — needed to reproduce the crons' window labels. */
+  site_tz:         string | null;
 }
 
 interface PingRow {
@@ -90,6 +100,17 @@ interface PingRow {
   accuracy_meters:     number | null;
   is_within_geofence:  boolean;
   ping_type:           string;
+  /** Which schedule-anchored window this ping was submitted for
+   *  (site-local HH:MM, same format the crons write). Null on legacy rows. */
+  window_label:        string | null;
+}
+
+interface MissedPingRow {
+  shift_session_id: string;
+  window_start:     string;
+  window_end:       string;
+  window_label:     string;
+  resolved_at:      string | null;
 }
 
 interface ReportRow {
@@ -219,21 +240,17 @@ const NO_ROUND = {
   expected_count: null,
 } as const;
 
-/** Round up to the next UTC :00 or :30 boundary. */
-function nextHalfHour(ms: number): number {
-  const d = new Date(ms);
-  d.setUTCMilliseconds(0);
-  d.setUTCSeconds(0);
-  const mins = d.getUTCMinutes();
-  if (mins === 0 || mins === 30) {
-    d.setUTCMinutes(mins + 30);
-  } else if (mins < 30) {
-    d.setUTCMinutes(30);
-  } else {
-    d.setUTCMinutes(0);
-    d.setUTCHours(d.getUTCHours() + 1);
-  }
-  return d.getTime();
+/**
+ * Site-local HH:MM label for a UTC timestamp — byte-identical to the
+ * formatter pingReminder/missedPingCron use to WRITE window_label, so
+ * label equality is a safe join key here.
+ */
+function siteLocalLabel(when: Date, siteTz: string | null): string {
+  const tz = siteTz ?? 'America/Los_Angeles';
+  return new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+    timeZone: tz,
+  }).format(when);
 }
 
 function buildPingStatus(deltaMin: number): { text: string; kind: 'on_time' | 'late' } {
@@ -314,7 +331,8 @@ export async function fetchActivityRows(
       ss.clocked_out_at,
       sh.id              AS shift_id,
       sh.scheduled_start,
-      sh.scheduled_end
+      sh.scheduled_end,
+      si.timezone        AS site_tz
     FROM shift_sessions ss
     JOIN guards g  ON g.id  = ss.guard_id
     JOIN sites  si ON si.id = ss.site_id
@@ -345,7 +363,7 @@ export async function fetchActivityRows(
   if (sessionIds.length > 0) {
     const pingsResult = await pool.query<PingRow>(
       `SELECT id, shift_session_id, pinged_at, photo_url, latitude, longitude,
-              accuracy_meters, is_within_geofence, ping_type
+              accuracy_meters, is_within_geofence, ping_type, window_label
        FROM location_pings
        WHERE shift_session_id = ANY($1::uuid[])
          AND pinged_at >= $2
@@ -354,6 +372,21 @@ export async function fetchActivityRows(
       [sessionIds, fromIso, toIso],
     );
     pings.push(...pingsResult.rows);
+  }
+
+  // ── Pull missed-ping rows for those sessions (authoritative source) ──────
+  const misses: MissedPingRow[] = [];
+  if (sessionIds.length > 0) {
+    const missesResult = await pool.query<MissedPingRow>(
+      `SELECT shift_session_id, window_start, window_end, window_label, resolved_at
+       FROM missed_pings
+       WHERE shift_session_id = ANY($1::uuid[])
+         AND window_end   > $2
+         AND window_start < $3
+       ORDER BY window_start ASC`,
+      [sessionIds, fromIso, toIso],
+    );
+    misses.push(...missesResult.rows);
   }
 
   // ── Pull reports in range (scoped) ───────────────────────────────────────
@@ -483,6 +516,13 @@ export async function fetchActivityRows(
     pingsBySession.set(p.shift_session_id, arr);
   }
 
+  const missesBySession = new Map<string, MissedPingRow[]>();
+  for (const m of misses) {
+    const arr = missesBySession.get(m.shift_session_id) ?? [];
+    arr.push(m);
+    missesBySession.set(m.shift_session_id, arr);
+  }
+
   // Group reports by session so the missed-report hourly scan can
   // check "did any report land in this hour window" in O(1) lookups.
   // Values are sorted reported_at millis for linear scan (typical
@@ -541,85 +581,103 @@ export async function fetchActivityRows(
       });
     }
 
-    let windowStart = nextHalfHour(sessionStartMs);
-    while (windowStart < sessionEndMs) {
-      const windowEnd = windowStart + WINDOW_MIN * 60_000;
+    // 2) Ping rows + missed pings — schedule-anchored windows (see the
+    //    top-of-file docblock). Windows are scheduled_start + N*30min,
+    //    tracked only while they end by scheduled_end — the same formula
+    //    pingReminder and missedPingCron use, so the feed can never
+    //    disagree with what the crons actually flagged. Every submitted
+    //    ping renders as its own row; lateness is graded against the
+    //    window it was submitted FOR (window_label match), falling back
+    //    to timestamp containment for legacy rows without a label.
+    const windows: { startMs: number; label: string }[] = [];
+    for (
+      let ws = scheduledStartMs;
+      ws + WINDOW_MIN * 60_000 <= scheduledEndMs;
+      ws += WINDOW_MIN * 60_000
+    ) {
+      windows.push({ startMs: ws, label: siteLocalLabel(new Date(ws), s.site_tz) });
+    }
 
-      // Window must be complete (next window has begun, or shift has ended).
-      const isComplete = windowEnd <= Math.min(nowMs, sessionEndMs);
-      if (!isComplete) break;
+    for (const ping of sessionPings) {
+      const pingMs = Date.parse(ping.pinged_at);
+      const win =
+        (ping.window_label
+          ? windows.find((w) => w.label === ping.window_label)
+          : undefined) ??
+        windows.find(
+          (w) => pingMs >= w.startMs && pingMs < w.startMs + WINDOW_MIN * 60_000,
+        ) ??
+        null;
+      // No matching window (e.g. out-of-schedule submission): grade as
+      // on-time rather than inventing a reference point.
+      const deltaMin = win ? (pingMs - win.startMs) / 60_000 : 0;
+      const status   = buildPingStatus(deltaMin);
+      rows.push({
+        id:             ping.id,
+        kind:           'ping',
+        guard_id:       s.guard_id,
+        guard_name:     s.guard_name,
+        site_id:        s.site_id,
+        site_name:      s.site_name,
+        status:         status.text,
+        status_kind:    status.kind,
+        log_time:       ping.pinged_at,
+        log_media_url:  ping.photo_url,
+        log_media_urls: ping.photo_url ? [ping.photo_url] : [],
+        event_time:     ping.pinged_at,
+        detail_id:      ping.id,
+        shift_id:        s.shift_id,
+        scheduled_start: s.scheduled_start,
+        scheduled_end:   s.scheduled_end,
+        report_type:  null,
+        severity:     null,
+        description:  null,
+        legal_hold:   false,
+        latitude:           isAdmin ? ping.latitude           : null,
+        longitude:          isAdmin ? ping.longitude          : null,
+        accuracy_m:         isAdmin ? ping.accuracy_meters    : null,
+        is_within_geofence: isAdmin ? ping.is_within_geofence : null,
+        ping_type:          isAdmin ? ping.ping_type          : null,
+        ...NO_ROUND,
+      });
+    }
 
-      // Date range filter: skip windows outside [fromMs, toMs]
-      if (windowEnd > fromMs && windowStart < toMs) {
-        const ping = sessionPings.find((p) => {
-          const pt = Date.parse(p.pinged_at);
-          return pt >= windowStart && pt < windowEnd;
-        });
-
-        if (ping) {
-          const deltaMin = (Date.parse(ping.pinged_at) - windowStart) / 60_000;
-          const status   = buildPingStatus(deltaMin);
-          rows.push({
-            id:             ping.id,
-            kind:           'ping',
-            guard_id:       s.guard_id,
-            guard_name:     s.guard_name,
-            site_id:        s.site_id,
-            site_name:      s.site_name,
-            status:         status.text,
-            status_kind:    status.kind,
-            log_time:       ping.pinged_at,
-            log_media_url:  ping.photo_url,
-            log_media_urls: ping.photo_url ? [ping.photo_url] : [],
-            event_time:     ping.pinged_at,
-            detail_id:      ping.id,
-            shift_id:        s.shift_id,
-            scheduled_start: s.scheduled_start,
-            scheduled_end:   s.scheduled_end,
-            report_type:  null,
-            severity:     null,
-            description:  null,
-            legal_hold:   false,
-            latitude:           isAdmin ? ping.latitude           : null,
-            longitude:          isAdmin ? ping.longitude          : null,
-            accuracy_m:         isAdmin ? ping.accuracy_meters    : null,
-            is_within_geofence: isAdmin ? ping.is_within_geofence : null,
-            ping_type:          isAdmin ? ping.ping_type          : null,
-            ...NO_ROUND,
-          });
-        } else {
-          rows.push({
-            id:             `missed-${s.session_id}-${windowStart}`,
-            kind:           'ping',
-            guard_id:       s.guard_id,
-            guard_name:     s.guard_name,
-            site_id:        s.site_id,
-            site_name:      s.site_name,
-            status:         'Missed Ping',
-            status_kind:    'missed',
-            log_time:       null,
-            log_media_url:  null,
-            log_media_urls: [],
-            event_time:     new Date(windowStart).toISOString(),
-            detail_id:      null,
-            shift_id:        s.shift_id,
-            scheduled_start: s.scheduled_start,
-            scheduled_end:   s.scheduled_end,
-            report_type:  null,
-            severity:     null,
-            description:  null,
-            legal_hold:   false,
-            latitude:           null,
-            longitude:          null,
-            accuracy_m:         null,
-            is_within_geofence: null,
-            ping_type:          null,
-            ...NO_ROUND,
-          });
-        }
-      }
-
-      windowStart = windowEnd;
+    // Miss rows come from the authoritative missed_pings table (already
+    // range-filtered in SQL). A resolved row is skipped: its resolving
+    // ping renders above as a Late Ping, and emitting the miss too would
+    // show one window as both missed and answered.
+    const sessionMisses = missesBySession.get(s.session_id) ?? [];
+    for (const m of sessionMisses) {
+      if (m.resolved_at) continue;
+      const windowStartMs = Date.parse(m.window_start);
+      rows.push({
+        id:             `missed-${s.session_id}-${windowStartMs}`,
+        kind:           'ping',
+        guard_id:       s.guard_id,
+        guard_name:     s.guard_name,
+        site_id:        s.site_id,
+        site_name:      s.site_name,
+        status:         'Missed Ping',
+        status_kind:    'missed',
+        log_time:       null,
+        log_media_url:  null,
+        log_media_urls: [],
+        event_time:     new Date(windowStartMs).toISOString(),
+        detail_id:      null,
+        shift_id:        s.shift_id,
+        scheduled_start: s.scheduled_start,
+        scheduled_end:   s.scheduled_end,
+        report_type:  null,
+        severity:     null,
+        description:  null,
+        legal_hold:   false,
+        latitude:           null,
+        longitude:          null,
+        accuracy_m:         null,
+        is_within_geofence: null,
+        ping_type:          null,
+        ...NO_ROUND,
+      });
     }
 
     // 3) Missed Report — hourly windows [HH:00, HH+1:00) that fall
