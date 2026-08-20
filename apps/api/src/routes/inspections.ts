@@ -26,7 +26,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { expiresAtFor } from '../services/retention';
-import { getS3ObjectHead, s3KeyFromPublicUrl } from '../services/s3';
+import { getS3ObjectHead, s3KeyFromPublicUrl, urlOrPresign } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 
 const router = Router();
@@ -41,6 +41,17 @@ const PHOTO_SLOTS = [
 type PhotoSlot = (typeof PHOTO_SLOTS)[number];
 
 const ODOMETER_MAX = 9_999_999;
+
+/** Swap the five stored photo URLs for short-lived presigned GETs — same
+ *  S3-lockdown path report photos use (services/s3.ts PR1 helpers). Raw
+ *  stored URLs never leave the API on read paths. */
+async function presignInspectionPhotos<T extends Record<string, unknown>>(row: T): Promise<T> {
+  const out: Record<string, unknown> = { ...row };
+  for (const slot of PHOTO_SLOTS) {
+    out[slot] = await urlOrPresign(row[slot] as string | null);
+  }
+  return out as T;
+}
 
 /** D2 validation for one client-supplied photo URL. Returns an error body
  *  to send, or null when the object is a genuine JPEG in our bucket. */
@@ -213,7 +224,7 @@ router.patch('/:id', requireAuth('guard'), async (req, res) => {
   );
 
   const result = await pool.query(`SELECT * FROM vehicle_inspections WHERE id = $1`, [req.params.id]);
-  res.json(result.rows[0]);
+  res.json(await presignInspectionPhotos(result.rows[0]));
 });
 
 // GET /api/inspections/session/:sessionId — the inspection for one shift
@@ -246,7 +257,48 @@ router.get('/session/:sessionId', requireAuth('company_admin', 'vishnu', 'guard'
   if (user!.role === 'guard' && row.guard_id !== user!.sub) {
     return res.status(404).json({ error: 'Inspection not found' });
   }
-  res.json(row);
+  res.json(await presignInspectionPhotos(row));
+});
+
+// GET /api/inspections/shift/:shiftId — every inspection across the
+// shift's sessions (handoff shifts have several), for the admin shift
+// detail viewer. company_admin: own company only; vishnu: any. Photos
+// come back presigned. Sessions WITHOUT an inspection row are included
+// with inspection fields null so the web can render "not started" rows.
+router.get('/shift/:shiftId', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const shiftCheck = await pool.query(
+    `SELECT sh.id, si.company_id, si.vehicle_inspection_required
+       FROM shifts sh JOIN sites si ON si.id = sh.site_id
+      WHERE sh.id = $1`,
+    [req.params.shiftId]
+  );
+  const shiftRow = shiftCheck.rows[0];
+  if (!shiftRow) return res.status(404).json({ error: 'Shift not found' });
+  if (req.user!.role === 'company_admin' && shiftRow.company_id !== req.user!.company_id) {
+    return res.status(404).json({ error: 'Shift not found' });
+  }
+
+  const result = await pool.query(
+    `SELECT ss.id AS session_id, ss.clocked_in_at, ss.clocked_out_at,
+            g.name AS guard_name,
+            vi.id, vi.vehicle_id, vi.odometer_reading, vi.completed_at, vi.created_at,
+            vi.photo_front_url, vi.photo_rear_url, vi.photo_driver_side_url,
+            vi.photo_passenger_side_url, vi.photo_odometer_url,
+            sv.label AS vehicle_label, sv.plate AS vehicle_plate,
+            sv.make_model AS vehicle_make_model, sv.odometer_unit
+       FROM shift_sessions ss
+       LEFT JOIN guards g ON g.id = ss.guard_id
+       LEFT JOIN vehicle_inspections vi ON vi.shift_session_id = ss.id
+       LEFT JOIN site_vehicles sv ON sv.id = vi.vehicle_id
+      WHERE ss.shift_id = $1
+      ORDER BY ss.clocked_in_at ASC`,
+    [req.params.shiftId]
+  );
+  const rows = await Promise.all(result.rows.map((r) => presignInspectionPhotos(r)));
+  res.json({
+    vehicle_inspection_required: shiftRow.vehicle_inspection_required,
+    sessions: rows,
+  });
 });
 
 export default router;
