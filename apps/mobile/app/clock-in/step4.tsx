@@ -233,6 +233,22 @@ export default function ClockInStep4() {
         );
         return;
       }
+      // Backstop for the home-screen time gate. The button is disabled until
+      // scheduled_start - 30min, but a stale card, a device clock skewed
+      // early, or a deep link into the wizard can still reach the POST.
+      // Unlike GEOFENCE_FAILED there is nothing to retry at step 1 — the
+      // guard simply has to wait — so this routes home rather than back into
+      // the wizard. err.code is populated here because the server sends
+      // `error: 'TOO_EARLY'`; ApiError derives .code from the error field.
+      if (err instanceof ApiError && err.code === 'TOO_EARLY') {
+        Alert.alert(
+          'Too Early',
+          err.message,
+          [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }],
+          { cancelable: false },
+        );
+        return;
+      }
       Alert.alert('Clock-In Failed', err?.message ?? 'Could not start shift. Please try again.');
     } finally {
       setSubmitting(false);

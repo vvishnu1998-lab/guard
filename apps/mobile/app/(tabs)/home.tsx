@@ -23,6 +23,16 @@ import { BreakType } from '../../constants/breakDurations';
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 /**
+ * Mirrors the server's clock-in eligibility window. apps/api shifts.ts
+ * rejects with 422 TOO_EARLY when
+ *   `Date.now() < scheduledStartMs - EARLY_CLOCK_IN_WINDOW_MS`.
+ * Same 30 minutes, same epoch-millis comparison against a UTC-anchored
+ * timestamptz — deliberately no local-date math, so the button and the
+ * endpoint cannot disagree across timezones or a DST boundary.
+ */
+const CLOCK_IN_WINDOW_MS = 30 * 60 * 1000;
+
+/**
  * Aug 18 incident — restore must fail LOUD.
  *
  * `restoreOrFetchShift` used to swallow every error from
@@ -116,6 +126,9 @@ export default function HomeScreen() {
   const [restoreFailed, setRestoreFailed] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [currentTime, setCurrentTime] = useState(getCurrentTimeStr());
+  /** Epoch millis, ticked alongside the display clock, so the CLOCK IN gate
+   *  re-evaluates as the window approaches instead of freezing at mount. */
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [elapsed, setElapsed] = useState(0);
   // Phase 1 4-field hours for the active session. Populated from
   // /shifts/active-session on restore/focus. Break Time on the stat bar
@@ -191,7 +204,10 @@ export default function HomeScreen() {
 
   // Clock tick every minute
   useEffect(() => {
-    const id = setInterval(() => setCurrentTime(getCurrentTimeStr()), 60000);
+    const id = setInterval(() => {
+      setCurrentTime(getCurrentTimeStr());
+      setNowMs(Date.now());
+    }, 60000);
     return () => clearInterval(id);
   }, []);
 
@@ -471,6 +487,24 @@ export default function HomeScreen() {
     }
   }
 
+  // ── CLOCK IN eligibility ────────────────────────────────────────────
+  // scheduled_start is an ISO timestamptz string; getTime() gives UTC millis.
+  const scheduledStartMs = upcomingShift ? new Date(upcomingShift.scheduled_start).getTime() : NaN;
+  const clockInOpensAtMs = Number.isNaN(scheduledStartMs) ? null : scheduledStartMs - CLOCK_IN_WINDOW_MS;
+  const clockInLocked = clockInOpensAtMs !== null && nowMs < clockInOpensAtMs;
+
+  // The minute tick alone would leave the button stale for up to 60s after
+  // the window opens. Fire once at the exact boundary instead. setTimeout
+  // delays are int32 millis, so anything beyond ~24 days overflows and fires
+  // immediately — cap at 24h and let the minute tick carry the rest.
+  useEffect(() => {
+    if (clockInOpensAtMs === null) return;
+    const delay = clockInOpensAtMs - Date.now();
+    if (delay <= 0 || delay > 24 * 60 * 60 * 1000) return;
+    const id = setTimeout(() => setNowMs(Date.now()), delay + 250);
+    return () => clearTimeout(id);
+  }, [clockInOpensAtMs]);
+
   const initials = guardId ? guardId.slice(0, 1).toUpperCase() : 'G';
 
   // Compute time-left
@@ -744,9 +778,26 @@ export default function HomeScreen() {
                     ? ` ${tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)}`
                     : ''}
                 </Text>
-                <TouchableOpacity style={styles.clockInBtn} onPress={handleClockIn}>
-                  <Text style={styles.clockInText}>CLOCK IN</Text>
+                <TouchableOpacity
+                  style={[styles.clockInBtn, clockInLocked && styles.clockInBtnLocked]}
+                  onPress={handleClockIn}
+                  disabled={clockInLocked}
+                >
+                  <Text style={[styles.clockInText, clockInLocked && styles.clockInTextLocked]}>
+                    CLOCK IN
+                  </Text>
                 </TouchableOpacity>
+                {clockInLocked && clockInOpensAtMs !== null ? (
+                  /* Site zone, matching the times above — the device zone
+                     would contradict the line directly above it whenever the
+                     guard's phone is set to a different zone than the post. */
+                  <Text style={styles.clockInLockedNote}>
+                    {`Clock-in opens ${fmtTimeInTz(new Date(clockInOpensAtMs).toISOString(), upcomingShift.site_tz)}`}
+                    {tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)
+                      ? ` ${tzAbbreviation(upcomingShift.scheduled_start, upcomingShift.site_tz ?? null)}`
+                      : ''}
+                  </Text>
+                ) : null}
               </>
             ) : (
               <>
@@ -1178,6 +1229,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
     marginBottom: Spacing.sm,
+  },
+  clockInBtnLocked: {
+    backgroundColor: Colors.surface2,
+    opacity: 0.6,
+  },
+  clockInTextLocked: { color: Colors.muted },
+  clockInLockedNote: {
+    color: Colors.muted,
+    fontSize: 12,
+    marginTop: Spacing.xs,
   },
   clockInBtn: {
     backgroundColor: Colors.action,
