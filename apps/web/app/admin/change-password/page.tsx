@@ -51,7 +51,12 @@ export default function AdminChangePasswordPage() {
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Could not change password'); return; }
-      window.location.href = '/admin';
+      // The server stamps tokens_not_before on password change, so the
+      // cookies we hold are already revoked — expire them and send the
+      // admin to sign in fresh instead of into a wall of 401s.
+      document.cookie = 'guard_admin_access=; path=/; max-age=0; SameSite=Strict';
+      document.cookie = 'guard_admin_refresh=; path=/; max-age=0; SameSite=Strict';
+      window.location.href = '/admin/login?notice=password-changed';
     } catch {
       setError('Network error. Please try again.');
     } finally {

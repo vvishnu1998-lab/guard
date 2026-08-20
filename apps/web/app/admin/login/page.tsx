@@ -1,6 +1,7 @@
 'use client';
 import Image from 'next/image';
 import { useState, FormEvent } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 function EyeIcon() {
   return (
@@ -21,6 +22,9 @@ function EyeOffIcon() {
 }
 
 export default function AdminLoginPage() {
+  const searchParams = useSearchParams();
+  const passwordChanged = searchParams?.get('notice') === 'password-changed';
+
   const [email, setEmail]           = useState('');
   const [password, setPassword]     = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -174,6 +178,12 @@ export default function AdminLoginPage() {
             <div>
               <h1 className="text-white font-black text-3xl tracking-tight mb-1">Admin Sign In</h1>
               <p className="text-white/35 text-sm mb-10 tracking-wide">Access the operations dashboard.</p>
+
+              {passwordChanged && !error && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3.5 mb-6 text-amber-400 text-sm">
+                  Password updated — sign in with your new password.
+                </div>
+              )}
 
               {error && (
                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3.5 mb-6 text-red-400 text-sm">

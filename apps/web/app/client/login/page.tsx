@@ -37,6 +37,7 @@ function EyeOffIcon() {
 export default function ClientLoginPage() {
   const searchParams = useSearchParams();
   const fromPath     = safeFromPath(searchParams?.get('from'));
+  const passwordChanged = searchParams?.get('notice') === 'password-changed';
 
   const [email, setEmail]           = useState('');
   const [password, setPassword]     = useState('');
@@ -206,6 +207,12 @@ export default function ClientLoginPage() {
             <div>
               <h1 className="text-white font-black text-3xl tracking-tight mb-1">Client Sign In</h1>
               <p className="text-white/35 text-sm mb-10 tracking-wide">View your site activity and reports.</p>
+
+              {passwordChanged && !error && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3.5 mb-6 text-amber-400 text-sm">
+                  Password updated — sign in with your new password.
+                </div>
+              )}
 
               {error && (
                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3.5 mb-6 text-red-400 text-sm">
