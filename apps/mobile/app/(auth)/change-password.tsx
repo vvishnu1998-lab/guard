@@ -122,7 +122,7 @@ export default function ChangePasswordScreen() {
           </TouchableOpacity>
         </View>
 
-        <TouchableOpacity onPress={logout} style={styles.logoutLink}>
+        <TouchableOpacity onPress={() => logout()} style={styles.logoutLink}>
           <Text style={styles.logoutText}>Not you? Log out</Text>
         </TouchableOpacity>
       </ScrollView>

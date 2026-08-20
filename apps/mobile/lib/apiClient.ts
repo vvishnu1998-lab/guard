@@ -5,7 +5,7 @@
  * - Triggers logout on refresh failure
  */
 import * as SecureStore from 'expo-secure-store';
-import { refreshTokens } from './refreshManager';
+import { refreshTokens, RefreshRejectedError } from './refreshManager';
 
 const BASE = process.env.EXPO_PUBLIC_API_URL;
 
@@ -50,10 +50,28 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Thrown when a 401's follow-up refresh was DEFINITIVELY rejected — the
+ * session is revoked (tokens_not_before bump, rotated/expired refresh
+ * token). Extends ApiError so isNetworkError() returns false: offlineStore
+ * must propagate this to the UI, never queue-and-retry it (the pre-Build-48
+ * misclassification retried revoked sessions into the shared /api/auth
+ * rate-limit budget — deepak lockout, 2026-08-20). `.message` keeps the
+ * legacy copy so existing `Alert.alert(err.message)` call sites still read
+ * correctly.
+ */
+export class SessionExpiredError extends ApiError {
+  constructor() {
+    super(401, { error: 'SESSION_EXPIRED', message: 'Session expired. Please log in again.' });
+    this.name = 'SessionExpiredError';
+  }
+}
+
 /** True for network / DNS / abort failures — anything where `fetch` itself
  *  rejected before we got a status code. offlineStore branches on this to
  *  decide whether to queue (network failure → queue) or propagate to the
- *  UI (4xx server response → re-throw). */
+ *  UI (4xx server response → re-throw). SessionExpiredError is an ApiError,
+ *  so revocation is never mistaken for a network failure. */
 export function isNetworkError(err: unknown): boolean {
   return err instanceof Error && !(err instanceof ApiError);
 }
@@ -84,12 +102,22 @@ async function request<T>(
   if (res.status === 401 && retry) {
     try {
       await refreshTokens();
-      return request<T>(method, path, body, options, false);
-    } catch {
-      const { useAuthStore } = await import('../store/authStore');
-      useAuthStore.getState().logout();
-      throw new Error('Session expired. Please log in again.');
+    } catch (refreshErr) {
+      if (refreshErr instanceof RefreshRejectedError) {
+        // Definitive revocation. logout() is single-flight and skips the
+        // network calls when the token is dead, so N concurrent 401s
+        // collapse into one teardown + one login redirect — no volley of
+        // fcm-null / /auth/logout / further refresh requests.
+        const { useAuthStore } = await import('../store/authStore');
+        void useAuthStore.getState().logout({ tokenRevoked: true });
+        throw new SessionExpiredError();
+      }
+      // Transient failure (network drop, refresh 5xx): NOT a revocation.
+      // Propagate the raw error so isNetworkError() callers keep their
+      // queue/banner retry behaviour and nobody gets logged out offline.
+      throw refreshErr;
     }
+    return request<T>(method, path, body, options, false);
   }
 
   if (!res.ok) {

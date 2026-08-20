@@ -26,6 +26,9 @@ export default function LoginScreen() {
   // web portals' post-change notice (d2a2cba).
   const { notice } = useLocalSearchParams<{ notice?: string }>();
   const passwordChanged = notice === 'password-changed';
+  // Set by authStore.logout({ tokenRevoked }) when the server definitively
+  // rejected the session (revoked / expired tokens).
+  const sessionExpired = notice === 'session-expired';
 
   async function handleEmailLogin() {
     if (!email.trim() || !password) return;
@@ -83,6 +86,14 @@ export default function LoginScreen() {
             <Ionicons name="checkmark-circle-outline" size={18} color={Colors.success} />
             <Text style={styles.noticeText}>
               Password updated — sign in with your new password.
+            </Text>
+          </View>
+        )}
+        {sessionExpired && (
+          <View style={[styles.noticeBanner, styles.noticeBannerWarning]}>
+            <Ionicons name="alert-circle-outline" size={18} color={Colors.warning} />
+            <Text style={[styles.noticeText, styles.noticeTextWarning]}>
+              Session expired — please sign in again.
             </Text>
           </View>
         )}
@@ -158,6 +169,10 @@ const styles = StyleSheet.create({
     padding: Spacing.md, marginBottom: Spacing.lg,
   },
   noticeText:  { color: Colors.success, fontSize: 13, flex: 1, lineHeight: 18 },
+  noticeBannerWarning: {
+    backgroundColor: Colors.warning + '15', borderColor: Colors.warning + '40',
+  },
+  noticeTextWarning: { color: Colors.warning },
 
   form:        { gap: Spacing.md },
   input: {

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { router } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -20,7 +21,11 @@ interface AuthState {
   loginWithEmail: (email: string, password: string, fcmToken?: string) => Promise<void>;
   changePassword: (current: string, next: string) => Promise<void>;
   forgotPassword: (email: string) => Promise<void>;
-  logout: () => Promise<void>;
+  /** tokenRevoked: the server has already invalidated this session
+   *  (401 + definitive refresh rejection). Skips every network call —
+   *  they'd only burn rate-limited requests on dead tokens — and routes
+   *  to login with the session-expired notice. */
+  logout: (opts?: { tokenRevoked?: boolean }) => Promise<void>;
   loadSession: () => Promise<void>;
 }
 
@@ -51,6 +56,9 @@ const FRESH_INSTALL_KEY = 'guard_fresh_install_marker';
 // The check + rewrite runs once per install; the marker persists in
 // AsyncStorage so subsequent launches skip.
 const KEYCHAIN_MIGRATION_KEY = 'keychain_migrated_v40';
+
+// Shared in-flight logout — see logout() below.
+let pendingLogout: Promise<void> | null = null;
 
 async function nukeSecureStoreOnFreshInstall(): Promise<void> {
   const marker = await AsyncStorage.getItem(FRESH_INSTALL_KEY);
@@ -126,45 +134,81 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  logout: async () => {
-    const access  = await SecureStore.getItemAsync(KEYS.ACCESS);
-    const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
+  logout: async (opts) => {
+    // Single-flight: N concurrent 401s (home mount volley, queue sync,
+    // AppState refetch) each used to fire their own logout — N fcm-null +
+    // N /auth/logout requests against the shared /api/auth rate limit.
+    // Everyone now awaits the same teardown.
+    if (pendingLogout) return pendingLogout;
+    pendingLogout = (async () => {
+      const tokenRevoked = opts?.tokenRevoked ?? false;
 
-    // Bug Y — null the guard's fcm_token BEFORE clearing local auth
-    // state so this request is still authenticated. The server
-    // relaxed /auth/guard/fcm-token to accept explicit null; without
-    // this, a logged-out phone keeps receiving pushes because the DB
-    // still holds its Expo token. Best-effort — a network failure
-    // here shouldn't block logout, but we breadcrumb it so we can
-    // tell in Sentry whether the null-write landed.
-    if (access) {
-      try {
-        await fetch(`${process.env.EXPO_PUBLIC_API_URL}/api/auth/guard/fcm-token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
-          body: JSON.stringify({ fcm_token: null }),
-        });
-        Sentry.addBreadcrumb({
-          category: 'auth',
-          message: 'fcm-token null-on-logout sent',
-          level: 'info',
-        });
-      } catch (err) {
-        Sentry.addBreadcrumb({
-          category: 'auth',
-          message: 'fcm-token null-on-logout failed',
-          level: 'warning',
-          data: { message: (err as Error)?.message },
-        });
+      // State first: every automatic retry loop (home.restoreOrFetchShift,
+      // offlineStore callers) gates on status === 'authenticated', so
+      // flipping it before anything async stops the storm immediately.
+      set({ status: 'unauthenticated', guardId: null, companyId: null, mustChangePassword: false });
+
+      // Stop background work that needs auth: the 60s offline-queue sync,
+      // and the shift cache — clearing activeSession trips the root-layout
+      // geofence gate, which disarms native region monitoring and wipes
+      // the background task's SecureStore session keys.
+      stopQueueSync();
+      useShiftStore.getState().clearSession();
+
+      const access  = await SecureStore.getItemAsync(KEYS.ACCESS);
+      const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
+
+      if (!tokenRevoked) {
+        // Bug Y — null the guard's fcm_token BEFORE clearing local auth
+        // state so this request is still authenticated. The server
+        // relaxed /auth/guard/fcm-token to accept explicit null; without
+        // this, a logged-out phone keeps receiving pushes because the DB
+        // still holds its Expo token. Best-effort — a network failure
+        // here shouldn't block logout, but we breadcrumb it so we can
+        // tell in Sentry whether the null-write landed.
+        if (access) {
+          try {
+            await fetch(`${process.env.EXPO_PUBLIC_API_URL}/api/auth/guard/fcm-token`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
+              body: JSON.stringify({ fcm_token: null }),
+            });
+            Sentry.addBreadcrumb({
+              category: 'auth',
+              message: 'fcm-token null-on-logout sent',
+              level: 'info',
+            });
+          } catch (err) {
+            Sentry.addBreadcrumb({
+              category: 'auth',
+              message: 'fcm-token null-on-logout failed',
+              level: 'warning',
+              data: { message: (err as Error)?.message },
+            });
+          }
+        }
+
+        try {
+          await _request('/auth/logout', { refresh_token: refresh });
+        } catch { /* best-effort */ }
       }
-    }
+      // tokenRevoked: skip both calls. The nbf stamp already invalidated
+      // access + refresh server-side, and a dead bearer's fcm-null POST is
+      // just a 401 that counts against the guard's login budget.
 
-    try {
-      await _request('/auth/logout', { refresh_token: refresh });
-    } catch { /* best-effort */ }
-    await Promise.all(Object.values(KEYS).map((k) => SecureStore.deleteItemAsync(k)));
-    set({ status: 'unauthenticated', guardId: null, companyId: null, mustChangePassword: false });
-    setUserTags({ guardId: null, companyId: null });
+      await Promise.all(Object.values(KEYS).map((k) => SecureStore.deleteItemAsync(k)));
+      setUserTags({ guardId: null, companyId: null });
+
+      if (tokenRevoked) {
+        // The root layout's plain replace('/(auth)/login') may fire first
+        // off the status flip; this replace lands last and carries the
+        // notice param. Runs only on the revoked path — user-initiated
+        // logout and the change-password flow route without a notice /
+        // with their own notice respectively.
+        router.replace('/(auth)/login?notice=session-expired');
+      }
+    })().finally(() => { pendingLogout = null; });
+    return pendingLogout;
   },
 
   loadSession: async () => {
