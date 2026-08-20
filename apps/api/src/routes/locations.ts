@@ -44,25 +44,38 @@ type BreachEventType = 'geofence_breach' | 'off_post_report' | 'off_post_task';
 
 const RATE_LIMIT_MINUTES = 5;
 
-/** Look up whether we've fired this exact (session, eventType) inside the
- *  rate-limit window. Used to short-circuit push + email without blocking
- *  the notification row insert. */
-async function isRateLimited(
-  shiftSessionId: string,
-  guardId: string,
-  eventType: BreachEventType,
-): Promise<boolean> {
-  const { rows } = await pool.query<{ recent: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM notifications
-       WHERE guard_id = $1
-         AND shift_session_id = $2
-         AND type = $3
-         AND created_at > NOW() - ($4 || ' minutes')::interval
-     ) AS recent`,
-    [guardId, shiftSessionId, eventType, String(RATE_LIMIT_MINUTES)],
+/**
+ * Atomic rate-limit claim. The caller has ALREADY inserted its
+ * notifications row (id = notifId); that row is the claim ticket. It wins
+ * the push+email channel iff no OTHER row of the same
+ * (guard, session, type) bucket within RATE_LIMIT_MINUTES sorts before it
+ * by (created_at, id).
+ *
+ * Why this can't double-fire (the 2026-08-20 incident: two boundary posts
+ * 333ms apart both passed the old SELECT-then-insert check and both
+ * pushed+emailed): each contender checks AFTER its own insert has
+ * committed (pool.query autocommits), so the later row always sees the
+ * earlier one and defers; two rows can't both sort first. Rows from
+ * earlier fires inside the window — including fires that were themselves
+ * rate-limited (every event inserts a row) — block all newcomers, which
+ * preserves the original sliding-window semantics exactly.
+ */
+async function claimAlertChannel(notifId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ claimed: boolean }>(
+    `SELECT NOT EXISTS (
+       SELECT 1
+       FROM notifications n, notifications me
+       WHERE me.id = $1
+         AND n.id <> me.id
+         AND n.guard_id = me.guard_id
+         AND n.type = me.type
+         AND n.shift_session_id IS NOT DISTINCT FROM me.shift_session_id
+         AND n.created_at > me.created_at - make_interval(mins => $2)
+         AND (n.created_at, n.id) < (me.created_at, me.id)
+     ) AS claimed`,
+    [notifId, RATE_LIMIT_MINUTES],
   );
-  return rows[0]?.recent === true;
+  return rows[0]?.claimed === true;
 }
 
 export async function fireBreachAlerts(params: {
@@ -108,11 +121,9 @@ export async function fireBreachAlerts(params: {
         body:  `You're outside the permitted radius at ${r.site_name}. Return to the post.`,
       };
 
-  // Rate-limit check — done BEFORE the notification insert so the row
-  // we're inserting doesn't itself count as "recent".
-  const rateLimited = await isRateLimited(params.shiftSessionId, params.guardId, params.eventType);
-
-  await insertNotification({
+  // The in-app record always lands (SD-C) — and its row id doubles as the
+  // atomic rate-limit claim ticket (see claimAlertChannel).
+  const notifId = await insertNotification({
     guardId:        params.guardId,
     type:           params.eventType,
     title:          notif.title,
@@ -126,10 +137,14 @@ export async function fireBreachAlerts(params: {
     shiftSessionId: params.shiftSessionId,
   });
 
-  if (rateLimited) {
+  // notifId null = the insert itself failed (DB error, already logged).
+  // Fail OPEN like the old path did: a DB hiccup must not silence a real
+  // breach alert; the duplicate-fire risk only exists when rows insert.
+  const claimed = notifId ? await claimAlertChannel(notifId) : true;
+  if (!claimed) {
     console.log(
       `[breach.rateLimit] skip push+email — session=${params.shiftSessionId} ` +
-      `type=${params.eventType} (last fired within ${RATE_LIMIT_MINUTES}m)`,
+      `type=${params.eventType} (another event holds the ${RATE_LIMIT_MINUTES}m window)`,
     );
     return;
   }

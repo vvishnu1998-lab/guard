@@ -108,11 +108,14 @@ export async function insertNotification(params: {
   // Shift-scoping (schema v16). NULL is valid and intentional for chat and
   // for events that fire while the guard has no active session.
   shiftSessionId?: string | null;
-}): Promise<void> {
+}): Promise<string | null> {
+  // Returns the inserted row id (null on failure). Most callers ignore it;
+  // fireBreachAlerts uses the row as its atomic rate-limit claim ticket.
   try {
-    await pool.query(
+    const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO notifications (guard_id, type, title, body, data, shift_session_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
       [
         params.guardId,
         params.type,
@@ -122,7 +125,9 @@ export async function insertNotification(params: {
         params.shiftSessionId ?? null,
       ],
     );
+    return rows[0]?.id ?? null;
   } catch (err) {
     console.error('[notifications] insert failed:', err);
+    return null;
   }
 }
