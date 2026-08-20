@@ -14,6 +14,7 @@ import { useClockInStore } from '../../store/clockInStore';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
+import { isOpenSessionConflict, handleOpenSessionConflict } from '../../lib/openSession';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { uuidv4 }          from '../../lib/uuid';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
@@ -215,6 +216,14 @@ export default function ClockInStep4() {
       });
       if (isSessionClosed(err)) {
         await handleSessionClosed(err, 'clockin.step4');
+        return;
+      }
+      // 409 OPEN_SESSION_EXISTS — the guard already has an open session
+      // (usually their own, after a client state loss). Rehydrate rather
+      // than dead-ending on a raw error. Sits above captureException with
+      // isSessionClosed: expected behaviour, breadcrumb only.
+      if (isOpenSessionConflict(err)) {
+        await handleOpenSessionConflict(err, 'clockin.step4');
         return;
       }
       Sentry.captureException(err, { extra: { where: 'clockin.step4.startShift' } });
