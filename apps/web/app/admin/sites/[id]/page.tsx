@@ -782,6 +782,41 @@ export default function SiteDetailPage() {
     );
   }
 
+  // Toggle row (schema_v47) — same JSX as before the nesting move, extracted
+  // so both rows share one copy. The gated feature block renders directly
+  // beneath its row, inside SITE SETTINGS.
+  function renderToggleRow(
+    flag: 'checkpoints_enabled' | 'vehicle_inspection_required',
+    label: string,
+    desc: string,
+    value: boolean,
+  ) {
+    return (
+      <div className="flex items-center justify-between gap-3 pb-3">
+        <div className="min-w-0">
+          <p className="text-gray-200 text-sm tracking-wider">{label}</p>
+          <p className="text-gray-500 text-xs mt-0.5">{desc}</p>
+        </div>
+        <button
+          role="switch"
+          aria-checked={value}
+          aria-label={label}
+          disabled={toggleSaving !== ''}
+          onClick={() => saveToggle(flag, !value)}
+          className={`relative shrink-0 w-12 h-6 rounded-full transition-colors border ${
+            value ? 'bg-amber-400/80 border-amber-400' : 'bg-[#0F1E35] border-[#1A3050]'
+          } ${toggleSaving === flag ? 'opacity-50' : ''} disabled:cursor-not-allowed`}
+        >
+          <span
+            className={`absolute top-0.5 h-[18px] w-[18px] rounded-full bg-white transition-all ${
+              value ? 'left-[26px]' : 'left-0.5'
+            }`}
+          />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       {/* Header + back link */}
@@ -807,133 +842,18 @@ export default function SiteDetailPage() {
           <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-3">{toggleError}</div>
         )}
         <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
-          {([
-            {
-              flag: 'checkpoints_enabled' as const,
-              label: 'CHECKPOINT SCANNING',
-              desc: 'Guards see the QR scanner and hourly patrol rounds at this site.',
-              value: site.checkpoints_enabled,
-            },
-            {
-              flag: 'vehicle_inspection_required' as const,
-              label: 'VEHICLE INSPECTION',
-              desc: 'Guards are prompted (not blocked) to complete a vehicle inspection after clock-in.',
-              value: site.vehicle_inspection_required,
-            },
-          ]).map(({ flag, label, desc, value }) => (
-            <div key={flag} className="py-3 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-gray-200 text-sm tracking-wider">{label}</p>
-                <p className="text-gray-500 text-xs mt-0.5">{desc}</p>
-              </div>
-              <button
-                role="switch"
-                aria-checked={value}
-                aria-label={label}
-                disabled={toggleSaving !== ''}
-                onClick={() => saveToggle(flag, !value)}
-                className={`relative shrink-0 w-12 h-6 rounded-full transition-colors border ${
-                  value ? 'bg-amber-400/80 border-amber-400' : 'bg-[#0F1E35] border-[#1A3050]'
-                } ${toggleSaving === flag ? 'opacity-50' : ''} disabled:cursor-not-allowed`}
-              >
-                <span
-                  className={`absolute top-0.5 h-[18px] w-[18px] rounded-full bg-white transition-all ${
-                    value ? 'left-[26px]' : 'left-0.5'
-                  }`}
-                />
-              </button>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Guard on shift */}
-      <section>
-        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">GUARD ON SHIFT</h2>
-        {presentGuards.length === 0 ? (
-          <p className="text-gray-500 text-sm">No guard currently on shift.</p>
-        ) : (
-          <ul className="divide-y divide-[#1A3050] border-y border-[#1A3050]">
-            {presentGuards.map((g) => {
-              const hoursWorked = (Date.now() - new Date(g.clocked_in_at).getTime()) / 3_600_000;
-              return (
-                <li key={g.id} className="py-3 flex items-center justify-between gap-3">
-                  <div className="min-w-0 flex items-center gap-3">
-                    <div className="min-w-0">
-                      <p className="text-gray-200 text-sm">{g.name}</p>
-                      <p className="text-gray-500 text-xs mt-0.5 font-mono">
-                        Clocked in {fmtTime(g.clocked_in_at)}
-                      </p>
-                      {g.scheduled_start && g.scheduled_end && (
-                        <p className="text-gray-500 text-xs mt-0.5 font-mono">
-                          Scheduled {fmtTime(g.scheduled_start)} → {fmtTime(g.scheduled_end)}
-                        </p>
-                      )}
-                    </div>
-                    <Link
-                      href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
-                      className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
-                    >
-                      CHAT →
-                    </Link>
-                  </div>
-                  <p className="text-gray-400 text-xs shrink-0">{formatHoursHHMM(hoursWorked)}</p>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      {/* Upcoming shifts (next 7 days, grouped by day) */}
-      <section>
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
-          <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
-          <Link
-            href={`/admin/shifts?newShift=1&siteId=${siteId}`}
-            className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
-          >
-            MANAGE SCHEDULE →
-          </Link>
-        </div>
-        {shiftsByDay.length === 0 ? (
-          <p className="text-gray-500 text-sm">No upcoming shifts in the next 7 days.</p>
-        ) : (
-          <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
-            {shiftsByDay.map((day) => (
-              <div key={day.key}>
-                <div className="py-2 text-gray-500 text-xs tracking-widest font-mono">
-                  {day.label}
-                </div>
-                <ul className="divide-y divide-[#1A3050] border-t border-[#1A3050]">
-                  {day.rows.map((s) => (
-                    <li key={s.id} className="py-3 flex items-center justify-between gap-3">
-                      <span className="text-gray-400 text-xs font-mono shrink-0">
-                        {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
-                      </span>
-                      {s.guard_name ? (
-                        <span className="text-gray-200 text-sm text-right">{s.guard_name}</span>
-                      ) : (
-                        <span className="text-amber-400 tracking-widest text-xs font-bold text-right">
-                          — UNASSIGNED —
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Checkpoints (C4a) — DISPLAY-gated on the checkpoints_enabled toggle
-          (schema_v47). Purely presentational: rows stay in the DB and in this
-          component's state (loadCheckpoints still runs), so flipping the
-          toggle back shows the same roster intact, no reload. SCAN HISTORY
-          below is deliberately NOT gated — audit evidence. */}
+          <div className="py-3">
+            {renderToggleRow('checkpoints_enabled', 'CHECKPOINT SCANNING',
+              'Guards see the QR scanner and hourly patrol rounds at this site.',
+              site.checkpoints_enabled)}
+      {/* Checkpoints (C4a) — nested under its toggle; DISPLAY-gated on
+          checkpoints_enabled (schema_v47). Purely presentational: rows stay
+          in the DB and in this component's state (loadCheckpoints still
+          runs), so flipping the toggle back shows the same roster intact,
+          no reload. SCAN HISTORY (its own section below) is deliberately
+          NOT gated — audit evidence. */}
       {site.checkpoints_enabled && (
-      <section>
+      <div className="ml-1 mb-3 pl-3 md:pl-4 border-l-2 border-[#1A3050]">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">CHECKPOINTS</h2>
           <button
@@ -1060,14 +980,18 @@ export default function SiteDetailPage() {
             ))}
           </div>
         )}
-      </section>
+      </div>
       )}
-
-      {/* Vehicle roster (schema_v48) — picker source for guard inspections.
-          DISPLAY-gated on vehicle_inspection_required; same non-destructive
+          </div>
+          <div className="py-3">
+            {renderToggleRow('vehicle_inspection_required', 'VEHICLE INSPECTION',
+              'Guards are prompted (not blocked) to complete a vehicle inspection after clock-in.',
+              site.vehicle_inspection_required)}
+      {/* Vehicle roster (schema_v48) — nested under its toggle; DISPLAY-
+          gated on vehicle_inspection_required, same non-destructive
           semantics as the checkpoints gate above. */}
       {site.vehicle_inspection_required && (
-      <section>
+      <div className="ml-1 mb-3 pl-3 md:pl-4 border-l-2 border-[#1A3050]">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">VEHICLES</h2>
           <button
@@ -1131,8 +1055,93 @@ export default function SiteDetailPage() {
             ))}
           </div>
         )}
-      </section>
+      </div>
       )}
+          </div>
+        </div>
+      </section>
+
+      {/* Guard on shift */}
+      <section>
+        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">GUARD ON SHIFT</h2>
+        {presentGuards.length === 0 ? (
+          <p className="text-gray-500 text-sm">No guard currently on shift.</p>
+        ) : (
+          <ul className="divide-y divide-[#1A3050] border-y border-[#1A3050]">
+            {presentGuards.map((g) => {
+              const hoursWorked = (Date.now() - new Date(g.clocked_in_at).getTime()) / 3_600_000;
+              return (
+                <li key={g.id} className="py-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex items-center gap-3">
+                    <div className="min-w-0">
+                      <p className="text-gray-200 text-sm">{g.name}</p>
+                      <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                        Clocked in {fmtTime(g.clocked_in_at)}
+                      </p>
+                      {g.scheduled_start && g.scheduled_end && (
+                        <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                          Scheduled {fmtTime(g.scheduled_start)} → {fmtTime(g.scheduled_end)}
+                        </p>
+                      )}
+                    </div>
+                    <Link
+                      href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
+                      className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+                    >
+                      CHAT →
+                    </Link>
+                  </div>
+                  <p className="text-gray-400 text-xs shrink-0">{formatHoursHHMM(hoursWorked)}</p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {/* Upcoming shifts (next 7 days, grouped by day) */}
+      <section>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
+          <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
+          <Link
+            href={`/admin/shifts?newShift=1&siteId=${siteId}`}
+            className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+          >
+            MANAGE SCHEDULE →
+          </Link>
+        </div>
+        {shiftsByDay.length === 0 ? (
+          <p className="text-gray-500 text-sm">No upcoming shifts in the next 7 days.</p>
+        ) : (
+          <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
+            {shiftsByDay.map((day) => (
+              <div key={day.key}>
+                <div className="py-2 text-gray-500 text-xs tracking-widest font-mono">
+                  {day.label}
+                </div>
+                <ul className="divide-y divide-[#1A3050] border-t border-[#1A3050]">
+                  {day.rows.map((s) => (
+                    <li key={s.id} className="py-3 flex items-center justify-between gap-3">
+                      <span className="text-gray-400 text-xs font-mono shrink-0">
+                        {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
+                      </span>
+                      {s.guard_name ? (
+                        <span className="text-gray-200 text-sm text-right">{s.guard_name}</span>
+                      ) : (
+                        <span className="text-amber-400 tracking-widest text-xs font-bold text-right">
+                          — UNASSIGNED —
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+
 
       {/* Scan history (C4b) — NOT gated on checkpoints_enabled, on purpose:
           scans are audit evidence; turning the feature off must never hide
