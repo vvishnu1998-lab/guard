@@ -564,6 +564,55 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
     });
   }
 
+  // Break-time quiet policy (locked 2026-08-20): during an active break
+  // there is no ping obligation and no geofence enforcement — a boundary
+  // exit is recorded as an off_post_events row ONLY. No violation row, no
+  // guard push, no admin email (deepak's 14:12–14:35 meal break produced a
+  // 17-min violation + 4 alert cycles ≈ 8 admin emails). The row still
+  // feeds breakExpiryCron's return-check, which reads off_post_events as
+  // off-post evidence.
+  //
+  // Coordinate semantics: per the Apple-appeal design the background
+  // task's violation POST transmits the SITE's coordinate, not the guard's
+  // fix — so break_exit rows may carry site-center lat/lng. The row proves
+  // an exit EVENT during a break, not a position; distance_m is left NULL
+  // deliberately (computing it from a site-center coordinate would yield a
+  // misleading ~0m).
+  const openBreak = await pool.query<{ id: string }>(
+    'SELECT id FROM break_sessions WHERE shift_session_id = $1 AND break_end IS NULL LIMIT 1',
+    [shift_session_id],
+  );
+  if (openBreak.rows[0]) {
+    const haveCoords =
+      typeof latitude === 'number' && Number.isFinite(latitude) &&
+      typeof longitude === 'number' && Number.isFinite(longitude);
+    if (haveCoords) {
+      try {
+        await pool.query(
+          `INSERT INTO off_post_events
+             (shift_session_id, guard_id, site_id, source, lat, lng,
+              accuracy_m, distance_m, reason, expires_at)
+           VALUES ($1, $2, $3, 'break_exit', $4, $5, NULL, NULL, $6, $7)`,
+          [shift_session_id, guardId, siteId, latitude, longitude,
+           'boundary exit during active break', expiresAtFor('off_post_event')],
+        );
+      } catch (err) {
+        // Evidence write is best-effort; suppression must never 500.
+        console.error('[violation.suppressed.on_break] off_post_events INSERT failed:', err);
+      }
+    }
+    console.log('[violation.suppressed.on_break]', {
+      shift_session_id,
+      guard_id: guardId,
+      break_id: openBreak.rows[0].id,
+      have_coords: haveCoords,
+    });
+    return res.status(200).json({
+      code:    'ON_BREAK',
+      message: 'Boundary exit recorded as an off-post event — guard is on an active break.',
+    });
+  }
+
   const insertResult = await pool.query(
     `INSERT INTO geofence_violations
        (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at)
