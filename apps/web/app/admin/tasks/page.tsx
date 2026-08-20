@@ -265,10 +265,10 @@ export default function TaskTemplatesPage() {
       <div className="bg-[#0B1526] border border-[#1A3050] rounded-xl p-4 text-sm text-gray-500">
         <p className="text-amber-400 font-bold tracking-widest text-xs mb-1">HOW IT WORKS</p>
         <ul className="space-y-1 list-disc list-inside">
-          <li>Task instances are generated automatically when a guard clocks in.</li>
+          <li>Task instances are generated automatically when a guard clocks in — only if the task&apos;s scheduled time falls within that shift&apos;s hours.</li>
           <li>The template title is copied into the instance — editing a template later does not change past instances.</li>
           <li>Deactivating a template stops it from generating new instances. Existing instances are unaffected.</li>
-          <li>Daily = every shift; Weekdays = Mon–Fri; Weekends = Sat–Sun.</li>
+          <li>Daily = every shift covering the task time; Weekdays = Mon–Fri; Weekends = Sat–Sun.</li>
         </ul>
       </div>
 

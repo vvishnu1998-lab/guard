@@ -38,12 +38,23 @@ export async function generateTaskInstancesForShift(
 
     if (!matches) continue;
 
+    // Window rule (2026-08-20): only instantiate when the computed due_at
+    // falls within the shift being clocked into. Previously every matching
+    // template produced an instance regardless of shift window, so a
+    // 10:45-12:30 shift got a task due 9:00 PM — shown as pending all
+    // shift, un-completable after clock-out (409 SESSION_CLOSED), and
+    // nagged by the hourly reminder. The due_at expression is unchanged
+    // (site-tz computation in Postgres); the shifts JOIN just gates the
+    // INSERT on scheduled_start <= due_at <= scheduled_end.
     await pool.query(
       `INSERT INTO task_instances (template_id, shift_id, site_id, title, due_at)
-       VALUES (
-         $1, $2, $3, $4,
-         (( ($5::TIMESTAMPTZ AT TIME ZONE $6)::DATE + $7::TIME )::TIMESTAMP AT TIME ZONE $6)
-       )
+       SELECT $1, $2, $3, $4, due.due_at
+       FROM (
+         SELECT (( ($5::TIMESTAMPTZ AT TIME ZONE $6)::DATE + $7::TIME )::TIMESTAMP AT TIME ZONE $6) AS due_at
+       ) due
+       JOIN shifts sh ON sh.id = $2
+       WHERE due.due_at >= sh.scheduled_start
+         AND due.due_at <= sh.scheduled_end
        ON CONFLICT DO NOTHING`,
       [tpl.id, shiftId, siteId, tpl.title, clockInAt, tpl.timezone, tpl.scheduled_time]
     );
