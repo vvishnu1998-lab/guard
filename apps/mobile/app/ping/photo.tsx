@@ -1,53 +1,34 @@
 /**
  * GPS + Photo Ping (Section 5.4 — on-hour pings)
- * Amber theme. Rear camera. Posts location ping + photo to API.
- * Shows 7-day photo deletion notice (Section 11.4 — retain_as_evidence exemption).
+ * Rear camera. Posts location ping + photo to API.
  *
- * Capture flow notes (post-build-#15 rework after the "shutter does nothing"
- * report on 2026-05-15):
- *  - Gated on `cameraReady` (onCameraReady callback + 3s force-enable fallback).
- *    Tapping before the camera is initialized used to silently no-op.
- *  - Photo is taken FIRST. GPS is fetched after with a 3s race timeout so a
- *    stalled location-services call can't hang the shutter.
- *  - takePictureAsync wrapped in a 10s Promise.race so a hung native call
- *    can't leave `capturing=true` forever (which is exactly what made the
- *    shutter look "broken" — it was disabled because capturing was stuck).
- *  - Every branch logs `[ping]` so the next failure is diagnosable from logs.
+ * Note: the 7-day photo retention POLICY (Section 11.4 — retain_as_evidence
+ * exemption, enforced server-side in retention.ts / nightlyPurge.ts) still
+ * applies; only the guard-facing banner was removed (batch/mobile-11).
+ *
+ * Camera UX lives in components/CameraCapture (batch/mobile-11 rebuild —
+ * full-bleed preview, instant shutter feedback, ref-based double-capture
+ * lock, freeze-frame through the whole submit pipeline). This screen owns
+ * the ping business logic only:
+ *  - active-session gate before capture
+ *  - S3 upload ('ping' context) — hard-fail, never offline-queued: a queued
+ *    payload referencing a dead local file:// URI can't sync
+ *  - POST /locations/ping with GPS coords from capture time
+ *  - window_label backfill semantics + markWindowPinged
+ *  - PING_OFF_POST / session-closed error mapping
  */
-import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import * as ImageManipulator from 'expo-image-manipulator';
-import * as Location from 'expo-location';
+import { Alert } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
+import CameraCapture, { CapturedPhoto } from '../../components/CameraCapture';
 import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { pingState }       from '../../lib/pingState';
 import { currentPingWindow } from '../../lib/pingSchedule';
-import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-
-const CAMERA_READY_FALLBACK_MS = 3000;
-const TAKE_PICTURE_TIMEOUT_MS  = 10_000;
-const GPS_TIMEOUT_MS           = 3000;
-
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
-    ),
-  ]);
-}
 
 export default function PhotoPing() {
-  const cameraRef                       = useRef<CameraView>(null);
-  const [permission, requestPermission] = useCameraPermissions();
-  const [cameraReady, setCameraReady]   = useState(false);
-  const [capturing, setCapturing]       = useState(false);
-
   const { activeSession, activeShift, markWindowPinged } = useShiftStore();
   // Missed-ping backfill window — set via deep-link from a missed_ping
   // notification tap (navigateForNotification.ts). When present, the
@@ -56,128 +37,32 @@ export default function PhotoPing() {
   const { window_label } = useLocalSearchParams<{ window_label?: string }>();
   const windowLabel = typeof window_label === 'string' && window_label ? window_label : null;
 
-  // Android often never fires onCameraReady — force-enable after 3s so the
-  // shutter doesn't sit disabled indefinitely.
-  useEffect(() => {
-    Sentry.addBreadcrumb({
-      category: 'ping_wizard',
-      message: 'entered photo capture',
-      level: 'info',
-      data: { session_id: activeSession?.id },
-    });
-    const t = setTimeout(() => setCameraReady(true), CAMERA_READY_FALLBACK_MS);
-    return () => clearTimeout(t);
-  }, [activeSession?.id]);
-
-  if (!permission) return null;
-  if (!permission.granted) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.permTitle}>CAMERA ACCESS NEEDED</Text>
-        <TouchableOpacity style={styles.permBtn} onPress={requestPermission}>
-          <Text style={styles.permBtnText}>GRANT CAMERA ACCESS</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  async function capture() {
-    if (capturing) {
-      console.log('[ping] capture ignored — already capturing');
-      return;
-    }
+  function validateBeforeCapture(): boolean {
     if (!activeSession) {
       Alert.alert(
         'No Active Shift',
         'Your shift has ended or hasn’t been clocked into yet. Pings can only be submitted while on shift.',
         [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }],
       );
-      return;
+      return false;
     }
-    if (!cameraRef.current || !cameraReady) {
-      console.log('[ping] capture ignored — camera not ready', { hasRef: !!cameraRef.current, cameraReady });
-      Alert.alert('Camera Loading', 'Camera is still initializing — try again in a moment.');
-      return;
-    }
+    return true;
+  }
 
-    setCapturing(true);
+  async function submit(photo: CapturedPhoto, setStatus: (msg: string) => void): Promise<void | 'reset'> {
+    if (!activeSession) return 'reset'; // validated pre-capture; belt only
     try {
-      // 1) Take the photo first. Wrap in a timeout so a hung native call
-      //    can't leave the shutter spinning forever.
-      console.log('[ping] taking picture…');
-      const photo = await withTimeout(
-        cameraRef.current.takePictureAsync({ quality: 0.9 }),
-        TAKE_PICTURE_TIMEOUT_MS,
-        'takePictureAsync',
-      );
-      if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
-      console.log('[ping] picture taken:', photo.uri);
-      Sentry.addBreadcrumb({
-        category: 'ping_wizard',
-        message: 'photo captured',
-        level: 'info',
-      });
-
-      // 2) Compress (best-effort)
-      let compressed: { uri: string } = { uri: photo.uri };
-      try {
-        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
-        // Android Bitmap.compress). Do NOT bypass the manipulator for uploads.
-        const result = await ImageManipulator.manipulateAsync(
-          photo.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
-        );
-        if (result?.uri) compressed = result;
-      } catch (err) {
-        console.warn('[ping] compression skipped:', err);
-      }
-
-      // 3) GPS with a 3s race — never block the submit on a slow GPS fix.
-      //    Prefer the cached last-known position; fall back to a live read.
-      //    On total GPS failure → throw so the outer catch surfaces the
-      //    user-facing message. DO NOT submit (0,0) — the API rejects it
-      //    with 400 anyway (audit T1-C-server, schema_v18 era), but the
-      //    wasted S3 upload + round-trip + generic 400 are a worse UX
-      //    than failing here.
-      let lat: number | null = null;
-      let lng: number | null = null;
-      let acc: number | null = null;
-      try {
-        const last = await Location.getLastKnownPositionAsync();
-        if (last) {
-          lat = last.coords.latitude;
-          lng = last.coords.longitude;
-          acc = last.coords.accuracy;
-        } else {
-          const live = await Promise.race([
-            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-            new Promise<null>((r) => setTimeout(() => r(null), GPS_TIMEOUT_MS)),
-          ]);
-          if (live) {
-            lat = (live as Location.LocationObject).coords.latitude;
-            lng = (live as Location.LocationObject).coords.longitude;
-            acc = (live as Location.LocationObject).coords.accuracy;
-          }
-        }
-      } catch (err) {
-        console.warn('[ping] GPS read threw:', err);
-      }
-      if (lat === null || lng === null) {
-        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
-      }
-
-      // 4) Upload the photo to S3. Hard-fail on error — the API rejects
+      // 1) Upload the photo to S3. Hard-fail on error — the API rejects
       //    file:// URLs at the photo validator, so a queued ping pointing
       //    at a local URI would silently dead-letter forever.
+      setStatus('UPLOADING…');
       console.log('[ping] uploading photo to S3…');
-      const { public_url } = await uploadToS3(compressed.uri, 'ping');
+      const { public_url } = await uploadToS3(photo.uri, 'ping');
       console.log('[ping] photo uploaded:', public_url);
 
-      // 5) Submit directly (not via useOfflineStore.submitPing) so a
-      //    failure throws to the outer catch and the guard sees it. The
-      //    offline-queue fallback is unsafe for ping-with-photo: a queued
-      //    payload referencing a no-longer-existing local URI can't sync.
+      // 2) Submit directly (not via useOfflineStore.submitPing) so a
+      //    failure throws to the catch below and the guard sees it.
+      setStatus('SUBMITTING…');
       console.log('[ping] submitting…');
       Sentry.addBreadcrumb({
         category: 'ping_wizard',
@@ -185,25 +70,21 @@ export default function PhotoPing() {
         level: 'info',
         data: {
           session_id:   activeSession.id,
-          accuracy_m:   acc ? Math.round(acc) : null,
+          accuracy_m:   photo.accuracy ? Math.round(photo.accuracy) : null,
           window_label: windowLabel ?? null,
         },
       });
       await apiClient.post('/locations/ping', {
         shift_session_id: activeSession.id,
-        latitude:         lat,
-        longitude:        lng,
-        accuracy:         acc ?? 30, // T2-H — server expands fence by (radius + accuracy + 50m safety)
+        latitude:         photo.latitude,
+        longitude:        photo.longitude,
+        accuracy:         photo.accuracy ?? 30, // T2-H — server expands fence by (radius + accuracy + 50m safety)
         ping_type:        'gps_photo',
         photo_url:        public_url,
         window_label:     windowLabel ?? undefined,
       });
       console.log('[ping] submit complete');
-      Sentry.addBreadcrumb({
-        category: 'ping_wizard',
-        message: 'submit succeeded',
-        level: 'info',
-      });
+      Sentry.addBreadcrumb({ category: 'ping_wizard', message: 'submit succeeded', level: 'info' });
 
       // Record which window this satisfied so the active-shift PING NOW tile
       // greys out instead of inviting a duplicate. A backfill (windowLabel
@@ -211,21 +92,19 @@ export default function PhotoPing() {
       // current one — answering 21:00 late leaves the 22:30 tile live, which
       // is correct. With no label the ping lands in whatever window is open
       // now, so resolve that one.
-      {
-        const satisfied =
-          windowLabel ??
-          (activeShift?.scheduled_start && activeShift?.scheduled_end
-            ? (() => {
-                const w = currentPingWindow({
-                  scheduledStart: activeShift.scheduled_start,
-                  scheduledEnd:   activeShift.scheduled_end,
-                  clockedInAt:    activeSession.clocked_in_at,
-                });
-                return w.status === 'open' ? w.window.label : null;
-              })()
-            : null);
-        if (satisfied) markWindowPinged(activeSession.id, satisfied);
-      }
+      const satisfied =
+        windowLabel ??
+        (activeShift?.scheduled_start && activeShift?.scheduled_end
+          ? (() => {
+              const w = currentPingWindow({
+                scheduledStart: activeShift.scheduled_start,
+                scheduledEnd:   activeShift.scheduled_end,
+                clockedInAt:    activeSession.clocked_in_at,
+              });
+              return w.status === 'open' ? w.window.label : null;
+            })()
+          : null);
+      if (satisfied) markWindowPinged(activeSession.id, satisfied);
 
       pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
       // Confirmation to the guard (was missing — submit used to silently
@@ -235,8 +114,9 @@ export default function PhotoPing() {
         'Photo and location saved.',
         [{ text: 'OK', onPress: () => router.replace('/active-shift') }],
       );
+      return; // stay on the freeze-frame behind the confirmation alert
     } catch (err: any) {
-      console.error('[ping] capture failed:', err);
+      console.error('[ping] submit failed:', err);
       // Shift ended under the guard (usually the autoCompleteShifts cron
       // closing the session at scheduled_end). Repairs local state, tears the
       // region down, and routes home — see lib/sessionClosed.ts.
@@ -247,8 +127,8 @@ export default function PhotoPing() {
       // PING_OFF_POST is expected under the Commit A hybrid policy (Q8) —
       // pings prove presence, so the server 422s any offsite submission.
       // Show the user-readable copy instead of the raw enum string, and
-      // leave the camera screen mounted so the guard can walk back onsite
-      // and retry without re-navigating. NOT a Sentry captureException
+      // return to the live camera so the guard can walk back onsite and
+      // retry without re-navigating. NOT a Sentry captureException
       // (this is expected behaviour, not a bug — just a breadcrumb).
       if (err instanceof ApiError && err.code === 'PING_OFF_POST') {
         Sentry.addBreadcrumb({
@@ -261,116 +141,30 @@ export default function PhotoPing() {
           'Off-post',
           'Cannot ping while off-post. Return to site to submit.',
         );
-      } else {
-        Sentry.addBreadcrumb({
-          category: 'ping_wizard',
-          message: 'submit / capture failed',
-          level: 'error',
-          data: { error: err?.message ?? String(err) },
-        });
-        Sentry.captureException(err, { extra: { where: 'ping.photo.capture' } });
-        Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
+        return 'reset';
       }
-    } finally {
-      setCapturing(false);
+      Sentry.addBreadcrumb({
+        category: 'ping_wizard',
+        message: 'submit / capture failed',
+        level: 'error',
+        data: { error: err?.message ?? String(err) },
+      });
+      Sentry.captureException(err, { extra: { where: 'ping.photo.capture' } });
+      Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
+      return 'reset';
     }
   }
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.step}>LOCATION PING</Text>
-      <Text style={styles.type}>GPS + PHOTO</Text>
-
-      <View style={styles.cameraContainer}>
-        <CameraView
-          ref={cameraRef}
-          style={styles.camera}
-          facing={'back' as CameraType}
-          onCameraReady={() => {
-            console.log('[ping] onCameraReady fired');
-            setCameraReady(true);
-          }}
-        >
-          {/* Corner guides */}
-          <View style={styles.cornerTL} /><View style={styles.cornerTR} />
-          <View style={styles.cornerBL} /><View style={styles.cornerBR} />
-
-          <View style={styles.timestampStrip}>
-            <Text style={styles.timestamp}>{new Date().toLocaleString()}</Text>
-          </View>
-        </CameraView>
-      </View>
-
-      {/* 7-day deletion notice */}
-      <View style={styles.noticeCard}>
-        <Text style={styles.noticeIcon}>🗑</Text>
-        <Text style={styles.noticeText}>
-          Ping photos are auto-deleted after 7 days unless flagged as evidence by admin.
-        </Text>
-      </View>
-
-      <TouchableOpacity
-        style={[styles.shutter, (capturing || !cameraReady) && styles.disabled]}
-        onPress={capture}
-        disabled={capturing || !cameraReady}
-      >
-        <View style={styles.shutterInner} />
-      </TouchableOpacity>
-
-      {!cameraReady && (
-        <Text style={styles.readyHint}>Camera initializing…</Text>
-      )}
-    </View>
+    <CameraCapture
+      facing="back"
+      gps="required"
+      breadcrumbCategory="ping_wizard"
+      breadcrumbPrefix="ping"
+      headerTitle="LOCATION PING"
+      headerSubtitle="GPS + PHOTO"
+      onCaptured={submit}
+      validateBeforeCapture={validateBeforeCapture}
+    />
   );
 }
-
-const CORNER_SIZE  = 24;
-const CORNER_WIDTH = 3;
-const cornerBase   = { position: 'absolute' as const, width: CORNER_SIZE, height: CORNER_SIZE, borderColor: Colors.action };
-
-const styles = StyleSheet.create({
-  container:       { flex: 1, backgroundColor: Colors.structure, alignItems: 'center' },
-  center:          { flex: 1, backgroundColor: Colors.structure, alignItems: 'center', justifyContent: 'center' },
-  step:            { color: Colors.muted, fontSize: 11, letterSpacing: 4, marginTop: Spacing.xl, marginBottom: 2 },
-  type:            { color: Colors.action, fontFamily: Fonts.heading, fontSize: 14, letterSpacing: 3, marginBottom: Spacing.md },
-  cameraContainer: { width: '100%', height: 300 },
-  camera:          { flex: 1 },
-  cornerTL: { ...cornerBase, top: 16, left: 16, borderTopWidth: CORNER_WIDTH, borderLeftWidth: CORNER_WIDTH },
-  cornerTR: { ...cornerBase, top: 16, right: 16, borderTopWidth: CORNER_WIDTH, borderRightWidth: CORNER_WIDTH },
-  cornerBL: { ...cornerBase, bottom: 32, left: 16, borderBottomWidth: CORNER_WIDTH, borderLeftWidth: CORNER_WIDTH },
-  cornerBR: { ...cornerBase, bottom: 32, right: 16, borderBottomWidth: CORNER_WIDTH, borderRightWidth: CORNER_WIDTH },
-  timestampStrip: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    backgroundColor: 'rgba(0,0,0,0.6)', padding: Spacing.sm,
-  },
-  timestamp: { color: Colors.action, fontSize: 12, textAlign: 'center', fontFamily: 'monospace' },
-
-  noticeCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: '92%',
-    backgroundColor: Colors.surface,
-    borderRadius: Radius.md,
-    borderWidth: 1, borderColor: Colors.border,
-    padding: Spacing.md,
-    gap: Spacing.sm,
-    marginTop: Spacing.md,
-  },
-  noticeIcon: { fontSize: 18 },
-  noticeText: { flex: 1, color: Colors.muted, fontSize: 12, lineHeight: 18 },
-
-  shutter: {
-    width: 72, height: 72, borderRadius: 36,
-    borderWidth: 4, borderColor: Colors.action,
-    alignItems: 'center', justifyContent: 'center',
-    marginVertical: Spacing.xl,
-  },
-  shutterInner: { width: 56, height: 56, borderRadius: 28, backgroundColor: Colors.action },
-  disabled:     { opacity: 0.4 },
-
-  readyHint: { color: Colors.muted, fontSize: 11, letterSpacing: 2, marginTop: -Spacing.lg },
-
-  permTitle:   { fontFamily: Fonts.heading, color: Colors.base, fontSize: 22, marginBottom: Spacing.xl, letterSpacing: 3 },
-  permBtn:     { backgroundColor: Colors.action, borderRadius: Radius.md, padding: Spacing.md },
-  permBtnText: { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 16, letterSpacing: 2 },
-});

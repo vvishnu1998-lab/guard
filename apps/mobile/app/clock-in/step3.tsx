@@ -1,110 +1,31 @@
 /**
  * Clock-In Step 3 — Site Photo (Section 5.2)
- * Rear camera. Admin-defined instruction text shown below viewfinder.
- * Shows a preview after capture; guard can retake or proceed.
+ * Rear camera. Admin-defined instruction text floats over the viewfinder.
+ * Preview after capture; guard can retake or proceed.
+ *
+ * Camera UX lives in components/CameraCapture (batch/mobile-11 rebuild).
+ * This screen owns only: the admin instruction, writing the proof into
+ * useClockInStore, and advancing to step4 (which uploads).
  */
-import { useRef, useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, Image, ScrollView } from 'react-native';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import * as ImageManipulator from 'expo-image-manipulator';
-import * as Location from 'expo-location';
+import { View, Text, StyleSheet } from 'react-native';
 import * as Sentry from '@sentry/react-native';
 import { router } from 'expo-router';
+import CameraCapture, { CapturedPhoto } from '../../components/CameraCapture';
 import { useClockInStore } from '../../store/clockInStore';
-import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { Colors, Spacing, Radius } from '../../constants/theme';
 
 export default function ClockInStep3() {
-  const cameraRef                        = useRef<CameraView>(null);
-  const [permission, requestPermission]  = useCameraPermissions();
-  const [cameraReady, setCameraReady]    = useState(false);
-  const [capturing, setCapturing]        = useState(false);
-  // Android: onCameraReady sometimes never fires — force-enable after 3s
-  useEffect(() => {
-    Sentry.addBreadcrumb({
-      category: 'clock_in_wizard',
-      message: 'entered step3 (Site Photo)',
-      level: 'info',
-    });
-    const t = setTimeout(() => setCameraReady(true), 3000);
-    return () => clearTimeout(t);
-  }, []);
-  const [preview, setPreview]            = useState<{
-    uri: string; latitude: number; longitude: number; takenAt: string;
-  } | null>(null);
   const { pendingShiftInstruction, setSitePhoto } = useClockInStore();
 
   const instruction = pendingShiftInstruction ?? 'Photograph the main entrance of the site.';
 
-  // ── Permission gate ──────────────────────────────────────────────────────────
-  if (!permission?.granted) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.title}>CAMERA ACCESS NEEDED</Text>
-        <TouchableOpacity style={styles.button} onPress={requestPermission}>
-          <Text style={styles.buttonText}>GRANT CAMERA ACCESS</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  // ── Capture ──────────────────────────────────────────────────────────────────
-  async function capture() {
-    if (!cameraRef.current || !cameraReady || capturing) return;
-    setCapturing(true);
-    try {
-      // Take photo first — don't block on GPS
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
-      if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
-
-      let compressed: { uri: string } = { uri: photo.uri };
-      try {
-        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
-        // Android Bitmap.compress). Do NOT bypass the manipulator for uploads.
-        const result = await ImageManipulator.manipulateAsync(
-          photo.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
-        );
-        if (result?.uri) compressed = result;
-      } catch {
-        // Use original photo if compression fails (e.g. Expo Go native module mismatch)
-      }
-
-      // Use cached GPS first (instant), fall back to live with 3s timeout
-      const loc = await Location.getLastKnownPositionAsync() ?? await Promise.race([
-        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-        new Promise<null>(res => setTimeout(() => res(null), 3000)),
-      ]);
-
-      setPreview({
-        uri:       compressed.uri,
-        latitude:  (loc as any)?.coords?.latitude  ?? 0,
-        longitude: (loc as any)?.coords?.longitude ?? 0,
-        takenAt:   new Date().toISOString(),
-      });
-      Sentry.addBreadcrumb({
-        category: 'clock_in_wizard',
-        message: 'step3: site photo captured',
-        level: 'info',
-      });
-    } catch (err: any) {
-      Sentry.addBreadcrumb({
-        category: 'clock_in_wizard',
-        message: 'step3: capture failed',
-        level: 'error',
-        data: { error: err?.message ?? String(err) },
-      });
-      Sentry.captureException(err, { extra: { where: 'clockin.step3.capture' } });
-      Alert.alert('Capture Failed', err?.message ?? 'Could not take photo. Try again.');
-    } finally {
-      setCapturing(false);
-    }
-  }
-
-  // ── Confirm preview and proceed ──────────────────────────────────────────────
-  function usePhoto() {
-    if (!preview?.uri) return;
-    setSitePhoto(preview);
+  function usePhoto(photo: CapturedPhoto): void {
+    setSitePhoto({
+      uri:       photo.uri,
+      latitude:  photo.latitude  ?? 0,
+      longitude: photo.longitude ?? 0,
+      takenAt:   photo.takenAt,
+    });
     Sentry.addBreadcrumb({
       category: 'clock_in_wizard',
       message: 'step3 → step4',
@@ -113,147 +34,35 @@ export default function ClockInStep3() {
     router.replace('/clock-in/step4');
   }
 
-  // ── Preview screen ───────────────────────────────────────────────────────────
-  if (preview) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.step}>CLOCK IN · STEP 3 OF 4</Text>
-        <Text style={styles.previewLabel}>PHOTO PREVIEW</Text>
-
-        <Image source={{ uri: preview.uri }} style={styles.previewImage} resizeMode="cover" />
-
-        <View style={styles.previewActions}>
-          <TouchableOpacity style={styles.retakeButton} onPress={() => setPreview(null)}>
-            <Text style={styles.retakeText}>RETAKE</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.useButton} onPress={usePhoto}>
-            <Text style={styles.useText}>USE PHOTO</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
-  // ── Camera screen ────────────────────────────────────────────────────────────
   return (
-    <View style={styles.container}>
-      <Text style={styles.step}>CLOCK IN · STEP 3 OF 4</Text>
-
-      <View style={styles.cameraContainer}>
-        <CameraView
-          ref={cameraRef}
-          style={styles.camera}
-          facing={'back' as CameraType}
-          onCameraReady={() => setCameraReady(true)}
-        >
-          {/* Corner guides */}
-          <View style={styles.cornerTL} /><View style={styles.cornerTR} />
-          <View style={styles.cornerBL} /><View style={styles.cornerBR} />
-
-          <View style={styles.timestampStrip}>
-            <Text style={styles.timestamp}>{new Date().toLocaleString()}</Text>
-          </View>
-        </CameraView>
-
-        {!cameraReady && (
-          <View style={styles.loadingOverlay}>
-            <Text style={styles.loadingText}>Initialising camera…</Text>
-          </View>
-        )}
-      </View>
-
-      {/* Admin instruction */}
-      <View style={styles.instructionCard}>
-        <Text style={styles.instructionLabel}>ADMIN INSTRUCTION</Text>
-        <ScrollView style={styles.instructionScroll}>
+    <CameraCapture
+      facing="back"
+      gps="best-effort"
+      confirm
+      breadcrumbCategory="clock_in_wizard"
+      breadcrumbPrefix="step3"
+      headerTitle="CLOCK IN · STEP 3 OF 4"
+      headerSubtitle="SITE PHOTO"
+      onCaptured={usePhoto}
+      overlayExtra={
+        <View style={styles.instructionCard}>
+          <Text style={styles.instructionLabel}>ADMIN INSTRUCTION</Text>
           <Text style={styles.instructionText}>{instruction}</Text>
-        </ScrollView>
-      </View>
-
-      <TouchableOpacity
-        style={[styles.shutter, (!cameraReady || capturing) && styles.disabled]}
-        onPress={capture}
-        disabled={!cameraReady || capturing}
-      >
-        <View style={[styles.shutterInner, capturing && styles.shutterCapturing]} />
-      </TouchableOpacity>
-
-      <Text style={styles.hint}>
-        {capturing ? 'Taking photo…' : !cameraReady ? 'Waiting for camera…' : ''}
-      </Text>
-    </View>
+        </View>
+      }
+    />
   );
 }
 
-const CORNER_SIZE  = 24;
-const CORNER_WIDTH = 3;
-const CORNER_COLOR = Colors.action;
-const cornerBase   = { position: 'absolute' as const, width: CORNER_SIZE, height: CORNER_SIZE, borderColor: CORNER_COLOR };
-
 const styles = StyleSheet.create({
-  container:       { flex: 1, backgroundColor: Colors.structure, alignItems: 'center' },
-  step:            { color: Colors.muted, fontSize: 11, letterSpacing: 3, marginTop: Spacing.xl, marginBottom: Spacing.sm },
-
-  cameraContainer: { width: '100%', height: 320, position: 'relative' },
-  camera:          { flex: 1 },
-  loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: Colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingText: { color: Colors.muted, fontSize: 14 },
-
-  cornerTL: { ...cornerBase, top: 16, left: 16, borderTopWidth: CORNER_WIDTH, borderLeftWidth: CORNER_WIDTH },
-  cornerTR: { ...cornerBase, top: 16, right: 16, borderTopWidth: CORNER_WIDTH, borderRightWidth: CORNER_WIDTH },
-  cornerBL: { ...cornerBase, bottom: 32, left: 16, borderBottomWidth: CORNER_WIDTH, borderLeftWidth: CORNER_WIDTH },
-  cornerBR: { ...cornerBase, bottom: 32, right: 16, borderBottomWidth: CORNER_WIDTH, borderRightWidth: CORNER_WIDTH },
-
-  timestampStrip: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    backgroundColor: 'rgba(0,0,0,0.6)', padding: Spacing.sm,
-  },
-  timestamp: { color: Colors.action, fontSize: 12, textAlign: 'center', fontFamily: 'monospace' },
-
   instructionCard: {
-    width: '100%', padding: Spacing.lg,
-    backgroundColor: Colors.surface, borderTopWidth: 1, borderTopColor: Colors.border,
-    maxHeight: 120,
+    width: '100%',
+    backgroundColor: 'rgba(15,25,41,0.85)', // Colors.surface over the preview
+    borderRadius: Radius.md,
+    borderWidth: 1, borderColor: Colors.border,
+    padding: Spacing.md,
+    gap: Spacing.xs,
   },
-  instructionLabel:  { color: Colors.action, fontSize: 11, letterSpacing: 3, marginBottom: Spacing.sm },
-  instructionScroll: { flex: 1 },
-  instructionText:   { color: Colors.base, fontSize: 15, lineHeight: 22 },
-
-  shutter: {
-    width: 72, height: 72, borderRadius: 36,
-    borderWidth: 4, borderColor: Colors.base,
-    alignItems: 'center', justifyContent: 'center',
-    marginVertical: Spacing.lg,
-  },
-  shutterInner:     { width: 56, height: 56, borderRadius: 28, backgroundColor: Colors.base },
-  shutterCapturing: { backgroundColor: Colors.action },
-  disabled:         { opacity: 0.3 },
-  hint:             { color: Colors.muted, fontSize: 12, marginBottom: Spacing.sm },
-
-  // Preview
-  previewLabel:  { color: Colors.action, fontSize: 11, letterSpacing: 3, marginBottom: Spacing.sm },
-  previewImage:  { width: '100%', flex: 1 },
-  previewActions: {
-    flexDirection: 'row', gap: Spacing.md,
-    marginVertical: Spacing.xl, paddingHorizontal: Spacing.xl, width: '100%',
-  },
-  retakeButton: {
-    flex: 1, borderWidth: 2, borderColor: Colors.base,
-    borderRadius: Radius.md, padding: Spacing.md, alignItems: 'center',
-  },
-  retakeText:  { color: Colors.base, fontFamily: Fonts.heading, fontSize: 16, letterSpacing: 2 },
-  useButton: {
-    flex: 1, backgroundColor: Colors.action,
-    borderRadius: Radius.md, padding: Spacing.md, alignItems: 'center',
-  },
-  useText:     { color: Colors.structure, fontFamily: Fonts.heading, fontSize: 16, letterSpacing: 2 },
-
-  title:       { fontFamily: Fonts.heading, color: Colors.base, fontSize: 24, marginTop: Spacing.xxl },
-  button:      { backgroundColor: Colors.action, borderRadius: Radius.md, padding: Spacing.md, marginTop: Spacing.lg },
-  buttonText:  { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 16, letterSpacing: 2 },
+  instructionLabel: { color: Colors.action, fontSize: 10, letterSpacing: 2 },
+  instructionText:  { color: Colors.base, fontSize: 13, lineHeight: 18 },
 });

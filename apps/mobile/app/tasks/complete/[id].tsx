@@ -3,19 +3,18 @@
  * Loads the task instance, enforces requires_photo, captures GPS,
  * optionally takes a photo (uploaded to S3), then POSTs completion.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Image,
   ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../../store/shiftStore';
 import { apiClient }     from '../../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../../lib/sessionClosed';
 import { uploadToS3 }    from '../../../lib/uploadToS3';
+import CameraCapture, { CapturedPhoto } from '../../../components/CameraCapture';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 
 interface TaskDetail {
@@ -31,8 +30,6 @@ type Phase = 'loading' | 'review' | 'camera' | 'submitting' | 'done' | 'error';
 
 export default function TaskCompleteScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const cameraRef = useRef<CameraView>(null);
-  const [permission, requestPermission] = useCameraPermissions();
 
   const [phase,      setPhase]      = useState<Phase>('loading');
   const [task,       setTask]       = useState<TaskDetail | null>(null);
@@ -68,29 +65,12 @@ export default function TaskCompleteScreen() {
     })();
   }, [id]);
 
-  async function capturePhoto() {
-    if (!cameraRef.current) return;
-    try {
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
-      if (!photo) throw new Error('No photo');
-      let compressed: { uri: string } = { uri: photo.uri };
-      try {
-        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
-        // Android Bitmap.compress). Do NOT bypass the manipulator for uploads.
-        const result = await ImageManipulator.manipulateAsync(
-          photo.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-        );
-        if (result?.uri) compressed = result;
-      } catch {
-        // Use original photo if compression fails (e.g. Expo Go native module mismatch)
-      }
-      setPhotoUri(compressed.uri);
-      setPhase('review');
-    } catch (err: any) {
-      Alert.alert('Camera Error', err?.message ?? 'Could not capture photo');
-    }
+  // Camera UX (ready gate, double-capture lock, compress) lives in
+  // CameraCapture. GPS is read at SUBMIT time on this surface, not at
+  // capture — gps="none" below.
+  function handlePhotoCaptured(photo: CapturedPhoto): void {
+    setPhotoUri(photo.uri);
+    setPhase('review');
   }
 
   async function submit() {
@@ -173,31 +153,18 @@ export default function TaskCompleteScreen() {
 
   // ── Camera capture ────────────────────────────────────────────────────────
   if (phase === 'camera') {
-    if (!permission?.granted) {
-      return (
-        <View style={styles.center}>
-          <Text style={styles.errorSub}>Camera access needed</Text>
-          <TouchableOpacity style={styles.btn} onPress={requestPermission}>
-            <Text style={styles.btnText}>GRANT ACCESS</Text>
-          </TouchableOpacity>
-        </View>
-      );
-    }
     return (
-      <View style={styles.cameraContainer}>
-        <CameraView ref={cameraRef} style={styles.camera} facing={'back' as CameraType}>
-          <View style={styles.cornerTL} /><View style={styles.cornerTR} />
-          <View style={styles.cornerBL} /><View style={styles.cornerBR} />
-        </CameraView>
-        <View style={styles.cameraControls}>
-          <TouchableOpacity style={styles.shutterBtn} onPress={capturePhoto}>
-            <View style={styles.shutterInner} />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.skipBtn} onPress={() => setPhase('review')}>
-            <Text style={styles.skipText}>CANCEL</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+      <CameraCapture
+        facing="back"
+        gps="none"
+        breadcrumbCategory="task_complete"
+        breadcrumbPrefix="task"
+        headerTitle="TASK PHOTO"
+        headerSubtitle={task.title.toUpperCase()}
+        onCaptured={handlePhotoCaptured}
+        onCancel={() => setPhase('review')}
+        showTimestamp={false}
+      />
     );
   }
 
@@ -277,14 +244,6 @@ export default function TaskCompleteScreen() {
   );
 }
 
-const CORNER = 20;
-const CBORDER = 3;
-const cornerBase = {
-  position: 'absolute' as const,
-  width: CORNER, height: CORNER,
-  borderColor: Colors.action,
-};
-
 const styles = StyleSheet.create({
   bg:     { flex: 1, backgroundColor: Colors.structure },
   scroll: { alignItems: 'center', paddingTop: 60, paddingBottom: 48, padding: Spacing.xl },
@@ -334,23 +293,6 @@ const styles = StyleSheet.create({
 
   cancelBtn:  { paddingVertical: Spacing.sm },
   cancelText: { color: Colors.muted, fontSize: 13, letterSpacing: 2 },
-
-  // Camera
-  cameraContainer: { flex: 1, backgroundColor: '#000' },
-  camera:          { flex: 1 },
-  cornerTL: { ...cornerBase, top: 16, left: 16, borderTopWidth: CBORDER, borderLeftWidth: CBORDER },
-  cornerTR: { ...cornerBase, top: 16, right: 16, borderTopWidth: CBORDER, borderRightWidth: CBORDER },
-  cornerBL: { ...cornerBase, bottom: 120, left: 16, borderBottomWidth: CBORDER, borderLeftWidth: CBORDER },
-  cornerBR: { ...cornerBase, bottom: 120, right: 16, borderBottomWidth: CBORDER, borderRightWidth: CBORDER },
-  cameraControls: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    height: 120, backgroundColor: 'rgba(0,0,0,0.6)',
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: Spacing.xl,
-  },
-  shutterBtn:  { width: 72, height: 72, borderRadius: 36, borderWidth: 4, borderColor: Colors.action, alignItems: 'center', justifyContent: 'center' },
-  shutterInner:{ width: 56, height: 56, borderRadius: 28, backgroundColor: Colors.action },
-  skipBtn:     { position: 'absolute', right: Spacing.xl },
-  skipText:    { color: Colors.muted, fontSize: 13, letterSpacing: 2 },
 
   // Center states
   center:     { flex: 1, backgroundColor: Colors.structure, alignItems: 'center', justifyContent: 'center', padding: Spacing.xl },

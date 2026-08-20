@@ -24,6 +24,14 @@ interface Shift {
    *  backwards compat with pre-Item-8 API responses; consumers should
    *  fall back to 30 when absent. */
   ping_interval_minutes?: number;
+  /** Site feature flags (schema_v47). Cached at clock-in / restore like
+   *  ping_interval_minutes — admin edits mid-shift do NOT propagate (Q37
+   *  semantics; refreshFromServer never rewrites activeShift). Optional on
+   *  the wire: a pre-v47 API omits both. READ THEM ONLY through
+   *  lib/siteFlags.ts — absence fails safe (checkpoints TRUE,
+   *  inspection FALSE). */
+  checkpoints_enabled?: boolean;
+  vehicle_inspection_required?: boolean;
   geofence?: Geofence;
 }
 
@@ -47,11 +55,23 @@ interface CurrentBreak {
   planned_duration_minutes: number;
 }
 
+/** Break-enforcement package — per-type used/limit from
+ *  /shifts/active-session's break_quotas (schema_v46 API). Optional on the
+ *  wire: a pre-v46 API omits it and the break screen renders no quota row
+ *  and disables nothing (server still enforces). */
+export type BreakQuotas = Record<
+  'meal' | 'rest' | 'other',
+  { used: number; limit: number }
+>;
+
 interface ShiftState {
   pendingShift: Shift | null;
   activeShift: Shift | null;
   activeSession: ShiftSession | null;
   currentBreak: CurrentBreak | null;
+  /** Server-truth break allowance state; null until the first
+   *  /shifts/active-session response that carries break_quotas. */
+  breakQuotas: BreakQuotas | null;
   /** Last ping window this device successfully submitted, as
    *  { sessionId, label }. Read by the PING NOW gate on the active-shift
    *  screen to grey the tile once the current window is satisfied.
@@ -80,6 +100,7 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   activeShift: null,
   activeSession: null,
   currentBreak: null,
+  breakQuotas: null,
   lastPingedWindow: null,
 
   setPendingShift: (shift) => set({ pendingShift: shift }),
@@ -95,7 +116,7 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   clearSession: () => {
     set({
       activeShift: null, activeSession: null, pendingShift: null,
-      currentBreak: null, lastPingedWindow: null,
+      currentBreak: null, breakQuotas: null, lastPingedWindow: null,
     });
     setShiftTag(null);
   },
@@ -151,6 +172,7 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
       const active = await apiClient.get<{
         session: { id: string };
         current_break?: CurrentBreak | null;
+        break_quotas?: BreakQuotas;
       } | null>('/shifts/active-session');
       const state = get();
       if (!active && state.activeSession) {
@@ -175,6 +197,12 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
         const nextBreak = active.current_break ?? null;
         if (JSON.stringify(state.currentBreak) !== JSON.stringify(nextBreak)) {
           set({ currentBreak: nextBreak });
+        }
+        // Quota state is pure server truth like currentBreak — overwrite on
+        // every refresh. Absent field (pre-v46 API) leaves the cache alone.
+        if (active.break_quotas &&
+            JSON.stringify(state.breakQuotas) !== JSON.stringify(active.break_quotas)) {
+          set({ breakQuotas: active.break_quotas });
         }
       }
     } catch (err: any) {
