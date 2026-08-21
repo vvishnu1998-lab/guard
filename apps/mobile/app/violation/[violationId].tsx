@@ -16,6 +16,7 @@ import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore }  from '../../store/shiftStore';
 import { apiClient }      from '../../lib/apiClient';
+import { isBreakActive }  from '../../lib/breakState';
 import { isInsideGeofence, haversineDistance } from '../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
@@ -33,6 +34,15 @@ export default function ViolationScreen() {
   const [lng, setLng]         = useState<number | null>(null);
   const [distance, setDist]   = useState<number | null>(null);
   const [resolving, setRes]   = useState(false);
+  // Break-quiet policy: reached while a break is active (e.g. via a stale
+  // pre-break notification tap), this screen renders a soft informational
+  // state instead of the red takeover. Reads the SecureStore mirror
+  // (lib/breakState.ts) — the same truth the background task uses — not
+  // the in-memory currentBreak, so foreground and headless can't disagree.
+  const [onBreak, setOnBreak] = useState(false);
+  useEffect(() => {
+    isBreakActive().then(setOnBreak).catch(() => setOnBreak(false));
+  }, []);
 
   const { activeShift } = useShiftStore();
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -51,15 +61,23 @@ export default function ViolationScreen() {
   }, []);
 
   // ── Block hardware back button (Android) ──────────────────────────────
+  // Not while on break: the soft informational state must stay leavable.
   useEffect(() => {
+    if (onBreak) return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => true);
     return () => sub.remove();
-  }, []);
+  }, [onBreak]);
 
   // ── GPS polling ────────────────────────────────────────────────────────
   useEffect(() => {
     async function checkLocation() {
       try {
+        // Re-check break state every tick, not just at mount: the key
+        // self-expires at the break's planned end, so this is what flips
+        // the soft screen back to the red takeover if the guard sits here
+        // past break end while still off-post.
+        isBreakActive().then(setOnBreak).catch(() => setOnBreak(false));
+
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         const { latitude, longitude, accuracy } = loc.coords;
         setLat(latitude);
@@ -114,6 +132,32 @@ export default function ViolationScreen() {
   }, [activeShift]);
 
   function fmtCoord(n: number) { return n.toFixed(5); }
+
+  // ── Soft informational state while on break ───────────────────────────
+  // No red takeover, no trap. The GPS poll above keeps running so a
+  // re-entry still auto-resolves the underlying violation server-side.
+  if (onBreak && !resolving) {
+    return (
+      <View style={styles.softContainer}>
+        <Text style={styles.softIcon}>ℹ</Text>
+        <Text style={styles.softTitle}>OUTSIDE SITE — ON BREAK</Text>
+        <Text style={styles.softText}>
+          You&apos;re outside the site boundary, but you&apos;re on break —
+          boundary alerts are paused.{'\n\n'}
+          Duty resumes when your break ends. Be back on post by then.
+        </Text>
+        {lat !== null && distance !== null && (
+          <Text style={styles.softDist}>≈ {distance}m from site center</Text>
+        )}
+        <TouchableOpacity
+          style={styles.softButton}
+          onPress={() => router.replace('/break')}
+        >
+          <Text style={styles.softButtonText}>BACK TO BREAK</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -207,4 +251,28 @@ const styles = StyleSheet.create({
 
   polling:   { color: '#FCA5A5', fontSize: 12, letterSpacing: 1, marginBottom: Spacing.xl },
   timestamp: { color: '#991B1B', fontSize: 11, fontFamily: 'monospace', marginTop: Spacing.lg },
+
+  // Soft on-break variant — informational, not punitive.
+  softContainer: {
+    flex: 1, backgroundColor: Colors.structure,
+    alignItems: 'center', justifyContent: 'center', padding: Spacing.xl,
+  },
+  softIcon:  { fontSize: 48, color: Colors.action, marginBottom: Spacing.lg },
+  softTitle: {
+    fontFamily: Fonts.heading, color: Colors.base, fontSize: 22,
+    letterSpacing: 3, textAlign: 'center', marginBottom: Spacing.md,
+  },
+  softText: {
+    color: Colors.muted, fontSize: 14, lineHeight: 22,
+    textAlign: 'center', marginBottom: Spacing.lg,
+  },
+  softDist: { color: Colors.muted, fontSize: 12, marginBottom: Spacing.xl },
+  softButton: {
+    backgroundColor: Colors.action, borderRadius: Radius.md,
+    paddingHorizontal: Spacing.xl, paddingVertical: Spacing.md,
+  },
+  softButtonText: {
+    fontFamily: Fonts.heading, color: Colors.structure,
+    fontSize: 15, letterSpacing: 2,
+  },
 });

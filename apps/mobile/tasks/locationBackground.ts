@@ -43,6 +43,7 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
 import { isPastShiftExpiry, SHIFT_EXPIRY_GRACE_MS } from '../lib/shiftExpiry';
+import { isBreakActive } from '../lib/breakState';
 
 export const GEOFENCE_TASK = 'GUARD_GEOFENCE';
 
@@ -126,16 +127,34 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
     return;
   }
 
+  // Break-quiet policy (server: main 99d09bd; locked 2026-08-20). During an
+  // active break neither transition surfaces a local notification — the
+  // Exit still POSTs so the server records its quiet off_post_events row
+  // (it answers 200 ON_BREAK), and Enter stays silent both ways. The key
+  // self-expires at the break's planned end (lib/breakState.ts), so a
+  // stale-open break can't mute a genuine post-break breach, and any read
+  // failure reports false — fail toward enforcement.
+  const onBreak = await isBreakActive();
+
   if (isExit) {
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: 'Outside post boundary',
-        body:  "You've left the permitted radius. Return to the post.",
-        sound: 'default',
-        data:  { type: 'geofence_breach', sessionId },
-      },
-      trigger: null,
-    }).catch((err) => console.warn('[geofence] local notification failed:', err));
+    if (onBreak) {
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message: 'exit during break — local alert suppressed, POST proceeds',
+        level: 'info',
+        data: { session_id: sessionId },
+      });
+    } else {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Outside post boundary',
+          body:  "You've left the permitted radius. Return to the post.",
+          sound: 'default',
+          data:  { type: 'geofence_breach', sessionId },
+        },
+        trigger: null,
+      }).catch((err) => console.warn('[geofence] local notification failed:', err));
+    }
 
     const apiUrl = process.env.EXPO_PUBLIC_API_URL;
     if (!apiUrl) return;
@@ -178,6 +197,20 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
           SecureStore.deleteItemAsync('active_session_id').catch(() => {}),
           SecureStore.deleteItemAsync('active_shift_end').catch(() => {}),
         ]);
+      } else if (res.ok) {
+        // Break-quiet: the server answers 200 {code:'ON_BREAK'} when it
+        // suppressed the violation and recorded a quiet off_post_events
+        // row instead. Nothing to do client-side — breadcrumb so the
+        // Sentry trail shows the quiet path was taken.
+        const body = (await res.json().catch(() => null)) as { code?: string } | null;
+        if (body?.code === 'ON_BREAK') {
+          Sentry.addBreadcrumb({
+            category: 'geofence',
+            message: 'server: on-break — quiet off-post row recorded, no violation',
+            level: 'info',
+            data: { session_id: sessionId },
+          });
+        }
       }
     } catch (err) {
       console.error('[geofence] Failed to post violation', err);
@@ -187,6 +220,18 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
   }
 
   if (isEnter) {
+    // Break-quiet: no noise in either direction while on break — a "Back
+    // on post" during break is as much of an interruption as the exit
+    // alert it pairs with.
+    if (onBreak) {
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message: 'enter during break — local notification suppressed',
+        level: 'info',
+        data: { session_id: sessionId },
+      });
+      return;
+    }
     await Notifications.scheduleNotificationAsync({
       content: {
         title: 'Back on post',
