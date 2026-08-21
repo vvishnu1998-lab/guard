@@ -14,9 +14,9 @@
  *     (site_id === id) & next 7 days & !cancelled. Matches the pattern used
  *     by /admin/shifts/site/[siteId]/page.tsx.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { adminFetch, adminGet, adminPatch, adminPost, triggerBlobDownload } from '../../../../lib/adminApi';
 import { fmtTime } from '../../../../lib/shiftFormat';
 import { formatHoursHHMM } from '../../../../lib/formatHours';
@@ -239,10 +239,52 @@ function NotInRosterTag() {
   );
 }
 
+/**
+ * Tab model. State lives in `?tab=`, never in React state, so a tab is a
+ * shareable URL and Back works — the same contract as /admin/shifts?view=.
+ * An unknown or absent slug falls back to `overview` rather than rendering
+ * an empty page.
+ */
+const TABS = [
+  ['overview',     'OVERVIEW'],
+  ['checkpoints',  'CHECKPOINTS'],
+  ['schedule',     'SCHEDULE'],
+  ['scan-history', 'SCAN HISTORY'],
+] as const;
+
+type TabSlug = (typeof TABS)[number][0];
+
+/**
+ * useSearchParams() opts the subtree into client-side rendering, which Next 14
+ * rejects at build time unless a Suspense boundary sits above it. Same wrapper
+ * the shifts page uses for the same reason.
+ */
 export default function SiteDetailPage() {
+  return (
+    <Suspense fallback={<div className="p-10 text-center text-gray-500 text-sm">Loading site…</div>}>
+      <SiteDetailPageInner />
+    </Suspense>
+  );
+}
+
+function SiteDetailPageInner() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const siteId = params?.id ?? '';
+
+  // ── Tab routing (?tab=) ────────────────────────────────────────────────
+  // Read-only derivation: no useState, no effect. Every other searchParam is
+  // carried through tabHref() so the scan-history date range (and any future
+  // filter) survives a tab switch.
+  const searchParams = useSearchParams();
+  const tabParam = searchParams?.get('tab') ?? '';
+  const tab: TabSlug = (TABS.some(([slug]) => slug === tabParam) ? tabParam : 'overview') as TabSlug;
+
+  function tabHref(slug: TabSlug): string {
+    const p = new URLSearchParams(searchParams?.toString() ?? '');
+    p.set('tab', slug);
+    return `/admin/sites/${siteId}?${p.toString()}`;
+  }
 
   const [site,    setSite]    = useState<Site | null>(null);
   const [guards,  setGuards]  = useState<LiveGuard[]>([]);
@@ -817,6 +859,55 @@ export default function SiteDetailPage() {
     );
   }
 
+  // Upcoming shifts (next 7 days, grouped by day). Extracted verbatim — the
+  // tab split assigns this section to BOTH Overview and Schedule, so it is
+  // rendered from one definition rather than duplicated. Same idiom as
+  // renderToggleRow above.
+  function renderUpcomingShifts() {
+    return (
+      <section>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
+          <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
+          <Link
+            href={`/admin/shifts?newShift=1&siteId=${siteId}`}
+            className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+          >
+            MANAGE SCHEDULE →
+          </Link>
+        </div>
+        {shiftsByDay.length === 0 ? (
+          <p className="text-gray-500 text-sm">No upcoming shifts in the next 7 days.</p>
+        ) : (
+          <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
+            {shiftsByDay.map((day) => (
+              <div key={day.key}>
+                <div className="py-2 text-gray-500 text-xs tracking-widest font-mono">
+                  {day.label}
+                </div>
+                <ul className="divide-y divide-[#1A3050] border-t border-[#1A3050]">
+                  {day.rows.map((s) => (
+                    <li key={s.id} className="py-3 flex items-center justify-between gap-3">
+                      <span className="text-gray-400 text-xs font-mono shrink-0">
+                        {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
+                      </span>
+                      {s.guard_name ? (
+                        <span className="text-gray-200 text-sm text-right">{s.guard_name}</span>
+                      ) : (
+                        <span className="text-amber-400 tracking-widest text-xs font-bold text-right">
+                          — UNASSIGNED —
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    );
+  }
+
   return (
     <div className="space-y-8">
       {/* Header + back link */}
@@ -834,7 +925,83 @@ export default function SiteDetailPage() {
           <p className="text-gray-500 text-xs mt-2">{site.address}</p>
         )}
       </div>
+      {/* Tab bar. <Link replace scroll={false}> — replace so a tab switch does
+          not stack history entries between the site list and this page, and
+          scroll={false} so switching tabs holds position instead of jumping to
+          the top. Anchors, not buttons: middle-click and copy-link work. */}
+      <nav aria-label="Site sections" className="border-b border-[#1A3050] -mt-2">
+        <ul className="flex gap-1 overflow-x-auto">
+          {TABS.map(([slug, label]) => {
+            const active = tab === slug;
+            return (
+              <li key={slug}>
+                <Link
+                  href={tabHref(slug)}
+                  replace
+                  scroll={false}
+                  aria-current={active ? 'page' : undefined}
+                  className={`block whitespace-nowrap px-3 md:px-4 py-2.5 text-xs tracking-widest border-b-2 -mb-px transition-colors ${
+                    active
+                      ? 'border-amber-400 text-amber-400 font-bold'
+                      : 'border-transparent text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {label}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
 
+      {/* OVERVIEW — live state first: who is on post now, what is scheduled next. */}
+      {tab === 'overview' && (
+      <>
+      {/* Guard on shift */}
+      <section>
+        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">GUARD ON SHIFT</h2>
+        {presentGuards.length === 0 ? (
+          <p className="text-gray-500 text-sm">No guard currently on shift.</p>
+        ) : (
+          <ul className="divide-y divide-[#1A3050] border-y border-[#1A3050]">
+            {presentGuards.map((g) => {
+              const hoursWorked = (Date.now() - new Date(g.clocked_in_at).getTime()) / 3_600_000;
+              return (
+                <li key={g.id} className="py-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex items-center gap-3">
+                    <div className="min-w-0">
+                      <p className="text-gray-200 text-sm">{g.name}</p>
+                      <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                        Clocked in {fmtTime(g.clocked_in_at)}
+                      </p>
+                      {g.scheduled_start && g.scheduled_end && (
+                        <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                          Scheduled {fmtTime(g.scheduled_start)} → {fmtTime(g.scheduled_end)}
+                        </p>
+                      )}
+                    </div>
+                    <Link
+                      href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
+                      className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+                    >
+                      CHAT →
+                    </Link>
+                  </div>
+                  <p className="text-gray-400 text-xs shrink-0">{formatHoursHHMM(hoursWorked)}</p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {renderUpcomingShifts()}
+      </>
+      )}
+
+      {/* CHECKPOINTS — SITE SETTINGS moves here whole: both toggles and the two rosters nested under them. */}
+      {tab === 'checkpoints' && (
+      <>
       {/* Site settings — schema_v47 feature toggles */}
       <section>
         <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">SITE SETTINGS</h2>
@@ -1060,89 +1227,15 @@ export default function SiteDetailPage() {
           </div>
         </div>
       </section>
+      </>
+      )}
 
-      {/* Guard on shift */}
-      <section>
-        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">GUARD ON SHIFT</h2>
-        {presentGuards.length === 0 ? (
-          <p className="text-gray-500 text-sm">No guard currently on shift.</p>
-        ) : (
-          <ul className="divide-y divide-[#1A3050] border-y border-[#1A3050]">
-            {presentGuards.map((g) => {
-              const hoursWorked = (Date.now() - new Date(g.clocked_in_at).getTime()) / 3_600_000;
-              return (
-                <li key={g.id} className="py-3 flex items-center justify-between gap-3">
-                  <div className="min-w-0 flex items-center gap-3">
-                    <div className="min-w-0">
-                      <p className="text-gray-200 text-sm">{g.name}</p>
-                      <p className="text-gray-500 text-xs mt-0.5 font-mono">
-                        Clocked in {fmtTime(g.clocked_in_at)}
-                      </p>
-                      {g.scheduled_start && g.scheduled_end && (
-                        <p className="text-gray-500 text-xs mt-0.5 font-mono">
-                          Scheduled {fmtTime(g.scheduled_start)} → {fmtTime(g.scheduled_end)}
-                        </p>
-                      )}
-                    </div>
-                    <Link
-                      href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
-                      className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
-                    >
-                      CHAT →
-                    </Link>
-                  </div>
-                  <p className="text-gray-400 text-xs shrink-0">{formatHoursHHMM(hoursWorked)}</p>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+      {/* SCHEDULE — the MANAGE SCHEDULE entry point lives in this section's header. */}
+      {tab === 'schedule' && renderUpcomingShifts()}
 
-      {/* Upcoming shifts (next 7 days, grouped by day) */}
-      <section>
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
-          <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
-          <Link
-            href={`/admin/shifts?newShift=1&siteId=${siteId}`}
-            className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
-          >
-            MANAGE SCHEDULE →
-          </Link>
-        </div>
-        {shiftsByDay.length === 0 ? (
-          <p className="text-gray-500 text-sm">No upcoming shifts in the next 7 days.</p>
-        ) : (
-          <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
-            {shiftsByDay.map((day) => (
-              <div key={day.key}>
-                <div className="py-2 text-gray-500 text-xs tracking-widest font-mono">
-                  {day.label}
-                </div>
-                <ul className="divide-y divide-[#1A3050] border-t border-[#1A3050]">
-                  {day.rows.map((s) => (
-                    <li key={s.id} className="py-3 flex items-center justify-between gap-3">
-                      <span className="text-gray-400 text-xs font-mono shrink-0">
-                        {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
-                      </span>
-                      {s.guard_name ? (
-                        <span className="text-gray-200 text-sm text-right">{s.guard_name}</span>
-                      ) : (
-                        <span className="text-amber-400 tracking-widest text-xs font-bold text-right">
-                          — UNASSIGNED —
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-
-
+      {/* SCAN HISTORY — ungated on checkpoints_enabled, as before. */}
+      {tab === 'scan-history' && (
+      <>
       {/* Scan history (C4b) — NOT gated on checkpoints_enabled, on purpose:
           scans are audit evidence; turning the feature off must never hide
           what it already recorded. */}
@@ -1309,7 +1402,12 @@ export default function SiteDetailPage() {
           </>
         )}
       </section>
+      </>
+      )}
 
+      {/* Modals stay mounted on every tab: they are opened from the
+          Checkpoints tab but must survive a re-render without being
+          torn out of the tree mid-flight. */}
       {/* ADD / EDIT vehicle modal */}
       {vehModalMode !== null && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60">
