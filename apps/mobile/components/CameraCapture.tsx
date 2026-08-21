@@ -228,13 +228,40 @@ export default function CameraCapture({
     Animated.timing(flashOpacity, { toValue: 0, duration: 180, useNativeDriver: true }).start();
 
     const t0 = Date.now();
+    let attempts = 0;
     try {
-      const photo = await withTimeout(
-        cameraRef.current.takePictureAsync({ quality: CAPTURE_QUALITY }),
-        TAKE_PICTURE_TIMEOUT_MS,
-        'takePictureAsync',
-      );
-      if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
+      // Night-shift captures intermittently fail in the native layer
+      // ("Image could not be captured" — low-light AE; Nandu's Cristo Rey
+      // overnight, 2026-08-20, six missed windows). One silent retry after
+      // a short beat clears the transient cases with no UX change on
+      // success — the guard just sees the shutter take a moment longer.
+      // Sentry fires only after the FINAL failure (outer catch).
+      const MAX_ATTEMPTS = 2;
+      const RETRY_DELAY_MS = 500;
+      let photo: Awaited<ReturnType<NonNullable<typeof cameraRef.current>['takePictureAsync']>>;
+      for (;;) {
+        attempts += 1;
+        try {
+          const p = await withTimeout(
+            cameraRef.current.takePictureAsync({ quality: CAPTURE_QUALITY }),
+            TAKE_PICTURE_TIMEOUT_MS,
+            'takePictureAsync',
+          );
+          if (!p?.uri) throw new Error('Camera did not return a photo. Try again.');
+          photo = p;
+          break;
+        } catch (attemptErr: any) {
+          crumb('capture attempt failed', 'warning', {
+            attempt: attempts,
+            max_attempts: MAX_ATTEMPTS,
+            error: attemptErr?.message ?? String(attemptErr),
+          });
+          if (attempts >= MAX_ATTEMPTS) throw attemptErr;
+          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        }
+      }
+      // capture_ms includes any retry delay — `attempts` on the crumb below
+      // lets the CAPTURE_QUALITY A/B read filter retried captures out.
       const tCapture = Date.now() - t0;
       const takenAt = new Date().toISOString();
 
@@ -261,7 +288,7 @@ export default function CameraCapture({
       // Amendment A instrumentation — read these off a device run to A/B
       // CAPTURE_QUALITY. capture_ms is the shutter-freeze component.
       console.log(`[camera] capture_ms=${tCapture} manipulate_ms=${tManipulate} quality=${CAPTURE_QUALITY}`);
-      crumb('captured', 'info', { capture_ms: tCapture, manipulate_ms: tManipulate, quality: CAPTURE_QUALITY });
+      crumb('captured', 'info', { capture_ms: tCapture, manipulate_ms: tManipulate, quality: CAPTURE_QUALITY, attempts });
 
       const pos = await readGps(gps);
       if (gps === 'required' && (pos.lat === null || pos.lng === null)) {
@@ -286,8 +313,8 @@ export default function CameraCapture({
       }
       await runPipeline(captured);
     } catch (err: any) {
-      crumb('capture failed', 'error', { error: err?.message ?? String(err) });
-      Sentry.captureException(err, { extra: { where: 'CameraCapture.capture', category: breadcrumbCategory } });
+      crumb('capture failed', 'error', { error: err?.message ?? String(err), attempts });
+      Sentry.captureException(err, { extra: { where: 'CameraCapture.capture', category: breadcrumbCategory, attempts } });
       Alert.alert('Capture Failed', err?.message ?? 'Could not take photo. Try again.');
       busyRef.current = false;
       setStage({ kind: 'live' });
