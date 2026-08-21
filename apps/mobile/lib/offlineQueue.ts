@@ -4,7 +4,6 @@
  *
  * Covered action types:
  *   report_submit   — activity / incident / maintenance reports
- *   location_ping   — GPS-only and GPS+photo pings
  *   task_complete   — task instance completions
  *   violation_post  — geofence violation notifications
  *
@@ -14,8 +13,11 @@
  *   - Each item tracks attempt count — after 5 failures it is moved to a dead-letter
  *     bucket and the guard is alerted
  *   - Sync runs: on app foreground, on network reconnect, and every 60 s while active
- *   - Items are processed strictly in FIFO order (reports before pings prevents
- *     pings referencing sessions that haven't been created yet)
+ *   - Items are processed strictly in FIFO order
+ *
+ * NOT covered: location pings. app/ping/photo.tsx posts them directly and
+ * surfaces failures to the guard. See the note on that file for why
+ * queueing them needs a schema change first, not just idempotency.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -37,7 +39,6 @@ const MAX_ATTEMPTS   = 5;
 
 export type QueueActionType =
   | 'report_submit'
-  | 'location_ping'
   | 'task_complete'
   | 'violation_post'
   | 'checkpoint_scan';
@@ -108,7 +109,6 @@ export async function pendingCount(): Promise<number> {
 
 const ENDPOINT: Record<QueueActionType, string> = {
   report_submit:   '/reports',
-  location_ping:   '/locations/ping',
   task_complete:   '/tasks/instances/{id}/complete',
   violation_post:  '/locations/violation',
   // Payload carries the GPS captured AT SCAN TIME; a replay that already
@@ -119,6 +119,13 @@ const ENDPOINT: Record<QueueActionType, string> = {
 async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead'> {
   try {
     let path = ENDPOINT[item.type];
+    // Unknown type — a queue item persisted by an older build whose action
+    // type this build no longer handles. Dead-letter immediately rather
+    // than POSTing to `undefined` five times.
+    if (!path) {
+      console.warn(`[offline-queue] unknown action type ${item.type} — dead-lettering`);
+      return 'dead';
+    }
 
     // task_complete needs the instance id interpolated into the path
     if (item.type === 'task_complete' && item.payload.task_instance_id) {

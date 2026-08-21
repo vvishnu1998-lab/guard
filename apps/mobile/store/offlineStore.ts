@@ -1,7 +1,7 @@
 /**
  * Offline-aware action store.
  *
- * Guards call submitReport / submitPing / completeTask from anywhere in the app.
+ * Guards call submitReport / completeTask from anywhere in the app.
  * Each method:
  *   1. Always tries to POST immediately (no NetInfo gate — NetInfo is unreliable on iOS simulator)
  *   2. Falls back to enqueue() only if the online POST throws
@@ -16,7 +16,7 @@ import { create } from 'zustand';
 import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../lib/apiClient';
 import { enqueue, pendingCount, startQueueSync, stopQueueSync, syncQueue } from '../lib/offlineQueue';
-import type { SubmitReportRequest, LocationPingRequest, GeofenceViolationRequest } from '@guard/shared';
+import type { SubmitReportRequest, GeofenceViolationRequest } from '@guard/shared';
 
 /**
  * Only network / DNS / 5xx failures should fall into the offline queue.
@@ -47,7 +47,6 @@ interface OfflineState {
   stopSync:  () => void;
 
   submitReport:   (payload: SubmitReportRequest)      => Promise<{ synced: true; data: any } | { synced: false; localId: string }>;
-  submitPing:     (payload: LocationPingRequest)       => Promise<string>;
   completeTask:   (taskInstanceId: string, payload: Record<string, unknown>) => Promise<string>;
   postViolation:  (payload: GeofenceViolationRequest)  => Promise<string>;
   submitCheckpointScan: (payload: {
@@ -80,21 +79,6 @@ export const useOfflineStore = create<OfflineState>((set) => ({
     set({ pendingCount: count });
     syncQueue().catch(console.error);
     return { synced: false, localId };
-  },
-
-  submitPing: async (payload) => {
-    try {
-      await apiClient.post('/locations/ping', payload);
-      return 'synced';
-    } catch (err) {
-      if (shouldSurfaceInsteadOfQueue(err)) throw err;
-    }
-
-    const localId = await enqueue('location_ping', payload as unknown as Record<string, unknown>);
-    const count = await pendingCount();
-    set({ pendingCount: count });
-    syncQueue().catch(console.error);
-    return localId;
   },
 
   completeTask: async (taskInstanceId, payload) => {
