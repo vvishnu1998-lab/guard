@@ -426,6 +426,9 @@ function SiteDetailPageInner() {
   const [deleteBusy,   setDeleteBusy]   = useState(false);
   const [deleteError,  setDeleteError]  = useState('');
   const [cpToggling,   setCpToggling]   = useState<string | null>(null);
+  // Which checkpoint card has its overflow menu open ('' = none). DELETE lives
+  // in there so it cannot be hit while reaching for DEACTIVATE.
+  const [cpMenuOpen,   setCpMenuOpen]   = useState<string | null>(null);
 
   // ── Vehicle roster (schema_v48) ────────────────────────────────────────
   const [vehicles,        setVehicles]        = useState<Vehicle[]>([]);
@@ -1331,6 +1334,14 @@ function SiteDetailPageInner() {
                     )}
                   </p>
                 </div>
+                {/* Action row, ranked by consequence rather than rendered flat.
+                    EDIT and UNLINK are routine and stay inline. DEACTIVATE is
+                    reversible and keeps scan history, so it drops to neutral
+                    grey — it previously wore the SAME red as DELETE, which put
+                    the mildest action and the irreversible one in one colour.
+                    DELETE moves behind the overflow menu: red now appears in
+                    exactly one place on this card, and only after a deliberate
+                    second gesture. */}
                 <div className="flex items-center gap-3 md:gap-2 md:shrink-0 flex-wrap">
                   <button
                     onClick={() => openEditCpModal(cp)}
@@ -1349,19 +1360,60 @@ function SiteDetailPageInner() {
                   <button
                     onClick={() => toggleCpActive(cp)}
                     disabled={cpToggling === cp.id}
+                    title={cp.is_active
+                      ? 'Hides this checkpoint from guards. Reversible, and scan history is kept.'
+                      : 'Puts this checkpoint back in the patrol roster.'}
                     className={`text-xs tracking-widest disabled:opacity-40 ${
-                      cp.is_active ? 'text-red-400 hover:text-red-300' : 'text-green-400 hover:text-green-300'
+                      cp.is_active
+                        ? 'text-gray-500 hover:text-gray-300'
+                        : 'text-green-400 hover:text-green-300'
                     }`}
                   >
                     {cpToggling === cp.id ? '…' : cp.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
                   </button>
-                  <button
-                    onClick={() => beginDelete(cp)}
-                    disabled={cpToggling === cp.id}
-                    className="text-xs text-red-400 hover:text-red-300 tracking-widest disabled:opacity-40"
-                  >
-                    DELETE
-                  </button>
+
+                  {/* Overflow menu — the only route to DELETE. */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-expanded={cpMenuOpen === cp.id}
+                      aria-label={`More actions for ${cp.label}`}
+                      onClick={() => setCpMenuOpen(cpMenuOpen === cp.id ? null : cp.id)}
+                      className="text-xs text-gray-500 hover:text-gray-300 tracking-widest px-1 leading-none"
+                    >
+                      •••
+                    </button>
+                    {cpMenuOpen === cp.id && (
+                      <>
+                        {/* Transparent backdrop closes the menu on any outside
+                            click without a document-level listener. */}
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setCpMenuOpen(null)}
+                          aria-hidden="true"
+                        />
+                        <div
+                          role="menu"
+                          onKeyDown={(e) => { if (e.key === 'Escape') setCpMenuOpen(null); }}
+                          className="absolute right-0 z-50 mt-1 w-56 bg-[#0B1526] border border-[#1A3050] rounded-lg shadow-lg p-1"
+                        >
+                          <button
+                            role="menuitem"
+                            onClick={() => { setCpMenuOpen(null); beginDelete(cp); }}
+                            disabled={cpToggling === cp.id}
+                            className="w-full text-left rounded px-2 py-1.5 text-xs tracking-widest text-red-400 hover:bg-red-500/10 disabled:opacity-40"
+                          >
+                            DELETE CHECKPOINT
+                          </button>
+                          <p className="px-2 pt-1 pb-1.5 text-[10px] leading-snug text-gray-500">
+                            Permanently destroys this checkpoint and its scan history.
+                            To retire it instead, use DEACTIVATE.
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
