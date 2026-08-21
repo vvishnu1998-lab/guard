@@ -37,6 +37,13 @@ import { insertNotification, NotificationType } from '../services/notifications'
 import { breakOverlapsWindow, PING_WINDOW_MS } from '../services/pingWindows';
 import { Sentry } from '../services/sentry';
 
+// The hourly slot the activity-report + task legs nudge for. Matches
+// jobs/missedReportCron.ts's WINDOW_MS (60 min) so the reminder and the
+// missed_reports flag reason about the same span of time. Deliberately a
+// local constant: services/pingWindows.ts owns PING_WINDOW_MS (30 min)
+// and exports no hourly equivalent.
+const REPORT_WINDOW_MS = 60 * 60 * 1000;
+
 interface ActiveGuardRow {
   guard_id: string;
   guard_name: string;
@@ -219,17 +226,45 @@ cron.schedule('* * * * *', async () => {
     if (minute !== 0) return;
     if (!rows.length) return;
 
+    // The hourly slot these two legs are FOR: [topOfHour, topOfHour+1h).
+    // Execution only reaches here at UTC minute 0, so this is the hour
+    // that is opening — the one the guard is being asked to file in.
+    const hourStart = new Date(now);
+    hourStart.setUTCMinutes(0, 0, 0);
+    const hourEnd = new Date(hourStart.getTime() + REPORT_WINDOW_MS);
+
+    let reportsFired = 0;
     await Promise.allSettled(
-      rows.map((row) =>
-        sendReminder(
+      rows.map(async (row) => {
+        // Break-time quiet policy (locked 2026-08-20): during a break a
+        // guard owes nothing, so no report nudge for an hour a break
+        // overlaps. Same shared predicate the ping leg above and
+        // missedReportCron use — one definition, so the nudge and the
+        // flag can never disagree.
+        //
+        // 155c9a8 gated the ping leg only. This leg fired at 20:00:01 PT
+        // on 2026-08-20 into a break running 19:54:42-20:13:58.
+        if (await breakOverlapsWindow(row.shift_session_id, hourStart, hourEnd)) {
+          console.log(
+            `[activityReportReminder.skipped.break] session=${row.shift_session_id} ` +
+            `window=${hourStart.toISOString()}`,
+          );
+          return;
+        }
+        reportsFired += 1;
+        await sendReminder(
           row,
           'activity_report_reminder',
           'Activity report',
           'Time to submit your hourly activity report.',
-        ),
-      ),
+        );
+      }),
     );
-    console.log(`[pingReminder] Sent activity-report reminder to ${rows.length} active guards`);
+    // Count is now what actually went out, not rows.length — a log line
+    // that overstates delivery is how a suppressed leg stays invisible.
+    console.log(
+      `[pingReminder] Sent activity-report reminder to ${reportsFired} of ${rows.length} active guards`,
+    );
 
     for (const row of rows) {
       const taskCount = await pool.query<{ count: number }>(
