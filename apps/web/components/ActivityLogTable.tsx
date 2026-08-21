@@ -18,9 +18,12 @@
  *   clocked_in_late         → red   "Clocked In at HH:MM (+Nm late)"
  *   missed_clock_in         → red   "Missed Clock In at HH:MM"
  *   missed_report           → red   "Missed Report at HH:00"
- *   on_time (ping)          → green "Ping (on time)"
- *   late (ping)             → green "Ping (+Nm late)"    (server text
- *                                    is the source; boundary [0, 30])
+ *   on_time (ping)          → green "Ping (N minutes)"
+ *   late (ping)             → amber "Late Ping (N minutes)"
+ *                                    Both render the SERVER's text verbatim,
+ *                                    graded against the window the ping was
+ *                                    submitted FOR (window_label). Amber, not
+ *                                    green: satisfied-but-late is not on time.
  *   missed (ping)           → red   "Missed Ping"
  *   activity_report         → blue  "Activity Report"
  *   incident_report         → red   "Incident Report"
@@ -49,7 +52,6 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { adminDownloadPost, adminPatch } from '../lib/adminApi';
-import { computeLateness } from '../lib/lateness';
 
 type StatusKind =
   | 'on_time'
@@ -91,7 +93,7 @@ interface ActivityRow {
   event_time:      string;
   detail_id:       string | null;
   // Threaded onto every row from apps/api/src/routes/activityLog.ts —
-  // enables the SHIFT column and client-side computeLateness().
+  // enables the SHIFT column and the clocked_in_late delta below.
   shift_id:        string | null;
   scheduled_start: string | null;
   scheduled_end:   string | null;
@@ -271,9 +273,22 @@ function guardInitial(name: string): string {
 
 // ── Status → badge label + color ────────────────────────────────────────────
 //
-// STATUS column runs the raw status through computeLateness for pings so
-// on-time/late timing lives in one place (same helper the live-status
-// page uses). Reports and missed rows are static labels.
+// STATUS renders the SERVER's ping text verbatim. It used to re-derive
+// lateness here via computeLateness(log_time, [0, 30]), which floors the
+// WALL CLOCK to the nearest :00/:30 and is blind to window_label — so a
+// ping submitted at 17:39 to backfill the 17:00 window (40 min late) was
+// graded against 17:30 and displayed "+9m late". The server already grades
+// against the window the ping was submitted FOR (routes/activityLog.ts —
+// window_label match, timestamp containment as the legacy fallback); this
+// column's job is to show that, not to recompute it from a weaker input.
+//
+// computeLateness still lives in lib/lateness.ts and is still correct for
+// the live-status page, where "last ping vs. now" genuinely IS a wall-clock
+// question with no window to attribute to.
+//
+// on_time and late are separate arms: a late ping is satisfied-but-late, so
+// it gets AMBER. RED stays reserved for an unmet obligation (missed).
+// Reports and missed rows are static labels.
 interface StatusPresentation {
   label: string;
   // Tailwind classes — one for text (used on light-on-dark table),
@@ -289,16 +304,11 @@ const AMBER_PILL = 'bg-amber-500/15   border-amber-500/40   text-amber-300';
 
 function statusPresentation(r: ActivityRow): StatusPresentation {
   switch (r.status_kind) {
+    // Server text: "Ping (4 minutes)" / "Late Ping (40 minutes)".
     case 'on_time':
-    case 'late': {
-      const late = computeLateness(r.log_time, [0, 30]);
-      // computeLateness returns "HH:MM (on time)" or "HH:MM (+Nm late)" —
-      // we only want the parenthesized qualifier since the LOG TIME
-      // column already shows the timestamp.
-      const paren = late.display.match(/\(([^)]+)\)/)?.[1] ?? '';
-      const label = paren ? `Ping (${paren})` : r.status;
-      return { label, textClass: 'text-emerald-400', pillClass: GREEN_PILL };
-    }
+      return { label: r.status, textClass: 'text-emerald-400', pillClass: GREEN_PILL };
+    case 'late':
+      return { label: r.status, textClass: 'text-amber-400', pillClass: AMBER_PILL };
     case 'missed':
       return { label: 'Missed Ping', textClass: 'text-rose-400', pillClass: RED_PILL };
     case 'clocked_in_on_time':
