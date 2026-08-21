@@ -267,6 +267,22 @@ cron.schedule('* * * * *', async () => {
     );
 
     for (const row of rows) {
+      // Break-time quiet policy (locked 2026-08-20) — leg 3. Same hourly
+      // slot and same shared predicate as the report leg above. Checked
+      // BEFORE the count query: a waived session needs no COUNT(*).
+      //
+      // This is the pre-due hourly NUDGE only. The at-due push lives in
+      // jobs/taskDueCron.ts and is suppressed by an open-break check
+      // there, because a due_at is an instant and the task is still due
+      // when the guard returns.
+      if (await breakOverlapsWindow(row.shift_session_id, hourStart, hourEnd)) {
+        console.log(
+          `[taskReminder.skipped.break] session=${row.shift_session_id} ` +
+          `window=${hourStart.toISOString()}`,
+        );
+        continue;
+      }
+
       const taskCount = await pool.query<{ count: number }>(
         // due_at horizon: only nag about tasks due within the next hour
         // (or overdue). Without it this hourly leg counted EVERY pending
