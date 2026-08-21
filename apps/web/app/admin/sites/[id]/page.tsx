@@ -248,7 +248,6 @@ function NotInRosterTag() {
 const TABS = [
   ['overview',     'OVERVIEW'],
   ['checkpoints',  'CHECKPOINTS'],
-  ['schedule',     'SCHEDULE'],
   ['scan-history', 'SCAN HISTORY'],
 ] as const;
 
@@ -859,10 +858,11 @@ function SiteDetailPageInner() {
     );
   }
 
-  // Upcoming shifts (next 7 days, grouped by day). Extracted verbatim — the
-  // tab split assigns this section to BOTH Overview and Schedule, so it is
-  // rendered from one definition rather than duplicated. Same idiom as
-  // renderToggleRow above.
+  // Upcoming shifts (next 7 days, grouped by day), verbatim. One call site:
+  // the Overview panel, which is also where MANAGE SCHEDULE → lives. Kept as
+  // a function rather than folded back inline so the Overview panel reads as
+  // two named sections instead of 40 lines of nested list markup — same idiom
+  // as renderToggleRow above.
   function renderUpcomingShifts() {
     return (
       <section>
@@ -1229,9 +1229,6 @@ function SiteDetailPageInner() {
       </section>
       </>
       )}
-
-      {/* SCHEDULE — the MANAGE SCHEDULE entry point lives in this section's header. */}
-      {tab === 'schedule' && renderUpcomingShifts()}
 
       {/* SCAN HISTORY — ungated on checkpoints_enabled, as before. */}
       {tab === 'scan-history' && (
