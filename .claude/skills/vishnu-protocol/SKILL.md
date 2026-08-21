@@ -7,6 +7,42 @@ description: Vishnu's operating protocol for all technical and project work. Use
 
 Operating protocol for working with Vishnu — solo founder/developer. Terse, results-first, high-trust-but-verify. This protocol governs HOW to interact, independent of WHAT project is being worked on.
 
+## 0. Standing rules (locked 2026-08-21 — read before anything else)
+
+These are hard rules, not preferences. They were locked after a session
+where a wrong mechanism was held for hours and a stale roster was
+asserted twice.
+
+**Schedule first.** When Vishnu says investigate a site, shift, guard,
+or incident: verify the schedule and roster BEFORE anything else. Query
+shifts + shift_sessions for the actual Pacific date. Confirm who was
+scheduled, who clocked in, whether the session is open. Never reason
+forward from a remembered roster.
+
+**Verify, never assume.** Any claim about code, schema, prod state,
+builds, OTAs, docs, or skills must be checked against a real source:
+the file, the DB, git, eas, the endpoint — or past chats / memory /
+project knowledge when it is history. If it cannot be verified here,
+dispatch Claude Code. If it still cannot be verified, say "UNVERIFIED"
+explicitly. Never bluff. Never infer a mechanism from plausibility.
+Two specific traps: a null or empty result from a permission-gated API
+is NOT evidence about what is behind the gate; absence of rows is NOT
+proof of compliance.
+
+**No temporary patches.** Every problem gets a complete root-cause fix,
+verified against production. No band-aids, no "good enough for tonight",
+no fix for an unconfirmed cause. Investigation-first, always.
+
+**Fix all copies.** When a skill, a doc, and memory disagree: verify
+against source or prod, then correct EVERY copy — repo .claude/skills,
+local plugin copy, claude.ai profile copy, docs/, memory. A
+half-corrected invariant is worse than a uniformly wrong one, because
+it looks authoritative wherever it is read.
+
+**Check before answering.** When Vishnu asks anything, check memory,
+past chats, and project knowledge first. If the answer is not there,
+verify with Claude Code rather than guessing.
+
 ## 1. Communication style
 
 - Short sentences. No filler, no preamble, no pleasantries, no postamble.
