@@ -30,7 +30,8 @@
  *
  * Ownership seam (Phase 0, approved):
  *  - Component owns: permission gate, ready gate, capture, compress
- *    (1080px / JPEG 0.8, EXIF-stripped), GPS tagging strategy, freeze-frame
+ *    (1080px / JPEG 0.8, EXIF-stripped), GPS tagging strategy + mount-time
+ *    GPS warm-up, freeze-frame
  *    + status UI, optional confirm/retake step, breadcrumbs.
  *  - Caller owns: S3 upload, API submission + error mapping, offline
  *    queueing, navigation. The caller's async pipeline runs inside
@@ -60,10 +61,13 @@ export interface CapturedPhoto {
 }
 
 /** GPS tagging strategy.
- *  required     — cached-first, live 3s race; no fix → alert + reset (never
- *                 delivers null coords; matches ping's hard-fail).
+ *  required     — cached-first, bounded live read, then the cache ONCE MORE
+ *                 (the mount warm-up has usually landed by then); no fix →
+ *                 alert + reset (never delivers null coords; matches ping's
+ *                 hard-fail).
  *  best-effort  — same reads, but null coords are delivered on miss.
- *  none         — skip GPS entirely (caller reads position itself). */
+ *  none         — skip GPS entirely (caller reads position itself); the
+ *                 warm-up does not start either. */
 export type GpsStrategy = 'required' | 'best-effort' | 'none';
 
 export type PipelineResult = void | 'reset';
@@ -100,7 +104,19 @@ interface Props {
 
 const CAMERA_READY_FALLBACK_MS = 3_000;
 const TAKE_PICTURE_TIMEOUT_MS  = 10_000;
-const GPS_TIMEOUT_MS           = 3_000;
+// iOS hands a relaunched process an EMPTY CLLocationManager cache, and a cold
+// first fix needs 20-60s. A guard who takes a call, comes back, and shoots
+// immediately therefore had NOTHING to fall back on under the old 3s budget.
+// 15s is the widest wait that still reads as work-in-progress behind the
+// status pill; the mount-time warm-up below is what actually closes the gap.
+const GPS_TIMEOUT_MS           = 15_000;
+
+// Mount-time GPS warm-up. Starting a watch when the camera screen mounts lets
+// the fix converge while the guard frames the shot, and every update it
+// receives lands in the OS last-known cache that readGps reads. Deliberately
+// fire-and-forget: a warm-up failure must never block the shutter.
+const WARMUP_INTERVAL_MS = 1_000;
+const WARMUP_DISTANCE_M  = 0;
 
 // Amendment A (latency): the final artifact is always re-encoded to 1080px
 // JPEG@0.8 below, so capture quality mainly buys intermediate encode time.
@@ -121,18 +137,41 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 
 async function readGps(strategy: GpsStrategy): Promise<{ lat: number | null; lng: number | null; acc: number | null }> {
   if (strategy === 'none') return { lat: null, lng: null, acc: null };
-  // Cached last-known first (instant), bounded live read as fallback.
+
+  // Three legs, each independently guarded so a THROW on one still falls
+  // through to the next (the old single try/catch skipped the remaining
+  // reads whenever the first one threw).
+
+  // 1 — cached last-known (instant). Empty on a freshly relaunched process.
   try {
     const last = await Location.getLastKnownPositionAsync();
     if (last) return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy };
+  } catch (err) {
+    console.warn('[camera] cached GPS read threw:', err);
+  }
+
+  // 2 — bounded live read.
+  try {
     const live = await Promise.race([
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
       new Promise<null>((r) => setTimeout(() => r(null), GPS_TIMEOUT_MS)),
     ]);
     if (live) return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy };
   } catch (err) {
-    console.warn('[camera] GPS read threw:', err);
+    console.warn('[camera] live GPS read threw:', err);
   }
+
+  // 3 — cache again. getCurrentPositionAsync can still be converging while
+  // the warm-up watch has already delivered a usable fix into the OS cache;
+  // that fix is invisible to leg 1 (which ran before the wait) and to leg 2
+  // (which timed out). This is the leg that rescues the relaunch case.
+  try {
+    const warmed = await Location.getLastKnownPositionAsync();
+    if (warmed) return { lat: warmed.coords.latitude, lng: warmed.coords.longitude, acc: warmed.coords.accuracy };
+  } catch (err) {
+    console.warn('[camera] warmed GPS read threw:', err);
+  }
+
   return { lat: null, lng: null, acc: null };
 }
 
@@ -169,6 +208,9 @@ export default function CameraCapture({
   const busyRef  = useRef(false);
   const flashOpacity = useRef(new Animated.Value(0)).current;
   const insets = useSafeAreaInsets();
+  // Warm-up subscription, torn down on unmount so we never leave a location
+  // session running behind a closed camera screen.
+  const gpsWarmupRef = useRef<Location.LocationSubscription | null>(null);
 
   function crumb(message: string, level: 'info' | 'warning' | 'error' = 'info', data?: Record<string, unknown>) {
     Sentry.addBreadcrumb({ category: breadcrumbCategory, message: `${breadcrumbPrefix}: ${message}`, level, data });
@@ -181,6 +223,45 @@ export default function CameraCapture({
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // GPS warm-up — starts converging the moment the screen mounts, so by the
+  // time the guard has framed and shot, readGps has something to read. Every
+  // failure path here is swallowed: no permission, no hardware, no problem —
+  // readGps still runs its own reads and the shutter is never gated on this.
+  useEffect(() => {
+    if (gps === 'none') return;
+    let cancelled = false;
+    let loggedFirstFix = false;
+    (async () => {
+      try {
+        const sub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: WARMUP_INTERVAL_MS,
+            distanceInterval: WARMUP_DISTANCE_M,
+          },
+          (loc) => {
+            if (loggedFirstFix) return;
+            loggedFirstFix = true;
+            // One line per screen visit — this is what to look for in a
+            // device test to confirm the warm-up landed before the shutter.
+            console.log(`[camera] GPS warm-up first fix acc=${loc.coords.accuracy}`);
+          },
+          (err) => console.warn('[camera] GPS warm-up error:', err),
+        );
+        // Unmounted while watchPositionAsync was still resolving.
+        if (cancelled) { sub.remove(); return; }
+        gpsWarmupRef.current = sub;
+      } catch (err) {
+        console.warn('[camera] GPS warm-up failed to start:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      gpsWarmupRef.current?.remove();
+      gpsWarmupRef.current = null;
+    };
+  }, [gps]);
 
   function setFrozenStatus(uri: string) {
     return (msg: string) => setStage({ kind: 'frozen', uri, status: msg });
@@ -290,9 +371,22 @@ export default function CameraCapture({
       console.log(`[camera] capture_ms=${tCapture} manipulate_ms=${tManipulate} quality=${CAPTURE_QUALITY}`);
       crumb('captured', 'info', { capture_ms: tCapture, manipulate_ms: tManipulate, quality: CAPTURE_QUALITY, attempts });
 
+      // Flip the status BEFORE the read: a 15s acquisition behind a pill that
+      // still says SAVING… reads as a hang. Reuses the freeze-frame spinner.
+      setStage({ kind: 'frozen', uri: photo.uri, status: 'GETTING LOCATION…' });
+      const tGps = Date.now();
       const pos = await readGps(gps);
+      crumb('gps read', pos.lat === null ? 'warning' : 'info', {
+        strategy: gps, gps_ms: Date.now() - tGps, accuracy_m: pos.acc, got_fix: pos.lat !== null,
+      });
       if (gps === 'required' && (pos.lat === null || pos.lng === null)) {
-        Alert.alert('GPS Failed', 'GPS lock failed. Move to an area with better signal and try again.');
+        // Copy is wait-not-walk on purpose: the failure is a cold location
+        // service on a relaunched process, not where the guard is standing.
+        // The old text sent guards walking off post to chase a phantom.
+        Alert.alert(
+          'GPS Not Ready',
+          "Your phone's location is still starting up. Wait about 30 seconds with the app open, then try again.",
+        );
         busyRef.current = false;
         setStage({ kind: 'live' });
         return;
