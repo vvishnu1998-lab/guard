@@ -54,6 +54,7 @@ interface DueRow {
 cron.schedule('*/5 * * * *', async () => {
   let considered = 0;
   let notified = 0;
+  let deferred = 0;
 
   try {
     const { rows } = await pool.query<DueRow>(
@@ -77,6 +78,34 @@ cron.schedule('*/5 * * * *', async () => {
 
     for (const row of rows) {
       try {
+        // Break-time quiet policy (locked 2026-08-20): during an active
+        // break a guard owes nothing. A due_at is an INSTANT, not a
+        // window, and the task is STILL DUE when the guard returns — so
+        // this DEFERS the push, it does not waive it. That is why this
+        // uses the open-break check (routes/locations.ts:725 pattern)
+        // rather than breakOverlapsWindow: there is no window to waive.
+        //
+        // ORDER IS LOAD-BEARING — this must run BEFORE the notified_at
+        // claim below. Stamping notified_at on a suppressed tick would
+        // make the `WHERE notified_at IS NULL` gate permanently false
+        // and the reminder would never fire again: deferred would become
+        // lost. The outer SELECT already filters on notified_at IS NULL,
+        // due_at <= NOW() and clocked_out_at IS NULL, so an untouched
+        // row reappears on the next 5-min tick and fires as soon as
+        // break_end is set.
+        const openBreak = await pool.query<{ id: string }>(
+          'SELECT id FROM break_sessions WHERE shift_session_id = $1 AND break_end IS NULL LIMIT 1',
+          [row.session_id],
+        );
+        if (openBreak.rows[0]) {
+          deferred += 1;
+          console.log(
+            `[taskDueCron.deferred.break] task=${row.task_instance_id} ` +
+            `session=${row.session_id} break=${openBreak.rows[0].id}`,
+          );
+          continue; // notified_at deliberately untouched
+        }
+
         // Idempotency gate — WHERE notified_at IS NULL is the atomic
         // check. Concurrent tick sees RETURNING empty and skips.
         const claim = await pool.query<{ id: string }>(
@@ -157,8 +186,10 @@ cron.schedule('*/5 * * * *', async () => {
     Sentry.captureException(err, { tags: { context: 'taskDueCron.tick' } });
     console.error('[taskDueCron] Cron error:', err);
   } finally {
-    if (notified > 0 || considered > 20) {
-      console.log(`[taskDueCron] considered=${considered} notified=${notified}`);
+    if (notified > 0 || deferred > 0 || considered > 20) {
+      console.log(
+        `[taskDueCron] considered=${considered} notified=${notified} deferred=${deferred}`,
+      );
     }
   }
 });
