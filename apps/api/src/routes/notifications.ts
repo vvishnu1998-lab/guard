@@ -80,10 +80,46 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
     )
   )
   AND CASE notifications.type
+    -- ping_reminder auto-erase is WINDOW-KEYED. It used to hide on "any
+    -- ping in this session arrived after this reminder", which is blind to
+    -- WHICH window was answered: submitting a late backfill for window
+    -- W-1 erased the live, still-unanswered reminder for window W.
+    --
+    -- Observed on 2026-08-20, session 078abb4d: the 17:30 reminder
+    -- (created 17:30:01) was erased at 17:39:59 by a ping labelled
+    -- '17:00' — a backfill of the earlier missed window. read_at stayed
+    -- NULL throughout, so nothing in the notifications table recorded
+    -- that the guard had stopped being told. Had they not happened to
+    -- ping 17:30 twenty-six seconds later, they would have missed that
+    -- window with no visible prompt.
+    --
+    -- The reminder's own window lives in data->>'window_label'
+    -- (pingReminder writes snake_case). missed_ping writes camelCase
+    -- 'windowLabel'; COALESCE covers both so this predicate stays correct
+    -- if the keys are ever unified. 2 of 450 legacy ping_reminder rows
+    -- carry neither key — those keep the old any-later-ping behaviour
+    -- rather than becoming permanently un-erasable.
+    --
+    -- Indexed by idx_location_pings_session_window
+    -- (shift_session_id, window_label) WHERE window_label IS NOT NULL.
+    --
+    -- The missed_ping arm below is NOT this shape and must not be
+    -- "fixed" to match: it keys on missedPingId -> missed_pings
+    -- .resolved_at, which is already exact.
     WHEN 'ping_reminder' THEN NOT EXISTS (
       SELECT 1 FROM location_pings lp
       WHERE lp.shift_session_id = notifications.shift_session_id
-        AND lp.pinged_at > notifications.created_at
+        AND CASE
+              WHEN COALESCE(
+                     notifications.data->>'window_label',
+                     notifications.data->>'windowLabel'
+                   ) IS NOT NULL
+              THEN lp.window_label = COALESCE(
+                     notifications.data->>'window_label',
+                     notifications.data->>'windowLabel'
+                   )
+              ELSE lp.pinged_at > notifications.created_at
+            END
     )
     WHEN 'activity_report_reminder' THEN NOT EXISTS (
       SELECT 1 FROM reports r
