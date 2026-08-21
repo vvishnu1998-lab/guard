@@ -1,0 +1,54 @@
+-- schema_v49 — one ping per window (dated cutover)
+--
+-- location_pings had NO uniqueness on (shift_session_id, window_label).
+-- idx_location_pings_session_window is a PLAIN btree — a lookup aid, not a
+-- constraint — so a window could be answered any number of times. Compare
+-- checkpoint_scans, which has carried uq_checkpoint_scans_round
+-- (checkpoint_id, shift_session_id, round_window) plus ON CONFLICT DO
+-- NOTHING since v44. Pings were the odd one out.
+--
+-- WHY THE DATE PREDICATE
+--
+-- Nine (shift_session_id, window_label) pairs already carry more than one
+-- ping — 20 rows, all belonging to STARNET SECURITY (a live paying
+-- customer), across three sessions:
+--   6936d78a  deepak naik / Bethel AME        10:30 x3, 12:00 x3, + 4 pairs
+--   9d15ce95  Bhanu / Cristo Rey (07-18)      02:00, 03:30
+--   1ba93935  Nandu / Cristo Rey (08-19)      01:30
+--
+-- They are two distinct defects, neither of which this index can repair:
+--   * genuine repeat answers of the same window (02:00:36 + 02:01:05);
+--   * MISLABELLED rows, where window_label names a window the ping does
+--     not belong to — including Nandu's 21:49:08 ping labelled '01:30',
+--     a window three hours forty minutes in its OWN FUTURE. That row is
+--     why the window_label validation in routes/locations.ts ships
+--     alongside this index. Note that shift ran 19:00-06:00, so '01:30'
+--     is legal GEOMETRY for it; only the not-yet-open bound rejects it.
+--
+-- Those rows are customer evidence. Deleting or relabelling them to make
+-- an index build is not a trade we are making, so the index is scoped to
+-- data written from the cutover forward. History stays exactly as it is,
+-- readable and unmodified; the constraint governs everything new.
+--
+-- 2026-08-21T00:00:00+00 == 2026-08-20 17:00:00 America/Los_Angeles.
+-- Verified at authoring time: 0 duplicate pairs at or after the cutover,
+-- so this builds cleanly.
+--
+-- The literal is an explicit-offset TIMESTAMPTZ, which is immutable and
+-- therefore legal in an index predicate. Do NOT rewrite it as a bare
+-- string or a NOW()-relative expression: the first depends on the session
+-- TimeZone and the second is not immutable, and either way the index
+-- silently stops being buildable.
+--
+-- Not CONCURRENTLY: CREATE INDEX CONCURRENTLY cannot run inside a
+-- transaction block, and db/migrate.ts executes each file as a single
+-- implicit transaction. location_pings is small (156 rows at authoring
+-- time), so the brief ACCESS EXCLUSIVE lock is immaterial.
+--
+-- The matching predicate is repeated verbatim in the ON CONFLICT clause in
+-- routes/locations.ts — arbiter inference on a PARTIAL index requires the
+-- statement to restate the predicate. If you change one, change both.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_location_pings_session_window
+  ON location_pings (shift_session_id, window_label)
+  WHERE window_label IS NOT NULL
+    AND pinged_at >= TIMESTAMPTZ '2026-08-21T00:00:00+00';

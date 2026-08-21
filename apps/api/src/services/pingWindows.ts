@@ -58,6 +58,73 @@ export async function breakOverlapsWindow(
 }
 
 /**
+ * Site-local HH:MM label for an instant — the string the crons WRITE into
+ * missed_pings.window_label and location_pings.window_label, and therefore
+ * the string every window lookup joins on.
+ *
+ * Byte-identical to the private copies in jobs/pingReminder.ts:91,
+ * jobs/missedPingCron.ts:56, jobs/missedReportCron.ts:63 and
+ * routes/activityLog.ts:281 — same locale, same option bag, same
+ * 'America/Los_Angeles' fallback. This is the canonical home; collapsing
+ * those four onto it is a separate commit (it touches three crons, and
+ * this one is already shipping a constraint).
+ */
+export function siteLocalLabel(when: Date, siteTz: string | null): string {
+  const tz = siteTz ?? 'America/Los_Angeles';
+  return new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+    timeZone: tz,
+  }).format(when);
+}
+
+/**
+ * Every label a shift could legitimately carry, mapped to the epoch ms at
+ * which that window OPENS: scheduled_start + N*30min for each window whose
+ * END fits inside scheduled_end (R3).
+ *
+ * Deliberately NOT filtered by clocked_in_at (R4), by whether the window
+ * has CLOSED, or by break waiver. Those are separate questions with their
+ * own rules, and folding them in here would reject legitimate submissions:
+ *   * R4 would reject a guard backfilling a window that opened moments
+ *     before they clocked in;
+ *   * a closed-window filter would reject every late backfill, which is
+ *     exactly the flow missed_pings exists to support;
+ *   * break waiver would reject a guard who pinged anyway during a break,
+ *     which is harmless and worth recording.
+ *
+ * The window START is returned so callers CAN cheaply reject a label whose
+ * window has not opened yet — see the note in routes/locations.ts. That
+ * bound is what catches the real production defect; schedule geometry
+ * alone does not. STARNET session 1ba93935 ran 19:00→06:00, so '01:30' is
+ * a perfectly legal window of that shift — the fault was that the ping
+ * carrying it was submitted at 21:49, three hours forty before that window
+ * existed to be answered.
+ *
+ * DST caveat: on a fall-back day a shift can contain the same local label
+ * twice (01:30 happens twice). First occurrence wins, which is the
+ * permissive choice — the earlier open time makes the not-yet-open check
+ * looser, and this validator must never reject a legitimate ping.
+ */
+export function scheduleWindows(
+  scheduledStart: Date,
+  scheduledEnd:   Date,
+  siteTz:         string | null,
+): Map<string, number> {
+  const ssMs = scheduledStart.getTime();
+  const seMs = scheduledEnd.getTime();
+  const out = new Map<string, number>();
+  // Same 250-window safety bound as completedTrackableWindows: a bad
+  // scheduled_start must not spin forever.
+  for (let n = 0; n < 250; n += 1) {
+    const wsMs = ssMs + n * PING_WINDOW_MS;
+    if (wsMs + PING_WINDOW_MS > seMs) break;   // R3 — end must fit in shift
+    const label = siteLocalLabel(new Date(wsMs), siteTz);
+    if (!out.has(label)) out.set(label, wsMs);  // first occurrence wins (DST)
+  }
+  return out;
+}
+
+/**
  * Enumerate the [window_start, window_end] pairs for a session that
  * have COMPLETED as of `now` and that pass the window fit + clock-in
  * rules (R3 + R4). Returns oldest → newest.

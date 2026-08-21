@@ -8,6 +8,7 @@ import { insertNotification } from '../services/notifications';
 import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
 import { sendPushNotification } from '../services/firebase';
 import { expiresAtFor } from '../services/retention';
+import { scheduleWindows } from '../services/pingWindows';
 
 /**
  * Fire guard notification row + admin email for a geofence violation.
@@ -353,18 +354,41 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     });
   }
 
-  // window_label sanity: HH:MM 24-hour. Cheap regex before we query the DB.
+  // window_label SHAPE check only — HH:MM 24-hour. Cheap regex before we
+  // query the DB. Whether the label names a real window of THIS shift is
+  // checked below, once the schedule has been loaded.
   const windowLabel: string | null =
     typeof window_label === 'string' && /^\d{2}:\d{2}$/.test(window_label)
       ? window_label
       : null;
 
-  const sessionResult = await pool.query<{ site_id: string; clocked_in_at: Date; clocked_out_at: Date | null }>(
-    'SELECT site_id, clocked_in_at, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+  // scheduled_start/end + site_tz come along for the window_label
+  // validation below — the schedule is what defines a legal label, and
+  // shift_sessions alone cannot answer that.
+  const sessionResult = await pool.query<{
+    site_id:         string;
+    clocked_in_at:   Date;
+    clocked_out_at:  Date | null;
+    scheduled_start: Date;
+    scheduled_end:   Date;
+    site_tz:         string | null;
+  }>(
+    `SELECT ss.site_id, ss.clocked_in_at, ss.clocked_out_at,
+            sh.scheduled_start, sh.scheduled_end, si.timezone AS site_tz
+       FROM shift_sessions ss
+       JOIN shifts sh ON sh.id = ss.shift_id
+       JOIN sites  si ON si.id = ss.site_id
+      WHERE ss.id = $1 AND ss.guard_id = $2`,
     [shift_session_id, req.user!.sub]
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Session not found' });
-  const { site_id, clocked_out_at: pingClockedOutAt } = sessionResult.rows[0];
+  const {
+    site_id,
+    clocked_out_at:  pingClockedOutAt,
+    scheduled_start: pingScheduledStart,
+    scheduled_end:   pingScheduledEnd,
+    site_tz:         pingSiteTz,
+  } = sessionResult.rows[0];
 
   // Liveness gate — same shape as POST /violation (5a6de20). A ping against
   // a closed session is not merely a spurious location_pings row: the
@@ -385,6 +409,53 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       message: 'This shift has already ended. Pings are only accepted during an open session.',
       clocked_out_at: pingClockedOutAt.toISOString(),
     });
+  }
+
+  // window_label must name a REAL window of this shift, and one that has
+  // already OPENED. Until now the only check was the HH:MM regex, so the
+  // server accepted any well-formed string and wrote it verbatim.
+  //
+  // Two bounds, because geometry alone is not enough. STARNET session
+  // 1ba93935 ran 19:00→06:00, so '01:30' IS a legal window of that shift;
+  // the defect was a ping submitted at 21:49:08 carrying it — three hours
+  // forty minutes before that window existed to be answered. It then sat
+  // in the record as a second answer to a window it had nothing to do
+  // with. Only the not-yet-open bound catches that row.
+  //
+  // Note what is NOT checked: whether the window has closed (every late
+  // backfill answers a closed window — that is the entire missed_pings
+  // flow), whether it began before clock-in (R4), or whether a break
+  // waived it. Those would each reject legitimate submissions.
+  //
+  // A distinct code, not a bare 400: the client must tell "your label is
+  // wrong" apart from "your coordinates are wrong", and `reason` lets the
+  // app distinguish a stale label from a clock-skewed one.
+  if (windowLabel) {
+    const windows    = scheduleWindows(pingScheduledStart, pingScheduledEnd, pingSiteTz);
+    const windowOpen = windows.get(windowLabel);
+    const reason =
+      windowOpen === undefined      ? 'not_in_schedule'
+      : windowOpen > Date.now()     ? 'not_yet_open'
+      : null;
+    if (reason) {
+      console.warn('[ping.reject.bad_window_label]', {
+        shift_session_id,
+        guard_id:        req.user!.sub,
+        window_label:    windowLabel,
+        reason,
+        scheduled_start: pingScheduledStart.toISOString(),
+        scheduled_end:   pingScheduledEnd.toISOString(),
+        site_tz:         pingSiteTz,
+      });
+      return res.status(422).json({
+        error:   'PING_WINDOW_INVALID',
+        reason,
+        message: reason === 'not_in_schedule'
+          ? 'That ping window is not part of this shift. Reopen the app and try again.'
+          : 'That ping window has not started yet. Reopen the app and try again.',
+        window_label: windowLabel,
+      });
+    }
   }
 
   const photoValidation = await validatePhotoOrQuarantine(photo_url, {
@@ -445,6 +516,9 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
   const client = await pool.connect();
   let pingRow: any;
   let resolvedMissedPingId: string | null = null;
+  // True when the window already had a ping and ON CONFLICT DO NOTHING
+  // swallowed this one — drives the 200/"already_recorded" response.
+  let alreadyRecorded = false;
   try {
     await client.query('BEGIN');
 
@@ -473,12 +547,27 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       }
     }
 
+    // One ping per window (schema_v49). The ON CONFLICT predicate must
+    // restate the partial index's predicate VERBATIM — arbiter inference
+    // on a partial index does not happen otherwise, and Postgres raises
+    // "no unique or exclusion constraint matching the ON CONFLICT
+    // specification" rather than silently falling back. If you change the
+    // cutover here, change db/schema_v49.sql too.
+    //
+    // Pre-cutover rows are outside the index, so a window answered twice
+    // back then still does not conflict — deliberate: history is not
+    // rewritten, only new writes are constrained.
     const pingInsert = await client.query(
       `INSERT INTO location_pings
          (shift_session_id, guard_id, site_id, latitude, longitude, accuracy_meters,
           is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason, expires_at,
           window_label, submitted_late)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       ON CONFLICT (shift_session_id, window_label)
+         WHERE window_label IS NOT NULL
+           AND pinged_at >= TIMESTAMPTZ '2026-08-21T00:00:00+00'
+       DO NOTHING
+       RETURNING *`,
       [shift_session_id, req.user!.sub, site_id, latitude, longitude, accuracyM,
        true, ping_type, photo_url || null, photoDeleteAt, throttle_reason ?? null,
        expiresAtFor('ping_metadata'),
@@ -486,8 +575,35 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     );
     pingRow = pingInsert.rows[0];
 
-    // Resolve the matching missed_pings row now that we have the ping's id.
-    if (resolvedMissedPingId) {
+    // DO NOTHING swallowed the row: this window already has a ping. Load
+    // the incumbent so the guard gets the real record back rather than an
+    // empty 201, and so the missed-ping resolve below still has an id to
+    // point at.
+    if (!pingRow) {
+      alreadyRecorded = true;
+      const existing = await client.query(
+        `SELECT * FROM location_pings
+          WHERE shift_session_id = $1
+            AND window_label = $2
+            AND pinged_at >= TIMESTAMPTZ '2026-08-21T00:00:00+00'
+          ORDER BY pinged_at ASC
+          LIMIT 1`,
+        [shift_session_id, windowLabel],
+      );
+      pingRow = existing.rows[0];
+      console.warn('[ping.duplicate_window]', {
+        shift_session_id,
+        guard_id:     req.user!.sub,
+        window_label: windowLabel,
+        existing_ping_id: pingRow?.id ?? null,
+      });
+    }
+
+    // Resolve the matching missed_pings row now that we have a ping id.
+    // Runs on the already-recorded path too: a window whose incumbent
+    // ping did not resolve its miss would otherwise leave the miss open
+    // forever, since every retry now short-circuits here.
+    if (resolvedMissedPingId && pingRow) {
       await client.query(
         `UPDATE missed_pings
             SET resolved_at = NOW(),
@@ -516,7 +632,20 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     client.release();
   }
 
-  res.status(201).json(pingRow);
+  // Recorded vs already-recorded must be distinguishable by the client:
+  // a duplicate submission is NOT an error (the guard did stand at the
+  // post and take a photo) but it is also not a second answer, and the
+  // app should say so rather than claim a fresh ping landed.
+  //   201 { status: 'recorded',         ping }  — this submission is the record
+  //   200 { status: 'already_recorded', ping }  — window already answered;
+  //                                               `ping` is the incumbent
+  // The 201 body changed shape (was the bare row). Only app/ping/photo.tsx
+  // and the dead offlineStore.submitPing call this endpoint, and neither
+  // reads the body — checked before changing it.
+  if (alreadyRecorded) {
+    return res.status(200).json({ status: 'already_recorded', ping: pingRow ?? null });
+  }
+  res.status(201).json({ status: 'recorded', ping: pingRow });
 });
 
 // POST /api/locations/violation — guard device reports a boundary breach.
