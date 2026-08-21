@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import * as Sentry from '@sentry/react-native';
 import { setShiftTag } from '../lib/sentry';
 import { apiClient } from '../lib/apiClient';
+import { persistBreakUntil, clearBreakUntil } from '../lib/breakState';
 import { useUnreadStore } from './unreadStore';
 
 interface Geofence {
@@ -114,6 +115,8 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
   },
 
   clearSession: () => {
+    // Breaks die with the session — clear the SecureStore mirror too.
+    void clearBreakUntil();
     set({
       activeShift: null, activeSession: null, pendingShift: null,
       currentBreak: null, breakQuotas: null, lastPingedWindow: null,
@@ -121,7 +124,16 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     setShiftTag(null);
   },
 
-  setCurrentBreak: (b) => set({ currentBreak: b }),
+  // Single choke point for break-state transitions: startBreak, endBreak
+  // (both success and 404-already-closed) and refreshFromServer all route
+  // through here, so the SecureStore mirror the headless geofence task
+  // reads (lib/breakState.ts) can never drift from the in-memory truth.
+  // Fire-and-forget — Keychain latency must not block UI state.
+  setCurrentBreak: (b) => {
+    if (b) void persistBreakUntil(b.break_start, b.planned_duration_minutes);
+    else void clearBreakUntil();
+    set({ currentBreak: b });
+  },
 
   markWindowPinged: (sessionId, label) => set({ lastPingedWindow: { sessionId, label } }),
 
@@ -196,7 +208,10 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
         // break" and should clear a cached one.
         const nextBreak = active.current_break ?? null;
         if (JSON.stringify(state.currentBreak) !== JSON.stringify(nextBreak)) {
-          set({ currentBreak: nextBreak });
+          // Through setCurrentBreak (not a bare set) so the SecureStore
+          // break mirror follows server truth — this is how the app learns
+          // of a server auto-close it slept through.
+          get().setCurrentBreak(nextBreak);
         }
         // Quota state is pure server truth like currentBreak — overwrite on
         // every refresh. Absent field (pre-v46 API) leaves the cache alone.

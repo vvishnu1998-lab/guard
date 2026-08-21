@@ -291,6 +291,8 @@ export default function RootLayout() {
       // NEW session against a PREVIOUS shift's clock. Always cleared with the
       // session id it belongs to.
       SecureStore.deleteItemAsync('active_shift_end').catch(() => {});
+      // Break mirror dies with the session (lib/breakState.ts).
+      SecureStore.deleteItemAsync('active_break_until').catch(() => {});
       // Legacy keys — safe to delete even when unused so a downgrade to
       // an older build doesn't rehydrate stale state.
       SecureStore.deleteItemAsync('active_geofence').catch(() => {});
