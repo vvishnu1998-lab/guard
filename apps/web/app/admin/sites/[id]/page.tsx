@@ -240,6 +240,33 @@ function NotInRosterTag() {
 }
 
 /**
+ * Shared grid template. The column header sits ABOVE the round list while the
+ * rows live inside each <details>, so they cannot be one <table> any more —
+ * a fixed grid template is what keeps them in the same columns.
+ */
+const SCAN_GRID = 'hidden md:grid grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_auto] gap-x-4';
+
+/** Distinct guard names in a round, first-seen order. Derived from scans
+ *  already fetched — no extra request. Usually one guard; a handoff mid-round
+ *  legitimately yields two. */
+function roundGuards(scans: CheckpointScan[]): string[] {
+  const seen: string[] = [];
+  for (const s of scans) if (s.guard_name && !seen.includes(s.guard_name)) seen.push(s.guard_name);
+  return seen;
+}
+
+/** Largest distance_m in a round — the worst read, surfaced on the summary so
+ *  a suspicious round is visible without opening it. Derived, not fetched. */
+function roundWorstDistance(scans: CheckpointScan[]): number | null {
+  let worst: number | null = null;
+  for (const s of scans) {
+    if (!Number.isFinite(s.distance_m)) continue;
+    if (worst === null || s.distance_m > worst) worst = s.distance_m;
+  }
+  return worst;
+}
+
+/**
  * Tab model. State lives in `?tab=`, never in React state, so a tab is a
  * shareable URL and Back works — the same contract as /admin/shifts?view=.
  * An unknown or absent slug falls back to `overview` rather than rendering
@@ -592,6 +619,32 @@ function SiteDetailPageInner() {
         };
       });
   }, [scans, site, activeLinked, activeLinkedIds]);
+
+  // ── Per-checkpoint coverage across the selected range (C9) ─────────────
+  // The aggregation the round list cannot give you: a checkpoint missed in
+  // EVERY round is one line here instead of a pattern you have to spot across
+  // eleven headers.
+  //
+  // Derived entirely from `rounds` and `activeLinked` — both already in
+  // memory. No new fetch, and deliberately NOT a new count: the numerator
+  // reuses the same "did this round contain a scan of this checkpoint" test
+  // the round grouping already makes, so the strip and the X-of-N pills can
+  // never disagree.
+  //
+  // Denominator is rounds IN RANGE, not rounds that should have happened —
+  // a round with zero scans produces no row to group and so cannot appear
+  // (same limitation the round list has always had).
+  const coverage = useMemo(() => {
+    if (rounds.length === 0) return [];
+    return activeLinked
+      .map((cp) => ({
+        id:    cp.id,
+        label: cp.label,
+        hit:   rounds.filter((r) => r.scans.some((s) => s.checkpoint_id === cp.id)).length,
+        total: rounds.length,
+      }))
+      .sort((a, b) => a.hit - b.hit || a.label.localeCompare(b.label));  // worst first
+  }, [rounds, activeLinked]);
 
   // C5/C7 — CSV export of exactly the rows on screen. Oldest first,
   // deliberately the reverse of the on-screen DESC order: a patrol log
@@ -1314,93 +1367,147 @@ function SiteDetailPageInner() {
               or unlinked later changes what past rounds appear to have missed.
             </p>
 
-            {/* Desktop (md+): one tbody per round, each opened by a header row.
-                distance_m keeps its own column — the anti-fraud signal. Plain
-                number, no thresholds: there is no data yet to justify one. */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="text-left text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
-                    <th className="py-2 pr-4 font-normal">CHECKPOINT</th>
-                    <th className="py-2 pr-4 font-normal">GUARD</th>
-                    <th className="py-2 pr-4 font-normal">SCANNED AT</th>
-                    <th className="py-2 font-normal">DISTANCE (M)</th>
-                  </tr>
-                </thead>
-                {rounds.map((r) => (
-                  <tbody key={r.key} className="divide-y divide-[#1A3050]">
-                    <tr>
-                      <td colSpan={4} className="pt-4 pb-2">
-                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                          <span className="text-amber-400 font-bold tracking-widest text-xs">{r.label}</span>
-                          <RoundCount scanned={r.scanned} expected={r.expected} />
-                          {r.missing.length > 0 && (
-                            <span className="text-gray-500 text-xs min-w-0 break-words">
-                              Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                    {r.scans.map((s) => (
-                      <tr key={s.id}>
-                        <td className="py-2.5 pr-4 text-gray-200">
-                          {s.checkpoint_label}
-                          {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
-                        </td>
-                        <td className="py-2.5 pr-4 text-gray-300">{s.guard_name}</td>
-                        <td className="py-2.5 pr-4 text-gray-400 font-mono text-xs">
-                          {scanTs.format(new Date(s.scanned_at))}
-                        </td>
-                        <td className="py-2.5 text-gray-300 font-mono text-xs">{Math.round(s.distance_m)} m</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                ))}
-              </table>
+            {/* Per-checkpoint coverage for the selected range. Sits ABOVE the
+                round list because it answers the question the round list is
+                worst at: "is anything being missed every single time?" */}
+            <div className="border border-[#1A3050] rounded-lg overflow-hidden mb-4">
+              <div className="px-3 py-2 bg-[#0F1E35] border-b border-[#1A3050]">
+                <h3 className="text-gray-400 text-xs tracking-widest">
+                  CHECKPOINT COVERAGE — {rounds.length} ROUND{rounds.length === 1 ? '' : 'S'} IN RANGE
+                </h3>
+              </div>
+              {scansTruncated ? (
+                /* Same reasoning as the EXPORT CSV disable: a ratio computed over
+                   a truncated set understates coverage, and a checkpoint that
+                   looks never-scanned because rows were capped is worse than no
+                   number at all. Suppress rather than qualify. */
+                <p className="px-3 py-2 text-amber-300 text-xs leading-relaxed">
+                  Coverage is hidden while the view is capped at 1000 rows — the ratios would be
+                  computed over a partial range and would understate what was actually scanned.
+                  Narrow the dates to see it.
+                </p>
+              ) : coverage.length === 0 ? (
+                <p className="px-3 py-2 text-gray-500 text-xs">
+                  No active, linked checkpoints to measure against.
+                </p>
+              ) : (
+                <ul className="divide-y divide-[#1A3050]">
+                  {coverage.map((c) => {
+                    const none = c.hit === 0;
+                    const full = c.hit >= c.total;
+                    return (
+                      <li key={c.id} className="px-3 py-2 flex items-center justify-between gap-3">
+                        <span className="text-gray-200 text-sm break-words min-w-0">{c.label}</span>
+                        <span
+                          className={
+                            'text-xs font-mono shrink-0 ' +
+                            (none ? 'text-red-400' : full ? 'text-green-400' : 'text-amber-400')
+                          }
+                        >
+                          {c.hit} of {c.total} round{c.total === 1 ? '' : 's'}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
 
-            {/* Mobile (<md): cards, per docs/mobile-responsive.md. At 375px the
-                round header stacks — label on its own line, count beneath it,
-                missing checkpoints wrapping below — so nothing is squeezed into
-                a shared row and truncated. The header is a filled bar rather
-                than a text line so the group boundary survives scrolling. */}
-            <div className="md:hidden space-y-4">
-              {rounds.map((r) => (
-                <div key={r.key}>
-                  <div className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 mb-2">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="text-amber-400 font-bold tracking-widest text-xs break-words min-w-0">
-                        {r.label}
-                      </span>
-                      <RoundCount scanned={r.scanned} expected={r.expected} />
-                    </div>
-                    {r.missing.length > 0 && (
-                      <p className="text-gray-500 text-xs mt-1 break-words">
-                        Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
-                      </p>
-                    )}
-                  </div>
-                  <div className="space-y-2 pl-2 border-l border-[#1A3050]">
-                    {r.scans.map((s) => (
-                      <div key={s.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2">
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-gray-200 text-sm font-medium break-words min-w-0">
+            {/* Column header for the desktop rows. Lives outside the rounds
+                because each round is its own <details> now — see SCAN_GRID. */}
+            <div className={`${SCAN_GRID} text-gray-500 text-xs tracking-widest border-b border-[#1A3050] px-3 py-2`}>
+              <span>CHECKPOINT</span>
+              <span>GUARD</span>
+              <span>SCANNED AT</span>
+              <span className="text-right">DISTANCE (M)</span>
+            </div>
+
+            {/* One plain <details> per round — deliberately NOT name-grouped, so
+                several rounds can sit open at once while an admin compares them.
+                Open state is a server-rendered `open` attribute, no JS: a round
+                that is incomplete opens itself, a whole round stays shut. The
+                completeness test is the same expression RoundCount uses, so the
+                pill and the open state can never disagree. */}
+            <div className="divide-y divide-[#1A3050]">
+              {rounds.map((r) => {
+                const complete = r.expected > 0 && r.scanned >= r.expected;
+                const guards   = roundGuards(r.scans);
+                const worst    = roundWorstDistance(r.scans);
+                return (
+                  <details key={r.key} open={!complete} className="group">
+                    <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden px-3 py-3 hover:bg-[#0F1E35] transition-colors">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <svg
+                          viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+                          className="w-3.5 h-3.5 shrink-0 text-gray-500 group-open:rotate-180 transition-transform duration-200"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m6 9 6 6 6-6" />
+                        </svg>
+                        <span className="text-amber-400 font-bold tracking-widest text-xs">{r.label}</span>
+                        <RoundCount scanned={r.scanned} expected={r.expected} />
+                        {guards.length > 0 && (
+                          <span className="text-gray-300 text-xs break-words min-w-0">{guards.join(', ')}</span>
+                        )}
+                        {worst !== null && (
+                          <span
+                            title="Largest distance from the checkpoint in this round."
+                            className="text-gray-400 font-mono text-xs shrink-0"
+                          >
+                            worst {Math.round(worst)} m
+                          </span>
+                        )}
+                      </div>
+                      {r.missing.length > 0 && (
+                        <p className="text-gray-500 text-xs mt-1 pl-[1.375rem] break-words">
+                          Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
+                        </p>
+                      )}
+                    </summary>
+
+                    {/* Desktop rows (md+). distance_m keeps its own column — the
+                        anti-fraud signal. Plain number, no thresholds: there is
+                        no data yet to justify one. */}
+                    <div className="pb-2">
+                      {r.scans.map((s) => (
+                        <div key={s.id} className={`${SCAN_GRID} px-3 py-2 text-sm items-baseline`}>
+                          <span className="text-gray-200 break-words min-w-0">
                             {s.checkpoint_label}
                             {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
                           </span>
-                          <span className="text-gray-300 font-mono text-xs shrink-0">{Math.round(s.distance_m)} m</span>
+                          <span className="text-gray-300 break-words min-w-0">{s.guard_name}</span>
+                          <span className="text-gray-400 font-mono text-xs">
+                            {scanTs.format(new Date(s.scanned_at))}
+                          </span>
+                          <span className="text-gray-300 font-mono text-xs text-right">
+                            {Math.round(s.distance_m)} m
+                          </span>
                         </div>
-                        <p className="text-gray-500 text-xs mt-0.5">
-                          {s.guard_name}
-                          <span className="text-gray-600"> · </span>
-                          <span className="font-mono">{scanTs.format(new Date(s.scanned_at))}</span>
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
+                      ))}
+                    </div>
+
+                    {/* Mobile cards (<md), per docs/mobile-responsive.md — the
+                        grid above collapses at 375px, so rows become cards. */}
+                    <div className="md:hidden space-y-2 px-3 pb-3 pl-5 border-l border-[#1A3050] ml-3">
+                      {r.scans.map((s) => (
+                        <div key={s.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-gray-200 text-sm font-medium break-words min-w-0">
+                              {s.checkpoint_label}
+                              {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
+                            </span>
+                            <span className="text-gray-300 font-mono text-xs shrink-0">{Math.round(s.distance_m)} m</span>
+                          </div>
+                          <p className="text-gray-500 text-xs mt-0.5">
+                            {s.guard_name}
+                            <span className="text-gray-600"> · </span>
+                            <span className="font-mono">{scanTs.format(new Date(s.scanned_at))}</span>
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
             </div>
           </>
         )}
