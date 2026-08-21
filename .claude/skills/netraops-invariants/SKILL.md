@@ -16,7 +16,9 @@ Verified ground truth for the NetraOps platform. When live state may have change
 
 ## Live customer — freeze policy
 
-- **STARNET SECURITY** (tenant `27c4d404-...`) is a REAL PAYING CUSTOMER. Admin: info@starnetsecurity.com (Nataniel); guard Bhanu GRD0001 works overnight shifts at 23000 Cristo Rey Los Altos; client Sai receives daily reports.
+- **STARNET SECURITY** (tenant `27c4d404-...`) is a REAL PAYING CUSTOMER. Admin: info@starnetsecurity.com (Nataniel); client Sai receives daily reports.
+- STARNET's FORWARD coverage is **Bethel AME Church** — deepak naik GRD0004 (20 future shifts) and Nikith Reddy GRD0005 (9). **23000 Cristo Rey Los Altos has ZERO future shifts.** Bhanu GRD0001 worked Cristo Rey on 2026-08-20 (his only shift there in 21 days); Nandu GRD0002 worked it 2026-08-16 → 08-19. Verified against `shifts` 2026-08-21.
+- **Rosters change — re-verify against `shifts` before asserting who is on post.** The line above is a snapshot, not a standing fact; "Bhanu works Cristo Rey overnights" was carried in this file long after his schedule there ended.
 - No disruptive prod changes during active customer shifts without explicit approval. Check the clock before every deploy touching guard/shift/login paths.
 - Any temporary Apple-review accommodation (widened geofences, seeded reviewer accounts/shifts) is frozen until approval and carries a logged revert task with original values.
 
@@ -64,7 +66,7 @@ Verified ground truth for the NetraOps platform. When live state may have change
 - Secrets appearing in screenshots/chats get rotated immediately (SendGrid key precedent).
 - DB credentials rotated 2026-07-31. The `guard-postgres` superuser MCP was deleted that day — NEVER re-add it; `postgres-readonly` (user scope) is the only DB MCP.
 - `railway variable set` supports `--skip-deploys` (use it for Postgres-service var updates — a mid-rotation Postgres restart is never acceptable).
-- Postgres-service vars `PGPASSWORD` / `DATABASE_URL` / `DATABASE_PUBLIC_URL` are template references off `POSTGRES_PASSWORD` — setting that one var propagates all four. The guard API's `DATABASE_URL` is a LITERAL copy — on rotation it must be set explicitly, which auto-triggers the API redeploy.
+- **Postgres-service vars are LITERALS, not template references.** `POSTGRES_PASSWORD`, `PGPASSWORD`, `DATABASE_URL`, `DATABASE_PUBLIC_URL` each hold their own copy of the password. **Setting `POSTGRES_PASSWORD` alone does NOT propagate to the other three.** Rotation is: `ALTER USER` FIRST, then FOUR explicit `railway variable set --skip-deploys` writes on the Postgres service, then a FIFTH on the guard service's `DATABASE_URL` literal — that last one auto-triggers the API redeploy. Five var writes, not one. (This file previously claimed template refs; that was wrong and would have left three vars stale mid-rotation.)
 
 ## Verification norms for this project
 
