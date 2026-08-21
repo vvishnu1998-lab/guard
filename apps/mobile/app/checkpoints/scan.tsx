@@ -16,11 +16,17 @@
  * fail if neither. The captured coords ride with the payload, so an
  * offline-queued scan replays the position from SCAN TIME, not retry time.
  *
+ * A warm-up watch starts on MOUNT so the fix is already converging while
+ * the guard lines the camera up on the tag. That is what makes the cached
+ * fallback survivable: iOS hands a relaunched process an EMPTY
+ * CLLocationManager cache, and before the warm-up both legs could miss —
+ * live too cold to land in 8s, cache empty because the process is new.
+ *
  * Every server verdict gets its own treatment (no generic off-post toast):
  * 201 fresh / 200 duplicate / 404 unknown tag / 422 too far (anti-fraud,
  * shows label + distance from err.details) / 403 no session / offline.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Location from 'expo-location';
@@ -30,7 +36,32 @@ import { apiClient, ApiError } from '../../lib/apiClient';
 import { useOfflineStore } from '../../store/offlineStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 
+// Deliberately NOT raised alongside ping's 3s -> 15s. Here the cached
+// fallback runs immediately AFTER this timeout, and the mount warm-up has
+// populated that cache by then — so a SHORTER live budget reaches the
+// rescue sooner, while a longer one would only delay it and make every
+// SCAN AGAIN cost the extra wait again. 8s stays.
 const GPS_LIVE_TIMEOUT_MS = 8000;
+
+// Mount-time GPS warm-up — same pattern as components/CameraCapture.tsx.
+// Fire-and-forget: a warm-up failure must never block a scan.
+const WARMUP_INTERVAL_MS = 1_000;
+const WARMUP_DISTANCE_M  = 0;
+
+// Wait-not-walk. The failure is a cold location service on a relaunched
+// process, not where the guard is standing — the old copy told them to walk
+// somewhere else, which was false and sent guards off post to chase it.
+const GPS_NOT_READY_MSG =
+  "Your phone's location is still starting up. Wait about 30 seconds with the app open, then try again.";
+
+/** Distinguishes the cold-GPS case from a real failure so the panel can say
+ *  what actually happened instead of a generic SCAN FAILED. */
+class GpsNotReadyError extends Error {
+  constructor() {
+    super(GPS_NOT_READY_MSG);
+    this.name = 'GpsNotReadyError';
+  }
+}
 
 // site_checkpoints.code_value is VARCHAR(512); the API 400s above it. A
 // longer payload must NOT be truncated client-side — a truncated code
@@ -67,22 +98,45 @@ interface ScanResponse {
 }
 
 async function getScanPosition(): Promise<{ lat: number; lng: number; acc: number | null }> {
+  const t0 = Date.now();
+  const crumbGps = (source: string, acc: number | null) =>
+    Sentry.addBreadcrumb({
+      category: 'checkpoint',
+      message: 'gps read',
+      level: source === 'none' ? 'warning' : 'info',
+      data: { source, gps_ms: Date.now() - t0, accuracy_m: acc, got_fix: source !== 'none' },
+    });
+
+  // Leg 1 — live at highest accuracy. Ordering is deliberate (see header):
+  // a scan is a presence proof, so a fresh fix beats a cached one.
   try {
     const live = await Promise.race([
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest }),
       new Promise<null>((r) => setTimeout(() => r(null), GPS_LIVE_TIMEOUT_MS)),
     ]);
     if (live) {
+      crumbGps('live', live.coords.accuracy);
       return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy };
     }
   } catch (err) {
     console.warn('[checkpoint] live GPS threw:', err);
   }
-  const last = await Location.getLastKnownPositionAsync().catch(() => null);
+
+  // Leg 2 — the cache, which the mount warm-up has been filling while the
+  // guard framed the tag. This IS the post-failure re-check: unlike ping's
+  // cached-first order, nothing here read the cache before the wait, so one
+  // read after the live miss already captures whatever the warm-up landed.
+  const last = await Location.getLastKnownPositionAsync().catch((err) => {
+    console.warn('[checkpoint] cached GPS threw:', err);
+    return null;
+  });
   if (last) {
+    crumbGps('cache', last.coords.accuracy);
     return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy };
   }
-  throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+
+  crumbGps('none', null);
+  throw new GpsNotReadyError();
 }
 
 export default function CheckpointScanner() {
@@ -94,6 +148,46 @@ export default function CheckpointScanner() {
   // Ref lock flips synchronously on first detection — state alone is too
   // slow and lets a single tag double-fire onBarcodeScanned.
   const lockRef = useRef(false);
+  // Warm-up subscription, torn down on unmount so we never leave a location
+  // session running behind a closed scanner.
+  const gpsWarmupRef = useRef<Location.LocationSubscription | null>(null);
+
+  // GPS warm-up — starts the moment the scanner mounts, so the fix is
+  // converging while the guard lines up on the tag. Every failure here is
+  // swallowed: no permission, no hardware, no problem — getScanPosition
+  // still runs its own reads and scanning is never gated on this. No
+  // permission prompt: if it isn't granted, this simply does nothing.
+  useEffect(() => {
+    let cancelled = false;
+    let loggedFirstFix = false;
+    (async () => {
+      try {
+        const sub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: WARMUP_INTERVAL_MS,
+            distanceInterval: WARMUP_DISTANCE_M,
+          },
+          (loc) => {
+            if (loggedFirstFix) return;
+            loggedFirstFix = true;
+            console.log(`[checkpoint] GPS warm-up first fix acc=${loc.coords.accuracy}`);
+          },
+          (err) => console.warn('[checkpoint] GPS warm-up error:', err),
+        );
+        // Unmounted while watchPositionAsync was still resolving.
+        if (cancelled) { sub.remove(); return; }
+        gpsWarmupRef.current = sub;
+      } catch (err) {
+        console.warn('[checkpoint] GPS warm-up failed to start:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      gpsWarmupRef.current?.remove();
+      gpsWarmupRef.current = null;
+    };
+  }, []);
 
   const params = useLocalSearchParams<{ mode?: string; checkpoint_id?: string; label?: string }>();
   const linkMode = params.mode === 'link' && typeof params.checkpoint_id === 'string';
@@ -222,6 +316,18 @@ export default function CheckpointScanner() {
           return;
         }
         setVerdict({ kind: 'error', title: 'SCAN FAILED', message: err.message, canRescan: true });
+        return;
+      }
+      // Cold GPS gets its own title and copy — a generic SCAN FAILED told
+      // the guard nothing about what to do. Still captured: before this,
+      // a GPS miss left NO trace anywhere except the guard's memory.
+      if (err instanceof GpsNotReadyError) {
+        Sentry.captureException(err, { extra: { where: 'checkpoint.scan.gps', link_mode: linkMode } });
+        setVerdict({
+          kind: 'error', title: 'GPS NOT READY',
+          message: GPS_NOT_READY_MSG,
+          canRescan: true,
+        });
         return;
       }
       // Non-ApiError from link mode = network failure (scan mode queues
