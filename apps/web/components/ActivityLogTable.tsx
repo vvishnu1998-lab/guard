@@ -25,6 +25,11 @@
  *                                    submitted FOR (window_label). Amber, not
  *                                    green: satisfied-but-late is not on time.
  *   missed (ping)           → red   "Missed Ping"
+ *   missed_answered_late    → red   "Missed — answered N minutes late"
+ *                                    One row per WINDOW: the miss and the
+ *                                    late ping that answered it are the same
+ *                                    obligation, so they are merged server-
+ *                                    side and the ping has no separate row.
  *   activity_report         → blue  "Activity Report"
  *   incident_report         → red   "Incident Report"
  *   maintenance_report      → amber "Maintenance Report"
@@ -57,6 +62,7 @@ type StatusKind =
   | 'on_time'
   | 'late'
   | 'missed'
+  | 'missed_answered_late'
   | 'activity_report'
   | 'incident_report'
   | 'maintenance_report'
@@ -311,6 +317,11 @@ function statusPresentation(r: ActivityRow): StatusPresentation {
       return { label: r.status, textClass: 'text-amber-400', pillClass: AMBER_PILL };
     case 'missed':
       return { label: 'Missed Ping', textClass: 'text-rose-400', pillClass: RED_PILL };
+    // Server text: "Missed — answered 40 minutes late". RED, not amber:
+    // the window was missed. Answering it late is mitigation, not
+    // compliance, and the pill should not read as though it were.
+    case 'missed_answered_late':
+      return { label: r.status, textClass: 'text-rose-400', pillClass: RED_PILL };
     case 'clocked_in_on_time':
       return {
         label:     `Clocked In at ${PT_TIME.format(new Date(r.log_time ?? r.event_time))}`,
@@ -1023,6 +1034,8 @@ export default function ActivityLogTable({
                     <p className="text-xs text-gray-600 italic mt-3">
                       {r.kind === 'ping' && r.status_kind === 'missed'
                         ? 'No ping was received in this half-hour window.'
+                        : r.kind === 'ping' && r.status_kind === 'missed_answered_late'
+                        ? 'No ping arrived in this window; it was answered by a later submission.'
                         : 'No additional details.'}
                     </p>
                   )}

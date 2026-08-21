@@ -1518,6 +1518,9 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
     on_time:                   NAVY,
     late:                      AMBER,
     missed:                    RED,
+    // Missed then answered: RED. The window WAS missed, and a document a
+    // client reads must not soften that because the guard caught up.
+    missed_answered_late:      RED,
     activity_report:           BLUE,
     incident_report:           RED,
     maintenance_report:        AMBER,
@@ -1529,6 +1532,9 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
     on_time:                   'PING',
     late:                      'LATE PING',
     missed:                    'MISSED PING',
+    // Row's `status` already reads "Missed — answered N minutes late";
+    // the badge is the short form.
+    missed_answered_late:      'MISSED / ANSWERED LATE',
     activity_report:           'ACTIVITY',
     incident_report:           'INCIDENT',
     maintenance_report:        'MAINTENANCE',
@@ -1569,7 +1575,15 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
 
   // Summary tile row
   const totalRows        = rows.length;
-  const missedCount      = eventRows.filter((r) => r.status_kind === 'missed').length;
+  // A window that was missed counts as missed even once it was answered
+  // late — that is the whole point of keeping the resolved row. It is
+  // deliberately NOT also added to pingCount: the merged row is one row,
+  // so counting it in both tiles would stop the cover reconciling with
+  // the body. Row totals are unchanged by the merge (a resolved window
+  // used to emit one ping row; it now emits one missed_answered_late row).
+  const missedCount      = eventRows.filter(
+    (r) => r.status_kind === 'missed' || r.status_kind === 'missed_answered_late',
+  ).length;
   const incidentCount    = eventRows.filter((r) => r.status_kind === 'incident_report').length;
   const activityCount    = eventRows.filter((r) => r.status_kind === 'activity_report').length;
   const maintenanceCount = eventRows.filter((r) => r.status_kind === 'maintenance_report').length;

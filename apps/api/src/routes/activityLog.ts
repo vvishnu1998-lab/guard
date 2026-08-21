@@ -30,14 +30,21 @@
  *
  * Status rules:
  *   - missed_pings row, unresolved → "Missed Ping" (the authoritative
- *     source — this route no longer infers misses itself). A resolved
- *     row is NOT emitted: its resolving ping renders as a Late Ping.
+ *     source — this route no longer infers misses itself).
+ *   - missed_pings row, RESOLVED  → "Missed — answered N minutes late"
+ *     (status_kind 'missed_answered_late'). The window was missed AND
+ *     later answered; both facts belong in the record, so the miss row
+ *     and its resolving ping collapse into this ONE row, which carries
+ *     the ping's timestamp, photo and coords. The resolving ping is
+ *     suppressed from the per-ping loop so the same obligation is not
+ *     counted twice. Previously the resolved miss was dropped and only
+ *     the ping rendered, which erased the miss from the record.
  *   - Ping arrived < 10 min late   → "Ping (X minutes)"
  *   - Ping arrived ≥ 10 min late   → "Late Ping (X minutes)"
  *   Lateness is measured from the start of the window the ping was
  *   submitted FOR (matched by window_label; timestamp containment as the
  *   fallback for legacy rows without labels). Every ping renders as its
- *   own row — nothing is collapsed per window.
+ *   own row EXCEPT one that resolves a miss — see above.
  *
  * Patrol rounds: one row per (site, round_window) from checkpoint_scans,
  * sorted into the timeline by round_window. Only rounds whose hour has
@@ -110,7 +117,10 @@ interface MissedPingRow {
   window_start:     string;
   window_end:       string;
   window_label:     string;
-  resolved_at:      string | null;
+  resolved_at:         string | null;
+  /** The late ping that answered this window. Set together with
+   *  resolved_at by POST /locations/ping; null iff resolved_at is null. */
+  resolved_by_ping_id: string | null;
 }
 
 interface ClockInVerificationRow {
@@ -166,6 +176,9 @@ type StatusKind =
   | 'on_time'
   | 'late'
   | 'missed'
+  /** Window was missed, then answered by a late backfill. Carries the
+   *  resolving ping's media/coords — see the window-outcome note above. */
+  | 'missed_answered_late'
   | 'activity_report'
   | 'incident_report'
   | 'maintenance_report'
@@ -398,7 +411,8 @@ export async function fetchActivityRows(
   const misses: MissedPingRow[] = [];
   if (sessionIds.length > 0) {
     const missesResult = await pool.query<MissedPingRow>(
-      `SELECT shift_session_id, window_start, window_end, window_label, resolved_at
+      `SELECT shift_session_id, window_start, window_end, window_label,
+              resolved_at, resolved_by_ping_id
        FROM missed_pings
        WHERE shift_session_id = ANY($1::uuid[])
          AND window_end   > $2
@@ -649,10 +663,31 @@ export async function fetchActivityRows(
     //    top-of-file docblock). Windows are scheduled_start + N*30min,
     //    tracked only while they end by scheduled_end — the same formula
     //    pingReminder and missedPingCron use, so the feed can never
-    //    disagree with what the crons actually flagged. Every submitted
-    //    ping renders as its own row; lateness is graded against the
-    //    window it was submitted FOR (window_label match), falling back
-    //    to timestamp containment for legacy rows without a label.
+    //    disagree with what the crons actually flagged. Lateness is graded
+    //    against the window the ping was submitted FOR (window_label
+    //    match), falling back to timestamp containment for legacy rows
+    //    without a label.
+    //
+    //    ROW SHAPE — one row per WINDOW OUTCOME, not per event.
+    //    A window that was missed and later answered used to vanish
+    //    entirely: the miss row was skipped on resolved_at and the
+    //    resolving ping rendered as an ordinary Late Ping, so the record
+    //    showed a late ping and no evidence a window was ever missed.
+    //    Both halves describe ONE obligation, so they collapse into ONE
+    //    row: 'missed_answered_late', carrying the resolving ping's
+    //    timestamp, photo and coords. The alternative — keeping the miss
+    //    row AND the ping row, cross-linked — was rejected because it
+    //    lists one failed-then-fixed obligation twice, and a client
+    //    reading the log would count two events where one happened.
+    //    The merged row sorts at the WINDOW's start (event_time =
+    //    window_start), where the obligation fell due; LOG TIME still
+    //    shows when it was actually answered.
+    const resolvingPingIds = new Set(
+      (missesBySession.get(s.session_id) ?? [])
+        .map((m) => m.resolved_by_ping_id)
+        .filter((id): id is string => id != null),
+    );
+
     const windows: { startMs: number; label: string }[] = [];
     for (
       let ws = scheduledStartMs;
@@ -663,6 +698,8 @@ export async function fetchActivityRows(
     }
 
     for (const ping of sessionPings) {
+      // Merged into its window's missed_answered_late row below.
+      if (resolvingPingIds.has(ping.id)) continue;
       const pingMs = Date.parse(ping.pinged_at);
       const win =
         (ping.window_label
@@ -707,13 +744,38 @@ export async function fetchActivityRows(
     }
 
     // Miss rows come from the authoritative missed_pings table (already
-    // range-filtered in SQL). A resolved row is skipped: its resolving
-    // ping renders above as a Late Ping, and emitting the miss too would
-    // show one window as both missed and answered.
+    // range-filtered in SQL). A RESOLVED row is no longer skipped — it
+    // renders as the window's outcome ("Missed — answered N minutes
+    // late") and absorbs the resolving ping, which was suppressed in the
+    // ping loop above. Skipping it was how a missed window could vanish
+    // from the record entirely once the guard backfilled it.
     const sessionMisses = missesBySession.get(s.session_id) ?? [];
     for (const m of sessionMisses) {
-      if (m.resolved_at) continue;
       const windowStartMs = Date.parse(m.window_start);
+      const resolver = m.resolved_by_ping_id
+        ? sessionPings.find((p) => p.id === m.resolved_by_ping_id)
+        : undefined;
+
+      // Resolved, but the resolving ping fell outside this query's date
+      // range (or predates resolved_by_ping_id being populated): state
+      // the outcome without inventing a lateness figure or media.
+      const answeredMin = resolver
+        ? Math.max(0, Math.round((Date.parse(resolver.pinged_at) - windowStartMs) / 60_000))
+        : null;
+
+      let status: string;
+      let statusKind: StatusKind;
+      if (!m.resolved_at) {
+        status     = 'Missed Ping';
+        statusKind = 'missed';
+      } else if (answeredMin === null) {
+        status     = 'Missed — answered late';
+        statusKind = 'missed_answered_late';
+      } else {
+        status     = `Missed — answered ${answeredMin} ${answeredMin === 1 ? 'minute' : 'minutes'} late`;
+        statusKind = 'missed_answered_late';
+      }
+
       rows.push({
         id:             `missed-${s.session_id}-${windowStartMs}`,
         kind:           'ping',
@@ -721,13 +783,17 @@ export async function fetchActivityRows(
         guard_name:     s.guard_name,
         site_id:        s.site_id,
         site_name:      s.site_name,
-        status:         'Missed Ping',
-        status_kind:    'missed',
-        log_time:       null,
-        log_media_url:  null,
-        log_media_urls: [],
+        status,
+        status_kind:    statusKind,
+        // Answered windows carry the resolving ping's evidence so the
+        // proof-of-presence photo is not orphaned by the merge.
+        log_time:       resolver ? resolver.pinged_at : null,
+        log_media_url:  resolver?.photo_url ?? null,
+        log_media_urls: resolver?.photo_url ? [resolver.photo_url] : [],
+        // Sorts at the window, where the obligation fell due — LOG TIME
+        // carries when it was actually answered.
         event_time:     new Date(windowStartMs).toISOString(),
-        detail_id:      null,
+        detail_id:      resolver ? resolver.id : null,
         shift_id:        s.shift_id,
         scheduled_start: s.scheduled_start,
         scheduled_end:   s.scheduled_end,
@@ -735,11 +801,11 @@ export async function fetchActivityRows(
         severity:     null,
         description:  null,
         legal_hold:   false,
-        latitude:           null,
-        longitude:          null,
-        accuracy_m:         null,
-        is_within_geofence: null,
-        ping_type:          null,
+        latitude:           isAdmin ? resolver?.latitude          ?? null : null,
+        longitude:          isAdmin ? resolver?.longitude         ?? null : null,
+        accuracy_m:         isAdmin ? resolver?.accuracy_meters   ?? null : null,
+        is_within_geofence: isAdmin ? resolver?.is_within_geofence ?? null : null,
+        ping_type:          isAdmin ? resolver?.ping_type         ?? null : null,
         ...NO_ROUND,
       });
     }
