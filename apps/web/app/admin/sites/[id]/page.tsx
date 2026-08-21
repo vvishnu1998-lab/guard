@@ -928,7 +928,13 @@ function SiteDetailPageInner() {
       {/* Tab bar. <Link replace scroll={false}> — replace so a tab switch does
           not stack history entries between the site list and this page, and
           scroll={false} so switching tabs holds position instead of jumping to
-          the top. Anchors, not buttons: middle-click and copy-link work. */}
+          the top. Anchors, not buttons: middle-click and copy-link work.
+
+          px-2 below md, measured not guessed: at md+ padding the three labels
+          run 361px against a 343px content box at 375px (and 358px at 390px),
+          so SCAN HISTORY clipped on both. px-2 brings the row to 336px — it
+          fits outright, and overflow-x-auto stays as the backstop for longer
+          labels or a large accessibility text size. */}
       <nav aria-label="Site sections" className="border-b border-[#1A3050] -mt-2">
         <ul className="flex gap-1 overflow-x-auto">
           {TABS.map(([slug, label]) => {
@@ -940,7 +946,7 @@ function SiteDetailPageInner() {
                   replace
                   scroll={false}
                   aria-current={active ? 'page' : undefined}
-                  className={`block whitespace-nowrap px-3 md:px-4 py-2.5 text-xs tracking-widest border-b-2 -mb-px transition-colors ${
+                  className={`block whitespace-nowrap px-2 md:px-4 py-2.5 text-xs tracking-widest border-b-2 -mb-px transition-colors ${
                     active
                       ? 'border-amber-400 text-amber-400 font-bold'
                       : 'border-transparent text-gray-500 hover:text-gray-300'
