@@ -14,7 +14,7 @@
  *    routed to. Activity-report-reminder push notifications now open this
  *    screen with the type pre-selected.
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Modal,
@@ -41,6 +41,32 @@ function countWords(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
 
+// iOS hands a relaunched process an EMPTY CLLocationManager cache, and a cold
+// first fix needs 20-60s. This screen had NO cache leg and NO bound at all —
+// a bare getCurrentPositionAsync that either hung or threw, with a composed
+// report and its photos sitting behind it. Bhanu, 2026-08-20 20:05.
+const GPS_TIMEOUT_MS = 15_000;
+
+// Mount-time GPS warm-up — same pattern as components/CameraCapture.tsx.
+// A report takes minutes to compose, so the fix has ample time to converge.
+const WARMUP_INTERVAL_MS = 1_000;
+const WARMUP_DISTANCE_M  = 0;
+
+// Wait-not-walk. The failure is a cold location service on a relaunched
+// process, not where the guard is standing — the old copy told them to walk
+// somewhere else, which was false and sent guards off post to chase it.
+const GPS_NOT_READY_MSG =
+  "Your phone's location is still starting up. Wait about 30 seconds with the app open, then try again.";
+
+/** Separates cold GPS from a real submission failure. Critically, this is
+ *  caught WITHOUT touching form state — see the catch in submit(). */
+class GpsNotReadyError extends Error {
+  constructor() {
+    super(GPS_NOT_READY_MSG);
+    this.name = 'GpsNotReadyError';
+  }
+}
+
 const TYPES: { value: ReportType; label: string; icon: string; color: string; desc: string }[] = [
   { value: 'activity',    label: 'Activity',    icon: '📋', color: Colors.action, desc: 'Routine patrol log, observations, completed rounds' },
   { value: 'incident',    label: 'Incident',    icon: '⚠',  color: '#EF4444',     desc: 'Security breach, injury, unauthorized access, emergency' },
@@ -63,6 +89,9 @@ export default function CreateReport() {
   const [typePickerOpen, setTypePickerOpen] = useState(false);
   const [description,  setDescription]  = useState('');
   const [submitting,   setSubmitting]   = useState(false);
+  // Sub-status for the submit button: a 15s GPS acquisition behind a bare
+  // spinner reads as a hang on a screen holding minutes of composed work.
+  const [submitStatus, setSubmitStatus] = useState('');
   const [enhancing,    setEnhancing]    = useState(false);
   const [enhanced,     setEnhanced]     = useState<string | null>(null);
   const [originalDesc, setOriginalDesc] = useState<string | null>(null);
@@ -82,6 +111,46 @@ export default function CreateReport() {
       data: { initial_type: initialType },
     });
   }, [initialType]);
+
+  // Warm-up subscription, torn down on unmount so we never leave a location
+  // session running behind a closed screen.
+  const gpsWarmupRef = useRef<Location.LocationSubscription | null>(null);
+
+  // GPS warm-up — starts on mount so the fix converges while the guard
+  // writes the report and attaches photos. Every failure here is swallowed:
+  // no permission, no hardware, no problem — submit() still runs its own
+  // reads and nothing is gated on this. No permission prompt.
+  useEffect(() => {
+    let cancelled = false;
+    let loggedFirstFix = false;
+    (async () => {
+      try {
+        const sub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: WARMUP_INTERVAL_MS,
+            distanceInterval: WARMUP_DISTANCE_M,
+          },
+          (loc) => {
+            if (loggedFirstFix) return;
+            loggedFirstFix = true;
+            console.log(`[report] GPS warm-up first fix acc=${loc.coords.accuracy}`);
+          },
+          (err) => console.warn('[report] GPS warm-up error:', err),
+        );
+        // Unmounted while watchPositionAsync was still resolving.
+        if (cancelled) { sub.remove(); return; }
+        gpsWarmupRef.current = sub;
+      } catch (err) {
+        console.warn('[report] GPS warm-up failed to start:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      gpsWarmupRef.current?.remove();
+      gpsWarmupRef.current = null;
+    };
+  }, []);
 
   function pickType(t: ReportType) {
     setReportType(t);
@@ -185,17 +254,74 @@ export default function CreateReport() {
       let latitude:  number | null = null;
       let longitude: number | null = null;
       let accuracy:  number | null = null;
+      let source = 'none';
+      const tGps = Date.now();
+      setSubmitStatus('GETTING LOCATION…');
+
+      // Three legs, each independently guarded so a THROW on one still falls
+      // through to the next. This screen previously had ONE leg: a bare,
+      // unbounded getCurrentPositionAsync with no cached fallback at all.
+
+      // 1 — cached last-known (instant). Empty on a relaunched process.
       try {
-        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-        latitude  = loc.coords.latitude;
-        longitude = loc.coords.longitude;
-        accuracy  = loc.coords.accuracy;
+        const last = await Location.getLastKnownPositionAsync();
+        if (last) {
+          latitude  = last.coords.latitude;
+          longitude = last.coords.longitude;
+          accuracy  = last.coords.accuracy;
+          source = 'cache';
+        }
       } catch (err) {
-        console.warn('[report] GPS read threw:', err);
+        console.warn('[report] cached GPS read threw:', err);
       }
+
+      // 2 — bounded live read. Accuracy.High retained: the server needs all
+      // three of {lat,lng,accuracy} to run the fence check at all.
+      if (latitude === null) {
+        try {
+          const live = await Promise.race([
+            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+            new Promise<null>((r) => setTimeout(() => r(null), GPS_TIMEOUT_MS)),
+          ]);
+          if (live) {
+            latitude  = live.coords.latitude;
+            longitude = live.coords.longitude;
+            accuracy  = live.coords.accuracy;
+            source = 'live';
+          }
+        } catch (err) {
+          console.warn('[report] live GPS read threw:', err);
+        }
+      }
+
+      // 3 — cache again. The warm-up has been running since mount and may
+      // have landed a fix that leg 1 (before the wait) and leg 2 (timed out)
+      // both missed. This is the leg that rescues the relaunch case.
+      if (latitude === null) {
+        try {
+          const warmed = await Location.getLastKnownPositionAsync();
+          if (warmed) {
+            latitude  = warmed.coords.latitude;
+            longitude = warmed.coords.longitude;
+            accuracy  = warmed.coords.accuracy;
+            source = 'warmed';
+          }
+        } catch (err) {
+          console.warn('[report] warmed GPS read threw:', err);
+        }
+      }
+
+      Sentry.addBreadcrumb({
+        category: 'reports_wizard',
+        message: 'gps read',
+        level: latitude === null ? 'warning' : 'info',
+        data: { source, gps_ms: Date.now() - tGps, accuracy_m: accuracy, got_fix: latitude !== null },
+      });
+
       if (latitude === null || longitude === null) {
-        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+        throw new GpsNotReadyError();
       }
+      setSubmitStatus('SUBMITTING…');
 
       if (windowLabel) {
         Sentry.addBreadcrumb({
@@ -275,6 +401,18 @@ export default function CreateReport() {
           'Off-post',
           `You must be inside the site boundary to submit ${reportType} reports.`,
         );
+      } else if (err instanceof GpsNotReadyError) {
+        // Form state is deliberately untouched here: description, type and
+        // every uploaded photo stay exactly as composed. The guard waits and
+        // taps SUBMIT again. photo_count on the crumb is the proof.
+        Sentry.addBreadcrumb({
+          category: 'reports_wizard',
+          message: 'gps not ready — form state preserved',
+          level: 'warning',
+          data: { report_type: reportType, photo_count: photos.attachments.length },
+        });
+        Sentry.captureException(err, { extra: { where: 'reports.new.gps' } });
+        Alert.alert('GPS Not Ready', GPS_NOT_READY_MSG);
       } else {
         Sentry.addBreadcrumb({
           category: 'reports_wizard',
@@ -287,6 +425,7 @@ export default function CreateReport() {
       }
     } finally {
       setSubmitting(false);
+      setSubmitStatus('');
     }
   }
 
@@ -410,7 +549,12 @@ export default function CreateReport() {
           disabled={submitting}
         >
           {submitting
-            ? <ActivityIndicator color={Colors.structure} />
+            ? (
+              <View style={styles.submitBusy}>
+                <ActivityIndicator color={Colors.structure} />
+                {submitStatus ? <Text style={styles.submitBusyText}>{submitStatus}</Text> : null}
+              </View>
+            )
             : <Text style={styles.submitText}>SUBMIT {typeMeta.label.toUpperCase()} REPORT</Text>
           }
         </TouchableOpacity>
@@ -539,6 +683,8 @@ const styles = StyleSheet.create({
     minHeight: 54, marginBottom: Spacing.md,
   },
   submitText: { fontFamily: Fonts.heading, color: '#FFFFFF', fontSize: 16, letterSpacing: 3 },
+  submitBusy:     { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  submitBusyText: { fontFamily: Fonts.heading, color: '#FFFFFF', fontSize: 13, letterSpacing: 2 },
   disabled:   { opacity: 0.4 },
 
   cancelBtn:  { paddingVertical: Spacing.sm },
