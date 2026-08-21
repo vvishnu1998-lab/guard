@@ -42,6 +42,7 @@ import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification } from '../services/notifications';
+import { breakOverlapsWindow } from '../services/pingWindows';
 import { expiresAtFor } from '../services/retention';
 import { Sentry } from '../services/sentry';
 
@@ -160,6 +161,27 @@ cron.schedule('*/5 * * * *', async () => {
         // Fast-path skip: SELECT is cheaper than a would-be
         // conflicting INSERT.
         if (await anyReportInWindow(s.session_id, w.windowStart, w.windowEnd)) continue;
+
+        // Break-time quiet policy (locked 2026-08-20): a window any part
+        // of which overlapped a break is WAIVED — no missed_reports row.
+        // The SAME predicate missedPingCron uses for ping windows and
+        // pingReminder uses to skip the nudge; one definition, so the
+        // report flag can never disagree with the report reminder about
+        // whether a guard owed anything.
+        //
+        // 155c9a8 gated the two ping legs only. This leg stayed open and
+        // wrote a real row against a real break: missed_reports
+        // f7271a18-96b9-4e84-a693-ac8af1093538, window 19:30-20:30 PT on
+        // 2026-08-20, for a break that ran 19:54:42-20:13:58 entirely
+        // inside it. A stray push is noise; this is a false compliance
+        // record with the guard's name on it.
+        if (await breakOverlapsWindow(s.session_id, w.windowStart, w.windowEnd)) {
+          console.log(
+            `[missedReport.waived.break] session=${s.session_id} ` +
+            `window=${w.windowStart.toISOString()}`,
+          );
+          continue;
+        }
 
         const label = siteLocalLabel(w.windowStart, s.site_tz);
 
