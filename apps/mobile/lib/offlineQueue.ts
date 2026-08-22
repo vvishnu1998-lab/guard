@@ -30,6 +30,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
+import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError, SessionExpiredError } from './apiClient';
 
 /** RFC-4122 v4 UUID — Math.random-based, safe in Hermes (no crypto.getRandomValues needed) */
@@ -44,6 +45,15 @@ function uuidv4(): string {
 const QUEUE_KEY      = 'guard_offline_queue';
 const DEAD_LETTER_KEY = 'guard_offline_dead_letter';
 const MAX_ATTEMPTS   = 5;
+
+/**
+ * Corrupt storage is quarantined under a UNIQUE key per incident, never
+ * appended to a shared list. A read-modify-write here would itself need to
+ * parse JSON, and the one thing we know at that point is that parsing is
+ * failing — a corrupt quarantine index would destroy the very bytes we are
+ * trying to preserve.
+ */
+const QUARANTINE_PREFIX = 'guard_offline_quarantine_';
 
 export type QueueActionType =
   | 'report_submit'
@@ -86,9 +96,77 @@ export interface QueuedAction {
 
 // ── Queue read/write ─────────────────────────────────────────────────────────
 
+/**
+ * Parse a persisted queue array, PRESERVING anything unparseable.
+ *
+ * ── WHY NOT try/catch → return [] ───────────────────────────────────────
+ *
+ * Because that discards writes. Silently. Which is the exact failure this
+ * whole surface exists to end — it would move it one layer down, from "the
+ * bucket is never read" to "the bucket is thrown away when it looks odd".
+ * A guard would lose a patrol scan to a storage glitch and never know,
+ * exactly as before.
+ *
+ * So on a parse failure we:
+ *   1. copy the raw bytes to a quarantine key (unique, never overwritten),
+ *   2. remove the corrupt key so the app is usable and the loop is broken,
+ *   3. raise a Sentry event carrying length and a short prefix — never the
+ *      whole payload, which holds coordinates, notes and photo urls,
+ *   4. leave a durable trace that puts the banner into a degraded state,
+ *      so the guard is TOLD their device lost saved data.
+ *
+ * Nothing is deleted. The bytes stay on the device and are recoverable.
+ */
+async function readJsonArray(key: string, label: string): Promise<QueuedAction[]> {
+  const raw = await AsyncStorage.getItem(key);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error('parsed value is not an array');
+    return parsed as QueuedAction[];
+  } catch (err: any) {
+    await quarantine(key, label, raw, err);
+    return [];
+  }
+}
+
+async function quarantine(key: string, label: string, raw: string, err: unknown): Promise<void> {
+  const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await AsyncStorage.setItem(
+      `${QUARANTINE_PREFIX}${stamp}`,
+      JSON.stringify({ key, label, at: new Date().toISOString(), bytes: raw.length, raw }),
+    );
+    // Only after the bytes are safely copied. Leaving the corrupt key in
+    // place would re-quarantine and re-report on every single read.
+    await AsyncStorage.removeItem(key);
+  } catch (writeErr) {
+    // Storage is failing outright. Do NOT remove the original — the
+    // unreadable copy is now the only copy there is.
+    console.error(`[offline-queue] quarantine write failed for ${label}:`, writeErr);
+  }
+  console.error(`[offline-queue] CORRUPT ${label} (${raw.length} bytes) quarantined as ${stamp}`);
+  Sentry.captureException(err instanceof Error ? err : new Error(String(err)), {
+    tags: { area: 'offline_queue_corruption', bucket: label },
+    extra: { key, quarantine_id: stamp, bytes: raw.length, prefix: raw.slice(0, 80) },
+  });
+  notifyChange();
+}
+
+/** How many corrupt buckets this device has quarantined. Derived from the
+ *  keys themselves, so it survives restart with no extra state to keep in
+ *  sync. Non-zero puts the banner into its degraded state. */
+export async function quarantineCount(): Promise<number> {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    return keys.filter((k) => k.startsWith(QUARANTINE_PREFIX)).length;
+  } catch {
+    return 0;
+  }
+}
+
 async function readQueue(): Promise<QueuedAction[]> {
-  const raw = await AsyncStorage.getItem(QUEUE_KEY);
-  return raw ? (JSON.parse(raw) as QueuedAction[]) : [];
+  return readJsonArray(QUEUE_KEY, 'queue');
 }
 
 async function writeQueue(queue: QueuedAction[]): Promise<void> {
@@ -97,8 +175,7 @@ async function writeQueue(queue: QueuedAction[]): Promise<void> {
 }
 
 async function readDeadLetter(): Promise<QueuedAction[]> {
-  const raw = await AsyncStorage.getItem(DEAD_LETTER_KEY);
-  return raw ? (JSON.parse(raw) as QueuedAction[]) : [];
+  return readJsonArray(DEAD_LETTER_KEY, 'dead_letter');
 }
 
 async function writeDeadLetter(dead: QueuedAction[]): Promise<void> {

@@ -26,8 +26,9 @@ import { reportDeadLetters } from '../lib/offlineQueue';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
 
 export default function UnsentWritesBanner() {
-  const deadCount     = useOfflineStore((s) => s.deadCount);
-  const refreshCounts = useOfflineStore((s) => s.refreshCounts);
+  const deadCount       = useOfflineStore((s) => s.deadCount);
+  const storageDegraded = useOfflineStore((s) => s.storageDegraded);
+  const refreshCounts   = useOfflineStore((s) => s.refreshCounts);
 
   // The bucket lives in AsyncStorage, so a cold start has a count of 0
   // until it is read back. Without this the banner would be invisible on
@@ -42,22 +43,30 @@ export default function UnsentWritesBanner() {
     void reportDeadLetters();
   }, [refreshCounts]);
 
-  if (deadCount < 1) return null;
+  // Degraded storage counts as something to show even at zero: a bucket we
+  // could not parse may have held writes that never went anywhere, and the
+  // count cannot see them precisely because it could not be read.
+  if (deadCount < 1 && !storageDegraded) return null;
+
+  const title = deadCount > 0
+    ? `⚠ ${deadCount} ${deadCount === 1 ? 'ITEM' : 'ITEMS'} FAILED TO SEND`
+    : '⚠ SAVED DATA COULD NOT BE READ';
+  const sub = deadCount > 0
+    ? (storageDegraded
+        ? 'Some saved data was also unreadable. Tap to review, and tell your supervisor.'
+        : `${deadCount === 1 ? 'It was' : 'They were'} not recorded. Tap to review.`)
+    : 'Some items saved on this phone could not be read and may never have been sent. Tell your supervisor.';
 
   return (
     <TouchableOpacity
       style={styles.card}
       onPress={() => router.push('/offline/failed')}
       accessibilityRole="button"
-      accessibilityLabel={`${deadCount} item${deadCount === 1 ? '' : 's'} failed to send. Tap to review.`}
+      accessibilityLabel={`${title}. ${sub}`}
     >
       <View style={styles.info}>
-        <Text style={styles.title}>
-          ⚠ {deadCount} {deadCount === 1 ? 'ITEM' : 'ITEMS'} FAILED TO SEND
-        </Text>
-        <Text style={styles.sub}>
-          {deadCount === 1 ? 'It was' : 'They were'} not recorded. Tap to review.
-        </Text>
+        <Text style={styles.title}>{title}</Text>
+        <Text style={styles.sub}>{sub}</Text>
       </View>
       <Text style={styles.chevron}>›</Text>
     </TouchableOpacity>

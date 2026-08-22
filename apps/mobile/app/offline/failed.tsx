@@ -58,7 +58,8 @@ function whenText(iso?: string): string {
 
 export default function FailedWritesScreen() {
   const [items, setItems] = useState<QueuedAction[] | null>(null);
-  const refreshCounts = useOfflineStore((s) => s.refreshCounts);
+  const refreshCounts   = useOfflineStore((s) => s.refreshCounts);
+  const storageDegraded = useOfflineStore((s) => s.storageDegraded);
 
   const load = useCallback(async () => {
     // Opening this screen is the strongest signal a guard cares about
@@ -106,7 +107,18 @@ export default function FailedWritesScreen() {
           not recorded. Tell your supervisor about anything important here.
         </Text>
 
-        {items !== null && visible.length === 0 && (
+        {storageDegraded && (
+          <View style={styles.degradedCard}>
+            <Text style={styles.degradedTitle}>SOME SAVED DATA COULD NOT BE READ</Text>
+            <Text style={styles.degradedSub}>
+              This phone stored something it could no longer open. It has been kept
+              on the device for support, but anything it held may never have been
+              sent — and it cannot be listed below. Tell your supervisor.
+            </Text>
+          </View>
+        )}
+
+        {items !== null && visible.length === 0 && !storageDegraded && (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>NOTHING FAILED</Text>
             <Text style={styles.emptySub}>Everything you have submitted reached the server.</Text>
@@ -172,6 +184,14 @@ const styles = StyleSheet.create({
   emptyCard:  { backgroundColor: Colors.surface, borderRadius: Radius.md, padding: Spacing.lg, alignItems: 'center' },
   emptyTitle: { fontFamily: Fonts.heading, fontSize: 16, color: Colors.success, letterSpacing: 0.5 },
   emptySub:   { fontFamily: Fonts.body, fontSize: 13, color: Colors.muted, marginTop: Spacing.xs, textAlign: 'center' },
+
+  degradedCard: {
+    backgroundColor: Colors.surface2,
+    borderWidth: 1, borderColor: Colors.danger,
+    borderRadius: Radius.md, padding: Spacing.md, marginBottom: Spacing.md,
+  },
+  degradedTitle: { fontFamily: Fonts.heading, fontSize: 14, color: Colors.danger, letterSpacing: 0.5 },
+  degradedSub:   { fontFamily: Fonts.body, fontSize: 13, color: Colors.muted, marginTop: Spacing.xs, lineHeight: 19 },
 
   card: {
     backgroundColor: Colors.surface,
