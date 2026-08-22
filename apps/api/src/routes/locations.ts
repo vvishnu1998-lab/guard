@@ -10,6 +10,7 @@ import { sendPushNotification } from '../services/firebase';
 import { expiresAtFor } from '../services/retention';
 import { scheduleWindows } from '../services/pingWindows';
 import { readShadowSignals } from '../services/shadowSignals';
+import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 
 /**
  * Fire guard notification row + admin email for a geofence violation.
@@ -348,6 +349,17 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0
       ? accuracy
       : null;
+
+  // Mock-location gate. Evaluated before the transaction opens so a reject
+  // is a plain early return. Fails open on NULL, absent, or error.
+  {
+    const mockCheck = checkMockLocation(
+      readShadowSignals(req.body, 'ping', accuracyM).locationMocked,
+      'ping',
+      { guardId: req.user!.sub, accuracyM },
+    );
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
+  }
 
   if (throttle_reason != null && !ALLOWED_THROTTLE_REASONS.has(throttle_reason)) {
     return res.status(400).json({
@@ -849,6 +861,17 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
     return res.status(400).json({
       error: 'Missing shift_session_id / verified_lat / verified_lng / accuracy. Update the app.',
     });
+  }
+
+  // Mock-location gate — see the ping route above. This route uses a plain
+  // pool.query rather than a transaction, so a reject is a simple return.
+  {
+    const mockCheck = checkMockLocation(
+      readShadowSignals(req.body, 'clock-in-verification').locationMocked,
+      'clock-in-verification',
+      { guardId: req.user!.sub },
+    );
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
 
   // Resolve site_id from the session (NEVER trust a client-supplied site_id —
