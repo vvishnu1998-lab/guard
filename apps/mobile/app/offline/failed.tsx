@@ -24,7 +24,7 @@
  */
 import { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
-import { router, useFocusEffect, Stack } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import {
   getDeadLetterItems, acknowledgeDeadLetter, retryDeadLetter, reportDeadLetters,
   type QueuedAction, type QueueActionType, type DeadReason,
@@ -95,10 +95,12 @@ export default function FailedWritesScreen() {
   const visible = items ?? [];
   const active  = visible.filter((i) => !i.acknowledgedAt);
 
+  // No <Stack.Screen>: the root layout sets headerShown:false and every
+  // other screen in this app carries its own title and back button. A
+  // header title here would simply never render.
   return (
-    <>
-      <Stack.Screen options={{ title: 'FAILED TO SEND' }} />
-      <ScrollView style={styles.bg} contentContainerStyle={styles.scroll}>
+    <ScrollView style={styles.bg} contentContainerStyle={styles.scroll}>
+        <Text style={styles.screenTitle}>FAILED TO SEND</Text>
         <Text style={styles.intro}>
           These were saved on your phone but never reached the server, so they were
           not recorded. Tell your supervisor about anything important here.
@@ -154,14 +156,17 @@ export default function FailedWritesScreen() {
         <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
           <Text style={styles.backBtnText}>BACK</Text>
         </TouchableOpacity>
-      </ScrollView>
-    </>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   bg:     { flex: 1, backgroundColor: Colors.bg },
-  scroll: { padding: Spacing.md, paddingBottom: Spacing.xxl },
+  scroll: { padding: Spacing.md, paddingBottom: Spacing.xxl, paddingTop: Spacing.xl },
+  screenTitle: {
+    fontFamily: Fonts.heading, fontSize: 22, color: Colors.textPrimary,
+    letterSpacing: 1, marginBottom: Spacing.sm,
+  },
   intro:  { fontFamily: Fonts.body, fontSize: 14, color: Colors.muted, lineHeight: 20, marginBottom: Spacing.md },
 
   emptyCard:  { backgroundColor: Colors.surface, borderRadius: Radius.md, padding: Spacing.lg, alignItems: 'center' },
