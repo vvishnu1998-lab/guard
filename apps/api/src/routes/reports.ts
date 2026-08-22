@@ -9,6 +9,8 @@ import { presignAll } from '../services/s3';
 import { expiresAtFor, expiresAtForReport } from '../services/retention';
 import { fireBreachAlerts } from './locations';
 import { Sentry } from '../services/sentry';
+import { readShadowSignals } from '../services/shadowSignals';
+import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 
 const router = Router();
 
@@ -191,6 +193,19 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
   const { site_id } = sessionResult.rows[0];
 
+  // Mock-location gate. This route has NO transaction (plain pool.query
+  // throughout), so a reject is a plain early return with nothing to unwind.
+  // site_id resolves above, so the log line carries a real site.
+  // Fails open on NULL, absent, non-boolean, and any thrown error.
+  const reportSignals = readShadowSignals(req.body, 'report');
+  {
+    const mockCheck = checkMockLocation(reportSignals.locationMocked, 'report', {
+      guardId: req.user!.sub, siteId: site_id,
+      accuracyM: reportSignals.accuracyMeters, fixAgeMs: reportSignals.fixAgeMs,
+    });
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
+  }
+
   // D2 / audit/WEEK1.md §D2 — magic-byte validation for every photo URL.
   // D1 closed the size and MIME-pin gaps via the presigned POST policy,
   // but the bytes themselves are still client-controlled.  Here we GET
@@ -313,8 +328,8 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     `INSERT INTO reports
        (shift_session_id, site_id, report_type, description, severity, expires_at,
         latitude, longitude, accuracy_meters, is_within_geofence,
-        window_label, submitted_late)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+        window_label, submitted_late, location_mocked, fix_age_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
     [
       shift_session_id, site_id, report_type, description, severity || null, expiresAt,
       haveCoords ? latitude  : null,
@@ -322,6 +337,8 @@ router.post('/', requireAuth('guard'), async (req, res) => {
       haveCoords ? accuracy  : null,
       isWithin,
       windowLabel, submittedLate,
+      // Shadow capture (Wave 2) — recorded, never evaluated here.
+      reportSignals.locationMocked, reportSignals.fixAgeMs,
     ]
   );
   const report = reportResult.rows[0];

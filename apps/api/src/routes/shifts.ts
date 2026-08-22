@@ -1612,10 +1612,11 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
 
   // Mock-location gate — see the clock-in route above.
   {
+    const hoSignals = readShadowSignals(req.body, 'handoff-clock-in');
     const mockCheck = checkMockLocation(
-      readShadowSignals(req.body, 'handoff-clock-in').locationMocked,
+      hoSignals.locationMocked,
       'handoff-clock-in',
-      { guardId: user!.sub },
+      { guardId: user!.sub, accuracyM: hoSignals.accuracyMeters, fixAgeMs: hoSignals.fixAgeMs },
     );
     if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
@@ -2413,6 +2414,18 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
     if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
     const { site_id } = sessionResult.rows[0];
 
+    // Mock-location gate — break-start. No transaction on this route
+    // (plain pool.query), so a reject is a plain early return. site_id
+    // resolves above, so the log carries a real site.
+    const breakSignals = readShadowSignals(req.body, 'break-start');
+    {
+      const mockCheck = checkMockLocation(breakSignals.locationMocked, 'break-start', {
+        guardId: req.user!.sub, siteId: site_id,
+        accuracyM: breakSignals.accuracyMeters, fixAgeMs: breakSignals.fixAgeMs,
+      });
+      if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
+    }
+
     // Idempotency: return the existing open row instead of inserting a
     // duplicate. Race-safe enough for the mobile double-tap case — no
     // UNIQUE constraint on the table today, but the mobile client is the
@@ -2470,9 +2483,12 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
     const planned = BREAK_DURATIONS[break_type];
     const result = await pool.query(
       `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes,
-                                   start_lat, start_lng, start_accuracy_m)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING id, break_start, break_type, planned_duration_minutes`,
-      [session_id, req.user!.sub, site_id, break_type, planned, startLat, startLng, startAccuracyM]
+                                   start_lat, start_lng, start_accuracy_m,
+                                   start_location_mocked, start_fix_age_ms)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10) RETURNING id, break_start, break_type, planned_duration_minutes`,
+      [session_id, req.user!.sub, site_id, break_type, planned, startLat, startLng, startAccuracyM,
+       // Shadow capture (Wave 2) — recorded, never evaluated here.
+       breakSignals.locationMocked, breakSignals.fixAgeMs]
     );
     const row = result.rows[0];
     res.status(201).json({
@@ -2557,10 +2573,11 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
   // is a plain early return with nothing to roll back. Fails open on NULL,
   // on an absent field, and on any internal error — see services/mockLocation.ts.
   {
+    const ciSignals = readShadowSignals(req.body, 'clock-in');
     const mockCheck = checkMockLocation(
-      readShadowSignals(req.body, 'clock-in').locationMocked,
+      ciSignals.locationMocked,
       'clock-in',
-      { guardId: req.user!.sub },
+      { guardId: req.user!.sub, accuracyM: ciSignals.accuracyMeters, fixAgeMs: ciSignals.fixAgeMs },
     );
     if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
@@ -2714,6 +2731,9 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
     typeof lng === 'number' && Number.isFinite(lng) &&
     typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0;
 
+  // Clock-out: capture provenance but NEVER gate on it. See the UPDATE below.
+  const clockOutSignals = readShadowSignals(req.body, 'clock-out');
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -2795,7 +2815,8 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
       `UPDATE shift_sessions
        SET total_hours = $1, handover_notes = $2,
            clock_out_lat = $3, clock_out_lng = $4,
-           clock_out_accuracy_meters = $5, clock_out_within_geofence = $6
+           clock_out_accuracy_meters = $5, clock_out_within_geofence = $6,
+           clock_out_location_mocked = $8, clock_out_fix_age_ms = $9
        WHERE id = $7`,
       [
         netHours,
@@ -2805,6 +2826,13 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
         haveCoords ? accuracy : null,
         haveCoords ? true : null, // null = "not validated" (old clients); true = "validated, allowed"
         session.id,
+        // ── CLOCK-OUT IS PERSIST-AND-FLAG. THERE IS DELIBERATELY NO GATE. ──
+        // Rejecting a clock-out strands the guard in an open session with no
+        // way to close it, and autoCompleteShifts would then close it with
+        // clock_out_lat/lng/accuracy/within_geofence ALL NULL — trading a
+        // flagged row that records the simulated position for a blank row
+        // that records nothing. Rejecting makes the evidence strictly worse.
+        clockOutSignals.locationMocked, clockOutSignals.fixAgeMs,
       ]
     );
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);

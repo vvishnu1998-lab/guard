@@ -4,6 +4,8 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { validateAtSite } from '../services/geofence';
 import { expiresAtFor } from '../services/retention';
+import { readShadowSignals } from '../services/shadowSignals';
+import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 
 const router = Router();
 
@@ -81,6 +83,20 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
     typeof completion_lat === 'number' && Number.isFinite(completion_lat) &&
     typeof completion_lng === 'number' && Number.isFinite(completion_lng) &&
     typeof accuracy === 'number' && Number.isFinite(accuracy) && accuracy >= 0;
+
+  // Mock-location gate. Placed BEFORE pool.connect() so a reject is a plain
+  // early return with no transaction to unwind. The task lookup and
+  // ownership check above already run pre-transaction, so nothing is
+  // reordered. site_id resolves only inside the transaction, so it is not
+  // available here — guard + route + timestamp locate the row.
+  const taskSignals = readShadowSignals(req.body, 'task-complete');
+  {
+    const mockCheck = checkMockLocation(taskSignals.locationMocked, 'task-complete', {
+      guardId: req.user!.sub,
+      accuracyM: taskSignals.accuracyMeters, fixAgeMs: taskSignals.fixAgeMs,
+    });
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
+  }
 
   const client = await pool.connect();
   try {
@@ -160,8 +176,9 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
       `INSERT INTO task_completions
          (task_instance_id, shift_session_id, guard_id,
           completion_lat, completion_lng, completion_accuracy_meters,
-          completion_within_geofence, photo_url, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          completion_within_geofence, photo_url, expires_at,
+          completion_location_mocked, completion_fix_age_ms)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         req.params.id, shift_session_id, req.user!.sub,
         completion_lat ?? null, completion_lng ?? null,
@@ -169,6 +186,8 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
         within,
         photo_url || null,
         expiresAtFor('task_completion'),
+        // Shadow capture (Wave 2) — recorded, never evaluated here.
+        taskSignals.locationMocked, taskSignals.fixAgeMs,
       ]
     );
     await client.query("UPDATE task_instances SET status = 'completed' WHERE id = $1", [req.params.id]);

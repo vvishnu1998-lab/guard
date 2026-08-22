@@ -33,6 +33,12 @@ const CAVEAT = {
     'Advisory only. These checks detect naive location simulation. A simulated position ' +
     'set to a coordinate never otherwise recorded, with plausible accuracy, is not detectable ' +
     'by any check here — an empty queue is not an all-clear.',
+  checks_are_not_interchangeable:
+    'Verified by controlled reproduction 2026-08-22: the monotonicity check does NOT fire on a ' +
+    'single uninterrupted simulated burst — it detects a coordinate reappearing after a newer ' +
+    'fix, which requires interleaving with genuine fixes. In that case the accuracy-sentinel ' +
+    'check carries the entire detection, and it recognises exactly ONE tool. A different tool ' +
+    'with plausible accuracy and jitter defeats BOTH checks.',
   platform:
     'The underlying OS signal (location_mocked) is Android-only. iOS devices report nothing ' +
     'and are not covered.',
