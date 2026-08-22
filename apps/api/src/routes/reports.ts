@@ -213,6 +213,70 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   // declared MIME (FF D8 FF for JPEG, 89 50 4E 47 for PNG, RIFF…WEBP).
   // Mismatch → quarantine row + 400; the report and its photos are
   // never INSERTed, so the corrupt object never enters the data plane.
+  // ── PHOTO SIZE GATE — mirrors report_photos.chk_file_size ─────────────
+  //
+  // WHY THIS EXISTS. S3 accepts up to MAX_UPLOAD_BYTES (5 MiB, services/s3.ts)
+  // but report_photos.chk_file_size caps a row at 800 KB — a 6.4x mismatch.
+  // A photo between the two uploads fine and is then REJECTED BY POSTGRES
+  // at the INSERT below, AFTER the report row and the earlier photos have
+  // already been committed (that loop uses pool.query, no transaction). The
+  // request then 500s with the report half-written.
+  //
+  // A 500 is not a 4xx, so the mobile offline queue treats it as transient,
+  // queues the report and replays it — AND EVERY REPLAY WRITES A NEW REPORT
+  // ROW. On 2026-08-22 one guard's four-photo activity report became SIX
+  // duplicate reports in a live customer's compliance record inside fifteen
+  // minutes, each holding three of the four photos, and the fourth photo
+  // was lost every time.
+  //
+  // Validating BEFORE any insert turns that into one clean 422 the guard can
+  // act on, and a 4xx is surfaced by the client instead of queued.
+  //
+  // THIS IS A STOP-GAP. It does not fix the limit mismatch, the missing
+  // transaction, or the fact that a constraint violation can surface as a
+  // 500. Raising chk_file_size is a separate decision — 800 KB may be
+  // load-bearing for S3 cost or for PDF generation.
+  //
+  // MUST equal report_photos.chk_file_size. Changing one without the other
+  // reopens exactly this hole.
+  const MAX_PHOTO_KB = 800;
+
+  if (Array.isArray(photo_urls) && photo_urls.length > 0) {
+    for (let i = 0; i < photo_urls.length; i++) {
+      const sizeKb = (photo_urls[i] as { size_kb?: unknown })?.size_kb;
+
+      // file_size_kb is NOT NULL, so an absent value is also a 500 waiting
+      // to happen — same storm, different constraint.
+      if (typeof sizeKb !== 'number' || !Number.isFinite(sizeKb) || sizeKb < 0) {
+        return res.status(422).json({
+          error: 'PHOTO_SIZE_MISSING',
+          message: `Photo ${i + 1} could not be measured, so the report was not saved. `
+                 + 'Remove that photo and submit the rest, then tell your supervisor.',
+          photo_index: i + 1,
+        });
+      }
+
+      if (sizeKb > MAX_PHOTO_KB) {
+        // The guard has done nothing wrong: the app already compresses to
+        // 1080px JPEG q0.8, so retaking is not reliable advice. Name the
+        // photo, name the limit, and give them the one action that works.
+        console.log(
+          `[reports.photo_too_large] guard=${req.user!.sub} photo_index=${i + 1} ` +
+          `size_kb=${sizeKb} limit_kb=${MAX_PHOTO_KB} photos=${photo_urls.length}`,
+        );
+        return res.status(422).json({
+          error: 'PHOTO_TOO_LARGE',
+          message: `Photo ${i + 1} is too large to save (${sizeKb} KB; the limit is `
+                 + `${MAX_PHOTO_KB} KB). Remove that photo and submit the rest, `
+                 + 'then tell your supervisor.',
+          photo_index: i + 1,
+          size_kb: sizeKb,
+          limit_kb: MAX_PHOTO_KB,
+        });
+      }
+    }
+  }
+
   if (Array.isArray(photo_urls) && photo_urls.length > 0) {
     for (const p of photo_urls as Array<{ url: string; content_type?: string }>) {
       const key = s3KeyFromPublicUrl(p.url);
