@@ -21,6 +21,7 @@
  */
 import * as Sentry from '@sentry/react-native';
 import * as SecureStore from 'expo-secure-store';
+import { ApiError, NetworkError } from './errors';
 
 const BASE = process.env.EXPO_PUBLIC_API_URL;
 
@@ -68,19 +69,31 @@ async function doRefresh(): Promise<void> {
 
   Sentry.addBreadcrumb({ category: 'auth', message: 'refresh start', level: 'info' });
 
-  const res = await fetch(`${BASE}/api/auth/refresh`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refresh_token: refresh }),
-  });
+  // This fetch is not routed through apiClient (that would recurse), so it
+  // classifies its own failures. A transport rejection must surface as a
+  // NetworkError or callers downgrade it to "unknown error" and stop
+  // treating it as retryable.
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refresh }),
+    });
+  } catch (cause) {
+    throw new NetworkError(cause);
+  }
   // 401/403 = the server rejected the refresh token itself (nbf bump,
   // rotation, expiry) — the session is unrecoverable. Any other non-2xx
-  // (5xx, gateway timeout) is transient: throw plain so callers treat it
-  // like a network failure rather than logging the guard out mid-shift.
+  // (5xx, gateway timeout) is transient and must stay retryable rather
+  // than logging the guard out mid-shift. It is thrown as an ApiError
+  // carrying the real status, so isRetryableRestoreError's `status >= 500`
+  // test sees it; a plain Error would now read as a bug in our own code
+  // and stop being retried.
   if (res.status === 401 || res.status === 403) {
     throw new RefreshRejectedError('refresh rejected');
   }
-  if (!res.ok) throw new Error('refresh failed');
+  if (!res.ok) throw new ApiError(res.status, { error: 'REFRESH_FAILED' });
   const data: { access: string; refresh: string } = await res.json();
 
   const jwtSub = decodeJwtSub(data.access);
