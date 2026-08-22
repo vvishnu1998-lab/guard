@@ -2711,12 +2711,10 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
 // session, sets total_hours = gross − breaks, and completes the shift in one
 // atomic unit.
 //
-// T2-A geofence validation (2026-05-17 audit Wave A): when all of
-// {lat, lng, accuracy} are present in the body, validateAtSite decides
-// the same way clock-in does. Reject → ROLLBACK + 422 CLOCK_OUT_OFF_POST;
-// the session stays open so the guard can return to the post and retry.
-// Build 24 + older clients that don't send coords skip validation
-// entirely (backward compat — tightens once mobile companion ships).
+// T2-A geofence validation (2026-05-17 audit Wave A) is EVALUATED AND
+// RECORDED, NEVER ENFORCED — changed 2026-08-22, reasoning at the call
+// site below. Build 24 + older clients that don't send coords skip
+// validation entirely (backward compat) and record within_geofence NULL.
 router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
   const { handover_notes, lat, lng, accuracy } = req.body as {
@@ -2757,28 +2755,56 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
     }
     const session = sessionResult.rows[0];
 
-    // T2-A — validate coords against site geofence when present.
-    // ROLLBACK on reject so clocked_out_at gets un-set, leaving the
-    // session open for retry from on-post.
+    // T2-A — evaluate the geofence, RECORD the verdict, NEVER reject on it.
+    //
+    // WHY THE REJECT WAS REMOVED (2026-08-22, live mock-location test):
+    //
+    //   1. The fence cannot tell an honest bad fix from a simulated one. It
+    //      sees a coordinate too far from the post and nothing else. A guard
+    //      standing at the post with a 2 km urban-canyon fix and a guard
+    //      running a mock app produce the identical verdict.
+    //   2. So the reject only ever lands on the honest guard. Someone
+    //      simulating their position turns the simulation off and clocks out
+    //      normally; the guard whose GPS is genuinely bad cannot end their
+    //      shift at all. That is backwards.
+    //   3. It bought nothing anyway. autoCompleteShifts closes the abandoned
+    //      session later with clock_out_lat/lng/accuracy/within_geofence ALL
+    //      NULL — so rejecting traded a flagged row that records the actual
+    //      submitted position for a blank row that records nothing. The
+    //      reject made the evidence strictly worse, not better.
+    //
+    // The verdict is not discarded: within_geofence = false is persisted on
+    // the row and [clock-out.reject] still fires. Those are the admin
+    // signals. What changed is that they inform rather than block.
+    //
+    // The SAVEPOINT exists so a failure INSIDE the fence query cannot poison
+    // the transaction and strand the guard through the back door — the one
+    // path that could still turn a fence problem into a failed clock-out.
+    let fenceAllowed: boolean | null = null;
     if (haveCoords) {
-      const fence = await validateAtSite(
-        { lat: lat!, lng: lng!, accuracy_m: accuracy! },
-        session.site_id,
-        client,
-      );
-      if (!fence.allowed) {
-        await client.query('ROLLBACK');
-        console.log(
-          `[clock-out.reject] session=${session.id} guard=${req.user!.sub} ` +
-          `distance=${fence.distance_m?.toFixed(1) ?? 'null'}m accuracy=${accuracy}m reason=${fence.reason}`,
+      await client.query('SAVEPOINT fence_check');
+      try {
+        const fence = await validateAtSite(
+          { lat: lat!, lng: lng!, accuracy_m: accuracy! },
+          session.site_id,
+          client,
         );
-        return res.status(422).json({
-          error: 'CLOCK_OUT_OFF_POST',
-          message: 'You appear to be outside the post. Return to the site and try again.',
-          distance_m: fence.distance_m,
-          accuracy_m: accuracy,
-          reason: fence.reason,
-        });
+        await client.query('RELEASE SAVEPOINT fence_check');
+        fenceAllowed = fence.allowed;
+        if (!fence.allowed) {
+          console.log(
+            `[clock-out.reject] session=${session.id} guard=${req.user!.sub} ` +
+            `distance=${fence.distance_m?.toFixed(1) ?? 'null'}m accuracy=${accuracy}m reason=${fence.reason} ` +
+            `enforced=false mocked=${clockOutSignals.locationMocked ?? 'unknown'}`,
+          );
+        }
+      } catch (fenceErr) {
+        // Fence evaluation failed. Record "unknown", never block.
+        await client.query('ROLLBACK TO SAVEPOINT fence_check');
+        console.error(
+          `[clock-out.fence_error] session=${session.id} guard=${req.user!.sub} ` +
+          `— recording within_geofence=NULL and continuing:`, fenceErr,
+        );
       }
     }
 
@@ -2824,7 +2850,9 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
         haveCoords ? lat  : null,
         haveCoords ? lng  : null,
         haveCoords ? accuracy : null,
-        haveCoords ? true : null, // null = "not validated" (old clients); true = "validated, allowed"
+        // true = at post, false = off post, null = not evaluated (old
+        // client sent no coords, or the fence query itself failed).
+        fenceAllowed,
         session.id,
         // ── CLOCK-OUT IS PERSIST-AND-FLAG. THERE IS DELIBERATELY NO GATE. ──
         // Rejecting a clock-out strands the guard in an open session with no
