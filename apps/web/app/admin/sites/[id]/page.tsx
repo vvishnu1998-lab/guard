@@ -14,9 +14,9 @@
  *     (site_id === id) & next 7 days & !cancelled. Matches the pattern used
  *     by /admin/shifts/site/[siteId]/page.tsx.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { adminFetch, adminGet, adminPatch, adminPost, triggerBlobDownload } from '../../../../lib/adminApi';
 import { fmtTime } from '../../../../lib/shiftFormat';
 import { formatHoursHHMM } from '../../../../lib/formatHours';
@@ -81,6 +81,11 @@ interface CheckpointScan {
   guard_name:       string;
   scanned_at:       string;
   distance_m:       number;
+  // The guard's own GPS accuracy at the moment of the scan. Already on every
+  // row (the /scans handler selects `cs.*`); nullable in schema_v44 and this
+  // client never read it before. It does not move the guard — it says how
+  // much to trust `distance_m`, which is exactly how the grading uses it.
+  accuracy_m:       number | null;
   // The round this scan belongs to: the site-local hour floor stored as a
   // UTC instant (schema_v44). Already on every row the API returns — the
   // /scans handler selects `cs.*` — this client just never read it before.
@@ -182,6 +187,22 @@ function dateInputValue(daysAgo: number): string {
 
 const MAX_RANGE_DAYS = 92;
 
+/** Date -> YYYY-MM-DD, same UTC-slice convention dateInputValue() already uses
+ *  so a preset and a typed date are directly comparable. */
+function isoDate(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/** Preset chip styling; active chip uses the same amber the tab bar does. */
+function presetCls(active: boolean): string {
+  return (
+    'rounded-lg px-3 py-1.5 text-xs tracking-widest border transition-colors ' +
+    (active
+      ? 'bg-amber-400/10 border-amber-400 text-amber-400'
+      : 'bg-[#0B1526] border-[#1A3050] text-gray-400 hover:border-gray-500')
+  );
+}
+
 // ── CSV helpers (C5) ─────────────────────────────────────────────────────────
 // Client-built by design: the export must be exactly the rows on screen.
 // No client-side CSV utility exists in apps/web (the API's rowsToCsv isn't
@@ -239,10 +260,140 @@ function NotInRosterTag() {
   );
 }
 
+/**
+ * Grades one distance against THAT checkpoint's own radius — never a global
+ * threshold, because a 22 m read is fine at a 60 m checkpoint and badly out at
+ * a 10 m one.
+ *
+ * Bands, using the status colours already in this page:
+ *   green  d <= radius/3   well inside
+ *   amber  d <= radius     approaching the radius
+ *   red    d >  radius     outside it
+ *
+ * accuracy_m participates as CONFIDENCE, not position. A 22 m reading taken
+ * with ±30 m GPS is noise; the same reading with ±3 m is a real 22 m. So when
+ * the scan's own accuracy is at or beyond the radius, the distance cannot be
+ * graded against that radius at all and is rendered neutral with the reason —
+ * colouring it red would assert a precision the fix never had.
+ *
+ * A checkpoint that has since been deleted or unlinked has no radius to grade
+ * against; those rows stay neutral too.
+ */
+function gradeDistance(
+  distance: number,
+  radius: number | null,
+  scanAccuracy: number | null,
+): { cls: string; title: string } {
+  if (radius == null) {
+    return {
+      cls: 'text-gray-300',
+      title: 'This checkpoint is no longer in the current list, so its radius is unknown — distance is shown ungraded.',
+    };
+  }
+  if (scanAccuracy != null && Number.isFinite(scanAccuracy) && scanAccuracy >= radius) {
+    return {
+      cls: 'text-gray-400',
+      title: `GPS accuracy at this scan was ±${Math.round(scanAccuracy)} m, at or beyond the ${radius} m radius — the distance cannot be graded against it.`,
+    };
+  }
+  if (distance <= radius / 3) {
+    return { cls: 'text-green-400', title: `Well inside the ${radius} m radius.` };
+  }
+  if (distance <= radius) {
+    return { cls: 'text-amber-400', title: `Approaching the ${radius} m radius.` };
+  }
+  return { cls: 'text-red-400', title: `Outside the ${radius} m radius.` };
+}
+
+/** One distance reading, graded against its own checkpoint. */
+function DistanceValue(
+  { scan, radius, className = '' }: { scan: CheckpointScan; radius: number | null; className?: string },
+) {
+  const g = gradeDistance(scan.distance_m, radius, scan.accuracy_m);
+  return (
+    <span title={g.title} className={`font-mono text-xs ${g.cls} ${className}`}>
+      {Math.round(scan.distance_m)} m
+      {scan.accuracy_m != null && Number.isFinite(scan.accuracy_m) && (
+        <span className="text-gray-600"> ±{Math.round(scan.accuracy_m)}</span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Shared grid template. The column header sits ABOVE the round list while the
+ * rows live inside each <details>, so they cannot be one <table> any more —
+ * a fixed grid template is what keeps them in the same columns.
+ */
+const SCAN_GRID = 'hidden md:grid grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_auto] gap-x-4';
+
+/** Distinct guard names in a round, first-seen order. Derived from scans
+ *  already fetched — no extra request. Usually one guard; a handoff mid-round
+ *  legitimately yields two. */
+function roundGuards(scans: CheckpointScan[]): string[] {
+  const seen: string[] = [];
+  for (const s of scans) if (s.guard_name && !seen.includes(s.guard_name)) seen.push(s.guard_name);
+  return seen;
+}
+
+/** The scan with the largest distance_m in a round — the worst read, surfaced
+ *  on the summary so a suspicious round is visible without opening it.
+ *  Returns the scan, not the number, so the summary can grade it against that
+ *  checkpoint's own radius. Derived, not fetched. */
+function roundWorstScan(scans: CheckpointScan[]): CheckpointScan | null {
+  let worst: CheckpointScan | null = null;
+  for (const s of scans) {
+    if (!Number.isFinite(s.distance_m)) continue;
+    if (worst === null || s.distance_m > worst.distance_m) worst = s;
+  }
+  return worst;
+}
+
+/**
+ * Tab model. State lives in `?tab=`, never in React state, so a tab is a
+ * shareable URL and Back works — the same contract as /admin/shifts?view=.
+ * An unknown or absent slug falls back to `overview` rather than rendering
+ * an empty page.
+ */
+const TABS = [
+  ['overview',     'OVERVIEW'],
+  ['checkpoints',  'CHECKPOINTS'],
+  ['scan-history', 'SCAN HISTORY'],
+] as const;
+
+type TabSlug = (typeof TABS)[number][0];
+
+/**
+ * useSearchParams() opts the subtree into client-side rendering, which Next 14
+ * rejects at build time unless a Suspense boundary sits above it. Same wrapper
+ * the shifts page uses for the same reason.
+ */
 export default function SiteDetailPage() {
+  return (
+    <Suspense fallback={<div className="p-10 text-center text-gray-500 text-sm">Loading site…</div>}>
+      <SiteDetailPageInner />
+    </Suspense>
+  );
+}
+
+function SiteDetailPageInner() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const siteId = params?.id ?? '';
+
+  // ── Tab routing (?tab=) ────────────────────────────────────────────────
+  // Read-only derivation: no useState, no effect. Every other searchParam is
+  // carried through tabHref() so the scan-history date range (and any future
+  // filter) survives a tab switch.
+  const searchParams = useSearchParams();
+  const tabParam = searchParams?.get('tab') ?? '';
+  const tab: TabSlug = (TABS.some(([slug]) => slug === tabParam) ? tabParam : 'overview') as TabSlug;
+
+  function tabHref(slug: TabSlug): string {
+    const p = new URLSearchParams(searchParams?.toString() ?? '');
+    p.set('tab', slug);
+    return `/admin/sites/${siteId}?${p.toString()}`;
+  }
 
   const [site,    setSite]    = useState<Site | null>(null);
   const [guards,  setGuards]  = useState<LiveGuard[]>([]);
@@ -275,6 +426,9 @@ export default function SiteDetailPage() {
   const [deleteBusy,   setDeleteBusy]   = useState(false);
   const [deleteError,  setDeleteError]  = useState('');
   const [cpToggling,   setCpToggling]   = useState<string | null>(null);
+  // Which checkpoint card has its overflow menu open ('' = none). DELETE lives
+  // in there so it cannot be hit while reaching for DEACTIVATE.
+  const [cpMenuOpen,   setCpMenuOpen]   = useState<string | null>(null);
 
   // ── Vehicle roster (schema_v48) ────────────────────────────────────────
   const [vehicles,        setVehicles]        = useState<Vehicle[]>([]);
@@ -288,8 +442,31 @@ export default function SiteDetailPage() {
   const [vehToggling,     setVehToggling]     = useState<string | null>(null);
 
   // ── Scan history (C4b) ─────────────────────────────────────────────────
-  const [scanFrom,      setScanFrom]      = useState(() => dateInputValue(7));
-  const [scanTo,        setScanTo]        = useState(() => dateInputValue(0));
+  // ── Scan-history range + filters (all URL-driven) ──────────────────────
+  // These were React state until this commit. Moving them into searchParams
+  // makes a filtered view a shareable link, makes Back step through filter
+  // changes, and — because tabHref() clones every param — carries the range
+  // across a tab switch by construction rather than by the client component
+  // happening not to remount.
+  const rangeDefaults = useMemo(() => ({ from: dateInputValue(7), to: dateInputValue(0) }), []);
+  const scanFrom = searchParams?.get('from') || rangeDefaults.from;
+  const scanTo   = searchParams?.get('to')   || rangeDefaults.to;
+  const fGuard      = searchParams?.get('guard') ?? '';
+  const fCheckpoint = searchParams?.get('cp')    ?? '';
+  const fIncomplete = searchParams?.get('inc')   === '1';
+  const filtersActive = !!fGuard || !!fCheckpoint || fIncomplete;
+
+  /** Patch searchParams in place. null/'' removes the key so a default state
+   *  produces a clean URL instead of ?guard=&cp=&inc=. */
+  function setParams(patch: Record<string, string | null>) {
+    const p = new URLSearchParams(searchParams?.toString() ?? '');
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null || v === '') p.delete(k);
+      else p.set(k, v);
+    }
+    const qs = p.toString();
+    router.replace(qs ? `/admin/sites/${siteId}?${qs}` : `/admin/sites/${siteId}`, { scroll: false });
+  }
   const [scans,         setScans]         = useState<CheckpointScan[]>([]);
   const [scansLoading,  setScansLoading]  = useState(true);
   const [scansError,    setScansError]    = useState('');
@@ -552,6 +729,83 @@ export default function SiteDetailPage() {
       });
   }, [scans, site, activeLinked, activeLinkedIds]);
 
+  // ── Per-checkpoint coverage across the selected range (C9) ─────────────
+  // The aggregation the round list cannot give you: a checkpoint missed in
+  // EVERY round is one line here instead of a pattern you have to spot across
+  // eleven headers.
+  //
+  // Derived entirely from `rounds` and `activeLinked` — both already in
+  // memory. No new fetch, and deliberately NOT a new count: the numerator
+  // reuses the same "did this round contain a scan of this checkpoint" test
+  // the round grouping already makes, so the strip and the X-of-N pills can
+  // never disagree.
+  //
+  // Denominator is rounds IN RANGE, not rounds that should have happened —
+  // a round with zero scans produces no row to group and so cannot appear
+  // (same limitation the round list has always had).
+  const coverage = useMemo(() => {
+    if (rounds.length === 0) return [];
+    return activeLinked
+      .map((cp) => ({
+        id:    cp.id,
+        label: cp.label,
+        hit:   rounds.filter((r) => r.scans.some((s) => s.checkpoint_id === cp.id)).length,
+        total: rounds.length,
+      }))
+      .sort((a, b) => a.hit - b.hit || a.label.localeCompare(b.label));  // worst first
+  }, [rounds, activeLinked]);
+
+  /** checkpoint_id -> its own radius, for per-checkpoint distance grading.
+   *  A scan whose checkpoint has since been deleted simply misses the map and
+   *  grades as ungraded rather than against someone else's radius. */
+  const radiusById = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of checkpoints) m.set(c.id, c.radius_meters);
+    return m;
+  }, [checkpoints]);
+
+  /** Guards who actually scanned in this range — filtering by a guard who was
+   *  never here would only ever return nothing. */
+  const guardOptions = useMemo(() => {
+    const seen = new Set<string>();
+    for (const s of scans) if (s.guard_name) seen.add(s.guard_name);
+    return Array.from(seen).sort((a, b) => a.localeCompare(b));
+  }, [scans]);
+
+  /** Most recent shift at this site that has already started — backs the
+   *  "LAST SHIFT" preset. Derived from the `shifts` this page already loads. */
+  const lastShift = useMemo(() => {
+    const now = Date.now();
+    return shifts
+      .filter((sh) => sh.site_id === siteId && sh.status !== 'cancelled'
+                   && new Date(sh.scheduled_start).getTime() <= now)
+      .sort((a, b) => new Date(b.scheduled_start).getTime() - new Date(a.scheduled_start).getTime())[0] ?? null;
+  }, [shifts, siteId]);
+
+  /**
+   * Filters select which rounds are LISTED. They deliberately do not touch how
+   * a round is built, what its X-of-N counts, or the coverage denominator:
+   *
+   *   • a listed round always shows ALL of its scans, so its rows and its pill
+   *     always reconcile;
+   *   • `coverage` still runs over every round in range, so "0 of 11 rounds"
+   *     keeps meaning 11 rounds in range — not 11 rounds that survived a
+   *     filter. Narrowing the denominator would let a filter manufacture
+   *     perfect coverage out of a bad site.
+   *
+   * The strip says so on screen whenever a filter is on.
+   */
+  const visibleRounds = useMemo(() => {
+    if (!filtersActive) return rounds;
+    return rounds.filter((r) => {
+      if (fGuard && !r.scans.some((sc) => sc.guard_name === fGuard)) return false;
+      if (fCheckpoint && !r.scans.some((sc) => sc.checkpoint_id === fCheckpoint)) return false;
+      // Same completeness expression as RoundCount and the <details open>.
+      if (fIncomplete && r.expected > 0 && r.scanned >= r.expected) return false;
+      return true;
+    });
+  }, [rounds, filtersActive, fGuard, fCheckpoint, fIncomplete]);
+
   // C5/C7 — CSV export of exactly the rows on screen. Oldest first,
   // deliberately the reverse of the on-screen DESC order: a patrol log
   // handed to a property manager reads chronologically forward.
@@ -564,7 +818,11 @@ export default function SiteDetailPage() {
   // correctly, whereas a label printed once per group breaks the moment
   // anyone re-sorts the sheet.
   function exportScansCsv() {
-    if (!site || scans.length === 0 || scansTruncated || !!scanRangeError) return;
+    // Exports exactly the rounds on screen — filters included. That is the
+    // contract this function already stated ("the export must be exactly the
+    // rows on screen"); now that filters exist, honouring it means exporting
+    // visibleRounds rather than every round in range.
+    if (!site || visibleRounds.length === 0 || scansTruncated || !!scanRangeError) return;
     const tsFmt = new Intl.DateTimeFormat('en-US', {
       year: 'numeric', month: 'short', day: 'numeric',
       hour: '2-digit', minute: '2-digit', hour12: false,
@@ -573,7 +831,7 @@ export default function SiteDetailPage() {
     const header = ['Round', 'Checkpoint', 'Guard', 'Scanned At', 'Distance (m)'].map(csvField).join(',');
     // `rounds` is newest-first for the screen; the file reads oldest-first.
     // Scans are already chronological within each round.
-    const rows = [...rounds].reverse().flatMap((r) =>
+    const rows = [...visibleRounds].reverse().flatMap((r) =>
       r.scans.map((s) =>
         [
           r.label,
@@ -817,6 +1075,56 @@ export default function SiteDetailPage() {
     );
   }
 
+  // Upcoming shifts (next 7 days, grouped by day), verbatim. One call site:
+  // the Overview panel, which is also where MANAGE SCHEDULE → lives. Kept as
+  // a function rather than folded back inline so the Overview panel reads as
+  // two named sections instead of 40 lines of nested list markup — same idiom
+  // as renderToggleRow above.
+  function renderUpcomingShifts() {
+    return (
+      <section>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
+          <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
+          <Link
+            href={`/admin/shifts?newShift=1&siteId=${siteId}`}
+            className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+          >
+            MANAGE SCHEDULE →
+          </Link>
+        </div>
+        {shiftsByDay.length === 0 ? (
+          <p className="text-gray-500 text-sm">No upcoming shifts in the next 7 days.</p>
+        ) : (
+          <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
+            {shiftsByDay.map((day) => (
+              <div key={day.key}>
+                <div className="py-2 text-gray-500 text-xs tracking-widest font-mono">
+                  {day.label}
+                </div>
+                <ul className="divide-y divide-[#1A3050] border-t border-[#1A3050]">
+                  {day.rows.map((s) => (
+                    <li key={s.id} className="py-3 flex items-center justify-between gap-3">
+                      <span className="text-gray-400 text-xs font-mono shrink-0">
+                        {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
+                      </span>
+                      {s.guard_name ? (
+                        <span className="text-gray-200 text-sm text-right">{s.guard_name}</span>
+                      ) : (
+                        <span className="text-amber-400 tracking-widest text-xs font-bold text-right">
+                          — UNASSIGNED —
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    );
+  }
+
   return (
     <div className="space-y-8">
       {/* Header + back link */}
@@ -834,7 +1142,89 @@ export default function SiteDetailPage() {
           <p className="text-gray-500 text-xs mt-2">{site.address}</p>
         )}
       </div>
+      {/* Tab bar. <Link replace scroll={false}> — replace so a tab switch does
+          not stack history entries between the site list and this page, and
+          scroll={false} so switching tabs holds position instead of jumping to
+          the top. Anchors, not buttons: middle-click and copy-link work.
 
+          px-2 below md, measured not guessed: at md+ padding the three labels
+          run 361px against a 343px content box at 375px (and 358px at 390px),
+          so SCAN HISTORY clipped on both. px-2 brings the row to 336px — it
+          fits outright, and overflow-x-auto stays as the backstop for longer
+          labels or a large accessibility text size. */}
+      <nav aria-label="Site sections" className="border-b border-[#1A3050] -mt-2">
+        <ul className="flex gap-1 overflow-x-auto">
+          {TABS.map(([slug, label]) => {
+            const active = tab === slug;
+            return (
+              <li key={slug}>
+                <Link
+                  href={tabHref(slug)}
+                  replace
+                  scroll={false}
+                  aria-current={active ? 'page' : undefined}
+                  className={`block whitespace-nowrap px-2 md:px-4 py-2.5 text-xs tracking-widest border-b-2 -mb-px transition-colors ${
+                    active
+                      ? 'border-amber-400 text-amber-400 font-bold'
+                      : 'border-transparent text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {label}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+
+      {/* OVERVIEW — live state first: who is on post now, what is scheduled next. */}
+      {tab === 'overview' && (
+      <>
+      {/* Guard on shift */}
+      <section>
+        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">GUARD ON SHIFT</h2>
+        {presentGuards.length === 0 ? (
+          <p className="text-gray-500 text-sm">No guard currently on shift.</p>
+        ) : (
+          <ul className="divide-y divide-[#1A3050] border-y border-[#1A3050]">
+            {presentGuards.map((g) => {
+              const hoursWorked = (Date.now() - new Date(g.clocked_in_at).getTime()) / 3_600_000;
+              return (
+                <li key={g.id} className="py-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex items-center gap-3">
+                    <div className="min-w-0">
+                      <p className="text-gray-200 text-sm">{g.name}</p>
+                      <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                        Clocked in {fmtTime(g.clocked_in_at)}
+                      </p>
+                      {g.scheduled_start && g.scheduled_end && (
+                        <p className="text-gray-500 text-xs mt-0.5 font-mono">
+                          Scheduled {fmtTime(g.scheduled_start)} → {fmtTime(g.scheduled_end)}
+                        </p>
+                      )}
+                    </div>
+                    <Link
+                      href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
+                      className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
+                    >
+                      CHAT →
+                    </Link>
+                  </div>
+                  <p className="text-gray-400 text-xs shrink-0">{formatHoursHHMM(hoursWorked)}</p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {renderUpcomingShifts()}
+      </>
+      )}
+
+      {/* CHECKPOINTS — SITE SETTINGS moves here whole: both toggles and the two rosters nested under them. */}
+      {tab === 'checkpoints' && (
+      <>
       {/* Site settings — schema_v47 feature toggles */}
       <section>
         <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">SITE SETTINGS</h2>
@@ -944,6 +1334,14 @@ export default function SiteDetailPage() {
                     )}
                   </p>
                 </div>
+                {/* Action row, ranked by consequence rather than rendered flat.
+                    EDIT and UNLINK are routine and stay inline. DEACTIVATE is
+                    reversible and keeps scan history, so it drops to neutral
+                    grey — it previously wore the SAME red as DELETE, which put
+                    the mildest action and the irreversible one in one colour.
+                    DELETE moves behind the overflow menu: red now appears in
+                    exactly one place on this card, and only after a deliberate
+                    second gesture. */}
                 <div className="flex items-center gap-3 md:gap-2 md:shrink-0 flex-wrap">
                   <button
                     onClick={() => openEditCpModal(cp)}
@@ -962,19 +1360,60 @@ export default function SiteDetailPage() {
                   <button
                     onClick={() => toggleCpActive(cp)}
                     disabled={cpToggling === cp.id}
+                    title={cp.is_active
+                      ? 'Hides this checkpoint from guards. Reversible, and scan history is kept.'
+                      : 'Puts this checkpoint back in the patrol roster.'}
                     className={`text-xs tracking-widest disabled:opacity-40 ${
-                      cp.is_active ? 'text-red-400 hover:text-red-300' : 'text-green-400 hover:text-green-300'
+                      cp.is_active
+                        ? 'text-gray-500 hover:text-gray-300'
+                        : 'text-green-400 hover:text-green-300'
                     }`}
                   >
                     {cpToggling === cp.id ? '…' : cp.is_active ? 'DEACTIVATE' : 'ACTIVATE'}
                   </button>
-                  <button
-                    onClick={() => beginDelete(cp)}
-                    disabled={cpToggling === cp.id}
-                    className="text-xs text-red-400 hover:text-red-300 tracking-widest disabled:opacity-40"
-                  >
-                    DELETE
-                  </button>
+
+                  {/* Overflow menu — the only route to DELETE. */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-expanded={cpMenuOpen === cp.id}
+                      aria-label={`More actions for ${cp.label}`}
+                      onClick={() => setCpMenuOpen(cpMenuOpen === cp.id ? null : cp.id)}
+                      className="text-xs text-gray-500 hover:text-gray-300 tracking-widest px-1 leading-none"
+                    >
+                      •••
+                    </button>
+                    {cpMenuOpen === cp.id && (
+                      <>
+                        {/* Transparent backdrop closes the menu on any outside
+                            click without a document-level listener. */}
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setCpMenuOpen(null)}
+                          aria-hidden="true"
+                        />
+                        <div
+                          role="menu"
+                          onKeyDown={(e) => { if (e.key === 'Escape') setCpMenuOpen(null); }}
+                          className="absolute right-0 z-50 mt-1 w-56 bg-[#0B1526] border border-[#1A3050] rounded-lg shadow-lg p-1"
+                        >
+                          <button
+                            role="menuitem"
+                            onClick={() => { setCpMenuOpen(null); beginDelete(cp); }}
+                            disabled={cpToggling === cp.id}
+                            className="w-full text-left rounded px-2 py-1.5 text-xs tracking-widest text-red-400 hover:bg-red-500/10 disabled:opacity-40"
+                          >
+                            DELETE CHECKPOINT
+                          </button>
+                          <p className="px-2 pt-1 pb-1.5 text-[10px] leading-snug text-gray-500">
+                            Permanently destroys this checkpoint and its scan history.
+                            To retire it instead, use DEACTIVATE.
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
@@ -1060,89 +1499,12 @@ export default function SiteDetailPage() {
           </div>
         </div>
       </section>
+      </>
+      )}
 
-      {/* Guard on shift */}
-      <section>
-        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">GUARD ON SHIFT</h2>
-        {presentGuards.length === 0 ? (
-          <p className="text-gray-500 text-sm">No guard currently on shift.</p>
-        ) : (
-          <ul className="divide-y divide-[#1A3050] border-y border-[#1A3050]">
-            {presentGuards.map((g) => {
-              const hoursWorked = (Date.now() - new Date(g.clocked_in_at).getTime()) / 3_600_000;
-              return (
-                <li key={g.id} className="py-3 flex items-center justify-between gap-3">
-                  <div className="min-w-0 flex items-center gap-3">
-                    <div className="min-w-0">
-                      <p className="text-gray-200 text-sm">{g.name}</p>
-                      <p className="text-gray-500 text-xs mt-0.5 font-mono">
-                        Clocked in {fmtTime(g.clocked_in_at)}
-                      </p>
-                      {g.scheduled_start && g.scheduled_end && (
-                        <p className="text-gray-500 text-xs mt-0.5 font-mono">
-                          Scheduled {fmtTime(g.scheduled_start)} → {fmtTime(g.scheduled_end)}
-                        </p>
-                      )}
-                    </div>
-                    <Link
-                      href={`/admin/chat?siteId=${siteId}&guardId=${g.id}`}
-                      className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
-                    >
-                      CHAT →
-                    </Link>
-                  </div>
-                  <p className="text-gray-400 text-xs shrink-0">{formatHoursHHMM(hoursWorked)}</p>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      {/* Upcoming shifts (next 7 days, grouped by day) */}
-      <section>
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 mb-3">
-          <h2 className="text-amber-400 font-bold tracking-widest text-sm">UPCOMING SHIFTS — NEXT 7 DAYS</h2>
-          <Link
-            href={`/admin/shifts?newShift=1&siteId=${siteId}`}
-            className="text-xs tracking-widest text-amber-400 hover:underline whitespace-nowrap"
-          >
-            MANAGE SCHEDULE →
-          </Link>
-        </div>
-        {shiftsByDay.length === 0 ? (
-          <p className="text-gray-500 text-sm">No upcoming shifts in the next 7 days.</p>
-        ) : (
-          <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
-            {shiftsByDay.map((day) => (
-              <div key={day.key}>
-                <div className="py-2 text-gray-500 text-xs tracking-widest font-mono">
-                  {day.label}
-                </div>
-                <ul className="divide-y divide-[#1A3050] border-t border-[#1A3050]">
-                  {day.rows.map((s) => (
-                    <li key={s.id} className="py-3 flex items-center justify-between gap-3">
-                      <span className="text-gray-400 text-xs font-mono shrink-0">
-                        {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
-                      </span>
-                      {s.guard_name ? (
-                        <span className="text-gray-200 text-sm text-right">{s.guard_name}</span>
-                      ) : (
-                        <span className="text-amber-400 tracking-widest text-xs font-bold text-right">
-                          — UNASSIGNED —
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-
-
+      {/* SCAN HISTORY — ungated on checkpoints_enabled, as before. */}
+      {tab === 'scan-history' && (
+      <>
       {/* Scan history (C4b) — NOT gated on checkpoints_enabled, on purpose:
           scans are audit evidence; turning the feature off must never hide
           what it already recorded. */}
@@ -1151,7 +1513,7 @@ export default function SiteDetailPage() {
           <h2 className="text-amber-400 font-bold tracking-widest text-sm">SCAN HISTORY</h2>
           <button
             onClick={exportScansCsv}
-            disabled={scans.length === 0 || scansLoading || scansTruncated || !!scanRangeError}
+            disabled={visibleRounds.length === 0 || scansLoading || scansTruncated || !!scanRangeError}
             title={
               scansTruncated
                 ? 'Export is disabled while the view is capped at 1000 rows — narrow the date range.'
@@ -1163,22 +1525,105 @@ export default function SiteDetailPage() {
           </button>
         </div>
 
-        {/* Date range — billing-page pattern: paired native date inputs. */}
+        {/* Range presets. Every one writes searchParams — a range is a link.
+            The custom FROM/TO pair below is retained and stays authoritative;
+            a preset just fills it in. Bounds are whole days (the request is
+            built as FROM 00:00Z -> TO 23:59:59Z), so "24 HOURS" means
+            yesterday and today rather than a rolling 24h — day-granular inputs
+            cannot express the latter, and widening them is not this commit. */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <span className="text-gray-500 text-xs tracking-widest mr-1">RANGE</span>
+          {lastShift && (
+            <button
+              onClick={() => setParams({
+                from: isoDate(new Date(lastShift.scheduled_start)),
+                to:   isoDate(new Date(lastShift.scheduled_end)),
+              })}
+              className={presetCls(
+                scanFrom === isoDate(new Date(lastShift.scheduled_start)) &&
+                scanTo   === isoDate(new Date(lastShift.scheduled_end)),
+              )}
+            >
+              LAST SHIFT
+            </button>
+          )}
+          {([[1, '24 HOURS'], [7, '7 DAYS'], [30, '30 DAYS']] as const).map(([days, label]) => {
+            const from = dateInputValue(days);
+            const to   = dateInputValue(0);
+            return (
+              <button
+                key={days}
+                onClick={() => setParams({ from, to })}
+                className={presetCls(scanFrom === from && scanTo === to)}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Custom range — retained verbatim in behaviour, now writing to the URL. */}
         <div className="flex flex-wrap gap-4 mb-3">
           <div>
             <label className="block text-gray-500 text-xs tracking-widest mb-1">FROM</label>
             <input
-              type="date" value={scanFrom} onChange={(e) => setScanFrom(e.target.value)}
+              type="date" value={scanFrom} onChange={(e) => setParams({ from: e.target.value })}
               className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
             />
           </div>
           <div>
             <label className="block text-gray-500 text-xs tracking-widest mb-1">TO</label>
             <input
-              type="date" value={scanTo} onChange={(e) => setScanTo(e.target.value)}
+              type="date" value={scanTo} onChange={(e) => setParams({ to: e.target.value })}
               className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
             />
           </div>
+        </div>
+
+        {/* Filters. All URL-driven, all narrowing which rounds are LISTED —
+            never what a round contains or what coverage is measured over. */}
+        <div className="flex flex-wrap items-end gap-3 mb-3">
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1" htmlFor="f-guard">GUARD</label>
+            <select
+              id="f-guard" value={fGuard} onChange={(e) => setParams({ guard: e.target.value })}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            >
+              <option value="">All guards</option>
+              {guardOptions.map((g) => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1" htmlFor="f-cp">CHECKPOINT</label>
+            <select
+              id="f-cp" value={fCheckpoint} onChange={(e) => setParams({ cp: e.target.value })}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            >
+              <option value="">All checkpoints</option>
+              {checkpoints.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+          </div>
+          <button
+            type="button"
+            aria-pressed={fIncomplete}
+            onClick={() => setParams({ inc: fIncomplete ? null : '1' })}
+            className={`rounded-lg px-3 py-2 text-xs tracking-widest border transition-colors ${
+              fIncomplete
+                ? 'bg-amber-400/10 border-amber-400 text-amber-400'
+                : 'bg-[#0B1526] border-[#1A3050] text-gray-400 hover:border-gray-500'
+            }`}
+          >
+            INCOMPLETE ROUNDS ONLY
+          </button>
+          {filtersActive && (
+            <button
+              type="button"
+              onClick={() => setParams({ guard: null, cp: null, inc: null })}
+              className="text-xs tracking-widest text-gray-500 hover:text-amber-400 px-1 py-2"
+            >
+              CLEAR FILTERS
+            </button>
+          )}
         </div>
 
         {scanRangeError && (
@@ -1218,98 +1663,174 @@ export default function SiteDetailPage() {
               or unlinked later changes what past rounds appear to have missed.
             </p>
 
-            {/* Desktop (md+): one tbody per round, each opened by a header row.
-                distance_m keeps its own column — the anti-fraud signal. Plain
-                number, no thresholds: there is no data yet to justify one. */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="text-left text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
-                    <th className="py-2 pr-4 font-normal">CHECKPOINT</th>
-                    <th className="py-2 pr-4 font-normal">GUARD</th>
-                    <th className="py-2 pr-4 font-normal">SCANNED AT</th>
-                    <th className="py-2 font-normal">DISTANCE (M)</th>
-                  </tr>
-                </thead>
-                {rounds.map((r) => (
-                  <tbody key={r.key} className="divide-y divide-[#1A3050]">
-                    <tr>
-                      <td colSpan={4} className="pt-4 pb-2">
-                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                          <span className="text-amber-400 font-bold tracking-widest text-xs">{r.label}</span>
-                          <RoundCount scanned={r.scanned} expected={r.expected} />
-                          {r.missing.length > 0 && (
-                            <span className="text-gray-500 text-xs min-w-0 break-words">
-                              Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                    {r.scans.map((s) => (
-                      <tr key={s.id}>
-                        <td className="py-2.5 pr-4 text-gray-200">
-                          {s.checkpoint_label}
-                          {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
-                        </td>
-                        <td className="py-2.5 pr-4 text-gray-300">{s.guard_name}</td>
-                        <td className="py-2.5 pr-4 text-gray-400 font-mono text-xs">
-                          {scanTs.format(new Date(s.scanned_at))}
-                        </td>
-                        <td className="py-2.5 text-gray-300 font-mono text-xs">{Math.round(s.distance_m)} m</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                ))}
-              </table>
+            {/* Per-checkpoint coverage for the selected range. Sits ABOVE the
+                round list because it answers the question the round list is
+                worst at: "is anything being missed every single time?" */}
+            <div className="border border-[#1A3050] rounded-lg overflow-hidden mb-4">
+              <div className="px-3 py-2 bg-[#0F1E35] border-b border-[#1A3050]">
+                <h3 className="text-gray-400 text-xs tracking-widest">
+                  CHECKPOINT COVERAGE — {rounds.length} ROUND{rounds.length === 1 ? '' : 'S'} IN RANGE
+                </h3>
+              </div>
+              {scansTruncated ? (
+                /* Same reasoning as the EXPORT CSV disable: a ratio computed over
+                   a truncated set understates coverage, and a checkpoint that
+                   looks never-scanned because rows were capped is worse than no
+                   number at all. Suppress rather than qualify. */
+                <p className="px-3 py-2 text-amber-300 text-xs leading-relaxed">
+                  Coverage is hidden while the view is capped at 1000 rows — the ratios would be
+                  computed over a partial range and would understate what was actually scanned.
+                  Narrow the dates to see it.
+                </p>
+              ) : coverage.length === 0 ? (
+                <p className="px-3 py-2 text-gray-500 text-xs">
+                  No active, linked checkpoints to measure against.
+                </p>
+              ) : (
+                <ul className="divide-y divide-[#1A3050]">
+                  {coverage.map((c) => {
+                    const none = c.hit === 0;
+                    const full = c.hit >= c.total;
+                    return (
+                      <li key={c.id} className="px-3 py-2 flex items-center justify-between gap-3">
+                        <span className="text-gray-200 text-sm break-words min-w-0">{c.label}</span>
+                        <span
+                          className={
+                            'text-xs font-mono shrink-0 ' +
+                            (none ? 'text-red-400' : full ? 'text-green-400' : 'text-amber-400')
+                          }
+                        >
+                          {c.hit} of {c.total} round{c.total === 1 ? '' : 's'}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
 
-            {/* Mobile (<md): cards, per docs/mobile-responsive.md. At 375px the
-                round header stacks — label on its own line, count beneath it,
-                missing checkpoints wrapping below — so nothing is squeezed into
-                a shared row and truncated. The header is a filled bar rather
-                than a text line so the group boundary survives scrolling. */}
-            <div className="md:hidden space-y-4">
-              {rounds.map((r) => (
-                <div key={r.key}>
-                  <div className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 mb-2">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="text-amber-400 font-bold tracking-widest text-xs break-words min-w-0">
-                        {r.label}
-                      </span>
-                      <RoundCount scanned={r.scanned} expected={r.expected} />
-                    </div>
-                    {r.missing.length > 0 && (
-                      <p className="text-gray-500 text-xs mt-1 break-words">
-                        Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
-                      </p>
-                    )}
-                  </div>
-                  <div className="space-y-2 pl-2 border-l border-[#1A3050]">
-                    {r.scans.map((s) => (
-                      <div key={s.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2">
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-gray-200 text-sm font-medium break-words min-w-0">
+            {/* Column header for the desktop rows. Lives outside the rounds
+                because each round is its own <details> now — see SCAN_GRID. */}
+            <div className={`${SCAN_GRID} text-gray-500 text-xs tracking-widest border-b border-[#1A3050] px-3 py-2`}>
+              <span>CHECKPOINT</span>
+              <span>GUARD</span>
+              <span>SCANNED AT</span>
+              <span className="text-right">DISTANCE (M)</span>
+            </div>
+
+            {/* One plain <details> per round — deliberately NOT name-grouped, so
+                several rounds can sit open at once while an admin compares them.
+                Open state is a server-rendered `open` attribute, no JS: a round
+                that is incomplete opens itself, a whole round stays shut. The
+                completeness test is the same expression RoundCount uses, so the
+                pill and the open state can never disagree. */}
+            {filtersActive && (
+              <p className="text-gray-500 text-xs mb-3">
+                Showing <span className="text-gray-400">{visibleRounds.length}</span> of{' '}
+                <span className="text-gray-400">{rounds.length}</span> rounds in range. Filters
+                narrow this list only — a listed round still shows every one of its scans, and
+                coverage above is still measured over all {rounds.length}.
+              </p>
+            )}
+
+            {visibleRounds.length === 0 ? (
+              <p className="text-gray-500 text-sm">No rounds in this range match the current filters.</p>
+            ) : (
+            <div className="divide-y divide-[#1A3050]">
+              {visibleRounds.map((r) => {
+                const complete = r.expected > 0 && r.scanned >= r.expected;
+                const guards   = roundGuards(r.scans);
+                const worst    = roundWorstScan(r.scans);
+                return (
+                  <details key={r.key} open={!complete} className="group">
+                    <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden px-3 py-3 hover:bg-[#0F1E35] transition-colors">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <svg
+                          viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+                          className="w-3.5 h-3.5 shrink-0 text-gray-500 group-open:rotate-180 transition-transform duration-200"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m6 9 6 6 6-6" />
+                        </svg>
+                        <span className="text-amber-400 font-bold tracking-widest text-xs">{r.label}</span>
+                        <RoundCount scanned={r.scanned} expected={r.expected} />
+                        {guards.length > 0 && (
+                          <span className="text-gray-300 text-xs break-words min-w-0">{guards.join(', ')}</span>
+                        )}
+                        {worst !== null && (
+                          <span className="flex items-baseline gap-1 shrink-0">
+                            <span className="text-gray-500 text-xs">worst</span>
+                            <DistanceValue scan={worst} radius={radiusById.get(worst.checkpoint_id) ?? null} />
+                          </span>
+                        )}
+                      </div>
+                      {r.missing.length > 0 && (
+                        <p className="text-gray-500 text-xs mt-1 pl-[1.375rem] break-words">
+                          Not scanned: <span className="text-gray-400">{r.missing.join(', ')}</span>
+                        </p>
+                      )}
+                    </summary>
+
+                    {/* Desktop rows (md+). distance_m keeps its own column — the
+                        anti-fraud signal. Plain number, no thresholds: there is
+                        no data yet to justify one. */}
+                    <div className="pb-2">
+                      {r.scans.map((s) => (
+                        <div key={s.id} className={`${SCAN_GRID} px-3 py-2 text-sm items-baseline`}>
+                          <span className="text-gray-200 break-words min-w-0">
                             {s.checkpoint_label}
                             {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
                           </span>
-                          <span className="text-gray-300 font-mono text-xs shrink-0">{Math.round(s.distance_m)} m</span>
+                          <span className="text-gray-300 break-words min-w-0">{s.guard_name}</span>
+                          <span className="text-gray-400 font-mono text-xs">
+                            {scanTs.format(new Date(s.scanned_at))}
+                          </span>
+                          <DistanceValue
+                            scan={s}
+                            radius={radiusById.get(s.checkpoint_id) ?? null}
+                            className="text-right"
+                          />
                         </div>
-                        <p className="text-gray-500 text-xs mt-0.5">
-                          {s.guard_name}
-                          <span className="text-gray-600"> · </span>
-                          <span className="font-mono">{scanTs.format(new Date(s.scanned_at))}</span>
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
+                      ))}
+                    </div>
+
+                    {/* Mobile cards (<md), per docs/mobile-responsive.md — the
+                        grid above collapses at 375px, so rows become cards. */}
+                    <div className="md:hidden space-y-2 px-3 pb-3 pl-5 border-l border-[#1A3050] ml-3">
+                      {r.scans.map((s) => (
+                        <div key={s.id} className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-gray-200 text-sm font-medium break-words min-w-0">
+                              {s.checkpoint_label}
+                              {!activeLinkedIds.has(s.checkpoint_id) && <NotInRosterTag />}
+                            </span>
+                            <DistanceValue
+                              scan={s}
+                              radius={radiusById.get(s.checkpoint_id) ?? null}
+                              className="shrink-0"
+                            />
+                          </div>
+                          <p className="text-gray-500 text-xs mt-0.5">
+                            {s.guard_name}
+                            <span className="text-gray-600"> · </span>
+                            <span className="font-mono">{scanTs.format(new Date(s.scanned_at))}</span>
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
             </div>
+            )}
           </>
         )}
       </section>
+      </>
+      )}
 
+      {/* Modals stay mounted on every tab: they are opened from the
+          Checkpoints tab but must survive a re-render without being
+          torn out of the tree mid-flight. */}
       {/* ADD / EDIT vehicle modal */}
       {vehModalMode !== null && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60">
