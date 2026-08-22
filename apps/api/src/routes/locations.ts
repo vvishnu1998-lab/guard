@@ -10,6 +10,7 @@ import { sendPushNotification } from '../services/firebase';
 import { expiresAtFor } from '../services/retention';
 import { scheduleWindows } from '../services/pingWindows';
 import { readShadowSignals } from '../services/shadowSignals';
+import { logClientIdentity } from '../services/clientIdentity';
 
 /**
  * Fire guard notification row + admin email for a geofence violation.
@@ -558,6 +559,7 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     // Pre-cutover rows are outside the index, so a window answered twice
     // back then still does not conflict — deliberate: history is not
     // rewritten, only new writes are constrained.
+    logClientIdentity(req, 'ping');
     const pingShadow = readShadowSignals(req.body, 'ping', accuracyM);
     const pingInsert = await client.query(
       `INSERT INTO location_pings
@@ -917,6 +919,7 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
   // Shadow capture (Wave 1) — recorded, never evaluated. This route's own
   // guard is a bare `typeof accuracy === 'number'` (see :841), which admits
   // NaN and Infinity, so accuracy is sanitised here rather than stored raw.
+  logClientIdentity(req, 'clock-in-verification');
   const verifyShadow = readShadowSignals(req.body, 'clock-in-verification');
 
   const result = await pool.query(
