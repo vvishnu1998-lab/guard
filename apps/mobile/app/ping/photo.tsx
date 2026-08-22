@@ -99,6 +99,9 @@ export default function PhotoPing() {
         ping_type:        'gps_photo',
         photo_url:        public_url,
         window_label:     windowLabel ?? undefined,
+        // Shadow capture (Wave 1) — recorded server-side, never evaluated.
+        // Optional: absent or malformed becomes NULL and the ping proceeds.
+        ...photo.signals,
       });
       // 200 already_recorded is SUCCESS, not an error: the window was
       // already answered, so the server declined to add a second row and

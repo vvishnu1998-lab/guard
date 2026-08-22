@@ -51,6 +51,7 @@ export default function ClockInStep4() {
     verifiedLatitude,
     verifiedLongitude,
     verifiedAccuracy,
+    verifiedSignals,
     verifiedAt,
     selfie,
     sitePhoto,
@@ -151,6 +152,10 @@ export default function ClockInStep4() {
           lat,
           lng,
           accuracy,
+          // Shadow capture (Wave 1) — recorded server-side, never evaluated.
+          // Optional on the server: absent or malformed becomes NULL and the
+          // clock-in proceeds exactly as before.
+          ...verifiedSignals,
         },
         { headers: { 'Idempotency-Key': clockInIdempotencyKey } },
       );
@@ -174,6 +179,8 @@ export default function ClockInStep4() {
         verified_lng:       lng,
         accuracy,
         is_within_geofence: true,
+        // Shadow capture (Wave 1) — see above.
+        ...verifiedSignals,
       });
       Sentry.addBreadcrumb({
         category: 'clock_in_wizard',
