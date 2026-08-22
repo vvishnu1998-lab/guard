@@ -30,6 +30,7 @@ import geocodeRoutes from './routes/geocode';
 import schedulingRoutes from './routes/scheduling';
 import checkpointsRoutes from './routes/checkpoints';
 import locationIntegrityRoutes from './routes/locationIntegrity';
+import offlineDeadLetterRoutes from './routes/offlineDeadLetter';
 import vehiclesRoutes from './routes/vehicles';
 import inspectionsRoutes from './routes/inspections';
 
@@ -143,6 +144,7 @@ app.use('/api/geocode', geocodeRoutes);
 app.use('/api/scheduling', schedulingRoutes);
 app.use('/api/checkpoints', checkpointsRoutes);
 app.use('/api/location-integrity', locationIntegrityRoutes);
+app.use('/api/offline', offlineDeadLetterRoutes);
 app.use('/api/vehicles', vehiclesRoutes);
 app.use('/api/inspections', inspectionsRoutes);
 
