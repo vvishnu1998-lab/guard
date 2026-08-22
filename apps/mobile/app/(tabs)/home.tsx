@@ -20,6 +20,7 @@ import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BreakType } from '../../constants/breakDurations';
 import { guardMessage } from '../../lib/errorCopy';
+import UnsentWritesBanner from '../../components/UnsentWritesBanner';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -529,6 +530,12 @@ export default function HomeScreen() {
       </View>
 
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+        {/* Unsent writes — also on home, not just active-shift: a loss can
+            outlive the shift it happened on, and a guard who has clocked
+            out still needs to know their patrol scan never landed.
+            Self-padding here because the map below is full-bleed. */}
+        <View style={styles.unsentWrap}><UnsentWritesBanner /></View>
+
         {/* Map — MapView always mounts with a default initialRegion
             (SF Bay Area) so tiles render immediately. Once we have a real
             fix it re-centers via `region`. This is walk-test bug #4:
@@ -894,6 +901,7 @@ function PingCountdownBanner({
 }
 
 const styles = StyleSheet.create({
+  unsentWrap: { paddingHorizontal: 16, paddingTop: 12 },
   container: { flex: 1, backgroundColor: Colors.bg },
 
   header: {

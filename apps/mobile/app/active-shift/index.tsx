@@ -28,6 +28,7 @@ import { useAuthStore }  from '../../store/authStore';
 import { currentPingWindow, remainingMsUntilNextPing, type PingWindowState } from '../../lib/pingSchedule';
 import { checkpointsEnabled, inspectionRequired } from '../../lib/siteFlags';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import UnsentWritesBanner from '../../components/UnsentWritesBanner';
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
 
@@ -280,6 +281,12 @@ export default function ActiveShiftScreen() {
         <Text style={styles.timerValue}>{formatElapsed(elapsedSeconds)}</Text>
         <Text style={styles.siteName}>{activeShift.site_name?.toUpperCase()}</Text>
       </View>
+
+      {/* ── Unsent writes ──────────────────────────────────────────
+          Above everything else on purpose: a write the guard believes
+          landed and which did not is the most consequential thing this
+          screen can tell them. Renders nothing when the bucket is empty. */}
+      <UnsentWritesBanner />
 
       {/* ── Vehicle inspection card (schema_v48) — prompted, not blocking ── */}
       {needInspection && !(inspStatus?.exists === true && inspStatus.complete) && (

@@ -4,14 +4,22 @@
  *
  * Covered action types:
  *   report_submit   — activity / incident / maintenance reports
- *   task_complete   — task instance completions
- *   violation_post  — geofence violation notifications
+ *   checkpoint_scan — patrol tag scans
+ *   task_complete   — DEAD CODE: offlineStore.completeTask has no consumers;
+ *                     tasks submit via apiClient directly. Type retained so
+ *                     items persisted by older builds still resolve.
+ *   violation_post  — DEAD CODE: offlineStore.postViolation has no consumers;
+ *                     tasks/locationBackground.ts posts violations with a raw
+ *                     fetch, outside this queue entirely. Same retention note.
  *
  * Design decisions:
  *   - Queue is stored in AsyncStorage as a JSON array (no native SQLite dep needed)
  *   - Items are keyed by a local UUID so the UI can reference them optimistically
- *   - Each item tracks attempt count — after 5 failures it is moved to a dead-letter
- *     bucket and the guard is alerted
+ *   - An item that cannot be delivered moves to a dead-letter bucket recording
+ *     WHY (permanent_4xx / max_attempts / unknown_type), and the guard is shown
+ *     a banner. That last clause was documented here and NOT IMPLEMENTED from
+ *     the day this file shipped until 2026-08-22: nothing read the bucket, so
+ *     every abandoned write vanished silently after the UI said it was saved.
  *   - Sync runs: on app foreground, on network reconnect, and every 60 s while active
  *   - Items are processed strictly in FIFO order
  *
@@ -43,6 +51,16 @@ export type QueueActionType =
   | 'violation_post'
   | 'checkpoint_scan';
 
+/**
+ * Why an item was given up on. The review screen branches on this: a
+ * network exhaustion CAN succeed if retried, a permanent 4xx never will,
+ * and offering "Retry" on the latter is theatre.
+ */
+export type DeadReason =
+  | 'permanent_4xx'   // server refused it; the frozen payload will never pass
+  | 'max_attempts'    // transport failed MAX_ATTEMPTS times
+  | 'unknown_type';   // persisted by a build whose action type we dropped
+
 export interface QueuedAction {
   localId:    string;          // uuid — client-assigned, used for optimistic UI
   type:       QueueActionType;
@@ -50,6 +68,20 @@ export interface QueuedAction {
   attempts:   number;
   queuedAt:   string;          // ISO timestamp
   lastError?: string;
+
+  // ── dead-letter fields; absent while the item is still in the queue ───
+  // All optional so items persisted by earlier builds still parse.
+  deadReason?:     DeadReason;
+  deadStatus?:     number;      // HTTP status, when there was one
+  deadAt?:         string;      // ISO
+  /** ISO once the server has acknowledged this loss. NULL/absent means the
+   *  loss exists only on this handset. Deletion is gated on this — see
+   *  deleteDeadLetter. */
+  reportedAt?:     string | null;
+  reportAttempts?: number;
+  /** ISO when the guard dismissed the banner for this item. It stays in
+   *  storage and stays eligible for reporting; this only hides it. */
+  acknowledgedAt?: string | null;
 }
 
 // ── Queue read/write ─────────────────────────────────────────────────────────
@@ -61,14 +93,58 @@ async function readQueue(): Promise<QueuedAction[]> {
 
 async function writeQueue(queue: QueuedAction[]): Promise<void> {
   await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+  notifyChange();
 }
 
-async function moveToDeadLetter(item: QueuedAction): Promise<void> {
+async function readDeadLetter(): Promise<QueuedAction[]> {
   const raw = await AsyncStorage.getItem(DEAD_LETTER_KEY);
-  const dead: QueuedAction[] = raw ? JSON.parse(raw) : [];
-  dead.push(item);
+  return raw ? (JSON.parse(raw) as QueuedAction[]) : [];
+}
+
+async function writeDeadLetter(dead: QueuedAction[]): Promise<void> {
   await AsyncStorage.setItem(DEAD_LETTER_KEY, JSON.stringify(dead));
-  console.warn(`[offline-queue] Moved ${item.type}:${item.localId} to dead-letter after ${item.attempts} attempts`);
+  notifyChange();
+}
+
+async function moveToDeadLetter(
+  item: QueuedAction,
+  reason: DeadReason,
+  status?: number,
+): Promise<void> {
+  const dead = await readDeadLetter();
+  dead.push({
+    ...item,
+    deadReason: reason,
+    deadStatus: status,
+    deadAt: new Date().toISOString(),
+    reportedAt: null,
+    reportAttempts: 0,
+    acknowledgedAt: null,
+  });
+  await writeDeadLetter(dead);
+  console.warn(
+    `[offline-queue] DEAD-LETTER ${item.type}:${item.localId} reason=${reason}` +
+    `${status ? ` status=${status}` : ''} after ${item.attempts} attempt(s)`,
+  );
+}
+
+// ── Change notification ──────────────────────────────────────────────────
+// The queue stays free of any UI dependency; offlineStore subscribes and
+// re-reads the counts. Without this the banner would only update on the
+// screens that happen to remount.
+type ChangeListener = () => void;
+const listeners = new Set<ChangeListener>();
+
+/** Subscribe to queue/dead-letter changes. Returns an unsubscribe fn. */
+export function onQueueChange(fn: ChangeListener): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+function notifyChange(): void {
+  for (const fn of listeners) {
+    try { fn(); } catch (err) { console.warn('[offline-queue] listener threw:', err); }
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -116,7 +192,12 @@ const ENDPOINT: Record<QueueActionType, string> = {
   checkpoint_scan: '/checkpoints/scan',
 };
 
-async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead'> {
+type SyncResult =
+  | { outcome: 'success' }
+  | { outcome: 'retry' }
+  | { outcome: 'dead'; reason: DeadReason; status?: number };
+
+async function syncItem(item: QueuedAction): Promise<SyncResult> {
   try {
     let path = ENDPOINT[item.type];
     // Unknown type — a queue item persisted by an older build whose action
@@ -124,7 +205,7 @@ async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead
     // than POSTing to `undefined` five times.
     if (!path) {
       console.warn(`[offline-queue] unknown action type ${item.type} — dead-lettering`);
-      return 'dead';
+      return { outcome: 'dead', reason: 'unknown_type' };
     }
 
     // task_complete needs the instance id interpolated into the path
@@ -133,7 +214,7 @@ async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead
     }
 
     await apiClient.post(path, item.payload);
-    return 'success';
+    return { outcome: 'success' };
   } catch (err: any) {
     const newAttempts = item.attempts + 1;
     console.error(`[offline-queue] syncItem failed (attempt ${newAttempts}/${MAX_ATTEMPTS}):`, err?.message, 'payload:', JSON.stringify(item.payload).slice(0, 400));
@@ -159,10 +240,10 @@ async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead
     if (err instanceof ApiError && !(err instanceof SessionExpiredError)
         && err.status >= 400 && err.status < 500) {
       console.error(`[offline-queue] permanent ${err.status} (${err.code ?? 'no code'}) — dead-lettering without retry`);
-      return 'dead';
+      return { outcome: 'dead', reason: 'permanent_4xx', status: err.status };
     }
-    if (newAttempts >= MAX_ATTEMPTS) return 'dead';
-    return 'retry';
+    if (newAttempts >= MAX_ATTEMPTS) return { outcome: 'dead', reason: 'max_attempts' };
+    return { outcome: 'retry' };
   }
 }
 
@@ -184,12 +265,15 @@ export async function syncQueue(): Promise<void> {
 
     for (const item of queue) {
       const result = await syncItem(item);
-      if (result === 'success') {
+      if (result.outcome === 'success') {
         await dequeue(item.localId);
         console.log(`[offline-queue] ✓ Synced ${item.type}:${item.localId}`);
-      } else if (result === 'dead') {
+      } else if (result.outcome === 'dead') {
+        // Re-read: syncItem's catch wrote the incremented attempts and
+        // lastError back to storage, so the loop's copy is stale.
+        const fresh = (await readQueue()).find((i) => i.localId === item.localId) ?? item;
         await dequeue(item.localId);
-        await moveToDeadLetter(item);
+        await moveToDeadLetter(fresh, result.reason, result.status);
       }
       // 'retry' → stays in queue, will be retried on next sync
     }
@@ -226,13 +310,81 @@ export function stopQueueSync(): void {
   console.log('[offline-queue] Sync stopped');
 }
 
-/** Retrieve dead-letter items so the UI can display them */
+// ── Dead letter: the record of writes that will never land ───────────────
+//
+// Until 2026-08-22 this bucket was written to and READ BY NOTHING.
+// getDeadLetterItems() and clearDeadLetter() had zero call sites and no
+// screen rendered the count, so every abandoned write since the queue
+// shipped disappeared in silence — after the UI had told the guard it was
+// saved. That is what this section exists to end.
+
+/** Every dead-letter item, newest first. Includes acknowledged ones. */
 export async function getDeadLetterItems(): Promise<QueuedAction[]> {
-  const raw = await AsyncStorage.getItem(DEAD_LETTER_KEY);
-  return raw ? JSON.parse(raw) : [];
+  const dead = await readDeadLetter();
+  return dead.slice().reverse();
 }
 
-/** Clear dead-letter after guard or admin has acknowledged */
-export async function clearDeadLetter(): Promise<void> {
-  await AsyncStorage.removeItem(DEAD_LETTER_KEY);
+/**
+ * How many losses the guard has not yet dismissed. This is the banner's
+ * number — it deliberately ignores whether the server knows, because guard
+ * awareness must not depend on connectivity.
+ */
+export async function deadLetterCount(): Promise<number> {
+  const dead = await readDeadLetter();
+  return dead.filter((i) => !i.acknowledgedAt).length;
+}
+
+/**
+ * Dismiss the banner for one item. DOES NOT DELETE IT.
+ *
+ * The item stays in storage and stays eligible for reporting to the
+ * server. A guard can silence the warning; they cannot make the loss
+ * disappear before anyone upstream has learned of it. Deleting on dismiss
+ * would rebuild the exact hole this whole surface exists to close.
+ */
+export async function acknowledgeDeadLetter(localId: string): Promise<void> {
+  const dead = await readDeadLetter();
+  const idx = dead.findIndex((i) => i.localId === localId);
+  if (idx === -1) return;
+  dead[idx].acknowledgedAt = new Date().toISOString();
+  await writeDeadLetter(dead);
+}
+
+/**
+ * Permanently remove an item. GATED ON reportedAt: an item the server has
+ * never heard about cannot be deleted from the handset, because this is
+ * then the only record that it happened.
+ *
+ * Returns false when the gate refuses.
+ */
+export async function deleteDeadLetter(localId: string): Promise<boolean> {
+  const dead = await readDeadLetter();
+  const item = dead.find((i) => i.localId === localId);
+  if (!item) return true;
+  if (!item.reportedAt) {
+    console.warn(`[offline-queue] refusing to delete unreported ${item.type}:${localId}`);
+    return false;
+  }
+  await writeDeadLetter(dead.filter((i) => i.localId !== localId));
+  return true;
+}
+
+/** Re-queue a dead-lettered item. Only meaningful for 'max_attempts' —
+ *  a permanent 4xx will be refused identically, because the payload was
+ *  frozen at enqueue time and cannot change. */
+export async function retryDeadLetter(localId: string): Promise<void> {
+  const dead = await readDeadLetter();
+  const item = dead.find((i) => i.localId === localId);
+  if (!item) return;
+  await writeDeadLetter(dead.filter((i) => i.localId !== localId));
+  const queue = await readQueue();
+  queue.push({
+    localId: item.localId,
+    type: item.type,
+    payload: item.payload,
+    attempts: 0,
+    queuedAt: item.queuedAt,
+  });
+  await writeQueue(queue);
+  syncQueue().catch(console.error);
 }

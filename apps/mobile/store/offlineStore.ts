@@ -15,7 +15,10 @@
 import { create } from 'zustand';
 import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../lib/apiClient';
-import { enqueue, pendingCount, startQueueSync, stopQueueSync, syncQueue } from '../lib/offlineQueue';
+import {
+  enqueue, pendingCount, startQueueSync, stopQueueSync, syncQueue,
+  deadLetterCount, onQueueChange,
+} from '../lib/offlineQueue';
 import type { SubmitReportRequest, GeofenceViolationRequest } from '@guard/shared';
 
 /**
@@ -42,7 +45,12 @@ function shouldSurfaceInsteadOfQueue(err: unknown): boolean {
 
 interface OfflineState {
   pendingCount: number;
+  /** Losses the guard has not dismissed. Drives the banner. Read from
+   *  AsyncStorage, so it survives force-quit, cold start and logout — only
+   *  an uninstall clears it. */
+  deadCount: number;
   refreshPendingCount: () => Promise<void>;
+  refreshCounts: () => Promise<void>;
   startSync: () => void;
   stopSync:  () => void;
 
@@ -56,10 +64,16 @@ interface OfflineState {
 
 export const useOfflineStore = create<OfflineState>((set) => ({
   pendingCount: 0,
+  deadCount: 0,
 
   refreshPendingCount: async () => {
     const count = await pendingCount();
     set({ pendingCount: count });
+  },
+
+  refreshCounts: async () => {
+    const [pending, dead] = await Promise.all([pendingCount(), deadLetterCount()]);
+    set({ pendingCount: pending, deadCount: dead });
   },
 
   startSync: () => startQueueSync(),
@@ -131,3 +145,10 @@ export const useOfflineStore = create<OfflineState>((set) => ({
     return localId;
   },
 }));
+
+// The queue mutates from a 60 s timer, a NetInfo listener and every submit
+// path. Subscribing here means the banner reacts wherever the guard is,
+// rather than only on screens that happen to remount.
+onQueueChange(() => {
+  void useOfflineStore.getState().refreshCounts();
+});
