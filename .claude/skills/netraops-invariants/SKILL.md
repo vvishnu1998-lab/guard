@@ -39,6 +39,12 @@ Verified ground truth for the NetraOps platform. When live state may have change
 - Null polygon no longer crashes mobile (fixed `f2eab42`, on main since `c9cb986`). `hasUsablePolygon()` at `utils/geofence.ts:13`; `isPointInPolygon` guards on it at :28, `isInsideGeofence` at :81.
 - Mobile caches `activeShift.geofence` at clock-in — server-side geofence edits do NOT propagate to an app with a shift in progress. `refreshFromServer` (`store/shiftStore.ts:127`, fired on AppState→active `_layout.tsx:254` w/ 2s throttle, and home `useFocusEffect` `home.tsx:173`) only ever CLEARS a dead session; it deliberately never rewrites `activeShift`, or it would tear down region monitoring. Only `setActiveSession` rehydrates the fence: clock-in (`clock-in/step4.tsx:190`) or `restoreOrFetchShift`, which runs only `if (!isOnShift)` (`home.tsx:268`). Refresh path: force-quit is enough (the store is in-memory, so relaunch re-fetches) — re-login is NOT required; nuclear: reinstall.
 
+## Error contract (API to mobile)
+
+- **NEVER branch on error prose. Branch on status PLUS code, or on payload shape.** `err.message` is copy — it gets reworded, and every reword silently breaks whatever was matching it. `ApiError.code` carries the server's `error` field for exactly this purpose. Two live bugs from this in one day (2026-08-22): `checkpoints/scan.tsx` keyed on `err.status === 422 && linkMode` and rendered `MOCK_LOCATION_REJECTED` as "GPS signal too weak", telling the guard to fix their signal when the cause was a device setting; `(auth)/login.tsx` tested `msg.includes('locked')` for the lockout dialog, but the server's 423 copy reads "Too many failed attempts. Try again in 30 minutes or contact your supervisor." — no such substring, so that dialog had been **unreachable** since the copy was reworded. A third instance was already fixed once at `clock-in/step4.tsx` (`err.message === 'GEOFENCE_FAILED'`); the comment there records it.
+- **Every guard GPS write route returns MORE THAN ONE 422** since Wave 2 — its own off-post/quota/window failure plus `MOCK_LOCATION_REJECTED`. Status alone has not been a usable discriminator on any of them since 2026-08-22.
+- **`error` is a CODE, `message` is the copy.** A route putting a sentence in `error` leaves the client nothing to branch on, which is what forced `scan.tsx` onto status in the first place.
+
 ## Build/release invariants
 
 - EAS remote versioning (`appVersionSource: 'remote'` + `autoIncrement`) is source of truth — `app.json` buildNumber/versionCode are ignored and lag.
