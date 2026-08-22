@@ -1612,10 +1612,11 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
 
   // Mock-location gate — see the clock-in route above.
   {
+    const hoSignals = readShadowSignals(req.body, 'handoff-clock-in');
     const mockCheck = checkMockLocation(
-      readShadowSignals(req.body, 'handoff-clock-in').locationMocked,
+      hoSignals.locationMocked,
       'handoff-clock-in',
-      { guardId: user!.sub },
+      { guardId: user!.sub, accuracyM: hoSignals.accuracyMeters, fixAgeMs: hoSignals.fixAgeMs },
     );
     if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
@@ -2557,10 +2558,11 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
   // is a plain early return with nothing to roll back. Fails open on NULL,
   // on an absent field, and on any internal error — see services/mockLocation.ts.
   {
+    const ciSignals = readShadowSignals(req.body, 'clock-in');
     const mockCheck = checkMockLocation(
-      readShadowSignals(req.body, 'clock-in').locationMocked,
+      ciSignals.locationMocked,
       'clock-in',
-      { guardId: req.user!.sub },
+      { guardId: req.user!.sub, accuracyM: ciSignals.accuracyMeters, fixAgeMs: ciSignals.fixAgeMs },
     );
     if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
