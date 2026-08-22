@@ -12,6 +12,7 @@ import { checkShiftEligibility, eligibilityError } from '../services/guardAssign
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
+import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { BREAK_DURATIONS, BREAK_QUOTAS, BREAK_MISTAP_SECONDS, isBreakType } from '../constants/breakDurations';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
@@ -1608,6 +1609,17 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
   if (typeof lat !== 'number' || typeof lng !== 'number' || typeof accuracy !== 'number') {
     return res.status(400).json({ error: 'Missing lat/lng/accuracy. Update the app to the latest version.' });
   }
+
+  // Mock-location gate — see the clock-in route above.
+  {
+    const mockCheck = checkMockLocation(
+      readShadowSignals(req.body, 'handoff-clock-in').locationMocked,
+      'handoff-clock-in',
+      { guardId: user!.sub },
+    );
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
+  }
+
   const coords = clock_in_coords ?? `(${lat},${lng})`;
 
   const client = await pool.connect();
@@ -2539,6 +2551,18 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     return res.status(400).json({
       error: 'Missing lat/lng/accuracy. Update the app to the latest version.',
     });
+  }
+
+  // Mock-location gate. Evaluated BEFORE the transaction opens so a reject
+  // is a plain early return with nothing to roll back. Fails open on NULL,
+  // on an absent field, and on any internal error — see services/mockLocation.ts.
+  {
+    const mockCheck = checkMockLocation(
+      readShadowSignals(req.body, 'clock-in').locationMocked,
+      'clock-in',
+      { guardId: req.user!.sub },
+    );
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
 
   const coords = clock_in_coords ?? `(${lat},${lng})`;
