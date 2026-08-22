@@ -26,6 +26,7 @@ import { tzAbbreviation } from '../../../lib/shiftTime';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 import RequestSwapModal from '../../../components/RequestSwapModal';
 import HandoffRequestModal from '../../../components/HandoffRequestModal';
+import { guardMessage } from '../../../lib/errorCopy';
 
 type ShiftStatus = 'scheduled' | 'active' | 'completed' | 'missed' | 'cancelled';
 
@@ -123,7 +124,7 @@ export default function ShiftDetailScreen() {
       setShift(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message ?? 'Could not load shift');
+      setError(guardMessage(err, 'Could not load this shift. Pull down to refresh.', 'shift.detail'));
     }
   }, [id]);
 
@@ -263,7 +264,7 @@ export default function ShiftDetailScreen() {
               await load();
             } catch (err: any) {
               Sentry.captureException(err, { extra: { where: 'shift-detail.handoff-cancel' } });
-              Alert.alert('Could not cancel', err?.message ?? 'Please try again.');
+              Alert.alert('Could not cancel', guardMessage(err, 'Could not cancel this shift. Try again.', 'shift.cancel'));
             } finally {
               setCancelling(false);
             }

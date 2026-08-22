@@ -30,6 +30,7 @@ import { apiClient, ApiError } from '../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 } from '../../lib/uploadToS3';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 interface Vehicle {
   id:            string;
@@ -110,7 +111,7 @@ export default function InspectionScreen() {
         return;
       }
       Sentry.captureException(err, { extra: { where: 'inspection.hydrate' } });
-      setStage({ kind: 'error', message: err?.message ?? 'Could not load inspection.' });
+      setStage({ kind: 'error', message: guardMessage(err, 'Could not load the inspection. Go back and try again.', 'inspection.load') });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -129,7 +130,7 @@ export default function InspectionScreen() {
       setStage({ kind: 'pick', vehicles, changing });
     } catch (err: any) {
       Sentry.captureException(err, { extra: { where: 'inspection.loadVehicles' } });
-      setStage({ kind: 'error', message: err?.message ?? 'Could not load the vehicle roster.' });
+      setStage({ kind: 'error', message: guardMessage(err, 'Could not load the vehicle roster. Go back and try again.', 'inspection.vehicles') });
     }
   }
 
@@ -151,7 +152,7 @@ export default function InspectionScreen() {
       setStage({ kind: 'checklist' });
     } catch (err: any) {
       if (isSessionClosed(err)) { await handleSessionClosed(err, 'inspection.pickVehicle'); return; }
-      Alert.alert('Could not select vehicle', err?.message ?? 'Try again.');
+      Alert.alert('Could not select vehicle', guardMessage(err, 'Could not select that vehicle. Try again.', 'inspection.select-vehicle'));
     } finally {
       setBusyVehicle(false);
     }
@@ -170,7 +171,7 @@ export default function InspectionScreen() {
       setInspection((prev) => ({ ...prev, ...row }));
     } catch (err: any) {
       if (isSessionClosed(err)) { await handleSessionClosed(err, 'inspection.odometer'); return; }
-      Alert.alert('Could not save odometer', err?.message ?? 'Try again.');
+      Alert.alert('Could not save odometer', guardMessage(err, 'Could not save the odometer reading. Try again.', 'inspection.odometer'));
     } finally {
       setOdoSaving(false);
     }
@@ -191,7 +192,7 @@ export default function InspectionScreen() {
     } catch (err: any) {
       if (isSessionClosed(err)) { await handleSessionClosed(err, 'inspection.photo'); return; }
       Sentry.captureException(err, { extra: { where: 'inspection.submitSlotPhoto', slot } });
-      Alert.alert('Photo not saved', err?.message ?? 'Could not save the photo. Try again.');
+      Alert.alert('Photo not saved', guardMessage(err, 'Could not save the photo. Try again.', 'inspection.photo'));
       return 'reset';
     }
   }

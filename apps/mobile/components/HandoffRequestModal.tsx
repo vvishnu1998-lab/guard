@@ -23,6 +23,7 @@ import * as Sentry from '@sentry/react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
+import { guardMessage } from '../lib/errorCopy';
 
 interface EligibleGuard {
   guard_id:     string;
@@ -98,7 +99,7 @@ export default function HandoffRequestModal(props: Props) {
         }
       } catch (err: any) {
         if (!cancelled) {
-          setError(err?.message ?? 'Could not load guards');
+          setError(guardMessage(err, 'Could not load the guard list. Try again.', 'handoff-modal.guards'));
           Sentry.captureException(err, { extra: { where: 'HandoffRequestModal.fetch' } });
         }
       } finally {
@@ -141,7 +142,7 @@ export default function HandoffRequestModal(props: Props) {
         data: { error: err?.message ?? String(err) },
       });
       Sentry.captureException(err, { extra: { where: 'HandoffRequestModal.submit' } });
-      Alert.alert('Could not send handoff', err?.message ?? 'Please try again.');
+      Alert.alert('Could not send handoff', guardMessage(err, 'Could not send the handoff request. Try again.', 'handoff-modal.send'));
       setSubmitting(false);
     }
   }

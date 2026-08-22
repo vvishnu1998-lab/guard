@@ -19,6 +19,7 @@ import { shiftDayLabel, fmtTimeInTz, tzAbbreviation } from '../../lib/shiftTime'
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BreakType } from '../../constants/breakDurations';
+import { guardMessage } from '../../lib/errorCopy';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -196,7 +197,7 @@ export default function HomeScreen() {
     } catch (err: any) {
       Sentry.captureException(err, { extra: { where: 'home.cancelOutboundHandoff' } });
       // eslint-disable-next-line no-alert
-      alert(err?.message ?? 'Could not cancel handoff.');
+      alert(guardMessage(err, 'Could not cancel the handoff. Try again.', 'home.handoff-cancel'));
     } finally {
       setCancellingHandoff(false);
     }

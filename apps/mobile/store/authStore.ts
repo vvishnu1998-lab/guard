@@ -8,6 +8,7 @@ import { apiClient } from '../lib/apiClient';
 import { refreshTokens } from '../lib/refreshManager';
 import { stopQueueSync } from '../lib/offlineQueue';
 import { useShiftStore } from './shiftStore';
+import { ApiError, NetworkError } from '../lib/errors';
 
 export type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -122,16 +123,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   forgotPassword: async (email) => {
-    const API_URL = process.env.EXPO_PUBLIC_API_URL;
-    const res = await fetch(`${API_URL}/api/auth/forgot-password`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.toLowerCase().trim(), portal: 'guard' }),
+    // Was a second hand-rolled copy of _request. Same endpoint shape, same
+    // error handling — deduped so both auth paths classify identically.
+    await _request('/auth/forgot-password', {
+      email: email.toLowerCase().trim(),
+      portal: 'guard',
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Request failed' }));
-      throw new Error(err.error ?? 'Request failed');
-    }
   },
 
   logout: async (opts) => {
@@ -259,16 +256,29 @@ export const useAuthStore = create<AuthState>((set) => ({
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
+// The auth endpoints deliberately bypass apiClient: they carry no Bearer
+// token and routing them through the 401-refresh path would recurse. They
+// must still speak the shared error taxonomy, or every login and
+// forgot-password failure lands in the "bug in our own code" bucket —
+// guardMessage would discard the server's copy and file a Sentry issue for
+// an ordinary wrong password.
 async function _request(path: string, body: unknown) {
   const API_URL = process.env.EXPO_PUBLIC_API_URL;
-  const res = await fetch(`${API_URL}/api${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    throw new NetworkError(cause);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(err.error ?? 'Request failed');
+    // ApiError carries status + code + the full body, so callers can branch
+    // on the 423 lockout without pattern-matching the message prose.
+    throw new ApiError(res.status, err);
   }
   return res.json();
 }

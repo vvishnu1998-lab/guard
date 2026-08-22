@@ -30,6 +30,8 @@ import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { useOfflineStore } from '../../store/offlineStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { GuardFacingError } from '../../lib/errors';
+import { guardMessage } from '../../lib/errorCopy';
 
 const GPS_LIVE_TIMEOUT_MS = 8000;
 
@@ -83,7 +85,7 @@ async function getScanPosition(): Promise<{ lat: number; lng: number; acc: numbe
   if (last) {
     return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy, signals: locationSignals(last) };
   }
-  throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+  throw new GuardFacingError('GPS lock failed. Move to an area with better signal and try again.');
 }
 
 export default function CheckpointScanner() {
@@ -275,7 +277,7 @@ export default function CheckpointScanner() {
       Sentry.captureException(err, { extra: { where: 'checkpoint.scan', link_mode: linkMode } });
       setVerdict({
         kind: 'error', title: linkMode ? 'LINK FAILED' : 'SCAN FAILED',
-        message: err?.message ?? 'Something went wrong. Try again.',
+        message: guardMessage(err, 'Could not record this scan. Try scanning the tag again.', 'checkpoint.scan'),
         canRescan: true,
       });
     }

@@ -12,6 +12,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { apiClient }     from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 interface TaskInstance {
   id:                   string;
@@ -45,7 +46,7 @@ export default function TasksScreen() {
       setTasks(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message ?? 'Could not load tasks');
+      setError(guardMessage(err, 'Could not load your tasks. Pull down to refresh.', 'tasks.list'));
     }
   }
 

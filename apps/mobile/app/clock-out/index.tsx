@@ -15,6 +15,8 @@ import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { apiClient }     from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { GuardFacingError } from '../../lib/errors';
+import { guardMessage } from '../../lib/errorCopy';
 
 const GPS_TIMEOUT_MS = 3000;
 
@@ -81,7 +83,7 @@ export default function ClockOutScreen() {
         console.warn('[clock-out] GPS read threw:', err);
       }
       if (lat === null || lng === null) {
-        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+        throw new GuardFacingError('GPS lock failed. Move to an area with better signal and try again.');
       }
 
       await apiClient.post(`/shifts/${activeShift!.id}/clock-out`, {
@@ -96,7 +98,7 @@ export default function ClockOutScreen() {
       clearSession();
       router.replace('/(tabs)/home');
     } catch (err: any) {
-      Alert.alert('Clock-Out Failed', err?.message ?? 'Could not end shift. Please try again.');
+      Alert.alert('Clock-Out Failed', guardMessage(err, 'Could not end your shift. Try again, or tell your supervisor.', 'clock-out'));
     } finally {
       setSubmitting(false);
     }

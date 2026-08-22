@@ -35,6 +35,7 @@ import { navigateForNotification } from '../../lib/navigateForNotification';
 import { useUnreadStore } from '../../store/unreadStore';
 import { visibleNotifications, groupNotifications } from '../../lib/notificationSections';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 type NotificationType =
   | 'ping_reminder'
@@ -147,7 +148,7 @@ export default function NotificationsScreen() {
       setRows(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message ?? 'Could not load notifications');
+      setError(guardMessage(err, 'Could not load notifications. Pull down to refresh.', 'notifications.list'));
     }
   }, []);
 

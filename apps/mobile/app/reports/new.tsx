@@ -29,6 +29,8 @@ import { usePhotoAttachments } from '../../hooks/usePhotoAttachments';
 import { PhotoStrip } from '../../components/reports/PhotoStrip';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { GuardFacingError } from '../../lib/errors';
+import { guardMessage } from '../../lib/errorCopy';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
 
@@ -124,7 +126,7 @@ export default function CreateReport() {
         data: { error: err?.message ?? String(err) },
       });
       Sentry.captureException(err, { extra: { where: 'reports.new.handleEnhance' } });
-      Alert.alert('Enhancement Failed', err?.message ?? 'Could not enhance description. Try again.');
+      Alert.alert('Enhancement Failed', guardMessage(err, 'Could not enhance the description. Write it yourself and carry on.', 'report.enhance'));
     } finally {
       setEnhancing(false);
     }
@@ -198,7 +200,7 @@ export default function CreateReport() {
         console.warn('[report] GPS read threw:', err);
       }
       if (latitude === null || longitude === null) {
-        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+        throw new GuardFacingError('GPS lock failed. Move to an area with better signal and try again.');
       }
 
       if (windowLabel) {
@@ -289,7 +291,7 @@ export default function CreateReport() {
           data: { error: err?.message ?? String(err) },
         });
         Sentry.captureException(err, { extra: { where: 'reports.new.submit' } });
-        Alert.alert('Report Submission Failed', err?.message ?? 'Could not submit report.');
+        Alert.alert('Report Submission Failed', guardMessage(err, 'Could not submit your report. Your text and photos are still here — try again.', 'report.submit'));
       }
     } finally {
       setSubmitting(false);

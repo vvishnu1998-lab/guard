@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../lib/apiClient';
 import { useUnreadStore } from '../../store/unreadStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 interface ChatMessage {
   id:          string;
@@ -43,7 +44,7 @@ export default function ChatRoomScreen() {
       setMessages(data);
       setError('');
     } catch (e: any) {
-      if (!silent) setError(e?.message ?? 'Failed to load messages');
+      if (!silent) setError(guardMessage(e, 'Could not load messages. Pull down to retry.', 'chat.messages'));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -85,7 +86,7 @@ export default function ChatRoomScreen() {
       const msg = await apiClient.post<ChatMessage>(`/chat/rooms/${roomId}/messages`, { message: body });
       setMessages((prev) => [...prev, msg]);
     } catch (e: any) {
-      setError(e?.message ?? 'Failed to send');
+      setError(guardMessage(e, 'Message not sent. Tap send again.', 'chat.send'));
       setText(body);
     } finally {
       setSending(false);

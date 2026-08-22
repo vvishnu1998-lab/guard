@@ -19,6 +19,7 @@ import { uploadToS3 }      from '../../lib/uploadToS3';
 import { uuidv4 }          from '../../lib/uuid';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 const STEPS = ['Uploading selfie…', 'Starting shift…', 'Saving verification…'];
 
@@ -265,7 +266,7 @@ export default function ClockInStep4() {
         );
         return;
       }
-      Alert.alert('Clock-In Failed', err?.message ?? 'Could not start shift. Please try again.');
+      Alert.alert('Clock-In Failed', guardMessage(err, 'Could not start your shift. Try again, or tell your supervisor.', 'clock-in'));
     } finally {
       setSubmitting(false);
     }

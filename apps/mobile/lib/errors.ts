@@ -114,6 +114,30 @@ export class NetworkError extends Error {
 }
 
 /**
+ * An error WE raised deliberately whose `message` is already guard-facing
+ * copy — a GPS lock that never came, a camera that returned no photo, a
+ * file over the upload ceiling.
+ *
+ * WHY THIS IS NEEDED. Without it these are indistinguishable from a bug in
+ * our own code, so guardMessage() would discard perfectly good copy,
+ * substitute a generic fallback, and file a Sentry issue for a condition
+ * that is not a defect. `throw new Error('GPS lock failed. Move to an area
+ * with better signal and try again.')` appears at five call sites and every
+ * one of them means exactly what it says.
+ *
+ * Use it ONLY when the string is written for a guard to read. If the text
+ * contains a status code, a stack, a field name, or the words "unexpected"
+ * or "invalid", it is not guard-facing — throw a plain Error and let the
+ * call site's fallback speak instead.
+ */
+export class GuardFacingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GuardFacingError';
+  }
+}
+
+/**
  * True ONLY for a transport-level failure — `fetch` rejected before a
  * status code existed. offlineStore branches on this to decide whether an
  * action may be queued.

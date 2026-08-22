@@ -13,6 +13,8 @@ import * as Notifications from 'expo-notifications';
 import * as Sentry from '@sentry/react-native';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { ApiError } from '../../lib/errors';
+import { guardMessage } from '../../lib/errorCopy';
 
 export default function LoginScreen() {
   const [email, setEmail]       = useState('');
@@ -55,16 +57,28 @@ export default function LoginScreen() {
       await loginWithEmail(email.trim(), password, fcmToken);
       // Navigation handled by root _layout.tsx
     } catch (err: any) {
-      const msg = err?.message ?? 'Login failed';
-      if (msg.includes('locked')) {
-        Alert.alert(
-          'Account Locked',
-          'Your account has been locked after 5 failed attempts. Contact your supervisor to unlock.',
-          [{ text: 'OK' }]
-        );
-      } else {
-        Alert.alert('Login Failed', msg);
-      }
+      // This branch used to test `msg.includes('locked')`. The server's 423
+      // body reads "Too many failed attempts. Try again in 30 minutes or
+      // contact your supervisor." — it contains no such substring, so the
+      // Account Locked dialog had been unreachable ever since that copy was
+      // reworded. Nobody noticed because the fallback still showed the
+      // server's sentence, which reads fine.
+      //
+      // Same failure shape as the checkpoint 422 bug: matching on prose
+      // instead of on a code. Branch on the status and the body's own flag.
+      //
+      // The hardcoded copy is dropped in favour of the server's, which is
+      // also the more accurate of the two — the lock self-clears after 30
+      // minutes (auth.ts auto-unlock), so "Contact your supervisor to
+      // unlock" was sending guards to escalate something that resolves
+      // itself.
+      const locked = err instanceof ApiError
+        && (err.status === 423 || err.details?.locked === true);
+      Alert.alert(
+        locked ? 'Account Locked' : 'Login Failed',
+        guardMessage(err, 'Could not sign you in. Check your email and password, then try again.', 'login'),
+        [{ text: 'OK' }],
+      );
     } finally {
       setLoading(false);
     }

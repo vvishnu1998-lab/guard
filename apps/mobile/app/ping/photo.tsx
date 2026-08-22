@@ -31,6 +31,7 @@ import {
   outstandingPingWindow,
   confirmationMessage,
 } from '../../lib/pingFollowUp';
+import { guardMessage } from '../../lib/errorCopy';
 
 /** POST /locations/ping. `already_recorded` means the window already had a
  *  ping and the server returned the incumbent instead of adding a second
@@ -219,7 +220,7 @@ export default function PhotoPing() {
         data: { error: err?.message ?? String(err) },
       });
       Sentry.captureException(err, { extra: { where: 'ping.photo.capture' } });
-      Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
+      Alert.alert('Ping Failed', guardMessage(err, 'Could not submit your ping. Try again before the window closes.', 'ping.submit'));
       return 'reset';
     }
   }

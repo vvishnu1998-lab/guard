@@ -51,6 +51,8 @@ import * as Haptics from 'expo-haptics';
 import * as Sentry from '@sentry/react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
+import { GuardFacingError } from '../lib/errors';
+import { guardMessage } from '../lib/errorCopy';
 
 export interface CapturedPhoto {
   uri:       string;         // compressed 1080px JPEG (EXIF-stripped)
@@ -231,7 +233,7 @@ export default function CameraCapture({
       // for anything that escapes so the screen never wedges locked.
       crumb('pipeline threw', 'error', { error: err?.message ?? String(err) });
       Sentry.captureException(err, { extra: { where: 'CameraCapture.pipeline', category: breadcrumbCategory } });
-      Alert.alert('Something went wrong', err?.message ?? 'Please try again.');
+      Alert.alert('Photo Not Saved', guardMessage(err, 'Could not process the photo. Try taking it again.', 'camera.pipeline'));
       busyRef.current = false;
       setStage({ kind: 'live' });
     }
@@ -275,7 +277,7 @@ export default function CameraCapture({
             TAKE_PICTURE_TIMEOUT_MS,
             'takePictureAsync',
           );
-          if (!p?.uri) throw new Error('Camera did not return a photo. Try again.');
+          if (!p?.uri) throw new GuardFacingError('Camera did not return a photo. Try again.');
           photo = p;
           break;
         } catch (attemptErr: any) {
@@ -344,7 +346,7 @@ export default function CameraCapture({
     } catch (err: any) {
       crumb('capture failed', 'error', { error: err?.message ?? String(err), attempts });
       Sentry.captureException(err, { extra: { where: 'CameraCapture.capture', category: breadcrumbCategory, attempts } });
-      Alert.alert('Capture Failed', err?.message ?? 'Could not take photo. Try again.');
+      Alert.alert('Capture Failed', guardMessage(err, 'Could not take the photo. Try again.', 'camera.capture'));
       busyRef.current = false;
       setStage({ kind: 'live' });
     }

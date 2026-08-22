@@ -17,6 +17,7 @@
  *   4. Return { public_url, size_kb } for the report payload.
  */
 import { apiClient } from './apiClient';
+import { GuardFacingError } from './errors';
 
 export interface UploadResult {
   public_url: string;
@@ -71,7 +72,7 @@ export async function uploadToS3(
   const size_kb = Math.round(blob.size / 1024);
 
   if (blob.size > presign.max_bytes) {
-    throw new Error(
+    throw new GuardFacingError(
       `File exceeds maximum upload size of ${Math.round(presign.max_bytes / 1024 / 1024)} MiB`
     );
   }

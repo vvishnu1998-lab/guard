@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 export default function ChangePasswordScreen() {
   const [current, setCurrent]     = useState('');
@@ -38,7 +39,7 @@ export default function ChangePasswordScreen() {
       // to login ourselves with the same notice the web portals show.
       router.replace('/(auth)/login?notice=password-changed');
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Could not change password');
+      Alert.alert('Error', guardMessage(err, 'Could not change your password. Try again.', 'change-password'));
     } finally {
       setLoading(false);
     }

@@ -27,6 +27,7 @@ import { useShiftStore } from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BREAK_DURATIONS, BreakType } from '../../constants/breakDurations';
+import { guardMessage } from '../../lib/errorCopy';
 
 // UI-facing metadata. Numbers pulled from BREAK_DURATIONS so this list
 // cannot drift from server / mobile constants file.
@@ -229,7 +230,7 @@ export default function BreakScreen() {
         Alert.alert('Break Limit Reached', err.message);
         refreshFromServer(); // sync the counts that gated us
       } else {
-        Alert.alert('Error', err?.message ?? 'Could not start break.');
+        Alert.alert('Error', guardMessage(err, 'Could not start your break. Try again.', 'break.start'));
       }
     } finally {
       setStarting(false);
@@ -254,7 +255,7 @@ export default function BreakScreen() {
         router.replace('/active-shift');
         return;
       }
-      Alert.alert('Error', err?.message ?? 'Could not end break. Please try again.');
+      Alert.alert('Error', guardMessage(err, 'Could not end your break. Try again.', 'break.end'));
       setEnding(false);
     }
   }

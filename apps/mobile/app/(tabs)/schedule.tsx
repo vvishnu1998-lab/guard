@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../lib/apiClient';
 import { formatScheduledHours } from '../../lib/formatHours';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const DAY_CELL_SIZE = Math.floor((SCREEN_WIDTH - 32) / 7);
@@ -113,7 +114,7 @@ export default function ScheduleScreen() {
       setShifts(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message ?? 'Could not load schedule');
+      setError(guardMessage(err, 'Could not load your schedule. Pull down to refresh.', 'schedule.list'));
     }
   }
 

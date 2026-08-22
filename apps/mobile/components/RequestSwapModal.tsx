@@ -17,6 +17,7 @@ import * as Sentry from '@sentry/react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
+import { guardMessage } from '../lib/errorCopy';
 
 interface EligibleGuard {
   guard_id:     string;
@@ -77,7 +78,7 @@ export default function RequestSwapModal(props: Props) {
         });
       } catch (err: any) {
         if (!cancelled) {
-          setError(err?.message ?? 'Could not load guards');
+          setError(guardMessage(err, 'Could not load the guard list. Try again.', 'swap-modal.guards'));
           Sentry.captureException(err, { extra: { where: 'RequestSwapModal.fetch' } });
         }
       } finally {
@@ -97,7 +98,7 @@ export default function RequestSwapModal(props: Props) {
       });
       props.onSubmitted();
     } catch (err: any) {
-      Alert.alert('Could not send request', err?.message ?? 'Please try again.');
+      Alert.alert('Could not send request', guardMessage(err, 'Could not send the swap request. Try again.', 'swap-modal.send'));
     } finally {
       setSubmitting(false);
     }
