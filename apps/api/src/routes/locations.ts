@@ -354,10 +354,16 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
   // Mock-location gate. Evaluated before the transaction opens so a reject
   // is a plain early return. Fails open on NULL, absent, or error.
   {
+    const pingSignals = readShadowSignals(req.body, 'ping', accuracyM);
     const mockCheck = checkMockLocation(
-      readShadowSignals(req.body, 'ping', accuracyM).locationMocked,
+      pingSignals.locationMocked,
       'ping',
-      { guardId: req.user!.sub, accuracyM },
+      // siteId is deliberately omitted: it is resolved from the session at
+      // :401, AFTER this gate. Moving the gate below that lookup would
+      // reorder operations for a log field, so the log carries
+      // site=unknown on this route by design — guard + route + timestamp
+      // locate the row, and location_integrity_flags stores site_id anyway.
+      { guardId: req.user!.sub, accuracyM, fixAgeMs: pingSignals.fixAgeMs },
     );
     if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
@@ -868,10 +874,11 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
   // Mock-location gate — see the ping route above. This route uses a plain
   // pool.query rather than a transaction, so a reject is a simple return.
   {
+    const verifySignals = readShadowSignals(req.body, 'clock-in-verification');
     const mockCheck = checkMockLocation(
-      readShadowSignals(req.body, 'clock-in-verification').locationMocked,
+      verifySignals.locationMocked,
       'clock-in-verification',
-      { guardId: req.user!.sub },
+      { guardId: req.user!.sub, accuracyM: verifySignals.accuracyMeters, fixAgeMs: verifySignals.fixAgeMs },
     );
     if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
