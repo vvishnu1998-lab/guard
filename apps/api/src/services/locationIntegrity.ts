@@ -1,7 +1,7 @@
 /**
  * Location integrity — ADVISORY detection. Never a blocking path.
  *
- * ── THE HONEST LIMIT ────────────────────────────────────────────────────
+ * ── THE HONEST LIMIT — READ BEFORE DESCRIBING THIS TO ANYONE ────────────
  *
  * A mock location set to a coordinate that was never otherwise recorded,
  * with plausible accuracy and plausible jitter, DEFEATS EVERY CHECK IN
@@ -9,6 +9,30 @@
  * precision break, no sentinel accuracy, no zero-variance cluster.
  *
  * These raise the cost of a naive tool. They do not close the hole.
+ *
+ * ── AND THE TWO WIRED CHECKS ARE NOT INTERCHANGEABLE ────────────────────
+ *
+ * Established by controlled reproduction on 2026-08-22, session 047534ca,
+ * on a device whose mock state we set directly:
+ *
+ *   c2 (monotonicity) DID NOT FIRE, and that is STRUCTURALLY CORRECT.
+ *   c2 detects a coordinate RESURRECTED across a gap — reappearing after a
+ *   different, newer fix was recorded. A single UNINTERRUPTED mocked burst
+ *   is not that shape. c2 caught the 2026-08-20/21 sessions only because
+ *   those bursts were INTERLEAVED with genuine fixes across days.
+ *
+ *   c4 (accuracy sentinel) DID fire, and carried the whole detection.
+ *
+ * So in the single-burst case — mock on, do the shift, mock off — c4 is the
+ * ONLY check that sees anything. And c4 detects exactly ONE tool's
+ * fingerprint: float32(0.01). It generalises across INSTALLS of that tool
+ * (verified across two devices, two tenants, two guards, separate installs)
+ * but says nothing about any other tool.
+ *
+ * NET: a different mock app with plausible accuracy and jitter defeats
+ * BOTH wired checks. Only `location_mocked` sees that case, and only on
+ * Android. Never describe these checks as mock detection; they are
+ * heuristics against one tool plus one behavioural pattern.
  *
  * Only `location_mocked` populated fleet-wide closes it:
  *   Android — shipped (Wave 1 OTA, group 966b8f66, runtime 1.0.16)
