@@ -9,6 +9,7 @@ import {
   ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../../lib/locationSignals';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../../store/shiftStore';
 import { apiClient }     from '../../../lib/apiClient';
@@ -96,8 +97,11 @@ export default function TaskCompleteScreen() {
       let lat: number | null = null;
       let lng: number | null = null;
       let acc: number | null = null;
+      // Shadow capture (Wave 2) — sent, never evaluated on the client.
+      let signals: LocationSignals = NO_LOCATION_SIGNALS;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        signals = locationSignals(loc);
         lat = loc.coords.latitude;
         lng = loc.coords.longitude;
         acc = loc.coords.accuracy;
@@ -115,6 +119,8 @@ export default function TaskCompleteScreen() {
         completion_lng:   lng,
         accuracy:         acc ?? 30,
         photo_url:        uploadedUrl,
+        // Shadow capture (Wave 2) — sent, never evaluated on the client.
+        ...signals,
       });
 
       setPhase('done');

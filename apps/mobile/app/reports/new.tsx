@@ -20,6 +20,7 @@ import {
   ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Modal,
 } from 'react-native';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import * as Sentry from '@sentry/react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
@@ -182,11 +183,14 @@ export default function CreateReport() {
       // Capturing accuracy is required to actually trigger validation
       // server-side; without all three of {lat,lng,accuracy} the server
       // skips the fence check.
+      // Shadow capture (Wave 2) — sent, never evaluated on the client.
+      let reportSignals: LocationSignals = NO_LOCATION_SIGNALS;
       let latitude:  number | null = null;
       let longitude: number | null = null;
       let accuracy:  number | null = null;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        reportSignals = locationSignals(loc);
         latitude  = loc.coords.latitude;
         longitude = loc.coords.longitude;
         accuracy  = loc.coords.accuracy;
@@ -215,6 +219,8 @@ export default function CreateReport() {
         longitude,
         accuracy:         accuracy ?? undefined,
         window_label:     windowLabel ?? undefined,
+        // Shadow capture (Wave 2) — sent, never evaluated on the client.
+        ...reportSignals,
       });
 
       Sentry.addBreadcrumb({

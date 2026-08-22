@@ -22,7 +22,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
-import { apiClient } from './apiClient';
+import { apiClient, ApiError, SessionExpiredError } from './apiClient';
 
 /** RFC-4122 v4 UUID — Math.random-based, safe in Hermes (no crypto.getRandomValues needed) */
 function uuidv4(): string {
@@ -143,6 +143,23 @@ async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead
       queue[idx].attempts  = newAttempts;
       queue[idx].lastError = err?.message ?? 'Unknown error';
       await writeQueue(queue);
+    }
+    // A permanent 4xx will NEVER succeed on replay — the payload is frozen
+    // in AsyncStorage at enqueue time and cannot change. Retrying it four
+    // more times burns requests, delays the dead-letter alert the guard
+    // needs to see, and (for 422 MOCK_LOCATION_REJECTED) emits four extra
+    // mock.reject lines for one event, polluting the exact signal we are
+    // measuring. Dead-letter it immediately.
+    //
+    // SessionExpiredError is the deliberate exception: it is an ApiError,
+    // but the session CAN be restored by logging back in, so the item must
+    // survive rather than be discarded.
+    //
+    // Network failures and 5xx keep the retry budget — those are transient.
+    if (err instanceof ApiError && !(err instanceof SessionExpiredError)
+        && err.status >= 400 && err.status < 500) {
+      console.error(`[offline-queue] permanent ${err.status} (${err.code ?? 'no code'}) — dead-lettering without retry`);
+      return 'dead';
     }
     if (newAttempts >= MAX_ATTEMPTS) return 'dead';
     return 'retry';

@@ -10,6 +10,7 @@ import {
   TextInput, ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import { router } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
 import { apiClient }     from '../../lib/apiClient';
@@ -54,6 +55,8 @@ export default function ClockOutScreen() {
       // user-facing message via the existing "Clock-Out Failed" alert.
       let lat: number | null = null;
       let lng: number | null = null;
+      // Shadow capture (Wave 2) — sent, never evaluated on the client.
+      let signals: LocationSignals = NO_LOCATION_SIGNALS;
       let acc: number | null = null;
       try {
         const last = await Location.getLastKnownPositionAsync();
@@ -61,6 +64,7 @@ export default function ClockOutScreen() {
           lat = last.coords.latitude;
           lng = last.coords.longitude;
           acc = last.coords.accuracy;
+          signals = locationSignals(last);
         } else {
           const live = await Promise.race([
             Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
@@ -70,6 +74,7 @@ export default function ClockOutScreen() {
             lat = (live as Location.LocationObject).coords.latitude;
             lng = (live as Location.LocationObject).coords.longitude;
             acc = (live as Location.LocationObject).coords.accuracy;
+            signals = locationSignals(live as Location.LocationObject);
           }
         }
       } catch (err) {
@@ -84,6 +89,9 @@ export default function ClockOutScreen() {
         lat,
         lng,
         accuracy: acc ?? 30, // null-accuracy iOS sim / coarse-grant → conservative 30m
+        // Wave 2 — clock-out PERSISTS AND FLAGS server-side; it is never
+        // rejected, so there is no 422 to handle on this path.
+        ...signals,
       });
       clearSession();
       router.replace('/(tabs)/home');

@@ -22,6 +22,7 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import { useShiftStore } from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
@@ -53,11 +54,11 @@ const GPS_TIMEOUT_MS = 5000;
  *  nulls when absent). Unlike clock-out this NEVER hard-fails — a guard must
  *  always be able to start a legitimate break, GPS lock or not. The server's
  *  expiry+10 check simply has one fewer signal to work with. */
-async function bestEffortPosition(): Promise<{ lat: number; lng: number; accuracy: number | null } | null> {
+async function bestEffortPosition(): Promise<{ lat: number; lng: number; accuracy: number | null; signals: LocationSignals } | null> {
   try {
     const last = await Location.getLastKnownPositionAsync();
     if (last) {
-      return { lat: last.coords.latitude, lng: last.coords.longitude, accuracy: last.coords.accuracy };
+      return { lat: last.coords.latitude, lng: last.coords.longitude, accuracy: last.coords.accuracy, signals: locationSignals(last) };
     }
     const live = await Promise.race([
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
@@ -65,7 +66,7 @@ async function bestEffortPosition(): Promise<{ lat: number; lng: number; accurac
     ]);
     if (live) {
       const l = live as Location.LocationObject;
-      return { lat: l.coords.latitude, lng: l.coords.longitude, accuracy: l.coords.accuracy };
+      return { lat: l.coords.latitude, lng: l.coords.longitude, accuracy: l.coords.accuracy, signals: locationSignals(l) };
     }
   } catch (err) {
     console.warn('[break] GPS read threw:', err);
@@ -210,7 +211,7 @@ export default function BreakScreen() {
       const data = await apiClient.post<BreakStartResponse>('/shifts/break-start', {
         session_id: activeSession.id,
         break_type: option.type,
-        ...(pos ? { lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy ?? 30 } : {}),
+        ...(pos ? { lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy ?? 30, ...pos.signals } : {}),
       });
       const cb = {
         break_id: data.break_id,

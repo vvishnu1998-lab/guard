@@ -24,6 +24,7 @@ import { useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../../lib/apiClient';
@@ -66,21 +67,21 @@ interface ScanResponse {
   total: number;
 }
 
-async function getScanPosition(): Promise<{ lat: number; lng: number; acc: number | null }> {
+async function getScanPosition(): Promise<{ lat: number; lng: number; acc: number | null; signals: LocationSignals }> {
   try {
     const live = await Promise.race([
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest }),
       new Promise<null>((r) => setTimeout(() => r(null), GPS_LIVE_TIMEOUT_MS)),
     ]);
     if (live) {
-      return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy };
+      return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy, signals: locationSignals(live) };
     }
   } catch (err) {
     console.warn('[checkpoint] live GPS threw:', err);
   }
   const last = await Location.getLastKnownPositionAsync().catch(() => null);
   if (last) {
-    return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy };
+    return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy, signals: locationSignals(last) };
   }
   throw new Error('GPS lock failed. Move to an area with better signal and try again.');
 }
@@ -146,6 +147,9 @@ export default function CheckpointScanner() {
           latitude:      pos.lat,
           longitude:     pos.lng,
           accuracy:      pos.acc ?? 999, // null accuracy must not pass the 30m gate
+          // Shadow capture (Wave 2). /link is the highest-leverage gate:
+          // it DEFINES the anchor every future scan is measured against.
+          ...pos.signals,
         });
         setVerdict({ kind: 'linked', label: linkLabel });
         return;
@@ -158,6 +162,10 @@ export default function CheckpointScanner() {
         latitude:   pos.lat,
         longitude:  pos.lng,
         accuracy:   pos.acc ?? undefined,
+        // Shadow capture (Wave 2). Frozen into the queued payload at scan
+        // time alongside the coords, so a replay submits the SCAN-TIME
+        // verdict — it cannot become clean by replaying later.
+        ...pos.signals,
       });
       if (!outcome.synced) {
         setVerdict({ kind: 'queued' });
