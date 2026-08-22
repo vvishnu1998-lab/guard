@@ -181,7 +181,38 @@ export default function CheckpointScanner() {
     } catch (err: any) {
       if (err instanceof ApiError) {
         const d = err.details as Record<string, any>;
-        if (err.status === 422 && !linkMode && typeof d.distance_m === 'number') {
+
+        // ── BRANCH ON err.code, NEVER ON err.status ALONE ────────────────
+        // Both checkpoint routes now return TWO different 422s: their own
+        // fence/GPS failure, and MOCK_LOCATION_REJECTED from the Wave 2
+        // gate. The link-mode branch below used to key on status alone, so
+        // a mock rejection rendered as "GPS signal too weak" — the guard
+        // was told to fix their signal when the real cause was a device
+        // setting. Found 2026-08-22; it never reached a guard only because
+        // the request failed at transport level first.
+        //
+        // Scan mode escaped the same fate by accident, not design: its
+        // branch happened to also test `typeof d.distance_m === 'number'`
+        // and the mock body carries no distance_m. Both are now guarded
+        // deliberately — by code where the server sends one, and by
+        // payload shape as a fallback so this screen is correct whether or
+        // not the API half has deployed.
+        if (err.code === 'MOCK_LOCATION_REJECTED') {
+          Sentry.addBreadcrumb({
+            category: 'checkpoint',
+            message: 'mock location rejected',
+            level: 'warning',
+            data: { link_mode: linkMode },
+          });
+          setVerdict({
+            kind: 'error', title: linkMode ? 'LINK FAILED' : 'SCAN FAILED',
+            message: err.message, canRescan: true,
+          });
+          return;
+        }
+
+        if (!linkMode && (err.code === 'CHECKPOINT_TOO_FAR'
+                          || (err.status === 422 && typeof d.distance_m === 'number'))) {
           // Anti-fraud rejection — NOT the PING_OFF_POST shape.
           Sentry.addBreadcrumb({
             category: 'checkpoint',
@@ -197,7 +228,8 @@ export default function CheckpointScanner() {
           });
           return;
         }
-        if (err.status === 422 && linkMode) {
+        if (linkMode && (err.code === 'CHECKPOINT_LINK_GPS_WEAK'
+                         || (err.status === 422 && typeof d.required_m === 'number'))) {
           setVerdict({
             kind: 'weak_gps',
             accuracyM: typeof d.accuracy_m === 'number' ? Math.round(d.accuracy_m) : null,
@@ -229,7 +261,13 @@ export default function CheckpointScanner() {
           setVerdict({ kind: 'error', title: 'CANNOT LINK', message: err.message, canRescan: false });
           return;
         }
-        setVerdict({ kind: 'error', title: 'SCAN FAILED', message: err.message, canRescan: true });
+        // Title followed the route, not the mode — a link failure read
+        // "SCAN FAILED". err.message is safe here: this branch is
+        // ApiError-only, so the text is server-authored copy.
+        setVerdict({
+          kind: 'error', title: linkMode ? 'LINK FAILED' : 'SCAN FAILED',
+          message: err.message, canRescan: true,
+        });
         return;
       }
       // Non-ApiError from link mode = network failure (scan mode queues
