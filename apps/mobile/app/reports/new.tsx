@@ -241,7 +241,28 @@ export default function CreateReport() {
         reportType === 'incident' &&
         result.data?.is_within_geofence === false;
 
-      if (offPostIncident) {
+      // A QUEUED report has not been submitted and nobody has been notified.
+      // This case used to fall through to the branches below, so a queued
+      // incident told the guard "Report submitted. The client has been
+      // notified by email." — the exact opposite of what happened, on the
+      // one report type that exists to escalate something. A non-incident
+      // queued report navigated away silently, indistinguishable from
+      // success. Both are now stated plainly.
+      if (result.synced === false) {
+        Sentry.addBreadcrumb({
+          category: 'reports',
+          message: 'report queued — not submitted',
+          level: 'warning',
+          data: { local_id: result.localId, report_type: reportType },
+        });
+        Alert.alert(
+          'NOT SENT YET',
+          "We couldn't reach the server, so your report is stored on your phone. "
+          + 'It has NOT been submitted and nobody has been notified yet.\n\n'
+          + "It will keep retrying. If it doesn't clear, tell your supervisor.",
+          [{ text: 'OK', onPress: () => router.replace('/(tabs)/reports') }],
+        );
+      } else if (offPostIncident) {
         Sentry.addBreadcrumb({
           category: 'reports',
           message: 'off-post incident accepted',

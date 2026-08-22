@@ -366,11 +366,23 @@ export default function CheckpointScanner() {
         </View>
       )}
 
+      {/* NOT a success state, and must not look like one. The old copy read
+          "SAVED OFFLINE — No connection — your scan and position were saved
+          and will sync automatically." Three problems: it asserted "no
+          connection" without ever checking; it said "saved", which a guard
+          reads as recorded; and it promised the sync as a certainty when a
+          queued item that the server will refuse is dead-lettered on its
+          first replay and discarded. That exact screen was shown for a scan
+          the server had already rejected (2026-08-22). */}
       {verdict.kind === 'queued' && (
-        <View style={styles.panel}>
-          <Text style={styles.panelNeutralTitle}>SAVED OFFLINE</Text>
+        <View style={[styles.panel, styles.panelWarning]}>
+          <Text style={styles.panelWarningTitle}>NOT SENT YET</Text>
           <Text style={styles.panelText}>
-            No connection — your scan and position were saved and will sync automatically.
+            We couldn't reach the server, so this scan is stored on your phone.
+            It has NOT been recorded yet.
+          </Text>
+          <Text style={styles.panelSub}>
+            It will keep retrying. If it doesn't clear, tell your supervisor.
           </Text>
           <PanelButtons primary="DONE" onPrimary={done} secondary="SCAN ANOTHER" onSecondary={rescan} />
         </View>
