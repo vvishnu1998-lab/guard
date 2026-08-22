@@ -373,8 +373,17 @@ router.post('/link', requireAuth('guard'), async (req, res) => {
   }
 
   if (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 30) {
+    // `error` is a CODE, `message` is the copy. Every other guard route
+    // already does this (PING_OFF_POST, REPORT_OFF_POST, TASK_OFF_POST,
+    // GEOFENCE_FAILED…); these two were the last sending a sentence in the
+    // code field, which is why the scanner screen had nothing to branch on
+    // and keyed on HTTP status instead. Since Wave 2 both /link and /scan
+    // return two distinct 422s, so status is no longer a usable
+    // discriminator. `message` is byte-identical to the old `error`, so
+    // pre-OTA clients that surface err.message read exactly as before.
     return res.status(422).json({
-      error: 'GPS signal too weak to anchor this checkpoint',
+      error: 'CHECKPOINT_LINK_GPS_WEAK',
+      message: 'GPS signal too weak to anchor this checkpoint',
       accuracy_m: Number.isFinite(accuracy) ? accuracy : null,
       required_m: 30,
     });
@@ -459,8 +468,11 @@ router.post('/scan', requireAuth('guard'), async (req, res) => {
       `link_accuracy=${fence.link_accuracy_m.toFixed(1)}m ` +
       `scan_lat=${latitude} scan_lng=${longitude}`
     );
+    // See the note on CHECKPOINT_LINK_GPS_WEAK above — code in `error`,
+    // copy in `message`, old clients unaffected.
     return res.status(422).json({
-      error: 'You are too far from this checkpoint',
+      error: 'CHECKPOINT_TOO_FAR',
+      message: 'You are too far from this checkpoint',
       checkpoint_label: cp.label,
       distance_m: Math.round(fence.distance_m),
       allowed_m: Math.round(fence.budget_m),
