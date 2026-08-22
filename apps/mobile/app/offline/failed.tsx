@@ -26,7 +26,7 @@ import { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
 import { router, useFocusEffect, Stack } from 'expo-router';
 import {
-  getDeadLetterItems, acknowledgeDeadLetter, retryDeadLetter,
+  getDeadLetterItems, acknowledgeDeadLetter, retryDeadLetter, reportDeadLetters,
   type QueuedAction, type QueueActionType, type DeadReason,
 } from '../../lib/offlineQueue';
 import { useOfflineStore } from '../../store/offlineStore';
@@ -61,6 +61,10 @@ export default function FailedWritesScreen() {
   const refreshCounts = useOfflineStore((s) => s.refreshCounts);
 
   const load = useCallback(async () => {
+    // Opening this screen is the strongest signal a guard cares about
+    // these, so take the chance to get them off the device and in front of
+    // someone who can act. Never blocks the render.
+    void reportDeadLetters();
     setItems(await getDeadLetterItems());
     await refreshCounts();
   }, [refreshCounts]);

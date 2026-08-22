@@ -22,6 +22,7 @@ import { useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { router } from 'expo-router';
 import { useOfflineStore } from '../store/offlineStore';
+import { reportDeadLetters } from '../lib/offlineQueue';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
 
 export default function UnsentWritesBanner() {
@@ -31,7 +32,15 @@ export default function UnsentWritesBanner() {
   // The bucket lives in AsyncStorage, so a cold start has a count of 0
   // until it is read back. Without this the banner would be invisible on
   // exactly the launch after a force-quit.
-  useEffect(() => { void refreshCounts(); }, [refreshCounts]);
+  //
+  // Also nudge the escalation sweep. startQueueSync only runs between
+  // clock-in and clock-out, so without this a loss reported at the end of
+  // a shift would wait for the NEXT shift before the server heard about
+  // it. Fire-and-forget: it never throws and the banner never waits on it.
+  useEffect(() => {
+    void refreshCounts();
+    void reportDeadLetters();
+  }, [refreshCounts]);
 
   if (deadCount < 1) return null;
 

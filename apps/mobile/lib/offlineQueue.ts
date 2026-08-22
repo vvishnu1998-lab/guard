@@ -247,6 +247,82 @@ async function syncItem(item: QueuedAction): Promise<SyncResult> {
   }
 }
 
+/**
+ * Tell the server about losses it does not know about yet.
+ *
+ * ── WHY THIS IS NOT A QUEUE ─────────────────────────────────────────────
+ *
+ * The obvious implementation — enqueue() the escalation — rebuilds the hole
+ * one layer up: a failed escalation would be dead-lettered, producing
+ * another escalation, which can also fail. So this is a FLAG on state that
+ * already exists (reportedAt / reportAttempts), swept by the timer that
+ * already runs. No new persistence, no new failure mode.
+ *
+ * ── FAILURE IS INERT ────────────────────────────────────────────────────
+ *
+ * If this never succeeds, nothing is lost and nothing is hidden: the item
+ * stays in the bucket, the banner still shows it, and deleteDeadLetter()
+ * still refuses. A failed escalation degrades to "device-only record",
+ * which is strictly better than the silence it replaced — never worse.
+ *
+ * The banner deliberately does NOT depend on this. Guard awareness must
+ * not require connectivity, because bad connectivity is what causes most
+ * of these losses in the first place.
+ */
+const MAX_REPORT_ATTEMPTS = 10;
+const REPORT_BATCH        = 20;   // server caps at 20 too; it is authoritative
+
+async function bumpAttempts(ids: Set<string>, reportedAt: string | null): Promise<void> {
+  const fresh = await readDeadLetter();
+  for (const i of fresh) {
+    if (!ids.has(i.localId)) continue;
+    if (reportedAt) i.reportedAt = reportedAt;
+    else i.reportAttempts = (i.reportAttempts ?? 0) + 1;
+  }
+  await writeDeadLetter(fresh);
+}
+
+export async function reportDeadLetters(): Promise<void> {
+  const dead = await readDeadLetter();
+  const pending = dead.filter(
+    (i) => !i.reportedAt && (i.reportAttempts ?? 0) < MAX_REPORT_ATTEMPTS,
+  );
+  if (pending.length === 0) return;
+
+  // One batched request per sweep, never one per item. A device with a
+  // backlog drains over successive 60 s ticks instead of firing the whole
+  // thing at the API at once.
+  const batch = pending.slice(0, REPORT_BATCH);
+  const ids   = new Set(batch.map((i) => i.localId));
+
+  try {
+    const res = await apiClient.post<{ accepted?: string[] }>('/offline/dead-letter', {
+      items: batch.map((i) => ({
+        local_id:    i.localId,
+        action_type: i.type,
+        dead_reason: i.deadReason ?? 'max_attempts',
+        dead_status: i.deadStatus,
+        queued_at:   i.queuedAt,
+        dead_at:     i.deadAt,
+        last_error:  i.lastError,
+        payload:     i.payload,
+      })),
+    });
+    // Mark ONLY what the server acknowledged. A partial accept leaves the
+    // rest pending for the next sweep rather than losing them.
+    const ok = new Set(res?.accepted ?? []);
+    await bumpAttempts(new Set([...ids].filter((id) => ok.has(id))), new Date().toISOString());
+    const missed = new Set([...ids].filter((id) => !ok.has(id)));
+    if (missed.size) await bumpAttempts(missed, null);
+    console.log(`[offline-queue] reported ${ok.size}/${batch.length} dead-letter item(s)`);
+  } catch (err: any) {
+    // Deliberately swallowed. This must never surface to a guard and must
+    // never be retried through the queue.
+    await bumpAttempts(ids, null);
+    console.warn(`[offline-queue] dead-letter report failed (not queued):`, err?.message);
+  }
+}
+
 let isSyncing = false;
 
 /** Process the entire queue. Called on reconnect / foreground / interval. */
@@ -259,24 +335,30 @@ export async function syncQueue(): Promise<void> {
   isSyncing = true;
   try {
     const queue = await readQueue();
-    if (queue.length === 0) return;
+    if (queue.length > 0) {
+      console.log(`[offline-queue] Syncing ${queue.length} queued action(s)`);
 
-    console.log(`[offline-queue] Syncing ${queue.length} queued action(s)`);
-
-    for (const item of queue) {
-      const result = await syncItem(item);
-      if (result.outcome === 'success') {
-        await dequeue(item.localId);
-        console.log(`[offline-queue] ✓ Synced ${item.type}:${item.localId}`);
-      } else if (result.outcome === 'dead') {
-        // Re-read: syncItem's catch wrote the incremented attempts and
-        // lastError back to storage, so the loop's copy is stale.
-        const fresh = (await readQueue()).find((i) => i.localId === item.localId) ?? item;
-        await dequeue(item.localId);
-        await moveToDeadLetter(fresh, result.reason, result.status);
+      for (const item of queue) {
+        const result = await syncItem(item);
+        if (result.outcome === 'success') {
+          await dequeue(item.localId);
+          console.log(`[offline-queue] ✓ Synced ${item.type}:${item.localId}`);
+        } else if (result.outcome === 'dead') {
+          // Re-read: syncItem's catch wrote the incremented attempts and
+          // lastError back to storage, so the loop's copy is stale.
+          const fresh = (await readQueue()).find((i) => i.localId === item.localId) ?? item;
+          await dequeue(item.localId);
+          await moveToDeadLetter(fresh, result.reason, result.status);
+        }
+        // 'retry' → stays in queue, will be retried on next sync
       }
-      // 'retry' → stays in queue, will be retried on next sync
     }
+
+    // Escalate losses even when the queue is empty. The dead-letter bucket
+    // outlives the queue, and "nothing pending, something lost" is the
+    // normal state — an early return here would mean the server was only
+    // ever told while the guard happened to have other work in flight.
+    await reportDeadLetters();
   } finally {
     isSyncing = false;
   }
