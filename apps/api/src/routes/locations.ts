@@ -9,6 +9,7 @@ import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
 import { sendPushNotification } from '../services/firebase';
 import { expiresAtFor } from '../services/retention';
 import { scheduleWindows } from '../services/pingWindows';
+import { readShadowSignals } from '../services/shadowSignals';
 
 /**
  * Fire guard notification row + admin email for a geofence violation.
@@ -557,12 +558,13 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     // Pre-cutover rows are outside the index, so a window answered twice
     // back then still does not conflict — deliberate: history is not
     // rewritten, only new writes are constrained.
+    const pingShadow = readShadowSignals(req.body, 'ping', accuracyM);
     const pingInsert = await client.query(
       `INSERT INTO location_pings
          (shift_session_id, guard_id, site_id, latitude, longitude, accuracy_meters,
           is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason, expires_at,
-          window_label, submitted_late)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          window_label, submitted_late, location_mocked, fix_age_ms)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        ON CONFLICT (shift_session_id, window_label)
          WHERE window_label IS NOT NULL
            AND pinged_at >= TIMESTAMPTZ '2026-08-21T00:00:00+00'
@@ -571,7 +573,11 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       [shift_session_id, req.user!.sub, site_id, latitude, longitude, accuracyM,
        true, ping_type, photo_url || null, photoDeleteAt, throttle_reason ?? null,
        expiresAtFor('ping_metadata'),
-       windowLabel, submittedLate],
+       windowLabel, submittedLate,
+       // Shadow capture (Wave 1) — recorded, never evaluated. accuracyM is
+       // already sanitised above and feeds the fence check, so it is reused
+       // rather than re-derived, keeping column and budget identical.
+       pingShadow.locationMocked, pingShadow.fixAgeMs],
     );
     pingRow = pingInsert.rows[0];
 
@@ -908,13 +914,20 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
     });
   }
 
+  // Shadow capture (Wave 1) — recorded, never evaluated. This route's own
+  // guard is a bare `typeof accuracy === 'number'` (see :841), which admits
+  // NaN and Infinity, so accuracy is sanitised here rather than stored raw.
+  const verifyShadow = readShadowSignals(req.body, 'clock-in-verification');
+
   const result = await pool.query(
     `INSERT INTO clock_in_verifications
-       (shift_session_id, guard_id, site_id, selfie_url, site_photo_url, verified_lat, verified_lng, is_within_geofence)
-     SELECT $1, ss.guard_id, ss.site_id, $2, $3, $4, $5, $6
+       (shift_session_id, guard_id, site_id, selfie_url, site_photo_url, verified_lat, verified_lng, is_within_geofence,
+        accuracy_meters, location_mocked, fix_age_ms)
+     SELECT $1, ss.guard_id, ss.site_id, $2, $3, $4, $5, $6, $7, $8, $9
      FROM shift_sessions ss WHERE ss.id = $1
      RETURNING *`,
-    [shift_session_id, selfie_url ?? null, site_photo_url ?? null, verified_lat, verified_lng, true],
+    [shift_session_id, selfie_url ?? null, site_photo_url ?? null, verified_lat, verified_lng, true,
+     verifyShadow.accuracyMeters, verifyShadow.locationMocked, verifyShadow.fixAgeMs],
   );
 
   res.status(201).json(result.rows[0]);

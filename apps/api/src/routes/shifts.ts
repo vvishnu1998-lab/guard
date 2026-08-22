@@ -10,6 +10,7 @@ import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { expiresAtFor } from '../services/retention';
+import { readShadowSignals } from '../services/shadowSignals';
 import { BREAK_DURATIONS, BREAK_QUOTAS, BREAK_MISTAP_SECONDS, isBreakType } from '../constants/breakDurations';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
@@ -1741,10 +1742,15 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
     // Insert B's session.
     let newSession;
     try {
+      // Shadow capture (Wave 1) — recorded, never evaluated. See the
+      // clock-in route for why accuracy is sanitised rather than stored raw.
+      const shadow = readShadowSignals(req.body, 'handoff-clock-in');
       const inserted = await client.query(
-        `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at)
-         VALUES ($1, $2, $3, NOW(), $4, $5) RETURNING *`,
-        [id, user!.sub, hist.site_id, coords, expiresAtFor('shift_session')],
+        `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at,
+                                     clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms)
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING *`,
+        [id, user!.sub, hist.site_id, coords, expiresAtFor('shift_session'),
+         shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs],
       );
       newSession = inserted.rows[0];
     } catch (err: any) {
@@ -2593,11 +2599,37 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
       });
     }
 
+    // Shadow capture (Wave 1) — recorded, never evaluated. These columns are
+    // not read by validateAtSite and take no part in the decision above,
+    // which has already been made by this point.
+    //
+    // accuracy is sanitised here rather than stored raw. The route's own
+    // guard above is a bare `typeof accuracy === 'number'`, which admits
+    // NaN and Infinity — both would reach this INSERT. Storing the
+    // sanitised value keeps a malformed body from turning into a failed
+    // clock-in, which would be exactly the behaviour change this wave
+    // forbids. The raw value is preserved in the accept log line below and
+    // in [shadow.reject], so nothing is lost.
+    const shadow = readShadowSignals(req.body, 'clock-in');
+
     const sessionResult = await client.query(
-      `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at)
-       VALUES ($1, $2, $3, NOW(), $4, $5) RETURNING *`,
-      [id, req.user!.sub, shift.site_id, coords, expiresAtFor('shift_session')]
+      `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at,
+                                   clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING *`,
+      [id, req.user!.sub, shift.site_id, coords, expiresAtFor('shift_session'),
+       shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs]
     );
+
+    // Accepted clock-ins previously logged NOTHING — geofence.reject fires
+    // only on the reject branch. That asymmetry is why the 2026-08-20
+    // clock-in accepted from 1,080 m off-post could not be reconstructed:
+    // the accuracy that bought it that budget was never written anywhere.
+    console.log(
+      `clock-in.accept guard=${req.user!.sub} site=${shift.site_id} shift=${id} ` +
+      `distance=${fence.distance_m?.toFixed(1) ?? 'null'} accuracy=${accuracy} ` +
+      `fix_age_ms=${shadow.fixAgeMs ?? 'null'} mocked=${shadow.locationMocked ?? 'null'} reason=${fence.reason}`,
+    );
+
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['active', id]);
     const session = sessionResult.rows[0];
     await client.query('COMMIT');
