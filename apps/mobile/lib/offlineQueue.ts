@@ -136,7 +136,7 @@ async function syncItem(item: QueuedAction): Promise<'success' | 'retry' | 'dead
     return 'success';
   } catch (err: any) {
     const newAttempts = item.attempts + 1;
-    console.error(`[offline-queue] syncItem failed (attempt ${newAttempts}/${MAX_ATTEMPTS}):`, err?.message, 'payload:', JSON.stringify(item.payload).slice(0, 150));
+    console.error(`[offline-queue] syncItem failed (attempt ${newAttempts}/${MAX_ATTEMPTS}):`, err?.message, 'payload:', JSON.stringify(item.payload).slice(0, 400));
     const queue = await readQueue();
     const idx = queue.findIndex((i) => i.localId === item.localId);
     if (idx !== -1) {

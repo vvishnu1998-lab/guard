@@ -11,6 +11,7 @@ import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { isInsideGeofence, hasUsablePolygon, haversineDistance } from '../../utils/geofence';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 
 type CheckState = 'checking' | 'inside' | 'outside' | 'error';
 
@@ -44,7 +45,15 @@ export default function ClockInStep1() {
     watcherRef.current = null;
   }
 
-  function evaluatePoint(point: { lat: number; lng: number }, accuracy: number) {
+  // `signals` is shadow capture only (Wave 1). It is threaded to
+  // setGpsVerified and never consulted here: the boundary decision below is
+  // byte-for-byte what it was before, and NEXT enables on exactly the same
+  // condition. See lib/locationSignals.ts.
+  function evaluatePoint(
+    point: { lat: number; lng: number },
+    accuracy: number,
+    signals: LocationSignals = NO_LOCATION_SIGNALS,
+  ) {
     const geofence = pendingShift?.geofence;
     if (!geofence) {
       // Walk-test bug #1: previously we silently allowed clock-in when
@@ -87,7 +96,7 @@ export default function ClockInStep1() {
         level: 'info',
         data: { distance_m: Math.round(approxDistance), accuracy_m: Math.round(accuracy) },
       });
-      setGpsVerified(point.lat, point.lng, accuracy);
+      setGpsVerified(point.lat, point.lng, accuracy, signals);
     } else if (!inside && lastInsideRef.current !== false) {
       Sentry.addBreadcrumb({
         category: 'clock_in_wizard',
@@ -130,7 +139,7 @@ export default function ClockInStep1() {
             level: 'info',
             data: { accuracy_m: Math.round(acc) },
           });
-          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc, locationSignals(loc));
         })
         .catch(() => {});
 
@@ -143,7 +152,7 @@ export default function ClockInStep1() {
         { accuracy: Location.Accuracy.Balanced, distanceInterval: 5, timeInterval: 3000 },
         (loc) => {
           const acc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : 30;
-          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc);
+          evaluatePoint({ lat: loc.coords.latitude, lng: loc.coords.longitude }, acc, locationSignals(loc));
         },
       );
     } catch (err) {

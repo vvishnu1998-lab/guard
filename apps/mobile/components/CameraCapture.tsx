@@ -46,6 +46,7 @@ import {
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../lib/locationSignals';
 import * as Haptics from 'expo-haptics';
 import * as Sentry from '@sentry/react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -57,6 +58,10 @@ export interface CapturedPhoto {
   longitude: number | null;
   accuracy:  number | null;
   takenAt:   string;         // ISO timestamp at capture
+  /** Shadow capture (Wave 1) — provenance/freshness of the fix above.
+   *  Recorded and sent; never evaluated, never gates the shutter or any
+   *  screen. See lib/locationSignals.ts. */
+  signals:   LocationSignals;
 }
 
 /** GPS tagging strategy.
@@ -119,21 +124,44 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   ]);
 }
 
-async function readGps(strategy: GpsStrategy): Promise<{ lat: number | null; lng: number | null; acc: number | null }> {
-  if (strategy === 'none') return { lat: null, lng: null, acc: null };
+async function readGps(
+  strategy: GpsStrategy,
+): Promise<{ lat: number | null; lng: number | null; acc: number | null; signals: LocationSignals }> {
+  if (strategy === 'none') return { lat: null, lng: null, acc: null, signals: NO_LOCATION_SIGNALS };
   // Cached last-known first (instant), bounded live read as fallback.
+  //
+  // NOTE (Wave 1): the cached branch is DELIBERATELY LEFT AS-IS. It is the
+  // source of the stale-coordinate defect — getLastKnownPositionAsync is
+  // called with no maxAge, so a fix hours old is returned as current. It is
+  // not fixed here because this wave must not change behaviour; the signals
+  // below are what make the staleness measurable first. Once shadow data
+  // shows the real fix-age distribution, bound this call.
   try {
     const last = await Location.getLastKnownPositionAsync();
-    if (last) return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy };
+    if (last) {
+      return {
+        lat: last.coords.latitude,
+        lng: last.coords.longitude,
+        acc: last.coords.accuracy,
+        signals: locationSignals(last),
+      };
+    }
     const live = await Promise.race([
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
       new Promise<null>((r) => setTimeout(() => r(null), GPS_TIMEOUT_MS)),
     ]);
-    if (live) return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy };
+    if (live) {
+      return {
+        lat: live.coords.latitude,
+        lng: live.coords.longitude,
+        acc: live.coords.accuracy,
+        signals: locationSignals(live),
+      };
+    }
   } catch (err) {
     console.warn('[camera] GPS read threw:', err);
   }
-  return { lat: null, lng: null, acc: null };
+  return { lat: null, lng: null, acc: null, signals: NO_LOCATION_SIGNALS };
 }
 
 type Stage =
@@ -304,6 +332,7 @@ export default function CameraCapture({
         longitude: pos.lng,
         accuracy:  pos.acc,
         takenAt,
+        signals:   pos.signals,
       };
 
       if (confirm) {

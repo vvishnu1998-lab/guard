@@ -5,9 +5,53 @@
  * - Triggers logout on refresh failure
  */
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
+import Constants from 'expo-constants';
+import * as Updates from 'expo-updates';
 import { refreshTokens, RefreshRejectedError } from './refreshManager';
 
 const BASE = process.env.EXPO_PUBLIC_API_URL;
+
+/**
+ * Client identity header — X-NetraOps-Client.
+ *
+ * WHY THIS EXISTS: Android sends a bare `okhttp/4.12.0` user agent with no
+ * app version, so Railway HTTP logs cannot tell which build a request came
+ * from. Establishing which runtime one guard's device was on cost a full
+ * session of forensics on 2026-08-21 and ultimately had to be answered from
+ * Sentry tags. With this header, every future runtime question is one log
+ * query.
+ *
+ * Format: `platform/<os>; version/<appVersion>; build/<buildNumber>; runtime/<runtimeVersion>; update/<updateId>`
+ *
+ * Computed ONCE at module load — these values cannot change within a
+ * process, and rebuilding the string per request would be waste on the
+ * hot path.
+ *
+ * Note `version` is the JS bundle's app version (from the update manifest
+ * after an OTA), while `build` is the NATIVE binary's build number.
+ * They diverge deliberately: build tells you the binary, version+runtime
+ * tell you what JS is running on it. app.json's buildNumber/versionCode lag
+ * EAS remote versioning, so treat `build` as indicative, `runtime` as
+ * authoritative for OTA targeting.
+ */
+const CLIENT_HEADER: string = (() => {
+  try {
+    const cfg = Constants.expoConfig;
+    const version = cfg?.version ?? 'unknown';
+    const build =
+      Platform.OS === 'ios'
+        ? cfg?.ios?.buildNumber ?? 'unknown'
+        : String(cfg?.android?.versionCode ?? 'unknown');
+    // Updates.runtimeVersion / updateId are null in Expo Go and in dev
+    // builds with updates disabled — never throw over telemetry.
+    const runtime = Updates.runtimeVersion ?? 'unknown';
+    const update = Updates.updateId ?? 'embedded';
+    return `platform/${Platform.OS}; version/${version}; build/${build}; runtime/${runtime}; update/${update}`;
+  } catch {
+    return `platform/${Platform.OS}; version/unknown; build/unknown; runtime/unknown; update/unknown`;
+  }
+})();
 
 async function getAccessToken(): Promise<string | null> {
   return SecureStore.getItemAsync('guard_access_token');
@@ -84,11 +128,14 @@ async function request<T>(
   retry = true,
 ): Promise<T> {
   const token = await getAccessToken();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-NetraOps-Client': CLIENT_HEADER,
+  };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (options?.headers) {
     for (const [k, v] of Object.entries(options.headers)) {
-      if (k === 'Content-Type' || k === 'Authorization') continue;
+      if (k === 'Content-Type' || k === 'Authorization' || k === 'X-NetraOps-Client') continue;
       headers[k] = v;
     }
   }
