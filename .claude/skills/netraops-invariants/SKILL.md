@@ -52,6 +52,7 @@ Verified ground truth for the NetraOps platform. When live state may have change
 - iOS `eas submit` auto-resolves ASC keys from Expo server storage; Android needs local `google-service-account.json` (manual Console upload is the fallback).
 - `npm start` does NOT run migrations. Run via `railway run npm run db:migrate` or `DATABASE_PUBLIC_URL` from workstation; `postgres.railway.internal` resolves only inside Railway.
 - Migration pattern: `railway connect Postgres` piped SQL with `-v ON_ERROR_STOP=1`.
+- **Read the migration chain from `apps/api/src/db/migrate.ts` at the start of EVERY session. Never from memory, never from a dispatch, never from this file.** The chain is an explicit array and it moves within a session. Writing `schema_vN.sql` over an existing file silently destroys a shipped migration and changes history on any replay-from-empty. Two collisions have been caught this way on stale numbers (v46 — Break enforcement; v51 — location integrity review queue, taken *the same day* it was quoted as free). `ls schema_v*.sql | sort -V | tail -1` and the tail of the `files` array in `migrate.ts` are the only sources of truth.
 
 ## Locked decisions (do not relitigate)
 
