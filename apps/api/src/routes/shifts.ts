@@ -11,6 +11,7 @@ import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../s
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
+import { logClientIdentity } from '../services/clientIdentity';
 import { BREAK_DURATIONS, BREAK_QUOTAS, BREAK_MISTAP_SECONDS, isBreakType } from '../constants/breakDurations';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
@@ -1744,6 +1745,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
     try {
       // Shadow capture (Wave 1) — recorded, never evaluated. See the
       // clock-in route for why accuracy is sanitised rather than stored raw.
+      logClientIdentity(req, 'handoff-clock-in');
       const shadow = readShadowSignals(req.body, 'handoff-clock-in');
       const inserted = await client.query(
         `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at,
@@ -2610,6 +2612,7 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     // clock-in, which would be exactly the behaviour change this wave
     // forbids. The raw value is preserved in the accept log line below and
     // in [shadow.reject], so nothing is lost.
+    logClientIdentity(req, 'clock-in');
     const shadow = readShadowSignals(req.body, 'clock-in');
 
     const sessionResult = await client.query(
