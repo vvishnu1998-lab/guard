@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { validateAtCheckpoint } from '../services/geofence';
+import { readShadowSignals } from '../services/shadowSignals';
+import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 
 const router = Router();
 
@@ -352,6 +354,24 @@ router.post('/link', requireAuth('guard'), async (req, res) => {
   if (Math.abs(latitude) < 1e-6 && Math.abs(longitude) < 1e-6) {
     return res.status(400).json({ error: 'Invalid coordinates. GPS lock required.' });
   }
+  // Mock-location gate — /link. No transaction on this route (plain
+  // pool.query), so a reject is a plain early return. session.site_id
+  // resolves above, so the log carries a real site.
+  //
+  // WHY THIS ROUTE MATTERS MOST: it does not record where a guard claimed
+  // to be, it DEFINES the anchor every future scan is measured against
+  // (validateAtCheckpoint reads site_checkpoints.lat/lng and budgets with
+  // link_accuracy_m). A simulated fix here silently relocates the
+  // checkpoint permanently, and no downstream row can tell.
+  {
+    const linkSignals = readShadowSignals(req.body, 'checkpoint-link');
+    const mockCheck = checkMockLocation(linkSignals.locationMocked, 'checkpoint-link', {
+      guardId: req.user!.sub, siteId: session.site_id,
+      accuracyM: linkSignals.accuracyMeters, fixAgeMs: linkSignals.fixAgeMs,
+    });
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
+  }
+
   if (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 30) {
     return res.status(422).json({
       error: 'GPS signal too weak to anchor this checkpoint',
@@ -399,6 +419,17 @@ router.post('/scan', requireAuth('guard'), async (req, res) => {
   }
   if (Math.abs(latitude) < 1e-6 && Math.abs(longitude) < 1e-6) {
     return res.status(400).json({ error: 'Invalid coordinates. GPS lock required.' });
+  }
+
+  // Mock-location gate — /scan. No transaction on this route, so a reject
+  // is a plain early return. session.site_id resolves above.
+  const scanSignals = readShadowSignals(req.body, 'checkpoint-scan');
+  {
+    const mockCheck = checkMockLocation(scanSignals.locationMocked, 'checkpoint-scan', {
+      guardId: req.user!.sub, siteId: session.site_id,
+      accuracyM: scanSignals.accuracyMeters, fixAgeMs: scanSignals.fixAgeMs,
+    });
+    if (mockCheck.reject) return res.status(422).json(MOCK_LOCATION_ERROR);
   }
 
   const cpResult = await pool.query(
@@ -449,13 +480,16 @@ router.post('/scan', requireAuth('guard'), async (req, res) => {
   const inserted = await pool.query(
     `INSERT INTO checkpoint_scans
        (checkpoint_id, shift_session_id, guard_id, site_id, round_window,
-        scan_lat, scan_lng, accuracy_m, distance_m, note)
-     SELECT $1, $2, $3, $4, ${ROUND_WINDOW_SQL}, $5, $6, $7, $8, $9
+        scan_lat, scan_lng, accuracy_m, distance_m, note,
+        location_mocked, fix_age_ms)
+     SELECT $1, $2, $3, $4, ${ROUND_WINDOW_SQL}, $5, $6, $7, $8, $9, $10, $11
      FROM sites s WHERE s.id = $4
      ON CONFLICT (checkpoint_id, shift_session_id, round_window) DO NOTHING
      RETURNING scanned_at`,
     [cp.id, session.id, req.user!.sub, session.site_id,
-     latitude, longitude, accuracyM, fence.distance_m, cleanNote]
+     latitude, longitude, accuracyM, fence.distance_m, cleanNote,
+     // Shadow capture (Wave 2) — recorded, never evaluated here.
+     scanSignals.locationMocked, scanSignals.fixAgeMs]
   );
 
   const duplicate = inserted.rowCount === 0;
