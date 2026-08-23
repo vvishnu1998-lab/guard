@@ -17,6 +17,9 @@ Verified ground truth for the NetraOps platform. When live state may have change
 ## Live customer — freeze policy
 
 - **STARNET SECURITY** (tenant `27c4d404-...`) is a REAL PAYING CUSTOMER. Admin: info@starnetsecurity.com (Nataniel); guard Bhanu GRD0001 works overnight shifts at 23000 Cristo Rey Los Altos; client Sai receives daily reports.
+- **RE-VERIFY THE ROSTER EVERY SESSION. Never reason from a remembered one.** STARNET SECURITY went from 4 to 7 active guards in six days (2026-08-17 → 08-23), two added on a single day. Any plan built on a remembered roster is stale within days.
+- **Badge numbers COLLIDE across tenants — a badge alone is NEVER an identifier.** `GRD0005` is "naik" on Star Guard AND "Nikith Reddy" on STARNET SECURITY. Always use tenant + badge, or the guard uuid. There is also a third tenant, lowercase `starnet`, with two guards and zero sessions ever — a stale duplicate distinct from `STARNET SECURITY`.
+- Roster query: `SELECT c.name, g.badge_number, g.name, g.id, g.is_active, g.created_at FROM guards g JOIN companies c ON c.id = g.company_id ORDER BY c.name, g.created_at;`
 - No disruptive prod changes during active customer shifts without explicit approval. Check the clock before every deploy touching guard/shift/login paths.
 - Any temporary Apple-review accommodation (widened geofences, seeded reviewer accounts/shifts) is frozen until approval and carries a logged revert task with original values.
 

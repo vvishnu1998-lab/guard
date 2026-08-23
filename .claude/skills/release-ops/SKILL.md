@@ -42,6 +42,15 @@ Confirm HEAD is the intended ref for this build and contains the accumulated wor
 
 **Credentials:** know which submissions need local key files vs server-stored keys; manual console upload is the fallback when automated submit is blocked.
 
+## 3b. OTA channels — PUBLISH TO BOTH, ALWAYS
+
+- **Every `eas update` goes to BOTH `--branch production` AND `--branch preview`.** A binary polls only the channel it was built with. A preview-profile build will NEVER see a production update, no matter how many times it relaunches — there is no fallback and no warning.
+- **Precedent (2026-08-23).** Guards Nikith Reddy GRD0005 and Svineah GRD0008 (STARNET) were running `com.netraops.guard@1.0.16+23`, `environment: preview`. Every OTA — Wave 1 anti-spoof capture, Wave 2 provenance, the `X-NetraOps-Client` header — had gone to `production` only, and the `preview` branch had **zero update groups ever published**. Those two devices sat on the embedded bundle of a 08-20 APK for three days while enforcement they were the subject of ran on everyone else. The tell was `[client.identity] client="absent"` in the API log, plus `clock_in_fix_age_ms IS NULL` on a post-Wave-1 clock-in.
+- **Diagnosing "the OTA didn't reach device X":** check `environment` on the Sentry release tag first (`preview` vs `production`) — that is the channel. Only then look at runtime version, relaunch count, or manifest fetch. Three of four hypotheses were wrong before the channel was checked.
+- **Runtime gate is separate and harder.** `runtimeVersion: {policy: appVersion}`, so runtime == `app.json` `version`. A device below the published runtime can never be reached by ANY update and needs a store install — e.g. Nandu GRD0002 on `1.0.14+44` cannot receive a 1.0.16 OTA at all.
+- **To bring a stale channel current without shipping new code:** `eas update:republish --group <groupId> --destination-branch <branch>`. It is ADDITIVE — verified 2026-08-23 that the source branch's group id and message were byte-identical before and after. Snapshot `eas branch:list` either side anyway.
+- `eas update:list --branch <name>` showing `Group ID N/A` means the branch exists but nothing was ever published to it. That is not "up to date".
+
 ## 4. Responsive QA + launch checklist
 
 **Viewport matrix (minimum):** small phone (~375px), large phone (~390px), desktop (~1280px). Verify every shipped UI change at all three.
