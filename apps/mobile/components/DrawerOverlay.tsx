@@ -7,6 +7,7 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useDrawerStore } from '../store/drawerStore';
 import { useAuthStore } from '../store/authStore';
+import { useOfflineStore } from '../store/offlineStore';
 import { Colors, Fonts, Spacing, Radius } from '../constants/theme';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -17,11 +18,16 @@ interface MenuItem {
   label: string;
   onPress: () => void;
   color?: string;
+  /** Shown as a pill on the right when > 0. Absent or 0 renders no pill —
+   *  the ROW still renders, which is the point. */
+  badge?: number;
 }
 
 export default function DrawerOverlay() {
   const { isOpen, close } = useDrawerStore();
   const { guardId, logout } = useAuthStore();
+  const deadCount     = useOfflineStore((s) => s.deadCount);
+  const refreshCounts = useOfflineStore((s) => s.refreshCounts);
   const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const opacityAnim = useRef(new Animated.Value(0)).current;
 
@@ -56,6 +62,10 @@ export default function DrawerOverlay() {
     }
   }, [isOpen]);
 
+  // Re-read on open. The drawer is unmounted while closed, so without this
+  // the badge would show whatever the store held when it last rendered.
+  useEffect(() => { if (isOpen) void refreshCounts(); }, [isOpen, refreshCounts]);
+
   // Derive initials from guardId — in real usage the JWT doesn't carry a name,
   // so we show a generic person icon. If guardId is available, show first char.
   const initials = guardId ? guardId.slice(0, 1).toUpperCase() : '?';
@@ -70,6 +80,18 @@ export default function DrawerOverlay() {
       icon: 'checkbox-outline',
       label: 'Tasks',
       onPress: () => { close(); router.push('/(tabs)/tasks'); },
+    },
+    {
+      // ALWAYS PRESENT — never gated on a count. Dismissing a dead-letter
+      // item clears the banner, and until 2026-08-23 the banner was the
+      // ONLY route to the review screen, so dismissing made the record
+      // unreachable. That defeated the point of acknowledgeDeadLetter
+      // hiding rather than deleting: the data survived and nobody could
+      // look at it. This row is the permanent way back in.
+      icon: 'cloud-offline-outline',
+      label: 'Unsent items',
+      badge: deadCount,
+      onPress: () => { close(); router.push('/offline/failed'); },
     },
     {
       icon: 'person-outline',
@@ -137,6 +159,11 @@ export default function DrawerOverlay() {
                 <Text style={[styles.menuLabel, item.color ? { color: item.color } : {}]}>
                   {item.label}
                 </Text>
+                {!!item.badge && item.badge > 0 && (
+                  <View style={styles.badge}>
+                    <Text style={styles.badgeText}>{item.badge}</Text>
+                  </View>
+                )}
               </TouchableOpacity>
               {idx < menuItems.length - 1 && <View style={styles.itemDivider} />}
             </View>
@@ -148,6 +175,15 @@ export default function DrawerOverlay() {
 }
 
 const styles = StyleSheet.create({
+  badge: {
+    minWidth: 22, paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: Radius.full, backgroundColor: Colors.warning,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  badgeText: {
+    fontFamily: Fonts.heading, fontSize: 12, color: Colors.black,
+    letterSpacing: 0.3,
+  },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.55)',
@@ -225,6 +261,9 @@ const styles = StyleSheet.create({
     width: 24,
   },
   menuLabel: {
+    // flex:1 so a trailing badge is pushed to the right edge of the row
+    // rather than hugging the label text.
+    flex: 1,
     color: Colors.textPrimary,
     fontSize: 17,
     fontFamily: Fonts.body,
