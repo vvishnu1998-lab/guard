@@ -41,6 +41,17 @@
       },
       "channel": "preview"
     },
+    "smoke": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_ENV": "smoke"
+      },
+      "channel": "smoke"
+    },
     "production": {
       "autoIncrement": true,
       "ios": {
