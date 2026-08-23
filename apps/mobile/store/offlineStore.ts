@@ -17,7 +17,7 @@ import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../lib/apiClient';
 import {
   enqueue, pendingCount, startQueueSync, stopQueueSync, syncQueue,
-  deadLetterCount, onQueueChange, quarantineCount,
+  deadLetterCounts, onQueueChange, quarantineCount,
 } from '../lib/offlineQueue';
 import type { SubmitReportRequest, GeofenceViolationRequest } from '@guard/shared';
 
@@ -49,6 +49,12 @@ interface OfflineState {
    *  AsyncStorage, so it survives force-quit, cold start and logout — only
    *  an uninstall clears it. */
   deadCount: number;
+  /** Every dead-letter item, dismissed or not. The drawer row uses this so
+   *  it can stay reachable after a dismissal. */
+  deadTotal: number;
+  /** Items the server has not acknowledged. A dismissed one of these is a
+   *  loss nobody upstream knows about. */
+  deadUnreported: number;
   /** True once this device has quarantined a corrupt bucket. Those writes
    *  are preserved but unreadable, so they may never have been sent — the
    *  guard has to be told rather than left to assume. */
@@ -69,6 +75,8 @@ interface OfflineState {
 export const useOfflineStore = create<OfflineState>((set) => ({
   pendingCount: 0,
   deadCount: 0,
+  deadTotal: 0,
+  deadUnreported: 0,
   storageDegraded: false,
 
   refreshPendingCount: async () => {
@@ -78,9 +86,15 @@ export const useOfflineStore = create<OfflineState>((set) => ({
 
   refreshCounts: async () => {
     const [pending, dead, quarantined] = await Promise.all([
-      pendingCount(), deadLetterCount(), quarantineCount(),
+      pendingCount(), deadLetterCounts(), quarantineCount(),
     ]);
-    set({ pendingCount: pending, deadCount: dead, storageDegraded: quarantined > 0 });
+    set({
+      pendingCount:    pending,
+      deadCount:       dead.unacknowledged,
+      deadTotal:       dead.total,
+      deadUnreported:  dead.unreported,
+      storageDegraded: quarantined > 0,
+    });
   },
 
   startSync: () => startQueueSync(),

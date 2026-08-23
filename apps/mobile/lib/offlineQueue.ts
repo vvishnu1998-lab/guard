@@ -484,13 +484,34 @@ export async function getDeadLetterItems(): Promise<QueuedAction[]> {
 }
 
 /**
- * How many losses the guard has not yet dismissed. This is the banner's
- * number — it deliberately ignores whether the server knows, because guard
- * awareness must not depend on connectivity.
+ * The three numbers the UI needs, from ONE read of the bucket.
+ *
+ * Kept together deliberately: they are three views of the same array, and
+ * three separate exported counters would mean three AsyncStorage reads on
+ * every refresh for data that cannot disagree with itself.
  */
-export async function deadLetterCount(): Promise<number> {
+export interface DeadLetterCounts {
+  /** Not yet dismissed. The loud banner's number. Deliberately ignores
+   *  whether the server knows — guard awareness must not depend on
+   *  connectivity. */
+  unacknowledged: number;
+  /** Every item, dismissed or not. Drives the always-present drawer row,
+   *  which must stay reachable AFTER a dismissal — otherwise dismissing
+   *  hides the only route to the record we deliberately preserved. */
+  total: number;
+  /** Not yet acknowledged by the server. A DISMISSED item that is also
+   *  unreported is a loss nobody upstream knows about, which is why it
+   *  still warrants a (quieter) banner. */
+  unreported: number;
+}
+
+export async function deadLetterCounts(): Promise<DeadLetterCounts> {
   const dead = await readDeadLetter();
-  return dead.filter((i) => !i.acknowledgedAt).length;
+  return {
+    total:          dead.length,
+    unacknowledged: dead.filter((i) => !i.acknowledgedAt).length,
+    unreported:     dead.filter((i) => !i.reportedAt).length,
+  };
 }
 
 /**
