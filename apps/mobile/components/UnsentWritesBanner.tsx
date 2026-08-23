@@ -82,6 +82,10 @@ const styles = StyleSheet.create({
     borderColor: Colors.warning,
     borderRadius: Radius.md,
     padding: Spacing.md,
+    // Vertical spacing lives HERE, not on the host's wrapper, so it
+    // disappears with the banner. A wrapper with paddingTop leaves dead
+    // space above the map on every launch where nothing has failed.
+    marginTop: Spacing.md,
     marginBottom: Spacing.md,
   },
   info:  { flex: 1 },

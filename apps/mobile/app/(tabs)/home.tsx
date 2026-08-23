@@ -529,13 +529,21 @@ export default function HomeScreen() {
         <Text style={styles.timeDisplay}>{currentTime}</Text>
       </View>
 
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-        {/* Unsent writes — also on home, not just active-shift: a loss can
-            outlive the shift it happened on, and a guard who has clocked
-            out still needs to know their patrol scan never landed.
-            Self-padding here because the map below is full-bleed. */}
-        <View style={styles.unsentWrap}><UnsentWritesBanner /></View>
+      {/* Unsent writes — PINNED, deliberately outside the ScrollView.
+          A loss can outlive the shift it happened on, and a guard who has
+          clocked out still needs to know their patrol scan never landed.
 
+          This sat INSIDE the ScrollView, above a full-bleed MapView, until
+          2026-08-23. During the on-device smoke run the banner was live
+          with deadCount 1 and was simply never seen on this screen — it
+          was below the fold every time. A warning a guard has to scroll
+          past a map to find is not a warning.
+
+          Renders null when the bucket is empty, and its own margins go
+          with it, so the layout is untouched in the normal case. */}
+      <View style={styles.unsentWrap}><UnsentWritesBanner /></View>
+
+      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* Map — MapView always mounts with a default initialRegion
             (SF Bay Area) so tiles render immediately. Once we have a real
             fix it re-centers via `region`. This is walk-test bug #4:
@@ -901,7 +909,9 @@ function PingCountdownBanner({
 }
 
 const styles = StyleSheet.create({
-  unsentWrap: { paddingHorizontal: 16, paddingTop: 12 },
+  // Horizontal only: vertical spacing belongs to the banner itself so an
+  // empty bucket costs zero height. See UnsentWritesBanner's card style.
+  unsentWrap: { paddingHorizontal: 16 },
   container: { flex: 1, backgroundColor: Colors.bg },
 
   header: {
