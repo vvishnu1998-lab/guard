@@ -656,9 +656,41 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 
 // PATCH /api/shifts/:id/cancel — admin cancels an accidentally-scheduled shift.
 //
-// Gate: only status='scheduled' is cancellable. Everything else 409s with
-// a specific reason so the operator understands why. Unassigned scheduled
-// shifts are cancellable too (no guard to notify, push is skipped).
+// Gate: an OPEN shift_session blocks the cancel outright; after that, only
+// status='scheduled' is cancellable. Everything else 409s with a specific
+// reason so the operator understands why. Unassigned scheduled shifts are
+// cancellable too (no guard to notify, push is skipped).
+//
+// WHY THE OPEN-SESSION CHECK IS SEPARATE FROM THE STATUS SWITCH.
+//
+// jobs/autoCompleteShifts.ts is the only thing that closes a session the
+// guard never clocked out of, and it only sweeps
+// `status IN ('active','scheduled')`. So moving a shift to 'cancelled'
+// while a session is open strands that session forever — and
+// idx_shift_sessions_one_open_per_guard is UNIQUE on guard_id WHERE
+// clocked_out_at IS NULL, so that guard is then blocked from clocking in
+// at ANY site, permanently.
+//
+// The status switch below used to be the only guard, on the reasoning that
+// an open session implies status='active'. That is a PROXY, and two routes
+// desynchronise it: PATCH /:id/assign-guard (no status gate at all) and
+// PATCH /:id/reassign (rejects only 'completed'/'missed') both write
+// status='scheduled' unconditionally. Reassigning a shift a guard is
+// currently working flips it 'active' -> 'scheduled', and the cancel below
+// would then sail through the switch with a live session underneath it.
+//
+// So this checks the invariant itself rather than the proxy: it holds no
+// matter how status got where it is.
+//
+// REFUSE, NOT AUTO-CLOSE — deliberate. Closing here would write
+// clocked_out_at and total_hours, i.e. silently decide the paid hours of a
+// guard who is still physically on post and whose app still shows an active
+// shift. The 409 at 'active' below is an existing, shipped product decision
+// that an in-progress shift is not cancellable; this makes the gate
+// actually enforce it. Left in ('active','scheduled'), the shift is swept
+// by autoCompleteShifts at scheduled_end and the session closes through the
+// path that already owns closing sessions, with the same total_hours math
+// as a manual clock-out. Nothing here writes clock_out_reason.
 //
 // Writes (single txn):
 //   shifts.status              = 'cancelled'
@@ -666,9 +698,9 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 //                                reason string, capped at 200 chars)
 //
 // Post-commit best-effort push to the assigned guard (skipped for
-// unassigned). Historical tables (shift_sessions, reports,
-// task_completions, geofence_violations, clock_in_verifications) are
-// never referenced.
+// unassigned). shift_sessions is READ (open-session gate) but never
+// written; reports, task_completions, geofence_violations and
+// clock_in_verifications are never referenced.
 router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const { user } = req;
   const { id }   = req.params;
@@ -707,6 +739,33 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
     if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Shift not found' });
+    }
+
+    // Open-session gate — checked BEFORE the status switch because it is the
+    // real invariant (see the header note). The shift row is already locked
+    // FOR UPDATE above, and POST /:id/clock-in takes that same lock before it
+    // inserts a session, so the two serialise: either clock-in commits first
+    // and we see its session here, or we commit first and clock-in's
+    // `WHERE status = 'scheduled'` no longer matches.
+    const openSession = await client.query<{ id: string; guard_id: string }>(
+      `SELECT id, guard_id FROM shift_sessions
+        WHERE shift_id = $1 AND clocked_out_at IS NULL
+        LIMIT 1`,
+      [id],
+    );
+    if (openSession.rows[0]) {
+      await client.query('ROLLBACK');
+      console.log(
+        `[shifts.cancel.blocked_open_session] shift=${id} ` +
+        `session=${openSession.rows[0].id} guard=${openSession.rows[0].guard_id} ` +
+        `shift_status=${shift.status}`,
+      );
+      return res.status(409).json({
+        error: 'SHIFT_HAS_OPEN_SESSION',
+        message:
+          'A guard is still clocked in on this shift. They must clock out ' +
+          '(or the shift must reach its scheduled end) before it can be cancelled.',
+      });
     }
 
     // Status gate — only 'scheduled' cancellable, everything else gets a
