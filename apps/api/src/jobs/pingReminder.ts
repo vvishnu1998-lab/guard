@@ -28,9 +28,13 @@
  *      after the guard had already captured and uploaded the photo. The
  *      arithmetic lives in ONE place now, the same place missedPingCron
  *      reads, which is the entire reason that module exists.
- *   3. Send at most one ping reminder per session per window — dedup
- *      via the notifications table (an existing ping_reminder row for
- *      this session within 5 min → skip).
+ *   3. Send at most one ping reminder per session per window, via an
+ *      ATOMIC CLAIM on shift_sessions.last_ping_reminder_window
+ *      (schema_v57). The window stays eligible for RECOVERY_MS after it
+ *      closes, so a dropped cron minute is recovered by a later tick
+ *      instead of losing the reminder outright; the claim is what makes
+ *      that widening safe. Copy is time-aware — a recovered push says the
+ *      window has closed rather than claiming a freshness it lacks.
  *
  * Activity-report + task reminders still run on the old UTC :00/:30
  * gate below the ping block. Those don't have the same "keyed to
@@ -60,6 +64,7 @@ interface ActiveGuardRow {
   scheduled_end: Date;
   clocked_in_at: Date;
   site_tz: string | null;
+  last_ping_reminder_window: Date | null;
 }
 
 async function sendReminder(
@@ -98,28 +103,49 @@ async function sendReminder(
   ]);
 }
 
-async function alreadyRemindedRecently(
-  shiftSessionId: string,
-  guardId: string,
-): Promise<boolean> {
-  const { rows } = await pool.query<{ recent: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM notifications
-       WHERE guard_id = $1
-         AND shift_session_id = $2
-         AND type = 'ping_reminder'
-         AND created_at > NOW() - INTERVAL '5 minutes'
-     ) AS recent`,
-    [guardId, shiftSessionId],
+/**
+ * ATOMIC CLAIM — the once-per-window guarantee (schema_v57).
+ *
+ * Tests and sets in ONE statement, so a second tick racing this one matches
+ * zero rows and returns false. Windows only ever advance, so "strictly
+ * greater than the last one claimed" is exactly once-per-window.
+ *
+ * This replaced alreadyRemindedRecently(), a read-then-decide SELECT EXISTS
+ * over a 5-minute notifications lookback. Two ticks could both read "no"
+ * before either wrote; widening the eligibility range below gives that race
+ * far more room to land, so the check had to stop being advisory.
+ *
+ * Only the CLAIM is SQL. The window arithmetic stays in pingWindows.ts —
+ * expressing R3/R4 in this statement would recreate exactly the second
+ * implementation the previous commit deleted.
+ */
+async function claimWindow(shiftSessionId: string, windowStart: Date): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `UPDATE shift_sessions
+        SET last_ping_reminder_window = $2
+      WHERE id = $1
+        AND (last_ping_reminder_window IS NULL OR last_ping_reminder_window < $2)
+      RETURNING id`,
+    [shiftSessionId, windowStart],
   );
-  return rows[0]?.recent === true;
+  return (rowCount ?? 0) > 0;
 }
 
 cron.schedule('* * * * *', async () => {
   const now = new Date();
-  // How stale a window CLOSE may be and still earn a push. 1 min
-  // reproduces the old firing instant exactly.
-  const TOLERANCE_MS = 60 * 1000;
+  // ELIGIBILITY RANGE, not a firing instant. The old ±60s tolerance meant a
+  // single skipped cron minute lost the reminder outright and never retried
+  // — see schema_v57's header for the 2026-08-24 04:00Z case, where the gap
+  // cost Naveen his ping AND flagged him for missing it.
+  //
+  // A window stays eligible for RECOVERY_MS after it closes, so a later tick
+  // still fires. The once-per-window claim below is what makes widening this
+  // safe. Bounded well inside the 30-min window length so a recovered push
+  // can never arrive after the NEXT window has already closed.
+  const RECOVERY_MS = 10 * 60 * 1000;
+  // A close within this age is "just now"; older is a catch-up, and the copy
+  // must say so rather than claim a freshness it does not have.
+  const FRESH_MS = 90 * 1000;
 
   try {
     // Every active session with the fields we need to compute per-session
@@ -133,6 +159,7 @@ cron.schedule('* * * * *', async () => {
               s.scheduled_start,
               s.scheduled_end,
               ss.clocked_in_at,
+              ss.last_ping_reminder_window,
               si.timezone AS site_tz
        FROM shift_sessions ss
        JOIN shifts s  ON s.id  = ss.shift_id
@@ -153,10 +180,22 @@ cron.schedule('* * * * *', async () => {
         new Date(row.scheduled_end),
         new Date(row.clocked_in_at),
         now,
-        TOLERANCE_MS,
+        RECOVERY_MS,
       );
       if (!closed) continue;
-      if (await alreadyRemindedRecently(row.shift_session_id, row.guard_id)) continue;
+
+      // Cheap short-circuit for the repeat ticks the widened range creates:
+      // a window stays eligible for RECOVERY_MS, so without this the break
+      // query AND the claim would re-run every minute for ten minutes
+      // instead of once. Purely an optimisation — claimWindow below is
+      // still the authority, so a stale read here costs at most one extra
+      // no-op UPDATE and can never double-send.
+      if (
+        row.last_ping_reminder_window !== null &&
+        new Date(row.last_ping_reminder_window).getTime() >= closed.windowStart.getTime()
+      ) {
+        continue;
+      }
 
       // Break-time quiet policy (locked 2026-08-20): no reminder for a
       // window a break overlaps.
@@ -178,12 +217,25 @@ cron.schedule('* * * * *', async () => {
         continue;
       }
 
+      // Claimed AFTER the break check so a waived window never burns a
+      // claim, and immediately BEFORE the send so the gap in which a crash
+      // could lose the push is as small as it can be.
+      if (!(await claimWindow(row.shift_session_id, closed.windowStart))) continue;
+
       const label = siteLocalLabel(closed.windowStart, row.site_tz);
+      const lateMs = now.getTime() - closed.windowEnd.getTime();
+      // Time-aware copy. On a catch-up tick the window closed minutes ago,
+      // and "now" would be claiming a freshness this push does not have —
+      // the same reasoning as clockOutReminder's minutes_left branch.
+      const body =
+        lateMs <= FRESH_MS
+          ? `Submit your ${label} ping now.`
+          : `You still owe the ${label} ping. Submit it now — the window has closed.`;
       await sendReminder(
         row,
         'ping_reminder',
         'Location ping',
-        `Submit your ${label} ping now.`,
+        body,
         {
           window_label: label,
           // Unchanged in both meaning and value: the instant we fired,
