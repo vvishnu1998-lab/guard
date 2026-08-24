@@ -69,6 +69,27 @@ Verified ground truth for the NetraOps platform. When live state may have change
 - `railway variable set` supports `--skip-deploys` (use it for Postgres-service var updates — a mid-rotation Postgres restart is never acceptable).
 - **Postgres-service vars are LITERALS, not template references.** `POSTGRES_PASSWORD`, `PGPASSWORD`, `DATABASE_URL`, `DATABASE_PUBLIC_URL` each hold their own copy of the password. **Setting `POSTGRES_PASSWORD` alone does NOT propagate to the other three.** Rotation is: `ALTER USER` FIRST, then FOUR explicit `railway variable set --skip-deploys` writes on the Postgres service, then a FIFTH on the guard service's `DATABASE_URL` literal — that last one auto-triggers the API redeploy. Five var writes, not one. (This file previously claimed template refs; that was wrong and would have left three vars stale mid-rotation.)
 
+## Cross-tier consistency
+
+- **When a reject path is removed server-side, audit every client that branches on it IN THE SAME DISPATCH.** A server that stops refusing does not make the client stop refusing; the guard still cannot proceed, and the fix reads as shipped because the server half is correct.
+  - Precedent 1: `5dd8077` (2026-08-22) made clock-out persist-and-flag instead of rejecting on geofence. `apps/mobile/app/clock-out/index.tsx:85` kept throwing `GuardFacingError('GPS lock failed…')` and refusing to close the shift until `d4af9cb` (2026-08-24) — **two days during which the removal had no effect for any guard whose GPS was bad**, which is the entire population it was written for.
+  - Precedent 2: the checkpoint error codes on the same date — one side fixed, the other never checked.
+  - The tell is a comment that describes the server correctly while the code above it contradicts it. That file's own comment already read *"clock-out PERSISTS AND FLAGS server-side; it is never rejected"* five lines below the throw. **A correct comment next to contradicting code is evidence of a half-finished cross-tier change, not of correct behaviour.**
+- Corollary: grep the mobile app for the removed condition before closing the dispatch. Client refusals are invisible in server logs — nothing reaches the API to be logged, so the absence of errors reads as success.
+
+## Clock-out reality (measured 2026-08-24)
+
+- **75% of all sessions since 2026-07-01 auto-closed (45/60); 78% for STARNET (14/18).** Bhanu 3/3, Nandu 4/4, deepak naik 3/3 — the highest-volume real guards have **never once** completed a manual clock-out.
+- **No manual clock-out has EVER landed within 20 minutes of `scheduled_end`** — the closest is 20.9 min early, and the median is well over an hour. Every manual clock-out in the dataset is a guard leaving *early*.
+- Cause is structural, not behavioural: the deployed sweep closes the session **at `scheduled_end`**, so a guard working their full shift has no window in which to clock out manually. `cee458f` moves it to `scheduled_end + 30 min` and is **on main but NOT deployed** — until it deploys, anything hung off manual clock-out (photo, reason, overtime) is a dead path by construction for full-shift guards.
+- Therefore: the GPS hard-fail above is a *candidate* contributor to Bhanu's 2026-08-20 non-clock-out (auto-closed, all `clock_out_*` NULL — verified), but the zero-grace sweep explains it on its own. Do not attribute to the client refusal what the sweep already accounts for.
+
+## Deploy gate
+
+- Standing gate for API deploys touching guard/shift/login paths: push in the 0-90s window after a STARNET ping row lands. The ping is a *proxy* for "a guard's app is alive and just checked in, so we have maximum time before the next interaction".
+- **The gate is satisfied by the CONDITION, not the proxy.** With 0 active shifts and 0 open sessions for the customer, no ping can land — the proxy is unsatisfiable while the thing it protects (nobody on post to disrupt) is trivially true. Deploying in that state is the safest window, not a bypass.
+- Exercised 2026-08-24 16:28 UTC (`d497416..f2dae17`, deployment `e73be1b4`): 0 active STARNET shifts, 0 open sessions, last ping 2h55m stale, next shift 17:00 UTC. Approved explicitly on that reasoning.
+
 ## Verification norms for this project
 
 - 3-viewport check on web UI changes: 375 / 390 / 1280px. Playwright ≠ real device — phone smoke test before "verified".
