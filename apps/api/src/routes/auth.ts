@@ -179,11 +179,28 @@ router.post('/guard/login', async (req: Request, res: Response) => {
     'UPDATE guards SET tokens_not_before = NOW(), fcm_token = $1 WHERE id = $2',
     [fcm_token ?? null, guard.id]
   );
+  // WHICH BUNDLE IS THIS HANDSET ON?
+  //
+  // Mobile has sent X-NetraOps-Client on every request since it was added
+  // (apps/mobile/lib/apiClient.ts:82) and NOTHING on the server ever read
+  // it. The safeguard existed only on the sending side, which is why a
+  // whole device test could be run, believed, and voided on 2026-08-24 —
+  // the handset was on a different channel and no server-side evidence
+  // could have contradicted that.
+  //
+  // Logged at guard login specifically: it is the one moment that always
+  // precedes a test run, it fires once per session rather than per
+  // request, and it carries platform/version/build/runtime/update in a
+  // single greppable line. `update/<id>` is the field that identifies an
+  // OTA bundle; `update/embedded` means the device is running the binary's
+  // baked-in bundle and has NOT taken an update.
+  const guardClient = req.get('X-NetraOps-Client') ?? 'absent';
+  console.log(`guard_client guard_id=${guard.id} client="${guardClient}"`);
   Sentry.addBreadcrumb({
     category: 'auth',
     message: 'guard login: session invalidated + fcm rewritten',
     level: 'info',
-    data: { guard_id: guard.id, has_new_fcm: !!fcm_token },
+    data: { guard_id: guard.id, has_new_fcm: !!fcm_token, client: guardClient },
   });
 
   const tokens = signTokens({ sub: guard.id, role: 'guard', company_id: guard.company_id });
