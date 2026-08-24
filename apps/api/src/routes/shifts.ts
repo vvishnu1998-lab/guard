@@ -7,6 +7,7 @@ import { dowInTimeZone } from '../services/siteTime';
 import { validateAtSite } from '../services/geofence';
 import { streamS3Object, extractS3Key, headS3Object } from '../services/s3';
 import { idempotent } from '../services/idempotency';
+import { validatePhotoOrQuarantine } from '../services/photoValidation';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
@@ -2816,11 +2817,15 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
 // validation entirely (backward compat) and record within_geofence NULL.
 router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   const { id } = req.params;
-  const { handover_notes, lat, lng, accuracy } = req.body as {
+  const { handover_notes, lat, lng, accuracy, clock_out_photo_url } = req.body as {
     handover_notes?: string | null;
     lat?: number;
     lng?: number;
     accuracy?: number;
+    /** Optional. The photo is SKIPPABLE by design — see the reason table
+     *  below. Absent, null and the legacy 'pending' sentinel all mean
+     *  "no photo", and none of them is an error. */
+    clock_out_photo_url?: string | null;
   };
 
   const haveCoords =
@@ -2830,6 +2835,57 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
 
   // Clock-out: capture provenance but NEVER gate on it. See the UPDATE below.
   const clockOutSignals = readShadowSignals(req.body, 'clock-out');
+
+  // Legacy 'pending' is the sentinel older builds send when S3 is not
+  // configured; treat it as "no photo" exactly as validatePhotoOrQuarantine
+  // does, so the reason we record matches the column we write.
+  const photoUrl =
+    typeof clock_out_photo_url === 'string' && clock_out_photo_url && clock_out_photo_url !== 'pending'
+      ? clock_out_photo_url
+      : null;
+
+  // Same S3 key validation and magic-byte check /reports and /ping use —
+  // the shared services/photoValidation.ts helper, not a fourth copy. A
+  // clock-out photo is not exempt from bucket-allowlist or content checks.
+  //
+  // Ordering matters: this runs BEFORE the transaction opens. A rejected
+  // photo must not leave a half-closed session behind, and the guard can
+  // retry the whole clock-out cleanly. A photo that fails validation is the
+  // ONE thing that stops a clock-out, and only because the guard can drop
+  // the photo and immediately succeed — skipping is always available.
+  if (photoUrl) {
+    const v = await validatePhotoOrQuarantine(photoUrl, {
+      guardId:   req.user!.sub,
+      companyId: req.user!.company_id,
+    });
+    if (!v.ok) return res.status(v.status).json(v.body);
+  }
+
+  // ── clock_out_reason, computed from what actually arrived ──────────────
+  //
+  // Five approved values across the two automatic-vs-manual paths:
+  //   'manual'                 photo + coords
+  //   'manual_no_photo'        coords, no photo
+  //   'manual_no_gps'          photo, no coords
+  //   'manual_no_photo_no_gps' neither
+  //   'auto'                   written by jobs/autoCompleteShifts.ts
+  // The handoff path keeps its own dynamic 'handed_off_to_<guard_uuid>',
+  // which is why no CHECK constrains this column (schema_v55).
+  //
+  // Computed here, written in the SAME statement as the other clock_out_*
+  // columns. There is deliberately no branch: the route already always
+  // completes — the 422 CLOCK_OUT_OFF_POST reject was removed on 2026-08-22
+  // (5dd8077) because it stranded honest guards with bad GPS while anyone
+  // simulating their position simply turned the simulation off. GPS or
+  // camera failure records the method and closes the shift; it never
+  // refuses.
+  //
+  // NULL is no longer produced by either path. It was previously the only
+  // auto-vs-manual discriminator, and only by accident of omission.
+  const clockOutReason =
+    photoUrl
+      ? (haveCoords ? 'manual' : 'manual_no_gps')
+      : (haveCoords ? 'manual_no_photo' : 'manual_no_photo_no_gps');
 
   const client = await pool.connect();
   try {
@@ -2941,7 +2997,17 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
        SET total_hours = $1, handover_notes = $2,
            clock_out_lat = $3, clock_out_lng = $4,
            clock_out_accuracy_meters = $5, clock_out_within_geofence = $6,
-           clock_out_location_mocked = $8, clock_out_fix_age_ms = $9
+           clock_out_location_mocked = $8, clock_out_fix_age_ms = $9,
+           clock_out_reason = $10,
+           clock_out_photo_url = $11,
+           -- 365-day photo retention (schema_v55). Set together with the url
+           -- in ONE statement so the two can never disagree; NULL when no
+           -- photo was taken, because there is nothing to delete. Nothing
+           -- consumes this column yet — see its COMMENT ON for the three
+           -- things a future purge needs fixed first.
+           clock_out_photo_delete_at =
+             CASE WHEN $11::varchar IS NULL THEN NULL
+                  ELSE NOW() + INTERVAL '365 days' END
        WHERE id = $7`,
       [
         netHours,
@@ -2960,6 +3026,8 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
         // flagged row that records the simulated position for a blank row
         // that records nothing. Rejecting makes the evidence strictly worse.
         clockOutSignals.locationMocked, clockOutSignals.fixAgeMs,
+        clockOutReason,
+        photoUrl,
       ]
     );
     await client.query('UPDATE shifts SET status = $1 WHERE id = $2', ['completed', id]);

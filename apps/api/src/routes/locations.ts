@@ -198,89 +198,9 @@ export async function fireBreachAlerts(params: {
   );
 }
 
+import { validatePhotoOrQuarantine } from '../services/photoValidation';
+
 const router = Router();
-
-/**
- * Magic-byte validator for photo URLs on the ping + clock-in-verification
- * endpoints. Item 6 — extends the magic-byte check that reports.ts already
- * performs (D2 / audit/WEEK1.md §D2) to the two remaining photo-bearing
- * paths that previously trusted the client.
- *
- * Skips legacy sentinel values ('pending', null, empty string) so older
- * builds that fall back when S3 isn't configured still go through. Real
- * S3 URLs get the same treatment as reports: Range-GET first 16 bytes,
- * verify magic, quarantine + 400 on mismatch.
- *
- * Sync (not async) by design — the user message above said an async
- * accept-now-reject-later flow would create a worse UX than a 60ms wait.
- */
-async function validatePhotoOrQuarantine(
-  photoUrl: string | null | undefined,
-  ctx: { guardId: string; companyId?: string; shiftSessionId?: string },
-): Promise<{ ok: true } | { ok: false; status: number; body: { error: string } }> {
-  // TODO(sentinel-removal): null and 'pending' are legacy fallbacks the
-  // mobile uses when S3 isn't configured. Deprecated-but-supported. When
-  // we remove the fallback path, grep for `sentinel-removal` and tighten
-  // this to reject unset photo_urls outright.
-  if (!photoUrl || photoUrl === 'pending') return { ok: true };
-
-  // Defense against URL substitution — photo_url is client-supplied and
-  // must be validated against our bucket allowlist. A tampered URL pointing
-  // at attacker-controlled storage would otherwise let the attacker dictate
-  // the bytes we accept as a "verified photo".
-  const key = s3KeyFromPublicUrl(photoUrl);
-  if (!key) {
-    return {
-      ok: false,
-      status: 400,
-      body: { error: 'photo_url must point at the configured S3 bucket' },
-    };
-  }
-
-  // The presigned POST policy pins Content-Type=image/jpeg per upload,
-  // so we treat the declared type as image/jpeg here. (Forward-compat
-  // hook: if the client ever uploads PNG/WEBP, add the content_type to
-  // the payload and pass it in.)
-  const declared = 'image/jpeg';
-  if (!isAllowedContentType(declared)) {
-    return {
-      ok: false,
-      status: 400,
-      body: { error: `unsupported content_type ${declared}` },
-    };
-  }
-
-  let head: Buffer;
-  try {
-    head = await getS3ObjectHead(key, 16);
-  } catch {
-    return {
-      ok: false,
-      status: 400,
-      body: { error: `Photo not found in storage (key=${key}); please re-upload before submitting.` },
-    };
-  }
-
-  if (!magicMatches(declared, head)) {
-    const detected = describeMagic(head);
-    await pool.query(
-      `INSERT INTO quarantined_uploads
-         (s3_key, declared_content_type, detected_magic,
-          guard_id, company_id, shift_session_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [key, declared, detected, ctx.guardId, ctx.companyId ?? null, ctx.shiftSessionId ?? null],
-    );
-    return {
-      ok: false,
-      status: 400,
-      body: {
-        error: `Uploaded file is not a valid ${declared} (detected: ${detected}). The upload has been quarantined; please re-take the photo.`,
-      },
-    };
-  }
-
-  return { ok: true };
-}
 
 // GET /api/locations/violations — guard's own violation history (mobile alerts tab)
 //
