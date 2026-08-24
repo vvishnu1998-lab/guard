@@ -14,6 +14,32 @@ import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation
 
 const router = Router();
 
+// ── Input bounds for POST / ───────────────────────────────────────────────
+//
+// Each of these mirrors a schema constraint. Where a bound duplicates one
+// that already exists in SQL, the SQL stays authoritative and this is the
+// gate that keeps a violation from surfacing as a 500 — see the note on the
+// input gate in POST / for why a 500 here is a duplicate-storm trigger.
+
+/** report_photos.chk_photo_index — CHECK (photo_index BETWEEN 1 AND 5). */
+const MAX_PHOTOS_PER_REPORT = 5;
+
+/** report_photos.storage_url — character varying(1000). */
+const MAX_STORAGE_URL_CHARS = 1000;
+
+/**
+ * Matches the client's own counter (maxLength={3000} in
+ * apps/mobile/app/reports/new.tsx:344). reports.description is TEXT and has
+ * no SQL bound, so this is the only place the stated limit is real.
+ */
+const MAX_DESCRIPTION_CHARS = 3000;
+
+/** reports CHECK (severity IN ('low','medium','high','critical')). */
+const ALLOWED_SEVERITIES = ['low', 'medium', 'high', 'critical'];
+
+/** shift_session_id lands in `WHERE id = $1` against a uuid column. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // GET /api/reports — scoped by role
 // CRITICAL: always filters by site_id or company_id (see Section 11.5)
 router.get('/', requireAuth('guard', 'company_admin', 'client'), async (req, res) => {
@@ -156,6 +182,120 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     return res.status(400).json({ error: 'report_type must be activity, incident, or maintenance' });
   }
 
+  // ── INPUT TYPE + BOUND GATE ───────────────────────────────────────────
+  //
+  // Everything below this block may assume its inputs are well-typed and
+  // within the bounds the schema will accept. Nothing here touches the DB
+  // or S3, so every rejection is a clean 4xx with no partial write.
+  //
+  // WHY IT EXISTS. A 500 is not a 4xx, and the mobile offline queue treats
+  // a 5xx as transient: it re-queues the report and replays it, and every
+  // replay writes a NEW report row. That is what produced six duplicate
+  // reports in STARNET's compliance record on 2026-08-22 (see the size-gate
+  // note below). Any unhandled throw on client input is therefore a
+  // duplicate-storm trigger, not just an ugly error — so the rule is that
+  // no client-supplied value may reach a throw.
+  //
+  // Codes follow the house convention: a stable SCREAMING_SNAKE code in
+  // `error` and the human sentence in `message`, so clients branch on
+  // status PLUS code and never on prose.
+  if (typeof shift_session_id !== 'string' || !UUID_RE.test(shift_session_id)) {
+    // A malformed id reaches Postgres as `WHERE id = $1` against a uuid
+    // column and raises 22P02 invalid_text_representation — a 500 on the
+    // very first DB call in the route.
+    return res.status(400).json({
+      error:   'INVALID_SESSION_ID',
+      message: 'shift_session_id must be a UUID.',
+    });
+  }
+
+  if (typeof description !== 'string') {
+    // `description?.trim()` only guards null/undefined. A number or object
+    // gets past `?.` and then throws "description.trim is not a function".
+    return res.status(400).json({
+      error:   'INVALID_DESCRIPTION',
+      message: 'description must be text.',
+    });
+  }
+  if (!description.trim()) {
+    return res.status(400).json({
+      error:   'DESCRIPTION_REQUIRED',
+      message: 'description is required.',
+    });
+  }
+  // reports.description is TEXT, so an oversized value does not throw — it
+  // is stored. The bound matches the client counter (maxLength={3000} in
+  // apps/mobile/app/reports/new.tsx:344) so the server enforces the same
+  // contract the guard is shown rather than silently accepting more.
+  // express.json() defaults to a 100 kB body, which already 413s well
+  // above this; this makes the real limit the stated one.
+  if (description.length > MAX_DESCRIPTION_CHARS) {
+    return res.status(422).json({
+      error:   'DESCRIPTION_TOO_LONG',
+      message: `Description is too long (${description.length} characters; the limit is ${MAX_DESCRIPTION_CHARS}).`,
+      length:  description.length,
+      limit:   MAX_DESCRIPTION_CHARS,
+    });
+  }
+
+  // reports.severity is varchar(20) with CHECK severity IN
+  // ('low','medium','high','critical'). Nothing validated it before, so any
+  // other string raised 23514 (or 22001 past 20 chars) at the INSERT —
+  // after nothing had been written, but still a 500 the queue would replay.
+  if (severity !== undefined && severity !== null && severity !== '') {
+    if (typeof severity !== 'string' || !ALLOWED_SEVERITIES.includes(severity)) {
+      return res.status(400).json({
+        error:   'INVALID_SEVERITY',
+        message: `severity must be one of ${ALLOWED_SEVERITIES.join(', ')}.`,
+      });
+    }
+  }
+
+  if (photo_urls !== undefined && photo_urls !== null && !Array.isArray(photo_urls)) {
+    return res.status(400).json({
+      error:   'INVALID_PHOTO_URLS',
+      message: 'photo_urls must be an array.',
+    });
+  }
+  if (Array.isArray(photo_urls)) {
+    // report_photos.chk_photo_index is CHECK (photo_index BETWEEN 1 AND 5)
+    // and photo_index is assigned i + 1 in the insert loop. Nothing checked
+    // the array length, so a 6-photo POST committed the report row and the
+    // first five photos and THEN raised 23514 — walking straight around the
+    // size gate below and leaving a half-written report behind.
+    if (photo_urls.length > MAX_PHOTOS_PER_REPORT) {
+      return res.status(422).json({
+        error:   'TOO_MANY_PHOTOS',
+        message: `A report can carry at most ${MAX_PHOTOS_PER_REPORT} photos (${photo_urls.length} were sent).`,
+        count:   photo_urls.length,
+        limit:   MAX_PHOTOS_PER_REPORT,
+      });
+    }
+    for (let i = 0; i < photo_urls.length; i++) {
+      const p = photo_urls[i];
+      // A null or primitive element makes the `p.url` read in the
+      // magic-byte loop throw a TypeError before any validation runs.
+      if (p === null || typeof p !== 'object' || Array.isArray(p)) {
+        return res.status(400).json({
+          error:       'INVALID_PHOTO_ENTRY',
+          message:     `Photo ${i + 1} is not a valid photo object.`,
+          photo_index: i + 1,
+        });
+      }
+      const url = (p as { url?: unknown }).url;
+      // storage_url is varchar(1000); a longer value raises 22001 at the
+      // insert. s3KeyFromPublicUrl below still decides whether the host is
+      // ours — this only guarantees the value is storable at all.
+      if (typeof url !== 'string' || url.length === 0 || url.length > MAX_STORAGE_URL_CHARS) {
+        return res.status(400).json({
+          error:       'INVALID_PHOTO_URL',
+          message:     `Photo ${i + 1} has a missing or unusable url.`,
+          photo_index: i + 1,
+        });
+      }
+    }
+  }
+
   // Commit A2 — optional late-report backfill. Same shape and semantics
   // as POST /api/locations/ping's window_label param: cheap HH:MM regex
   // guard now, matched against an open missed_reports row inside the
@@ -164,9 +304,6 @@ router.post('/', requireAuth('guard'), async (req, res) => {
     typeof window_label === 'string' && /^\d{2}:\d{2}$/.test(window_label)
       ? window_label
       : null;
-  if (!description?.trim()) {
-    return res.status(400).json({ error: 'description is required' });
-  }
   // Severity is optional for all report types — incidents no longer require it
   // (UX simplification 2026-05-15; was previously incident-only mandatory).
   // The DB column stays nullable so historical incidents keep their severity.
@@ -247,7 +384,14 @@ router.post('/', requireAuth('guard'), async (req, res) => {
 
       // file_size_kb is NOT NULL, so an absent value is also a 500 waiting
       // to happen — same storm, different constraint.
-      if (typeof sizeKb !== 'number' || !Number.isFinite(sizeKb) || sizeKb < 0) {
+      //
+      // Number.isInteger is load-bearing, not belt-and-braces: file_size_kb
+      // is `integer`, and node-pg sends a JS number as its text form, so
+      // 500.5 arrives as '500.5' and Postgres raises 22P02 invalid_text_
+      // representation. A fractional value under the cap passed every other
+      // check here and only failed at the INSERT — after the report row had
+      // committed. Same half-write, same replay, same storm.
+      if (typeof sizeKb !== 'number' || !Number.isInteger(sizeKb) || sizeKb < 0) {
         return res.status(422).json({
           error: 'PHOTO_SIZE_MISSING',
           message: `Photo ${i + 1} could not be measured, so the report was not saved. `
@@ -306,15 +450,25 @@ router.post('/', requireAuth('guard'), async (req, res) => {
       }
       if (!magicMatches(declared, head)) {
         const detected = describeMagic(head);
-        // Forensics row — keep going only after the INSERT in case of DB
-        // failure we still don't accept the report.
-        await pool.query(
-          `INSERT INTO quarantined_uploads
-             (s3_key, declared_content_type, detected_magic,
-              guard_id, company_id, shift_session_id)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [key, declared, detected, req.user!.sub, req.user!.company_id, shift_session_id]
-        );
+        // Forensics row. The rejection below is the load-bearing part — the
+        // quarantine row is evidence, not a gate — so a failure to record it
+        // must NOT turn a clean 400 into a 500 the offline queue will replay.
+        // Log to Sentry instead and still refuse the report.
+        try {
+          await pool.query(
+            `INSERT INTO quarantined_uploads
+               (s3_key, declared_content_type, detected_magic,
+                guard_id, company_id, shift_session_id)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [key, declared, detected, req.user!.sub, req.user!.company_id, shift_session_id]
+          );
+        } catch (err) {
+          console.error('[reports] quarantine INSERT failed:', err);
+          Sentry.captureException(err, {
+            tags:  { flow: 'report_quarantine' },
+            extra: { s3_key: key, declared, detected, shift_session_id },
+          } as unknown as Parameters<typeof Sentry.captureException>[1]);
+        }
         return res.status(400).json({
           error: `Uploaded file is not a valid ${declared} (detected: ${detected}). The upload has been quarantined; please re-take the photo.`,
         });
@@ -335,14 +489,30 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   let fenceDistance: number | null = null;
   let fenceReason: string | null = null;
   if (haveCoords) {
-    const fence = await validateAtSite(
-      { lat: latitude, lng: longitude, accuracy_m: accuracy },
-      site_id,
-      pool,
-    );
-    isWithin = fence.allowed;
-    fenceDistance = fence.distance_m;
-    fenceReason = fence.reason;
+    // Fail OPEN on a validator error, matching the missing-coords branch
+    // above: when we cannot decide, the report goes through with
+    // is_within_geofence NULL rather than 500ing. A malformed or absent
+    // site_geofence row is an admin data problem, and making the guard's
+    // report bounce (and the offline queue replay it) is the wrong end to
+    // punish. The failure is surfaced to Sentry so it is not silent.
+    try {
+      const fence = await validateAtSite(
+        { lat: latitude, lng: longitude, accuracy_m: accuracy },
+        site_id,
+        pool,
+      );
+      isWithin = fence.allowed;
+      fenceDistance = fence.distance_m;
+      fenceReason = fence.reason;
+    } catch (err) {
+      console.error('[reports] validateAtSite failed:', err);
+      Sentry.captureException(err, {
+        tags:  { flow: 'report_geofence' },
+        extra: { site_id, shift_session_id, latitude, longitude, accuracy },
+      } as unknown as Parameters<typeof Sentry.captureException>[1]);
+      // isWithin stays null → treated as "could not decide", same as a
+      // client that sent no coords.
+    }
   }
 
   // Non-incident reports MUST be at the post. Incidents are always
