@@ -1,4 +1,5 @@
 import { pool } from '../db/pool';
+import { dowInTimeZone } from './siteTime';
 
 const DAY_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
 
@@ -11,10 +12,6 @@ export async function generateTaskInstancesForShift(
   siteId: string,
   clockInAt: Date
 ): Promise<void> {
-  const dayOfWeek = clockInAt.getDay(); // 0 = Sunday
-  const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-
   const templates = await pool.query(
     // v40: JOIN sites for timezone. scheduled_time is stored as site-local
     // wall-clock (naive TIME) post-migration; due_at is computed in Postgres
@@ -28,6 +25,29 @@ export async function generateTaskInstancesForShift(
       WHERE tt.site_id = $1 AND tt.is_active = true`,
     [siteId]
   );
+  if (templates.rows.length === 0) return;
+
+  // The day-of-week gate below must be the day at the SITE, not at the
+  // server. clockInAt is a UTC instant and the API runs UTC on Railway, so
+  // the previous `clockInAt.getDay()` returned the UTC day: Bethel AME
+  // Church (17:00-23:00 PT) and 23000 Cristo Rey Los Altos (19:00-06:00 PT)
+  // both cross UTC midnight mid-shift, so a Saturday-evening clock-in
+  // resolved to Sunday and 'weekdays'/'weekends'/'custom' templates fired on
+  // the wrong day. Same class of bug v40 fixed for due_at, and resolved the
+  // same way v40 established: through sites.timezone.
+  //
+  // v40's Postgres timezone math is the right tool for computing a
+  // TIMESTAMP (due_at, below — unchanged). This gate is a JS-side filter
+  // over template rows, so it uses the JS helper routes/shifts.ts already
+  // uses to resolve a day-of-week for repeat_days, now shared rather than
+  // duplicated.
+  //
+  // Every row comes from one site (WHERE tt.site_id = $1 JOIN sites), so
+  // rows[0].timezone is that site's zone.
+  const siteTz    = templates.rows[0].timezone as string;
+  const dayOfWeek = dowInTimeZone(clockInAt, siteTz); // 0 = Sunday, site-local
+  const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
 
   for (const tpl of templates.rows) {
     const matches =

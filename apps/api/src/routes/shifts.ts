@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/node';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
+import { dowInTimeZone } from '../services/siteTime';
 import { validateAtSite } from '../services/geofence';
 import { streamS3Object, extractS3Key, headS3Object } from '../services/s3';
 import { idempotent } from '../services/idempotency';
@@ -345,17 +346,12 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     const pending: { start: Date; end: Date }[] = [];
     const cur = new Date(baseStart);
     // Compute DOW in the SITE's timezone so a shift-day computed near
-    // midnight isn't off-by-one because the server runs UTC. Same code
-    // as before otherwise.
-    const DOW_BY_NAME: Record<string, number> = {
-      Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3,
-      Thursday: 4, Friday: 5, Saturday: 6,
-    };
-    const dowInSiteTz = (d: Date): number =>
-      DOW_BY_NAME[new Intl.DateTimeFormat('en-US',
-        { timeZone: siteTz, weekday: 'long' }).format(d)] ?? d.getDay();
+    // midnight isn't off-by-one because the server runs UTC. The helper
+    // moved to services/siteTime.ts (semantics unchanged) when
+    // services/tasks.ts needed the same answer for its recurrence gate —
+    // one implementation, two callers.
     while (cur <= horizon) {
-      const dow = dowInSiteTz(cur);
+      const dow = dowInTimeZone(cur, siteTz);
       if (repeat_days.includes(dow)) {
         const shiftStart = new Date(cur);
         shiftStart.setHours(baseStart.getHours(), baseStart.getMinutes(), baseStart.getSeconds(), 0);
