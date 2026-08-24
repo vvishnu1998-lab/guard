@@ -154,3 +154,53 @@ export function completedTrackableWindows(
   }
   return out;
 }
+
+/**
+ * The window a REMINDER should nag for: the most recent window that has
+ * CLOSED, that COUNTS against this guard (R3 + R4), and that closed no
+ * longer than `maxAgeMs` ago.
+ *
+ * This exists because jobs/pingReminder.ts used to answer the question
+ * itself, with a private `currentBoundary()` that computed
+ * `scheduled_start + N*30min` and a private copy of siteLocalLabel. That
+ * second implementation was wrong in two ways that only a shared
+ * definition prevents:
+ *
+ *   1. It named the BOUNDARY, not the window that closed. At boundary
+ *      18:40 on an 18:10 shift it said "submit your 11:40 ping" when the
+ *      window that had just closed was 11:10.
+ *   2. It had no R3 check, so it fired for windows that CANNOT EXIST.
+ *      Any shift whose length is a multiple of 30 min puts its final
+ *      boundary exactly on scheduled_end, and a window opening there
+ *      always overruns the shift. 46 of 670 production reminders (6.9%,
+ *      11 guards, 14 of them STARNET's) named a window scheduleWindows
+ *      would reject — the guard tapped the push, captured and uploaded a
+ *      photo, and only then got 422 PING_WINDOW_INVALID.
+ *
+ * Returning the CLOSED window rather than a boundary makes both faults
+ * unrepresentable: there is no boundary to mislabel, and R3/R4 come from
+ * completedTrackableWindows, which missedPingCron already uses. The
+ * reminder and the flag now answer to one definition, which is the whole
+ * reason this module exists.
+ *
+ * R4 is deliberately inherited: a window that opened before the guard
+ * clocked in is one they will never be flagged for, so nagging for it is
+ * the same class of defect. Do not nag for what you will not flag.
+ *
+ * `maxAgeMs` is how stale a close may be and still deserve a push. A
+ * value of one minute reproduces the old ±60s firing instant; a larger
+ * one lets a dropped cron tick still be recovered.
+ */
+export function windowJustClosed(
+  scheduledStart: Date,
+  scheduledEnd:   Date,
+  clockedInAt:    Date,
+  now:            Date,
+  maxAgeMs:       number,
+): { windowStart: Date; windowEnd: Date } | null {
+  const closed = completedTrackableWindows(scheduledStart, scheduledEnd, clockedInAt, now);
+  const latest = closed[closed.length - 1];
+  if (!latest) return null;
+  if (now.getTime() - latest.windowEnd.getTime() > maxAgeMs) return null;
+  return latest;
+}

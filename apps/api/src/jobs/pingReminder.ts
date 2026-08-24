@@ -14,14 +14,21 @@
  *      and site tz. Skip guards who clocked in less than 5 min ago
  *      (parity with the old rule so a 5:59 clock-in doesn't get the
  *      6:00 ping at 6:00:30).
- *   2. For each session, compute the most recent completed 30-min
- *      window boundary and the next upcoming one. If NOW falls within
- *      the 1-min tolerance of a window BOUNDARY (i.e. scheduled_start
- *      + N*30min) → fire the ping reminder. This is the moment the
- *      guard should ping FOR the window that just closed, not the one
- *      that just opened; the mobile UI treats this as "your 6:30 ping
- *      window is closing — submit now".
- *   3. Send at most one ping reminder per session per boundary — dedup
+ *   2. For each session, ask services/pingWindows.ts which window has
+ *      just CLOSED (windowJustClosed → R3 + R4 + closure). If one has,
+ *      and it closed within TOLERANCE_MS, fire the ping reminder naming
+ *      THAT window; the mobile UI treats this as "your 6:30 ping window
+ *      is closing — submit now".
+ *
+ *      This job used to compute the answer itself, from a private
+ *      currentBoundary() plus a private copy of siteLocalLabel. Both are
+ *      gone. The boundary form named the window OPENING rather than the
+ *      one closing, and had no R3 check, so it nagged for windows that
+ *      cannot exist — 6.9% of production reminders, ending in a 422
+ *      after the guard had already captured and uploaded the photo. The
+ *      arithmetic lives in ONE place now, the same place missedPingCron
+ *      reads, which is the entire reason that module exists.
+ *   3. Send at most one ping reminder per session per window — dedup
  *      via the notifications table (an existing ping_reminder row for
  *      this session within 5 min → skip).
  *
@@ -34,7 +41,7 @@ import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { insertNotification, NotificationType } from '../services/notifications';
-import { breakOverlapsWindow, PING_WINDOW_MS } from '../services/pingWindows';
+import { breakOverlapsWindow, siteLocalLabel, windowJustClosed } from '../services/pingWindows';
 import { Sentry } from '../services/sentry';
 
 // The hourly slot the activity-report + task legs nudge for. Matches
@@ -91,49 +98,6 @@ async function sendReminder(
   ]);
 }
 
-/**
- * Site-local HH:MM label for a UTC timestamp. Used as the deep-link
- * payload so the mobile ping screen shows "6:30 window" to the guard.
- */
-function siteLocalLabel(when: Date, siteTz: string | null): string {
-  const tz = siteTz ?? 'America/Los_Angeles';
-  return new Intl.DateTimeFormat('en-GB', {
-    hour: '2-digit', minute: '2-digit', hour12: false,
-    timeZone: tz,
-  }).format(when);
-}
-
-/**
- * Compute the latest window BOUNDARY (scheduled_start + N*30min) that
- * has just closed at NOW. Returns the boundary time and its label.
- * The boundary must lie within a ±1 min tolerance of NOW for the cron
- * to consider this session eligible this tick.
- */
-function currentBoundary(
-  scheduledStart: Date,
-  scheduledEnd: Date,
-  now: Date,
-  toleranceMs: number,
-): { boundary: Date; label: string; siteTz: null } | null {
-  const startMs = scheduledStart.getTime();
-  const nowMs   = now.getTime();
-  const endMs   = scheduledEnd.getTime();
-  if (nowMs < startMs || nowMs > endMs + toleranceMs) return null;
-
-  const stepMs = 30 * 60 * 1000;
-  // N = the number of complete 30-min steps since scheduled_start.
-  const n = Math.round((nowMs - startMs) / stepMs);
-  if (n <= 0) return null;
-  const boundary = new Date(startMs + n * stepMs);
-  if (Math.abs(nowMs - boundary.getTime()) > toleranceMs) return null;
-
-  // Boundary must have actually happened at or before NOW — never
-  // fire for a boundary that's still in the future.
-  if (boundary.getTime() > nowMs) return null;
-
-  return { boundary, label: '', siteTz: null };
-}
-
 async function alreadyRemindedRecently(
   shiftSessionId: string,
   guardId: string,
@@ -153,7 +117,9 @@ async function alreadyRemindedRecently(
 
 cron.schedule('* * * * *', async () => {
   const now = new Date();
-  const TOLERANCE_MS = 60 * 1000; // 1 minute either side of the boundary
+  // How stale a window CLOSE may be and still earn a push. 1 min
+  // reproduces the old firing instant exactly.
+  const TOLERANCE_MS = 60 * 1000;
 
   try {
     // Every active session with the fields we need to compute per-session
@@ -179,41 +145,55 @@ cron.schedule('* * * * *', async () => {
     // ── Ping reminder — schedule-anchored per session ─────────────────
     let pingsFired = 0;
     for (const row of rows) {
-      const boundary = currentBoundary(
+      // The window that just CLOSED — R3 + R4 + closure, from the same
+      // module missedPingCron flags from. Never a boundary: see the
+      // windowJustClosed docblock for the two faults a boundary produced.
+      const closed = windowJustClosed(
         new Date(row.scheduled_start),
         new Date(row.scheduled_end),
+        new Date(row.clocked_in_at),
         now,
         TOLERANCE_MS,
       );
-      if (!boundary) continue;
+      if (!closed) continue;
       if (await alreadyRemindedRecently(row.shift_session_id, row.guard_id)) continue;
 
       // Break-time quiet policy (locked 2026-08-20): no reminder for a
-      // window a break overlaps. The boundary is the window START; the
-      // window it opens runs [boundary, boundary + 30min). Same shared
-      // predicate missedPingCron uses to waive the flag, so the reminder
-      // and the flag can never disagree about a window.
-      if (
-        await breakOverlapsWindow(
-          row.shift_session_id,
-          boundary.boundary,
-          new Date(boundary.boundary.getTime() + PING_WINDOW_MS),
-        )
-      ) {
+      // window a break overlaps.
+      //
+      // This waives on the window being NAGGED FOR — the closed one,
+      // [windowStart, windowEnd] — which is the identical span
+      // missedPingCron passes when it decides whether to waive the flag.
+      // It previously passed [boundary, boundary + 30min), i.e. the
+      // window OPENING rather than the one closing, so a break covering
+      // the nagged window failed to suppress the push while a break
+      // covering the NEXT one suppressed it wrongly. The comment here
+      // asserted the reminder and the flag "can never disagree"; they
+      // were off by exactly one window, always.
+      if (await breakOverlapsWindow(row.shift_session_id, closed.windowStart, closed.windowEnd)) {
         console.log(
           `[pingReminder.skipped.break] session=${row.shift_session_id} ` +
-          `window=${boundary.boundary.toISOString()}`,
+          `window=${closed.windowStart.toISOString()}`,
         );
         continue;
       }
 
-      const label = siteLocalLabel(boundary.boundary, row.site_tz);
+      const label = siteLocalLabel(closed.windowStart, row.site_tz);
       await sendReminder(
         row,
         'ping_reminder',
         'Location ping',
         `Submit your ${label} ping now.`,
-        { window_label: label, window_boundary: boundary.boundary.toISOString() },
+        {
+          window_label: label,
+          // Unchanged in both meaning and value: the instant we fired,
+          // which is the close of the nagged window. Kept so forensic
+          // queries stay comparable across this fix. window_start is the
+          // new field — the label is timezone-derived and therefore
+          // ambiguous on its own.
+          window_boundary: closed.windowEnd.toISOString(),
+          window_start:    closed.windowStart.toISOString(),
+        },
       );
       pingsFired += 1;
     }
