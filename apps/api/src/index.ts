@@ -53,6 +53,7 @@ import './jobs/taskDueCron';
 import './jobs/breakExpiryCron';
 import './jobs/locationIntegrityCron';
 import './jobs/orphanedSessionCheck';
+import './jobs/clockOutReminder';
 
 const app = express();
 app.set('trust proxy', 1);

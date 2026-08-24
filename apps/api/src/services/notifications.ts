@@ -33,6 +33,11 @@ export type NotificationType =
   | 'off_post_task'
   | 'missed_ping'
   | 'late_clock_in'
+  // clock_out_reminder — fired ~5 min before scheduled_end by
+  //   jobs/clockOutReminder.ts so the guard closes their own shift instead
+  //   of being swept by autoCompleteShifts. Data payload: { shiftId }.
+  //   Deep-link -> clock-out flow.
+  | 'clock_out_reminder'
   // Commit A2 addition:
   //   missed_report — hourly report window closed with no report
   //     submitted. Emitted by jobs/missedReportCron.ts. Data payload:
