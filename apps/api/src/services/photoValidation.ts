@@ -37,9 +37,44 @@ import { pool } from '../db/pool';
 import { getS3ObjectHead, s3KeyFromPublicUrl } from './s3';
 import { isAllowedContentType, magicMatches, describeMagic } from './imageMagic';
 
+/**
+ * Why this shape.
+ *
+ * The 2026-08-22 invariant: NEVER make a client branch on error prose.
+ * Branch on status PLUS code. The checkpoint routes put a human sentence in
+ * `error`, clients branched on it, and the branching broke the moment the
+ * wording changed.
+ *
+ * This helper previously returned `{ error: <sentence> }` with no code, so a
+ * caller could only distinguish a rejected photo from any other 400 by
+ * string-matching. That was survivable while the only callers were ping and
+ * clock-in-verification, where a rejected photo IS a failed submission and
+ * there is nothing else to do. It stopped being survivable when clock-out
+ * started using it: there, a rejected photo must render as "photo couldn't
+ * be saved — clock out without it?" with skip immediately available, and it
+ * must NEVER render as a failed clock-out. That distinction needs a code.
+ *
+ *   error   — stable, always 'PHOTO_REJECTED'. The thing clients branch on.
+ *   message — the human sentence, unchanged from before. For display only.
+ *   reason  — which of the four checks failed. For logs, metrics and any
+ *             caller that wants finer copy; NOT required for the basic
+ *             "was it the photo?" decision, which `error` alone answers.
+ */
+export type PhotoRejectionReason =
+  | 'BAD_BUCKET'         // url does not point at our S3 bucket
+  | 'BAD_CONTENT_TYPE'   // declared type is not on the allowlist
+  | 'NOT_IN_STORAGE'     // object missing — upload never landed, or wrong key
+  | 'MAGIC_MISMATCH';    // bytes do not match the declared type; quarantined
+
+export interface PhotoRejection {
+  error:   'PHOTO_REJECTED';
+  message: string;
+  reason:  PhotoRejectionReason;
+}
+
 export type PhotoValidation =
   | { ok: true }
-  | { ok: false; status: number; body: { error: string } };
+  | { ok: false; status: number; body: PhotoRejection };
 
 export async function validatePhotoOrQuarantine(
   photoUrl: string | null | undefined,
@@ -66,7 +101,11 @@ export async function validatePhotoOrQuarantine(
     return {
       ok: false,
       status: 400,
-      body: { error: 'photo_url must point at the configured S3 bucket' },
+      body: {
+        error:   'PHOTO_REJECTED',
+        reason:  'BAD_BUCKET',
+        message: 'photo_url must point at the configured S3 bucket',
+      },
     };
   }
 
@@ -79,7 +118,11 @@ export async function validatePhotoOrQuarantine(
     return {
       ok: false,
       status: 400,
-      body: { error: `unsupported content_type ${declared}` },
+      body: {
+        error:   'PHOTO_REJECTED',
+        reason:  'BAD_CONTENT_TYPE',
+        message: `unsupported content_type ${declared}`,
+      },
     };
   }
 
@@ -90,7 +133,11 @@ export async function validatePhotoOrQuarantine(
     return {
       ok: false,
       status: 400,
-      body: { error: `Photo not found in storage (key=${key}); please re-upload before submitting.` },
+      body: {
+        error:   'PHOTO_REJECTED',
+        reason:  'NOT_IN_STORAGE',
+        message: `Photo not found in storage (key=${key}); please re-upload before submitting.`,
+      },
     };
   }
 
@@ -107,7 +154,9 @@ export async function validatePhotoOrQuarantine(
       ok: false,
       status: 400,
       body: {
-        error: `Uploaded file is not a valid ${declared} (detected: ${detected}). The upload has been quarantined; please re-take the photo.`,
+        error:   'PHOTO_REJECTED',
+        reason:  'MAGIC_MISMATCH',
+        message: `Uploaded file is not a valid ${declared} (detected: ${detected}). The upload has been quarantined; please re-take the photo.`,
       },
     };
   }
