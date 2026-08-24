@@ -11,6 +11,7 @@ import { fireBreachAlerts } from './locations';
 import { Sentry } from '../services/sentry';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
+import { idempotent } from '../services/idempotency';
 
 const router = Router();
 
@@ -175,7 +176,7 @@ router.get('/:id', requireAuth('guard', 'company_admin', 'client'), async (req, 
 // incident report while a ping-boundary breach is already open still
 // fires the off_post_report alert because they're different event
 // types with independent 5-min buckets.
-router.post('/', requireAuth('guard'), async (req, res) => {
+router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) => {
   const { shift_session_id, report_type, description, severity, photo_urls, latitude, longitude, accuracy, window_label } = req.body;
 
   if (!['activity', 'incident', 'maintenance'].includes(report_type)) {
@@ -369,14 +370,18 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   // Validating BEFORE any insert turns that into one clean 422 the guard can
   // act on, and a 4xx is surfaced by the client instead of queued.
   //
-  // THIS IS A STOP-GAP. It does not fix the limit mismatch, the missing
-  // transaction, or the fact that a constraint violation can surface as a
-  // 500. Raising chk_file_size is a separate decision — 800 KB may be
-  // load-bearing for S3 cost or for PDF generation.
+  // The stop-gap this note used to describe is now closed on all three
+  // counts: the limits agree (below), the report and its photos write in
+  // one transaction, and every constraint violation reachable from client
+  // input is a 4xx before any write.
   //
-  // MUST equal report_photos.chk_file_size. Changing one without the other
-  // reopens exactly this hole.
-  const MAX_PHOTO_KB = 800;
+  // MUST equal report_photos.chk_file_size, which schema_v54 moved from
+  // 800 to 5120 so the row can hold anything S3 was willing to take
+  // (MAX_UPLOAD_BYTES = 5 MiB, services/s3.ts:31). The three values are
+  // now one value. Changing one without the others reopens exactly the
+  // hole that orphaned vamshi's 919 KB photo on 2026-08-22: S3 accepted
+  // it, Postgres refused it, and the object was left with no row.
+  const MAX_PHOTO_KB = 5120;
 
   if (Array.isArray(photo_urls) && photo_urls.length > 0) {
     for (let i = 0; i < photo_urls.length; i++) {

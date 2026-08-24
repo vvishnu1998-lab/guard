@@ -2438,7 +2438,7 @@ router.get('/:id/instructions.pdf', requireAuth('guard'), async (req, res) => {
 // duplicate open breaks. A requested break_type that differs from the open
 // row's type is a Sentry warning (visibility into UI double-taps hitting
 // different buttons) but still returns the existing row.
-router.post('/break-start', requireAuth('guard'), async (req, res) => {
+router.post('/break-start', requireAuth('guard'), idempotent('break-start'), async (req, res) => {
   const { session_id, break_type, lat, lng, accuracy } = req.body;
   if (!session_id || !break_type) {
     return res.status(400).json({ error: 'session_id and break_type are required' });
@@ -2482,9 +2482,10 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
     }
 
     // Idempotency: return the existing open row instead of inserting a
-    // duplicate. Race-safe enough for the mobile double-tap case — no
-    // UNIQUE constraint on the table today, but the mobile client is the
-    // sole writer per guard and this SELECT + INSERT window is O(1ms).
+    // duplicate. This SELECT is the fast path; schema_v54's
+    // uq_break_sessions_one_open_per_session is the backstop that closes
+    // the SELECT + INSERT window this comment used to concede was open —
+    // see the 23505 branch in the catch below.
     const existing = await pool.query(
       `SELECT id, break_start, break_type, planned_duration_minutes
          FROM break_sessions
@@ -2553,6 +2554,49 @@ router.post('/break-start', requireAuth('guard'), async (req, res) => {
       planned_duration_minutes: row.planned_duration_minutes,
     });
   } catch (err: any) {
+    // 23505 = unique_violation on uq_break_sessions_one_open_per_session
+    // (schema_v54). The SELECT above is the fast path; this is the backstop
+    // for the double-tap that races it. Without this branch the index would
+    // turn a losing tap into a 500, and a 5xx is what the mobile offline
+    // queue replays — which is the failure this whole ship exists to
+    // remove. Return the row that won, so both taps see the same 200 the
+    // idempotent branch above would have given them.
+    //
+    // Shape copied from the clock-in handler for
+    // idx_shift_sessions_one_open_per_guard (:2752) rather than inventing a
+    // second idiom for the same thing. Read via pool, not a tx client: by
+    // the time we see the 23505 the winning INSERT has committed.
+    if (err?.code === '23505' && err?.constraint === 'uq_break_sessions_one_open_per_session') {
+      const winner = await pool.query(
+        `SELECT id, break_start, break_type, planned_duration_minutes
+           FROM break_sessions
+          WHERE shift_session_id = $1 AND break_end IS NULL
+          ORDER BY break_start DESC LIMIT 1`,
+        [session_id],
+      );
+      const row = winner.rows[0];
+      if (row) {
+        console.log(
+          `[break-start.raced] session=${session_id} guard=${req.user!.sub} ` +
+          `winner_break=${row.id} — returning the open row`,
+        );
+        return res.status(200).json({
+          break_id: row.id,
+          break_start: row.break_start,
+          break_type: row.break_type,
+          planned_duration_minutes: row.planned_duration_minutes,
+        });
+      }
+      // The winning break closed between the 23505 and this read. Rare, and
+      // the guard is genuinely not on a break now — say so as a 409 rather
+      // than fabricating a row. Same "it can vanish underneath us" caveat
+      // the clock-in conflict helper documents.
+      console.warn(`[break-start.raced] session=${session_id} — winner vanished before read`);
+      return res.status(409).json({
+        error:   'BREAK_RACE_LOST',
+        message: 'That break was just closed. Start it again.',
+      });
+    }
     console.error('break-start error:', err);
     res.status(500).json({ error: err.message ?? 'Failed to start break' });
   }
