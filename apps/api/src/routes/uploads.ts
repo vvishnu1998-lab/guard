@@ -23,10 +23,14 @@ const ALLOWED_TYPES: Record<string, string> = {
   'image/webp': 'webp',
 };
 
-const ALLOWED_CONTEXTS = new Set(['report', 'ping', 'clock_in', 'inspection']);
+// The context IS the S3 key prefix (see `key` below), so this set is also
+// the list of prefixes that exist in the bucket. It must stay in sync with
+// the union in apps/mobile/lib/uploadToS3.ts — a client context missing here
+// 400s at presign, which surfaces as a photo that can never be attached.
+const ALLOWED_CONTEXTS = new Set(['report', 'ping', 'clock_in', 'clock_out', 'inspection']);
 
 // POST /api/uploads/presign
-// Body: { content_type: string, context: 'report' | 'ping' | 'clock_in' }
+// Body: { content_type: string, context: 'report' | 'ping' | 'clock_in' | 'clock_out' | 'inspection' }
 // Returns: { post_url, fields, public_url, key, max_bytes }
 //
 // Client must POST multipart/form-data to `post_url` with:
@@ -41,7 +45,7 @@ router.post('/presign', requireAuth('guard'), async (req, res) => {
     return res.status(400).json({ error: 'content_type must be image/jpeg, image/png, or image/webp' });
   }
   if (!ALLOWED_CONTEXTS.has(context)) {
-    return res.status(400).json({ error: 'context must be report, ping, clock_in, or inspection' });
+    return res.status(400).json({ error: 'context must be report, ping, clock_in, clock_out, or inspection' });
   }
 
   const ext = ALLOWED_TYPES[content_type];
