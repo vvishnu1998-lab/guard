@@ -534,130 +534,212 @@ router.post('/', requireAuth('guard'), async (req, res) => {
 
   const expiresAt = expiresAtForReport(report_type);
 
-  // Late-report resolution: look up the matching open missed_reports
-  // row BEFORE the report INSERT so we know whether to stamp
-  // submitted_late = true and which row to resolve. Same match rule
-  // as POST /ping — (shift_session_id, window_label), earliest row
-  // if multiple exist (window_label is site-local HH:MM and unique
-  // per session in practice).
+  // ── THE WRITE, AS ONE UNIT ────────────────────────────────────────────
+  //
+  // The report and its photos are one record or they are neither. Before
+  // this, the reports row committed on its own and each report_photos row
+  // committed separately after it, so any failure in the photo loop left a
+  // report standing with a partial photo set — and the 5xx that failure
+  // produced was replayed by the mobile offline queue, writing the whole
+  // partial record again. That is the 2026-08-22 duplicate storm.
+  //
+  // What is INSIDE the transaction, and why — argued from what a failure
+  // in each block costs, not from where the code used to sit:
+  //
+  //   * reports INSERT + report_photos loop — the core unit. Non-negotiable.
+  //
+  //   * missed_reports lookup — moved in so the read and the resolve below
+  //     see one snapshot. Same reasoning as the reassign route sharing its
+  //     txn client for read-your-own-writes consistency.
+  //
+  //   * missed_reports resolve — IN, behind a SAVEPOINT. On failure the
+  //     savepoint rolls back and the report still commits, which is exactly
+  //     what the old outside-the-txn catch achieved. On SUCCESS it is now
+  //     atomic with the report, which the old shape could not offer: two
+  //     separate commits leave a window where a crash strands
+  //     reports.submitted_late = true against a missed_reports row that
+  //     still reads unresolved. That is a permanent contradiction in the
+  //     compliance record, and it is the "imbalanced resolve/insert ratio"
+  //     the previous comment was worried about. Same failure behaviour,
+  //     strictly better success behaviour, so IN wins.
+  //
+  //   * geofence_violations INSERT — IN, behind a SAVEPOINT, for the same
+  //     reason. A failure must never cost us the incident report; a success
+  //     should not be separately committable from the report that caused it.
+  //
+  // What is OUTSIDE, and why it must be:
+  //
+  //   * fireBreachAlerts — it reads through `pool.query` on a DIFFERENT
+  //     pooled connection (routes/locations.ts:102), so inside this
+  //     transaction it cannot see the uncommitted violation row at all.
+  //     This is a correctness requirement, not a preference. It also does
+  //     push + email I/O, which must never hold a transaction open.
+  //
+  //   * sendIncidentAlert — email I/O, and the failure mode is the worst
+  //     available: sending a client an incident alert inside a transaction
+  //     that then rolls back means an un-retractable external message about
+  //     a report that does not exist. Always after COMMIT.
+  //
+  // A throw that escapes this transaction is now a genuine server or DB
+  // fault, not bad input — Phase 1 turned every client-triggerable failure
+  // into a 4xx before we get here. For a real fault a 5xx and a client
+  // replay is the correct behaviour, and the ROLLBACK guarantees the replay
+  // has nothing partial to collide with.
+  const client = await pool.connect();
+  let report: any;
+  let violationId: string | null = null;
   let missedReportId: string | null = null;
   let submittedLate = false;
-  if (windowLabel) {
-    const mr = await pool.query<{ id: string; window_end: Date }>(
-      `SELECT id, window_end FROM missed_reports
-        WHERE shift_session_id = $1
-          AND window_label = $2
-          AND resolved_at IS NULL
-        ORDER BY window_start ASC
-        LIMIT 1`,
-      [shift_session_id, windowLabel],
+
+  try {
+    await client.query('BEGIN');
+
+    // Late-report resolution: look up the matching open missed_reports
+    // row BEFORE the report INSERT so we know whether to stamp
+    // submitted_late = true and which row to resolve. Same match rule
+    // as POST /ping — (shift_session_id, window_label), earliest row
+    // if multiple exist (window_label is site-local HH:MM and unique
+    // per session in practice).
+    if (windowLabel) {
+      const mr = await client.query<{ id: string; window_end: Date }>(
+        `SELECT id, window_end FROM missed_reports
+          WHERE shift_session_id = $1
+            AND window_label = $2
+            AND resolved_at IS NULL
+          ORDER BY window_start ASC
+          LIMIT 1`,
+        [shift_session_id, windowLabel],
+      );
+      if (mr.rows[0]) {
+        missedReportId = mr.rows[0].id;
+        submittedLate  = new Date(mr.rows[0].window_end).getTime() < Date.now();
+      }
+    }
+
+    const reportResult = await client.query(
+      `INSERT INTO reports
+         (shift_session_id, site_id, report_type, description, severity, expires_at,
+          latitude, longitude, accuracy_meters, is_within_geofence,
+          window_label, submitted_late, location_mocked, fix_age_ms)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+      [
+        shift_session_id, site_id, report_type, description, severity || null, expiresAt,
+        haveCoords ? latitude  : null,
+        haveCoords ? longitude : null,
+        haveCoords ? accuracy  : null,
+        isWithin,
+        windowLabel, submittedLate,
+        // Shadow capture (Wave 2) — recorded, never evaluated here.
+        reportSignals.locationMocked, reportSignals.fixAgeMs,
+      ]
     );
-    if (mr.rows[0]) {
-      missedReportId = mr.rows[0].id;
-      submittedLate  = new Date(mr.rows[0].window_end).getTime() < Date.now();
+    report = reportResult.rows[0];
+
+    if (photo_urls?.length) {
+      for (let i = 0; i < photo_urls.length; i++) {
+        await client.query(
+          `INSERT INTO report_photos (report_id, storage_url, file_size_kb, photo_index)
+           VALUES ($1, $2, $3, $4)`,
+          [report.id, photo_urls[i].url, photo_urls[i].size_kb, i + 1]
+        );
+      }
     }
+
+    // Resolve the matched missed_reports row now that we have the new
+    // report id. SAVEPOINT so a failure here cannot poison the transaction
+    // and cost us the report — same idiom as the clock-out fence check.
+    if (missedReportId) {
+      await client.query('SAVEPOINT missed_report_resolve');
+      try {
+        await client.query(
+          `UPDATE missed_reports
+              SET resolved_at = NOW(),
+                  resolved_by_report_id = $1
+            WHERE id = $2
+              AND resolved_at IS NULL`,
+          [report.id, missedReportId],
+        );
+        await client.query('RELEASE SAVEPOINT missed_report_resolve');
+        Sentry.addBreadcrumb({
+          category: 'reports',
+          message: 'late report resolved missed_reports row',
+          level: 'info',
+          data: {
+            report_id:         report.id,
+            missed_report_id:  missedReportId,
+            window_label:      windowLabel,
+            submitted_late:    submittedLate,
+          },
+        });
+      } catch (err) {
+        await client.query('ROLLBACK TO SAVEPOINT missed_report_resolve');
+        console.error('[reports] missed_reports resolve failed:', err);
+        Sentry.captureException(err, {
+          tags: { flow: 'missed_report_resolve' },
+          extra: { report_id: report.id, missed_report_id: missedReportId },
+        } as unknown as Parameters<typeof Sentry.captureException>[1]);
+      }
+    }
+
+    // Off-post incident report — INSERT a violation row (still guarded by
+    // schema_v18's partial unique index). Even if the INSERT conflicts (an
+    // open ping-boundary violation is already on the session), we read the
+    // existing row so its id can be passed to fireBreachAlerts AFTER the
+    // commit — the 5-min per-type rate limiter inside will decide whether
+    // to push+email, and different eventTypes have separate buckets so this
+    // ALWAYS wakes the admin even during an active breach.
+    // SAVEPOINT: losing the violation row must never cost us the incident
+    // report itself.
+    if (isWithin === false && report_type === 'incident') {
+      await client.query('SAVEPOINT violation_insert');
+      try {
+        const violationInsert = await client.query(
+          `INSERT INTO geofence_violations
+             (shift_session_id, guard_id, site_id, violation_lat, violation_lng, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
+           RETURNING id`,
+          [shift_session_id, req.user!.sub, site_id, latitude, longitude, expiresAtFor('geofence_violation')],
+        );
+        if (violationInsert.rows[0]) {
+          violationId = violationInsert.rows[0].id;
+        } else {
+          const existing = await client.query<{ id: string }>(
+            `SELECT id FROM geofence_violations
+             WHERE shift_session_id = $1 AND resolved_at IS NULL
+             ORDER BY occurred_at DESC LIMIT 1`,
+            [shift_session_id],
+          );
+          violationId = existing.rows[0]?.id ?? null;
+        }
+        await client.query('RELEASE SAVEPOINT violation_insert');
+      } catch (err) {
+        await client.query('ROLLBACK TO SAVEPOINT violation_insert');
+        violationId = null;
+        console.error('[report.flag] violation INSERT failed:', err);
+        Sentry.captureException(err, {
+          tags:  { flow: 'report_violation_insert' },
+          extra: { report_id: report.id, shift_session_id, site_id },
+        } as unknown as Parameters<typeof Sentry.captureException>[1]);
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
 
-  const reportResult = await pool.query(
-    `INSERT INTO reports
-       (shift_session_id, site_id, report_type, description, severity, expires_at,
-        latitude, longitude, accuracy_meters, is_within_geofence,
-        window_label, submitted_late, location_mocked, fix_age_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
-    [
-      shift_session_id, site_id, report_type, description, severity || null, expiresAt,
-      haveCoords ? latitude  : null,
-      haveCoords ? longitude : null,
-      haveCoords ? accuracy  : null,
-      isWithin,
-      windowLabel, submittedLate,
-      // Shadow capture (Wave 2) — recorded, never evaluated here.
-      reportSignals.locationMocked, reportSignals.fixAgeMs,
-    ]
-  );
-  const report = reportResult.rows[0];
-
-  // Resolve the matched missed_reports row now that we have the new
-  // report id. Best-effort — a failure here shouldn't roll back an
-  // otherwise-successful 201, but we log to Sentry so ops can catch
-  // an imbalanced resolve/insert ratio.
-  if (missedReportId) {
-    try {
-      await pool.query(
-        `UPDATE missed_reports
-            SET resolved_at = NOW(),
-                resolved_by_report_id = $1
-          WHERE id = $2
-            AND resolved_at IS NULL`,
-        [report.id, missedReportId],
-      );
-      Sentry.addBreadcrumb({
-        category: 'reports',
-        message: 'late report resolved missed_reports row',
-        level: 'info',
-        data: {
-          report_id:         report.id,
-          missed_report_id:  missedReportId,
-          window_label:      windowLabel,
-          submitted_late:    submittedLate,
-        },
-      });
-    } catch (err) {
-      console.error('[reports] missed_reports resolve failed:', err);
-      Sentry.captureException(err, {
-        tags: { flow: 'missed_report_resolve' },
-        extra: { report_id: report.id, missed_report_id: missedReportId },
-      });
-    }
-  }
-
-  if (photo_urls?.length) {
-    for (let i = 0; i < photo_urls.length; i++) {
-      await pool.query(
-        `INSERT INTO report_photos (report_id, storage_url, file_size_kb, photo_index)
-         VALUES ($1, $2, $3, $4)`,
-        [report.id, photo_urls[i].url, photo_urls[i].size_kb, i + 1]
-      );
-    }
-  }
+  // ── Post-commit side effects. Nothing below may abort the report. ──────
 
   // Email: only incident reports trigger the client-facing incident alert.
   if (report_type === 'incident') {
     sendIncidentAlert(report, site_id).catch(console.error);
   }
 
-  // Off-post incident report — INSERT a violation row (still guarded by
-  // schema_v18's partial unique index) and ALWAYS fire the off_post_report
-  // alert. Even if the INSERT conflicts (an open ping-boundary violation
-  // is already on the session), we resolve the existing row and pass its
-  // id to fireBreachAlerts — the 5-min per-type rate limiter inside will
-  // decide whether to push+email, and different eventTypes have separate
-  // buckets so this ALWAYS wakes the admin even during an active breach.
   if (isWithin === false && report_type === 'incident') {
-    let violationId: string | null = null;
-    try {
-      const violationInsert = await pool.query(
-        `INSERT INTO geofence_violations
-           (shift_session_id, guard_id, site_id, violation_lat, violation_lng, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
-         RETURNING id`,
-        [shift_session_id, req.user!.sub, site_id, latitude, longitude, expiresAtFor('geofence_violation')],
-      );
-      if (violationInsert.rows[0]) {
-        violationId = violationInsert.rows[0].id;
-      } else {
-        const existing = await pool.query<{ id: string }>(
-          `SELECT id FROM geofence_violations
-           WHERE shift_session_id = $1 AND resolved_at IS NULL
-           ORDER BY occurred_at DESC LIMIT 1`,
-          [shift_session_id],
-        );
-        violationId = existing.rows[0]?.id ?? null;
-      }
-    } catch (err) {
-      console.error('[report.flag] violation INSERT failed:', err);
-    }
     console.log(
       `[report.flag] report=${report.id} session=${shift_session_id} ` +
       `type=incident violation=${violationId ?? 'none'}`,
