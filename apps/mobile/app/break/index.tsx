@@ -25,6 +25,7 @@ import * as Location from 'expo-location';
 import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import { useShiftStore } from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
+import { uuidv4 } from '../../lib/uuid';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { BREAK_DURATIONS, BreakType } from '../../constants/breakDurations';
 import { guardMessage } from '../../lib/errorCopy';
@@ -199,6 +200,15 @@ export default function BreakScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expired]);
 
+  // Idempotency key for break-start. Minted once per mount (same pattern as
+  // clock-in step4.tsx:40) so a double-tap or an auto-retry of the SAME
+  // logical break reuses it. break-start is not offline-queued, so there is
+  // no queued replay to freeze it into — the direct POST is the only
+  // attempt. uq_break_sessions_one_open_per_session (schema_v54) plus the
+  // route's 23505 handler remain the backstop for a true concurrent race,
+  // which no key-based scheme dedups.
+  const [breakIdempotencyKey] = useState(() => uuidv4());
+
   async function startBreak(option: typeof BREAK_OPTIONS[0]) {
     if (!activeSession) {
       Alert.alert('No Active Shift', 'You must be clocked in to take a break.');
@@ -213,7 +223,7 @@ export default function BreakScreen() {
         session_id: activeSession.id,
         break_type: option.type,
         ...(pos ? { lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy ?? 30, ...pos.signals } : {}),
-      });
+      }, { headers: { 'Idempotency-Key': breakIdempotencyKey } });
       const cb = {
         break_id: data.break_id,
         break_start: data.break_start,

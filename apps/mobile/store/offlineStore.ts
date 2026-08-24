@@ -64,7 +64,10 @@ interface OfflineState {
   startSync: () => void;
   stopSync:  () => void;
 
-  submitReport:   (payload: SubmitReportRequest)      => Promise<{ synced: true; data: any } | { synced: false; localId: string }>;
+  /** `idempotencyKey` MUST be minted at screen mount, before the first
+   *  direct POST, and the SAME value reused for every retry of that logical
+   *  submission — see the note in submitReport. */
+  submitReport:   (payload: SubmitReportRequest, idempotencyKey?: string) => Promise<{ synced: true; data: any } | { synced: false; localId: string }>;
   completeTask:   (taskInstanceId: string, payload: Record<string, unknown>) => Promise<string>;
   postViolation:  (payload: GeofenceViolationRequest)  => Promise<string>;
   submitCheckpointScan: (payload: {
@@ -100,16 +103,27 @@ export const useOfflineStore = create<OfflineState>((set) => ({
   startSync: () => startQueueSync(),
   stopSync:  () => stopQueueSync(),
 
-  submitReport: async (payload) => {
+  submitReport: async (payload, idempotencyKey) => {
+    // The key goes on the DIRECT post and is then frozen into the queued
+    // item, so both attempts at the same logical submission carry the same
+    // value. It cannot be derived from localId: that is minted inside
+    // enqueue() below, i.e. only after this direct POST has already failed,
+    // so the two attempts would carry different keys and the server would
+    // create two reports. A network timeout on a POST that actually
+    // succeeded is precisely the case this covers.
     try {
-      const data = await apiClient.post<any>('/reports', payload);
+      const data = await apiClient.post<any>(
+        '/reports',
+        payload,
+        idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined,
+      );
       return { synced: true, data };
     } catch (err: any) {
       if (shouldSurfaceInsteadOfQueue(err)) throw err;
       console.error('[submitReport] Direct submit failed, queuing:', err?.message, JSON.stringify(payload).slice(0, 150));
     }
 
-    const localId = await enqueue('report_submit', payload as unknown as Record<string, unknown>);
+    const localId = await enqueue('report_submit', payload as unknown as Record<string, unknown>, idempotencyKey);
     const count = await pendingCount();
     set({ pendingCount: count });
     syncQueue().catch(console.error);

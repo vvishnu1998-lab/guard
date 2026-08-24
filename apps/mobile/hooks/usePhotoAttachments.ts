@@ -4,7 +4,8 @@
  */
 import { useState } from 'react';
 import * as ImagePicker from 'expo-image-picker';
-import * as ImageManipulator from 'expo-image-manipulator';
+import { compressImage } from '../lib/compressImage';
+import { guardMessage } from '../lib/errorCopy';
 import * as Location from 'expo-location';
 import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../lib/locationSignals';
 import { uploadToS3, UploadResult } from '../lib/uploadToS3';
@@ -81,21 +82,21 @@ export function usePhotoAttachments(maxPhotos = 3) {
         }
       } catch { /* GPS optional */ }
 
-      // Compress to max 1080px / 80% quality
-      let compressed: { uri: string } = { uri: asset.uri };
+      // Compress via the shared helper — the SINGLE implementation, also
+      // used by components/CameraCapture. It measures the result and throws
+      // rather than ever returning the raw capture.
+      //
+      // This catch used to be EMPTY, which meant a failed compression
+      // silently uploaded asset.uri at quality 0.9 with no record of why.
+      // Now the photo is simply not added, and the guard is told which one
+      // and how big it was. compressImage has already reported the reason
+      // to Sentry, so this only owns the guard-facing half.
+      let compressed: { uri: string };
       try {
-        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
-        // Android Bitmap.compress). Library-picked photos carry EXIF on disk;
-        // re-encoding here is what removes it. Do NOT bypass the manipulator
-        // for uploads.
-        const result = await ImageManipulator.manipulateAsync(
-          asset.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-        );
-        if (result?.uri) compressed = result;
-      } catch {
-        // Use original if compression fails (Expo Go native module mismatch)
+        compressed = await compressImage(asset.uri, 'report');
+      } catch (err: any) {
+        Alert.alert('Photo Not Added', guardMessage(err, 'That photo could not be processed. Retake it.', 'report.compress'));
+        return;
       }
 
       const placeholder: Attachment = {

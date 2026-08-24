@@ -79,6 +79,22 @@ export interface QueuedAction {
   queuedAt:   string;          // ISO timestamp
   lastError?: string;
 
+  /**
+   * Idempotency-Key for the replay, FROZEN at enqueue from the key the
+   * caller already used on its direct POST.
+   *
+   * It must not be minted here. localId is generated inside enqueue(), which
+   * only runs AFTER the direct attempt has already failed — so a key derived
+   * from it would differ between the direct POST and the replay, and the
+   * server would treat them as two separate submissions. That is exactly the
+   * duplicate the mechanism exists to prevent. The caller mints the key at
+   * screen mount, before the first POST, and hands the same value here.
+   *
+   * Optional so pre-existing queued items (written before this shipped)
+   * still replay; they simply replay without a key, as they do today.
+   */
+  idempotencyKey?: string;
+
   // ── dead-letter fields; absent while the item is still in the queue ───
   // All optional so items persisted by earlier builds still parse.
   deadReason?:     DeadReason;
@@ -229,7 +245,8 @@ function notifyChange(): void {
 /** Add an action to the queue. Returns the localId for optimistic UI binding. */
 export async function enqueue(
   type: QueueActionType,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  idempotencyKey?: string,
 ): Promise<string> {
   const localId = uuidv4();
   const item: QueuedAction = {
@@ -238,6 +255,7 @@ export async function enqueue(
     payload,
     attempts: 0,
     queuedAt: new Date().toISOString(),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
   };
   const queue = await readQueue();
   queue.push(item);
@@ -290,7 +308,14 @@ async function syncItem(item: QueuedAction): Promise<SyncResult> {
       path = `/tasks/instances/${item.payload.task_instance_id}/complete`;
     }
 
-    await apiClient.post(path, item.payload);
+    // Re-send the SAME key the direct POST used. Without this the replay is
+    // a fresh submission to the server and a timed-out-but-successful direct
+    // POST becomes a duplicate row.
+    await apiClient.post(
+      path,
+      item.payload,
+      item.idempotencyKey ? { headers: { 'Idempotency-Key': item.idempotencyKey } } : undefined,
+    );
     return { outcome: 'success' };
   } catch (err: any) {
     const newAttempts = item.attempts + 1;

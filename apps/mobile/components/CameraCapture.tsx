@@ -44,7 +44,7 @@ import {
   Animated, ActivityIndicator,
 } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import * as ImageManipulator from 'expo-image-manipulator';
+import { compressImage } from '../lib/compressImage';
 import * as Location from 'expo-location';
 import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../lib/locationSignals';
 import * as Haptics from 'expo-haptics';
@@ -299,26 +299,30 @@ export default function CameraCapture({
       // never sees the live viewfinder again until the pipeline resolves.
       setStage({ kind: 'frozen', uri: photo.uri, status: 'SAVING…' });
 
-      // Compress (best-effort). EXIF: stripped by ImageManipulator pipeline
-      // (iOS UIImage.jpegData, Android Bitmap.compress). Do NOT bypass the
-      // manipulator for uploads.
+      // Compress via the shared helper — the SINGLE implementation, also
+      // used by hooks/usePhotoAttachments. It measures the artifact and
+      // throws rather than ever handing back the raw capture; this used to
+      // console.warn and silently upload photo.uri at CAPTURE_QUALITY.
+      // A throw here lands in the catch below, which already surfaces a
+      // guard-facing alert and returns the viewfinder to live.
       const t1 = Date.now();
-      let compressedUri = photo.uri;
-      try {
-        const result = await ImageManipulator.manipulateAsync(
-          photo.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
-        );
-        if (result?.uri) compressedUri = result.uri;
-      } catch (err) {
-        console.warn('[camera] compression skipped:', err);
-      }
+      const compressed = await compressImage(photo.uri, 'camera');
+      const compressedUri = compressed.uri;
       const tManipulate = Date.now() - t1;
       // Amendment A instrumentation — read these off a device run to A/B
       // CAPTURE_QUALITY. capture_ms is the shutter-freeze component.
-      console.log(`[camera] capture_ms=${tCapture} manipulate_ms=${tManipulate} quality=${CAPTURE_QUALITY}`);
-      crumb('captured', 'info', { capture_ms: tCapture, manipulate_ms: tManipulate, quality: CAPTURE_QUALITY, attempts });
+      // `attempts` is the takePictureAsync auto-retry count; `compress_attempts`
+      // is the quality-ladder count inside compressImage. Different counters,
+      // both kept — neither supersedes the other.
+      console.log(
+        `[camera] capture_ms=${tCapture} manipulate_ms=${tManipulate} quality=${CAPTURE_QUALITY} ` +
+        `attempts=${attempts} out_kb=${compressed.sizeKb} out_q=${compressed.quality} ` +
+        `compress_attempts=${compressed.attempts}`,
+      );
+      crumb('captured', 'info', {
+        capture_ms: tCapture, manipulate_ms: tManipulate, quality: CAPTURE_QUALITY, attempts,
+        out_kb: compressed.sizeKb, out_quality: compressed.quality, compress_attempts: compressed.attempts,
+      });
 
       const pos = await readGps(gps);
       if (gps === 'required' && (pos.lat === null || pos.lng === null)) {
