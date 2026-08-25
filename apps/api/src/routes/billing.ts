@@ -27,8 +27,16 @@ async function fetchHoursData(companyId: string, params: {
   const args: unknown[] = [companyId];
   const clauses: string[] = [];
 
-  if (start_date) { args.push(start_date); clauses.push(`AND ss.clocked_in_at >= $${args.length}::date`); }
-  if (end_date)   { args.push(end_date);   clauses.push(`AND ss.clocked_in_at <  ($${args.length}::date + INTERVAL '1 day')`); }
+  // Range bounds are anchored in each row's OWN site timezone, not UTC.
+  // `s` is the sites row joined below, so the comparison instant is per-row:
+  // start_date '2026-07-01' means midnight AT THAT SITE. Anchored to UTC the
+  // cut landed at 17:00 PDT the previous day, so every Pacific shift starting
+  // after 17:00 was filed under the wrong date — 28 of 72 sessions in prod,
+  // and 45% of STARNET's, whose Cristo Rey post runs 19:00–06:00 PT.
+  // sites.timezone is the platform's anchor everywhere else (schema_v21,
+  // schema_v40, services/siteTime.ts, routes/checkpoints.ts round windows).
+  if (start_date) { args.push(start_date); clauses.push(`AND ss.clocked_in_at >= (($${args.length}::date)::timestamp AT TIME ZONE s.timezone)`); }
+  if (end_date)   { args.push(end_date);   clauses.push(`AND ss.clocked_in_at <  (($${args.length}::date + INTERVAL '1 day') AT TIME ZONE s.timezone)`); }
   if (site_id)    { args.push(site_id);    clauses.push(`AND s.id = $${args.length}`); }
   if (guard_id)   { args.push(guard_id);   clauses.push(`AND g.id = $${args.length}`); }
 
@@ -43,7 +51,15 @@ async function fetchHoursData(companyId: string, params: {
         THEN s.name
         ELSE '[INACTIVE] ' || s.name
       END                                             AS site_name,
-      DATE(ss.clocked_in_at)                          AS shift_date,
+      (ss.clocked_in_at AT TIME ZONE s.timezone)::date AS shift_date,
+      -- shift_date_label is formatted in SQL on purpose. node-postgres parses
+      -- a DATE column into a JS Date at PROCESS-LOCAL midnight, so re-formatting
+      -- it with a timeZone option in JS would shift an already-correct calendar
+      -- date backwards by the offset and undo the fix. Only true instants
+      -- (clock_in/out below) may be rendered with a timeZone option.
+      TO_CHAR((ss.clocked_in_at AT TIME ZONE s.timezone)::date, 'DD/MM/YYYY')
+                                                      AS shift_date_label,
+      s.timezone                                      AS site_timezone,
       ss.clocked_in_at                                AS clock_in_time,
       ss.clocked_out_at                               AS clock_out_time,
       COALESCE(
@@ -83,9 +99,12 @@ function buildWorkbook(rows: Record<string, unknown>[], fileName: string): XLSX.
     ...rows.map(r => [
       r.guard_name,
       r.site_name,
-      r.shift_date ? new Date(r.shift_date as string).toLocaleDateString('en-GB') : '',
-      r.clock_in_time  ? new Date(r.clock_in_time as string).toLocaleString('en-GB') : '',
-      r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB') : '',
+      r.shift_date_label ?? '',
+      // Explicit timeZone — never the process TZ. Railway runs UTC, so the
+      // bare toLocaleString printed UTC wall-clock under an en-GB label: a
+      // 19:54 PT clock-in rendered as 02:54 the next day.
+      r.clock_in_time  ? new Date(r.clock_in_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
+      r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
       r.break_duration_mins,
       r.total_hours_worked,
       Number(r.scheduled_hours) || 0,
@@ -187,7 +206,11 @@ router.post('/hours-export/schedule', requireAuth('company_admin', 'vishnu'), as
   const year  = req.body.year  ?? (now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear());
 
   const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
-  const monthEnd   = new Date(year, month, 0).toISOString().split('T')[0]; // last day of month
+  // Date.UTC, not the local-time Date ctor: new Date(y, m, 0) builds
+  // process-local midnight, and .toISOString() on that rolls back a day in
+  // any negative-offset TZ. Identical output on Railway (UTC) today; this
+  // makes it independent of the process TZ rather than lucky.
+  const monthEnd   = new Date(Date.UTC(year, month, 0)).toISOString().split('T')[0]; // last day of month
 
   const rows = await fetchHoursData(companyId, { start_date: monthStart, end_date: monthEnd });
 

@@ -17,7 +17,9 @@ cron.schedule('0 2 1 * *', async () => {
   const month = now.getMonth() === 0 ? 12 : now.getMonth();
   const year  = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
   const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
-  const monthEnd   = new Date(year, month, 0).toISOString().split('T')[0];
+  // Date.UTC, not the local-time Date ctor — see routes/billing.ts. Same
+  // value on Railway today; no longer dependent on the process TZ.
+  const monthEnd   = new Date(Date.UTC(year, month, 0)).toISOString().split('T')[0];
 
   const companies = await pool.query('SELECT id FROM companies WHERE is_active = true');
 
@@ -34,7 +36,10 @@ cron.schedule('0 2 1 * *', async () => {
             THEN s.name
             ELSE '[INACTIVE] ' || s.name
           END                                             AS site_name,
-          DATE(ss.clocked_in_at)                         AS shift_date,
+          (ss.clocked_in_at AT TIME ZONE s.timezone)::date AS shift_date,
+          TO_CHAR((ss.clocked_in_at AT TIME ZONE s.timezone)::date, 'DD/MM/YYYY')
+                                                         AS shift_date_label,
+          s.timezone                                     AS site_timezone,
           ss.clocked_in_at                               AS clock_in_time,
           ss.clocked_out_at                              AS clock_out_time,
           COALESCE(
@@ -49,8 +54,8 @@ cron.schedule('0 2 1 * *', async () => {
         JOIN sites  s  ON s.id  = ss.site_id
         JOIN guards g  ON g.id  = ss.guard_id
         WHERE s.company_id = $1
-          AND ss.clocked_in_at >= $2::date
-          AND ss.clocked_in_at <  ($3::date + INTERVAL '1 day')
+          AND ss.clocked_in_at >= (($2::date)::timestamp AT TIME ZONE s.timezone)
+          AND ss.clocked_in_at <  (($3::date + INTERVAL '1 day') AT TIME ZONE s.timezone)
           AND ss.clocked_out_at IS NOT NULL
         ORDER BY ss.clocked_in_at DESC
         LIMIT 10000
@@ -66,9 +71,9 @@ cron.schedule('0 2 1 * *', async () => {
         ...rows.rows.map((r: Record<string, unknown>) => [
           r.guard_name,
           r.site_name,
-          r.shift_date ? new Date(r.shift_date as string).toLocaleDateString('en-GB') : '',
-          r.clock_in_time  ? new Date(r.clock_in_time as string).toLocaleString('en-GB') : '',
-          r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB') : '',
+          r.shift_date_label ?? '',
+          r.clock_in_time  ? new Date(r.clock_in_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
+          r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
           r.break_duration_mins,
           r.total_hours_worked,
           Number(r.scheduled_hours) || 0,
