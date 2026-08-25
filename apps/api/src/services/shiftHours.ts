@@ -9,8 +9,8 @@
  * Contract (per Phase 1 lock-in, D1/D5/D6):
  *   scheduled_hours = shifts.scheduled_end − shifts.scheduled_start
  *   actual_hours    = COALESCE(clocked_out_at, NOW()) − clocked_in_at  (raw, no truncation)
- *   break_hours     = Σ (COALESCE(break_end,  NOW()) − break_start)      over break_sessions
- *   violation_hours = Σ (COALESCE(resolved_at, NOW()) − occurred_at)     over geofence_violations
+ *   break_hours     = Σ max(0, min(break_end,   NOW(), clocked_out_at) − max(break_start,  clocked_in_at))
+ *   violation_hours = Σ max(0, min(resolved_at, NOW(), clocked_out_at) − max(occurred_at,  clocked_in_at))
  *
  * All values are non-negative decimal hours rounded to 2 places.
  *
@@ -24,6 +24,23 @@
  * (open break_sessions, unresolved geofence_violations) are extended to
  * NOW() so that in-flight shifts show a running total across all four
  * fields — no partial states.
+ *
+ * break_hours and violation_hours are additionally BOUNDED TO THE SESSION
+ * WINDOW and clamped PER ROW (2026-08-25). An unresolved geofence_violations
+ * row on a session that has already closed used to accrue against wall-clock
+ * forever: one orphan (0633b82b, written 28 min after an auto-close-at-plan)
+ * reported 405 h of off-post on a 3.09 h shift in the billing export, and
+ * grew by an hour every hour — so two exports of the same closed period
+ * never agreed. Bounding the end to clocked_out_at makes a closed session's
+ * numbers immutable; bounding the start to clocked_in_at drops intervals
+ * lying entirely outside the session.
+ *
+ * The GREATEST(0, …) sits INSIDE SUM, not around it. A row whose resolved_at
+ * was back-stamped to clocked_out_at can precede its own occurred_at (two
+ * such rows exist in prod, e.g. ffce3372 at −0.01 h); clamping per row makes
+ * it contribute 0 instead of eating a sibling row's hours. actual_hours
+ * already had this clamp — these two did not, which is why a negative
+ * reached the spreadsheet.
  */
 
 import { pool } from '../db/pool';
@@ -107,12 +124,18 @@ export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string)
     ROUND(CAST(EXTRACT(EPOCH FROM (${sh}.scheduled_end - ${sh}.scheduled_start)) / 3600.0 AS NUMERIC), 2) AS scheduled_hours,
     ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(${s}.clocked_out_at, NOW()) - ${s}.clocked_in_at)) / 3600.0) AS NUMERIC), 2) AS actual_hours,
     ROUND(CAST(COALESCE((
-      SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start)) / 3600.0)
+      SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (
+                 LEAST(COALESCE(bs.break_end, NOW()), COALESCE(${s}.clocked_out_at, NOW()))
+               - GREATEST(bs.break_start, ${s}.clocked_in_at)
+             ))) / 3600.0)
         FROM break_sessions bs
        WHERE bs.shift_session_id = ${s}.id
     ), 0) AS NUMERIC), 2) AS break_hours,
     ROUND(CAST(COALESCE((
-      SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at)) / 3600.0)
+      SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (
+                 LEAST(COALESCE(gv.resolved_at, NOW()), COALESCE(${s}.clocked_out_at, NOW()))
+               - GREATEST(gv.occurred_at, ${s}.clocked_in_at)
+             ))) / 3600.0)
         FROM geofence_violations gv
        WHERE gv.shift_session_id = ${s}.id
     ), 0) AS NUMERIC), 2) AS violation_hours
@@ -148,7 +171,8 @@ export interface ShiftHoursInput {
  * Compute the 4-field hours object for one shift session.
  *
  * Returns emptyShiftHours() if the session doesn't exist. Live intervals
- * (open session, open break, unresolved violation) are extended to NOW().
+ * (open session, open break, unresolved violation) are extended to NOW(),
+ * then bounded to the session window — see the contract at the top.
  */
 export async function getShiftHours(input: ShiftHoursInput): Promise<ShiftHours> {
   const result = await pool.query<ShiftHours>(
