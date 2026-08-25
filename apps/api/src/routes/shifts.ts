@@ -434,54 +434,185 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
 });
 
 // PATCH /api/admin/shifts/:id/assign-guard
-router.patch('/:id/assign-guard', requireAuth('company_admin'), async (req, res) => {
-  const { guard_id } = req.body;
-  if (!guard_id) return res.status(400).json({ error: 'guard_id is required' });
+router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { user } = req;
+  const { id }   = req.params;
+  const { guard_id, reason } = req.body as { guard_id?: string; reason?: string };
 
-  // Verify guard and shift belong to this company. shiftCheck also pulls
-  // scheduled_start + site_id so Phase A can validate the assignment for
-  // the shift's actual date — closing the gap left by the original Phase A,
-  // which only enforced on POST /api/shifts.
-  const [guardCheck, shiftCheck] = await Promise.all([
-    pool.query(
-      'SELECT id FROM guards WHERE id = $1 AND company_id = $2 AND is_active = true',
-      [guard_id, req.user!.company_id]
-    ),
-    pool.query(
-      `SELECT s.id, s.site_id, s.scheduled_start
-         FROM shifts s
-         JOIN sites si ON si.id = s.site_id
-        WHERE s.id = $1 AND si.company_id = $2`,
-      [req.params.id, req.user!.company_id]
-    ),
-  ]);
-  if (!guardCheck.rows[0]) return res.status(400).json({ error: 'Guard not found or inactive' });
-  if (!shiftCheck.rows[0]) return res.status(404).json({ error: 'Shift not found' });
-
-  // Phase A — gate against guard_site_assignments for the shift's Pacific
-  // calendar date. site_id is NOT mutable on this endpoint, so the
-  // effective site is always the shift's current site.
-  const shiftDate = pacificDateStr(shiftCheck.rows[0].scheduled_start);
-  const eligAssign = await checkShiftEligibility(guard_id, shiftCheck.rows[0].site_id, shiftDate);
-  if (!eligAssign.ok) {
-    return res.status(422).json({ error: eligibilityError(eligAssign, shiftDate) });
+  if (!guard_id || typeof guard_id !== 'string') {
+    return res.status(400).json({ error: 'guard_id is required' });
+  }
+  if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
+    return res.status(400).json({ error: 'reason must be a string up to 500 chars' });
   }
 
-  const result = await pool.query(
-    `UPDATE shifts SET guard_id = $1, status = 'scheduled'
-     WHERE id = $2 RETURNING *`,
-    [guard_id, req.params.id]
-  );
-  res.json(result.rows[0]);
-  // Aggregated per-guard push + notification, fire-and-forget after response.
-  const row = result.rows[0];
-  pushShiftAssignments([{
-    id:              row.id,
-    guard_id:        row.guard_id,
-    site_id:         row.site_id,
-    scheduled_start: row.scheduled_start,
-    scheduled_end:   row.scheduled_end,
-  }]).catch((err) => console.error('[shifts.assign-guard] push failed:', err));
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // FOR UPDATE. POST /:id/clock-in takes this same lock before inserting a
+    // session, so the two serialise: either clock-in commits first and the
+    // session gate below sees its row, or this commits first and clock-in's
+    // own `WHERE status = 'scheduled'` no longer matches. Without the lock
+    // there is a window where both succeed.
+    const shiftRes = await client.query(
+      `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
+              sh.scheduled_start, sh.scheduled_end,
+              si.company_id, si.name AS site_name, si.timezone AS site_tz
+         FROM shifts sh
+         JOIN sites si ON si.id = sh.site_id
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+
+    // STATUS GATE — the defect this route existed without.
+    //
+    // The UPDATE at the bottom used to run unconditionally with
+    // `status = 'scheduled'`, so calling it on an ACTIVE shift detached the
+    // clocked-in guard and reset the status while their session stayed open.
+    // Only an unassigned shift may be assigned here; changing the guard on a
+    // shift that already has one is a REASSIGN and belongs to
+    // PATCH /:id/reassign, which audits the old guard.
+    //
+    // guard_id IS NULL is checked as well as the status. The two agree on
+    // all 189 production rows, but nothing enforces that agreement, and this
+    // route writing guard_id is exactly where a disagreement would do damage.
+    if (shift.status !== 'unassigned' || shift.guard_id !== null) {
+      await client.query('ROLLBACK');
+      const alreadyAssigned = shift.guard_id !== null;
+      return res.status(409).json({
+        error: alreadyAssigned
+          ? 'This shift already has a guard. Use Reassign Guard to change who is on it.'
+          : `Shift status '${shift.status}' cannot be assigned a guard.`,
+      });
+    }
+
+    // Session gate — the invariant, not the status proxy. An unassigned
+    // shift should never have a session, but this route writes guard_id and
+    // a session here would mean somebody is already working it.
+    const sessionRes = await client.query(
+      'SELECT id FROM shift_sessions WHERE shift_id = $1 LIMIT 1',
+      [id],
+    );
+    if (sessionRes.rows[0]) {
+      console.warn(
+        `[shifts.assign-guard.blocked_session] shift=${id} ` +
+        `session=${sessionRes.rows[0].id} shift_status=${shift.status}`,
+      );
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'A guard has already clocked in on this shift. It cannot be reassigned here.',
+      });
+    }
+
+    const guardRes = await client.query(
+      `SELECT id FROM guards
+        WHERE id = $1 AND company_id = $2 AND is_active = true`,
+      [guard_id, shift.company_id],
+    );
+    if (!guardRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Guard not found, inactive, or belongs to a different company.' });
+    }
+
+    // Phase A — gate against guard_site_assignments for the shift's Pacific
+    // calendar date. site_id is NOT mutable on this endpoint, so the
+    // effective site is always the shift's current site. Shares the txn
+    // client for read-your-own-writes consistency.
+    const shiftDate = pacificDateStr(shift.scheduled_start);
+    const eligAssign = await checkShiftEligibility(guard_id, shift.site_id, shiftDate, client);
+    if (!eligAssign.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: eligibilityError(eligAssign, shiftDate) });
+    }
+
+    // OVERLAP CHECK — absent before. Assigning a guard is exactly as capable
+    // of double-booking them as reassigning one, and this route had no check
+    // at all. Same predicate and 409 shape as reassign.
+    const overlap = await client.query(
+      `SELECT 1 FROM shifts
+        WHERE guard_id = $1
+          AND id      != $2
+          AND status IN ('scheduled','active')
+          AND scheduled_start < $4
+          AND scheduled_end   > $3
+        LIMIT 1`,
+      [guard_id, id, shift.scheduled_start, shift.scheduled_end],
+    );
+    if (overlap.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Selected guard has an overlapping shift in the same time window.',
+      });
+    }
+
+    // Re-arm the reminder chain for the incoming guard: an unassigned shift
+    // can still have accumulated latches (every latch cron selects on
+    // status, and missedShiftAlert/preShiftReminder do not require a guard
+    // to have been assigned when they fired). services/shiftLatches.ts owns
+    // the column list — never clear latches inline here.
+    await clearScheduleDerivedLatches(id, client);
+
+    const updated = await client.query(
+      `UPDATE shifts
+          SET guard_id = $1,
+              status   = 'scheduled'
+        WHERE id = $2
+        RETURNING *`,
+      [guard_id, id],
+    );
+
+    // AUDIT — shift_reassignments, not shift_schedule_audit. This route
+    // changes guard_id and nothing else, which is precisely the (old_guard,
+    // new_guard) transition that table records; old_guard_id is NULLABLE in
+    // schema_v15 specifically so an assignment from nothing can be written.
+    // shift_schedule_audit is scoped to scheduled_start/scheduled_end by its
+    // action CHECK and column comments, and widening it to carry guard
+    // changes would put two unrelated concerns in one table. The web history
+    // panel already renders `old_guard_name ?? '(unassigned)'`, so these
+    // rows display correctly with no UI change at all.
+    await client.query(
+      `INSERT INTO shift_reassignments
+         (shift_id, old_guard_id, new_guard_id,
+          reassigned_by_admin_id, reassigned_by_role, reason)
+       VALUES ($1, NULL, $2, $3, $4, $5)`,
+      [id, guard_id, user!.sub, user!.role, reason ?? null],
+    );
+
+    await client.query('COMMIT');
+
+    res.json(updated.rows[0]);
+
+    // Aggregated per-guard push + notification, fire-and-forget after the
+    // response so a push failure can never undo a committed assignment.
+    const row = updated.rows[0];
+    pushShiftAssignments([{
+      id:              row.id,
+      guard_id:        row.guard_id,
+      site_id:         row.site_id,
+      scheduled_start: row.scheduled_start,
+      scheduled_end:   row.scheduled_end,
+    }]).catch((err) => console.error('[shifts.assign-guard] push failed:', err));
+    return;
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[shifts.assign-guard] error:', err);
+    Sentry.captureException(err, { tags: { route: 'shifts.assign-guard' }, extra: { shift_id: id } });
+    return res.status(500).json({ error: err?.message ?? 'Failed to assign guard' });
+  } finally {
+    client.release();
+  }
 });
 
 // PATCH /api/shifts/:id/reassign — admin reassigns a shift to a different guard.
@@ -688,14 +819,26 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 //
 // The status switch below used to be the only guard, on the reasoning that
 // an open session implies status='active'. That is a PROXY, and two routes
-// desynchronise it: PATCH /:id/assign-guard (no status gate at all) and
-// PATCH /:id/reassign (rejects only 'completed'/'missed') both write
+// desynchronised it: PATCH /:id/assign-guard (no status gate at all) and
+// PATCH /:id/reassign (rejects only 'completed'/'missed') both wrote
 // status='scheduled' unconditionally. Reassigning a shift a guard is
-// currently working flips it 'active' -> 'scheduled', and the cancel below
+// currently working flipped it 'active' -> 'scheduled', and the cancel below
 // would then sail through the switch with a live session underneath it.
 //
 // So this checks the invariant itself rather than the proxy: it holds no
 // matter how status got where it is.
+//
+// FIXED AT THE SOURCE (2026-08-25). The paragraph above described the defect
+// correctly for months while only this route — the VICTIM — was hardened
+// against it; both offenders kept writing status='scheduled' unconditionally.
+// assign-guard now takes FOR UPDATE, admits only status='unassigned' with
+// guard_id IS NULL, checks for an existing session, checks overlap, and
+// writes an audit row. reassign still deliberately admits 'active' (an admin
+// may reassign a shift in progress) but no longer writes latches inline.
+//
+// The check below STAYS regardless. It is the invariant rather than the
+// proxy, it costs one query, and the whole lesson of this comment's history
+// is that upstream routes drift.
 //
 // REFUSE, NOT AUTO-CLOSE — deliberate. Closing here would write
 // clocked_out_at and total_hours, i.e. silently decide the paid hours of a
