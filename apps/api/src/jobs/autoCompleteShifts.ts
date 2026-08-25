@@ -154,19 +154,71 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
        RETURNING ss.id`
     );
 
-    // Walk-test 2026-07-09 BUG I: for every session we just auto-closed,
-    // resolve its lingering open geofence violations. Uses the freshly-set
-    // clocked_out_at as the resolution timestamp for parity with the
-    // manual clock-out path.
-    const violations = await client.query(
+    // Walk-test 2026-07-09 BUG I: resolve lingering open geofence violations
+    // on any session that has closed. Uses clocked_out_at as the resolution
+    // timestamp for parity with the manual clock-out path.
+    //
+    // ── WHY THERE IS NO RECENCY BOUND ────────────────────────────────────
+    //
+    // This predicate used to carry `AND ss.clocked_out_at > NOW() - INTERVAL
+    // '10 minutes'`, which made the sweep structurally incapable of catching
+    // the rows that need it most. A violation is written by the guard's
+    // device, and the device does not learn that the server auto-closed the
+    // session — its geofence region stays armed. On 2026-08-06 that produced
+    // two boundary reports 3 and 28 minutes after clock-out. The 28-minute
+    // one (0633b82b) was already OUTSIDE the ten-minute window on the tick it
+    // was born, so no later tick could ever match it either. It stayed open
+    // for 18 days and, read by an unbounded COALESCE(resolved_at, NOW()),
+    // reported 405 h of off-post against a 3.09 h shift in the billing export
+    // — growing an hour every hour. locations.ts now rejects post-clock-out
+    // boundary reports with 409 SESSION_CLOSED, so this is defence in depth:
+    // the ingress is closed, and if anything ever reopens it the row is no
+    // longer permanent.
+    //
+    // The file header argues for detection over auto-remediation, and that
+    // still holds — it is an argument about orphaned SESSIONS, where an
+    // auto-close invents billable hours. A violation carries no money and no
+    // total_hours; leaving one open is what caused the defect above. Widening
+    // here does not widen the session predicate.
+    //
+    // ── THE RESOLUTION RULE ──────────────────────────────────────────────
+    //
+    //   occurred_at >= clocked_out_at  →  resolved_at = occurred_at
+    //   otherwise                      →  resolved_at = clocked_out_at
+    //
+    // The first branch is the post-clock-out birth: a zero-length interval,
+    // which is exactly the correction approved for 0633b82b on 2026-08-25.
+    // Resolving those to clocked_out_at instead would put resolved_at BEFORE
+    // occurred_at and recreate the negative duration_minutes this same
+    // expression already wrote onto cf48688b (-3) and ffce3372 (-1). The
+    // second branch is the ordinary case and is unchanged.
+    //
+    // duration_minutes collapses to one expression because clocked_out_at -
+    // occurred_at is negative in exactly the first branch: GREATEST(0, ...)
+    // yields the 0 that branch requires and is a no-op in the second. A
+    // negative can no longer be written from here.
+    const violations = await client.query<{
+      id:                   string;
+      shift_session_id:     string;
+      resolved_at:          Date;
+      post_clock_out_birth: boolean;
+    }>(
       `UPDATE geofence_violations gv
-          SET resolved_at = ss.clocked_out_at,
-              duration_minutes = ROUND(EXTRACT(EPOCH FROM (ss.clocked_out_at - gv.occurred_at)) / 60)::INT
+          SET resolved_at = CASE WHEN gv.occurred_at >= ss.clocked_out_at
+                                 THEN gv.occurred_at
+                                 ELSE ss.clocked_out_at
+                            END,
+              duration_minutes = GREATEST(0, ROUND(
+                EXTRACT(EPOCH FROM (ss.clocked_out_at - gv.occurred_at)) / 60
+              ))::INT
          FROM shift_sessions ss
         WHERE gv.shift_session_id = ss.id
           AND gv.resolved_at IS NULL
-          AND ss.clocked_out_at > NOW() - INTERVAL '10 minutes'
-        RETURNING gv.id`
+          AND ss.clocked_out_at IS NOT NULL
+        RETURNING gv.id,
+                  gv.shift_session_id,
+                  gv.resolved_at,
+                  (gv.occurred_at >= ss.clocked_out_at) AS post_clock_out_birth`
     );
 
     // Step 3: Mark the overdue shifts. Shifts with at least one
@@ -190,6 +242,20 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     );
 
     await client.query('COMMIT');
+
+    // One line per resolved row, after COMMIT so a rolled-back tick never
+    // reports a resolution that did not happen. `branch` names which arm of
+    // the CASE fired: 'occurred_at' is the post-clock-out birth that used to
+    // be uncatchable, and seeing it in the logs means the ingress gate in
+    // routes/locations.ts let one through.
+    for (const v of violations.rows) {
+      console.info('[auto_complete_shifts.violation_resolved]', {
+        violation_id:     v.id,
+        shift_session_id: v.shift_session_id,
+        branch:           v.post_clock_out_birth ? 'occurred_at' : 'clocked_out_at',
+        resolved_at:      v.resolved_at instanceof Date ? v.resolved_at.toISOString() : v.resolved_at,
+      });
+    }
 
     return {
       shiftsClosed:       shifts.rowCount ?? 0,
