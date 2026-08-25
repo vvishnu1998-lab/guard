@@ -1,5 +1,5 @@
 /**
- * Monthly Hours Report — 1st of every month at 2:00 AM UTC
+ * Monthly Hours Report — 1st of every month at 12:00 UTC
  * Generates an XLSX hours report for the previous month for every company,
  * uploads to S3, and stores the URL in monthly_hours_reports.
  */
@@ -10,7 +10,29 @@ import { pool } from '../db/pool';
 import { uploadBufferToS3 } from '../services/s3';
 import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
 
-cron.schedule('0 2 1 * *', async () => {
+// 12:00 UTC on the 1st, not 02:00. The job must not run until the reported
+// month has CLOSED in every site's local timezone, because the range bounds
+// below are anchored per-site on sites.timezone (8b08e62) rather than to UTC.
+//
+// At 02:00 UTC on the 1st, August's window — [Aug 1 00:00, Sep 1 00:00) at
+// each site — was still five hours from closing in Pacific time. A shift
+// starting 19:00–24:00 PT on the last day of the month would have been
+// generated before it existed and silently missing from that month's file.
+// That window is exactly STARNET's Cristo Rey post (19:00–06:00 PT). No
+// production row has ever landed in it, so this is closing the hole before
+// it is hit, not after.
+//
+// 12:00 UTC clears local midnight for every US timezone with margin —
+// Pacific by 5h, Alaska by 4h, Hawaii (UTC-10, no DST) by 2h — and in fact
+// for every inhabited zone, since the westernmost in use is UTC-11.
+//
+// KNOWN OPENNESS: a single global fire time is a blunt instrument. It is
+// correct here because it is late enough for every zone, but it is not
+// "immediately after close" for any of them, and it does not adapt. The
+// general answer, consistent with the per-site decision, is a per-site close
+// check — emit a company's file only once month-end has passed at all of its
+// sites — which this does not do. Revisit if sites ever span wide longitudes.
+cron.schedule('0 12 1 * *', async () => {
   console.log('[monthly-hours] Starting at', new Date().toISOString());
 
   const now   = new Date();
