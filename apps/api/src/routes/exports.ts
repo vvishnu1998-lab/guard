@@ -89,8 +89,18 @@ async function fetchAnalyticsData(companyId: string | null, params: {
       (ss.clocked_in_at AT TIME ZONE s.timezone)::date AS shift_date,
       ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
       ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
-      ss.clocked_in_at,
-      ss.clocked_out_at
+      -- Rendered site-local, in SQL rather than JS. This file's XLSX path is
+      -- json_to_sheet(rows), which emits EVERY key as a column, so carrying a
+      -- site_timezone helper the way routes/billing.ts does would silently add
+      -- a column to the sheet; TO_CHAR replaces the value in place and leaves
+      -- the header row untouched. Shape matches billing's toLocaleString
+      -- ('en-GB') output, DD/MM/YYYY, HH:MM:SS. NULL survives as NULL, which
+      -- rowsToCsv renders as an empty field and json_to_sheet leaves blank.
+      -- ORDER BY below stays on the QUALIFIED column (ss./r./gv.), not this
+      -- alias — sorting the formatted string would order lexicographically by
+      -- day-of-month.
+      TO_CHAR(ss.clocked_in_at  AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS clocked_in_at,
+      TO_CHAR(ss.clocked_out_at AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS clocked_out_at
     FROM shift_sessions ss
     JOIN shifts sh ON sh.id = ss.shift_id
     JOIN sites s   ON s.id = ss.site_id
@@ -109,7 +119,8 @@ async function fetchAnalyticsData(companyId: string | null, params: {
       g.name          AS guard_name,
       r.report_type,
       r.severity,
-      r.reported_at,
+      -- Site-local render — see the hours sheet above for the rationale.
+      TO_CHAR(r.reported_at AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS reported_at,
       LEFT(r.description, 200) AS description_preview
     FROM reports r
     JOIN sites s         ON s.id = r.site_id
@@ -127,8 +138,9 @@ async function fetchAnalyticsData(companyId: string | null, params: {
     SELECT
       CASE WHEN s.is_active THEN s.name ELSE '[INACTIVE] ' || s.name END AS site_name,
       g.name               AS guard_name,
-      gv.occurred_at,
-      gv.resolved_at,
+      -- Site-local render — see the hours sheet above for the rationale.
+      TO_CHAR(gv.occurred_at AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS occurred_at,
+      TO_CHAR(gv.resolved_at AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS resolved_at,
       gv.duration_minutes,
       gv.supervisor_override,
       gv.notification_sent
