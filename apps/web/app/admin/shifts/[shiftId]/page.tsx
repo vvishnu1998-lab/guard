@@ -92,11 +92,16 @@ interface ShiftDetail {
   site_tz:              string | null;
   reassignment_history: ReassignmentRow[];
   swap_history:         SwapHistoryRow[];
-  schedule_audit:       ScheduleAuditRow[];
+  // BOTH OPTIONAL — absent until the API deploys, same convention as
+  // inspection_incomplete above. Web and API deploy independently (Vercel
+  // on push, Railway on build), so there is always a window in which this
+  // page runs against an API that predates these fields. Treating them as
+  // required crashes the page in that window.
+  schedule_audit?:      ScheduleAuditRow[];
   // True when ANY shift_sessions row exists on this shift. The edit gate
   // checks this directly rather than inferring it from status — see the
   // canEdit comment below.
-  has_session:          boolean;
+  has_session?:         boolean;
 }
 
 interface Guard {
@@ -247,7 +252,11 @@ export default function ShiftDetailPage() {
   const canEdit =
     !!shift &&
     (shift.status === 'scheduled' || shift.status === 'unassigned') &&
-    !shift.has_session;
+    // === false, not !has_session. On an API that predates the field it is
+    // undefined, and `!undefined` would SHOW the button against an API with
+    // no PATCH /api/shifts/:id to serve it. Fail closed: no explicit false,
+    // no button.
+    shift.has_session === false;
 
   const pickableGuards = guards
     .filter((g) => g.is_active !== false)
@@ -645,7 +654,10 @@ export default function ShiftDetailPage() {
             // reassigns and swaps: they are all "something changed about
             // this shift", and an admin reconstructing what happened should
             // read one chronological list, not three panels.
-            ...shift.schedule_audit     .map((r): HistoryEntry => ({ source: 'schedule_edit',   ts: r.changed_at,   row: r })),
+            // ?? [] — an API predating schema_v58 omits this entirely, and
+            // .map on undefined throws, taking the whole page down rather
+            // than just hiding the new entries.
+            ...(shift.schedule_audit ?? []).map((r): HistoryEntry => ({ source: 'schedule_edit', ts: r.changed_at, row: r })),
           ].sort((a, b) => (a.ts < b.ts ? 1 : -1));
           if (combined.length === 0) {
             return <p className="text-gray-500 text-sm">No history yet.</p>;
