@@ -37,6 +37,7 @@ import {
 } from '../services/email';
 import {
   SHIFT_HOURS_SQL_FIELDS,
+  SHIFT_HOURS_AGG_SQL_FIELDS,
   emptyShiftHours,
   getShiftHours,
   type ShiftHours,
@@ -2455,15 +2456,7 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
        ) ss_agg ON ss_agg.shift_id = s.id
        LEFT JOIN (
          SELECT ss.shift_id,
-                ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2) AS actual_hours,
-                ROUND(CAST(COALESCE(SUM((
-                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
-                    FROM break_sessions bs WHERE bs.shift_session_id = ss.id
-                )), 0) AS NUMERIC), 2) AS break_hours,
-                ROUND(CAST(COALESCE(SUM((
-                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
-                    FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
-                )), 0) AS NUMERIC), 2) AS violation_hours
+                ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
          FROM shift_sessions ss
          WHERE ss.guard_id = $1
          GROUP BY ss.shift_id
@@ -2500,15 +2493,7 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
        LEFT JOIN guards g ON s.guard_id = g.id
        LEFT JOIN (
          SELECT ss.shift_id,
-                ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2) AS actual_hours,
-                ROUND(CAST(COALESCE(SUM((
-                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
-                    FROM break_sessions bs WHERE bs.shift_session_id = ss.id
-                )), 0) AS NUMERIC), 2) AS break_hours,
-                ROUND(CAST(COALESCE(SUM((
-                  SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
-                    FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
-                )), 0) AS NUMERIC), 2) AS violation_hours
+                ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
          FROM shift_sessions ss
          GROUP BY ss.shift_id
        ) ss_hrs ON ss_hrs.shift_id = s.id
@@ -2781,15 +2766,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
   const hoursResult = await pool.query<ShiftHours>(
     `SELECT
        ROUND(CAST(EXTRACT(EPOCH FROM ($1::timestamptz - $2::timestamptz))/3600.0 AS NUMERIC), 2) AS scheduled_hours,
-       ROUND(CAST(COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)), 0) AS NUMERIC), 2) AS actual_hours,
-       ROUND(CAST(COALESCE(SUM((
-         SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
-           FROM break_sessions bs WHERE bs.shift_session_id = ss.id
-       )), 0) AS NUMERIC), 2) AS break_hours,
-       ROUND(CAST(COALESCE(SUM((
-         SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
-           FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
-       )), 0) AS NUMERIC), 2) AS violation_hours
+       ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
      FROM shift_sessions ss
      WHERE ss.shift_id = $3`,
     [shift.scheduled_end, shift.scheduled_start, shift.id],

@@ -6,6 +6,24 @@
  * billing XLSX, emails, PDFs). Replaces the four divergent formulas
  * cataloged in the 2026-07-17 audit.
  *
+ * That claim lapsed and was restored on 2026-08-25. Between them, routes/
+ * admin.ts and routes/shifts.ts had accumulated SEVEN hand-inlined copies
+ * of the break/violation arithmetic — so the 2026-08-24 fix to this file
+ * would have left the billing export reporting 0.00 h off-post on a shift
+ * the admin dashboard, the mobile profile and the shift-detail page were
+ * all still reporting at 441 h. Every copy now calls in here.
+ *
+ * Two fragment shapes are exported, because call sites come in two shapes:
+ *   SHIFT_HOURS_SQL_FIELDS      — PER SESSION. One row in, one row out;
+ *                                 break/violation via correlated subquery.
+ *   SHIFT_HOURS_AGG_SQL_FIELDS  — AGGREGATE. Wraps the same expressions in
+ *                                 SUM() for a GROUP BY over sessions
+ *                                 (per shift, per site, per guard, per month).
+ * Both are built from BREAK_HOURS_ROW_SQL / VIOLATION_HOURS_ROW_SQL, which
+ * are the actual definition and are exported for call sites whose join runs
+ * the other way (see routes/admin.ts dashboard-sites, where the event table
+ * drives and the session is joined in).
+ *
  * Contract (per Phase 1 lock-in, D1/D5/D6):
  *   scheduled_hours = shifts.scheduled_end − shifts.scheduled_start
  *   actual_hours    = COALESCE(clocked_out_at, NOW()) − clocked_in_at  (raw, no truncation)
@@ -117,6 +135,49 @@ function round2(n: number): number {
  * COALESCE at the caller's LATERAL/LEFT-JOIN boundary, not inside this
  * fragment).
  */
+/**
+ * THE definition of a bounded, clamped sub-interval of a shift session.
+ * Everything else in this file, and every aggregate call site, is built on
+ * these three functions — a route needing a different SQL shape parameterises
+ * the aliases instead of re-typing the arithmetic.
+ *
+ * `endExpr` must arrive already NULL-safe (callers wrap the open end in
+ * COALESCE(..., NOW())). Postgres LEAST/GREATEST SKIP nulls rather than
+ * propagating them, so a NULL reaching here would silently widen the bound
+ * instead of narrowing it — the one failure mode that would look like the
+ * original bug returning.
+ */
+function boundedIntervalHours(startExpr: string, endExpr: string, sessionAlias: string): string {
+  return `GREATEST(0, EXTRACT(EPOCH FROM (
+             LEAST(${endExpr}, COALESCE(${sessionAlias}.clocked_out_at, NOW()))
+           - GREATEST(${startExpr}, ${sessionAlias}.clocked_in_at)
+         ))) / 3600.0`;
+}
+
+/**
+ * One break_sessions row's contribution, bounded to its session and clamped.
+ * Aliases must be trusted identifiers (never user input).
+ */
+export function BREAK_HOURS_ROW_SQL(breakAlias: string, sessionAlias: string): string {
+  return boundedIntervalHours(
+    `${breakAlias}.break_start`,
+    `COALESCE(${breakAlias}.break_end, NOW())`,
+    sessionAlias,
+  );
+}
+
+/**
+ * One geofence_violations row's contribution, bounded to its session and
+ * clamped. Aliases must be trusted identifiers (never user input).
+ */
+export function VIOLATION_HOURS_ROW_SQL(violationAlias: string, sessionAlias: string): string {
+  return boundedIntervalHours(
+    `${violationAlias}.occurred_at`,
+    `COALESCE(${violationAlias}.resolved_at, NOW())`,
+    sessionAlias,
+  );
+}
+
 export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string): string {
   const s = sessionAlias;
   const sh = shiftAlias;
@@ -124,21 +185,59 @@ export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string)
     ROUND(CAST(EXTRACT(EPOCH FROM (${sh}.scheduled_end - ${sh}.scheduled_start)) / 3600.0 AS NUMERIC), 2) AS scheduled_hours,
     ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(${s}.clocked_out_at, NOW()) - ${s}.clocked_in_at)) / 3600.0) AS NUMERIC), 2) AS actual_hours,
     ROUND(CAST(COALESCE((
-      SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (
-                 LEAST(COALESCE(bs.break_end, NOW()), COALESCE(${s}.clocked_out_at, NOW()))
-               - GREATEST(bs.break_start, ${s}.clocked_in_at)
-             ))) / 3600.0)
+      SELECT SUM(${BREAK_HOURS_ROW_SQL('bs', s)})
         FROM break_sessions bs
        WHERE bs.shift_session_id = ${s}.id
     ), 0) AS NUMERIC), 2) AS break_hours,
     ROUND(CAST(COALESCE((
-      SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (
-                 LEAST(COALESCE(gv.resolved_at, NOW()), COALESCE(${s}.clocked_out_at, NOW()))
-               - GREATEST(gv.occurred_at, ${s}.clocked_in_at)
-             ))) / 3600.0)
+      SELECT SUM(${VIOLATION_HOURS_ROW_SQL('gv', s)})
         FROM geofence_violations gv
        WHERE gv.shift_session_id = ${s}.id
     ), 0) AS NUMERIC), 2) AS violation_hours
+  `.trim();
+}
+
+/**
+ * SQL fragment — AGGREGATE shape. Same four-field contract as
+ * SHIFT_HOURS_SQL_FIELDS, but every field is wrapped in SUM() for a query
+ * that GROUPs BY something coarser than a session: per shift (handoffs
+ * contribute several sessions), per site, per guard, per month.
+ *
+ *   const q = `SELECT ss.shift_id, ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
+ *                FROM shift_sessions ss GROUP BY ss.shift_id`
+ *
+ * scheduled_hours is deliberately absent — it is a property of the SHIFT,
+ * not of the sessions being aggregated, so summing it here would double-count
+ * a handoff. Callers select it from the shift row themselves.
+ *
+ * `naming` picks the output column names, because the two conventions in
+ * this codebase disagree: routes/shifts.ts consumes actual_hours/break_hours/
+ * violation_hours, routes/admin.ts consumes h_actual/h_break/h_violation.
+ *
+ * The inner SUM returns NULL for a session with no breaks/violations; the
+ * outer SUM skips those NULLs, and COALESCE(...,0) covers the all-NULL group.
+ * That is the pre-existing behaviour of all six call sites this replaced.
+ */
+export function SHIFT_HOURS_AGG_SQL_FIELDS(
+  sessionAlias: string,
+  naming: 'hours_suffix' | 'h_prefix' = 'hours_suffix',
+): string {
+  const s = sessionAlias;
+  const col = naming === 'h_prefix'
+    ? { actual: 'h_actual',     brk: 'h_break',     viol: 'h_violation'     }
+    : { actual: 'actual_hours', brk: 'break_hours', viol: 'violation_hours' };
+  return `
+    ROUND(CAST(COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(${s}.clocked_out_at, NOW()) - ${s}.clocked_in_at)) / 3600.0)), 0) AS NUMERIC), 2) AS ${col.actual},
+    ROUND(CAST(COALESCE(SUM((
+      SELECT SUM(${BREAK_HOURS_ROW_SQL('bs', s)})
+        FROM break_sessions bs
+       WHERE bs.shift_session_id = ${s}.id
+    )), 0) AS NUMERIC), 2) AS ${col.brk},
+    ROUND(CAST(COALESCE(SUM((
+      SELECT SUM(${VIOLATION_HOURS_ROW_SQL('gv', s)})
+        FROM geofence_violations gv
+       WHERE gv.shift_session_id = ${s}.id
+    )), 0) AS NUMERIC), 2) AS ${col.viol}
   `.trim();
 }
 

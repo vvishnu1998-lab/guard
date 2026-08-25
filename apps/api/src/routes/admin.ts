@@ -20,7 +20,14 @@ import {
   type ActivityRow,
   type UserScope,
 } from './activityLog';
-import { SHIFT_HOURS_SQL_FIELDS, BREAK_OVERRUN_SQL_FIELDS, type ShiftHours } from '../services/shiftHours';
+import {
+  SHIFT_HOURS_SQL_FIELDS,
+  SHIFT_HOURS_AGG_SQL_FIELDS,
+  BREAK_HOURS_ROW_SQL,
+  VIOLATION_HOURS_ROW_SQL,
+  BREAK_OVERRUN_SQL_FIELDS,
+  type ShiftHours,
+} from '../services/shiftHours';
 
 const router = Router();
 
@@ -927,14 +934,14 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
             AND ss4.clocked_in_at >= DATE_TRUNC('week', NOW())
        ), 0) AS h_actual,
        COALESCE((
-         SELECT ROUND(CAST(SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0) AS NUMERIC), 2)
+         SELECT ROUND(CAST(SUM(${BREAK_HOURS_ROW_SQL('bs', 'ss5')}) AS NUMERIC), 2)
            FROM break_sessions bs
            JOIN shift_sessions ss5 ON ss5.id = bs.shift_session_id
           WHERE ss5.site_id = s.id
             AND ss5.clocked_in_at >= DATE_TRUNC('week', NOW())
        ), 0) AS h_break,
        COALESCE((
-         SELECT ROUND(CAST(SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0) AS NUMERIC), 2)
+         SELECT ROUND(CAST(SUM(${VIOLATION_HOURS_ROW_SQL('gv', 'ss6')}) AS NUMERIC), 2)
            FROM geofence_violations gv
            JOIN shift_sessions ss6 ON ss6.id = gv.shift_session_id
           WHERE ss6.site_id = s.id
@@ -1208,15 +1215,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
                  AND ss2.clocked_in_at >= DATE_TRUNC('month', NOW())
             ) sched
         ), 0) AS h_scheduled,
-        COALESCE(ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2), 0) AS h_actual,
-        COALESCE(ROUND(CAST(SUM((
-          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
-            FROM break_sessions bs WHERE bs.shift_session_id = ss.id
-        )) AS NUMERIC), 2), 0) AS h_break,
-        COALESCE(ROUND(CAST(SUM((
-          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
-            FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
-        )) AS NUMERIC), 2), 0) AS h_violation
+        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
       FROM shift_sessions ss
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
@@ -1250,15 +1249,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       SELECT g.name, g.badge_number,
              ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS total_hours,
              COUNT(DISTINCT ss.id) AS shift_count,
-             COALESCE(ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2), 0) AS h_actual,
-             COALESCE(ROUND(CAST(SUM((
-               SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
-                 FROM break_sessions bs WHERE bs.shift_session_id = ss.id
-             )) AS NUMERIC), 2), 0) AS h_break,
-             COALESCE(ROUND(CAST(SUM((
-               SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
-                 FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
-             )) AS NUMERIC), 2), 0) AS h_violation
+             ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
       FROM shift_sessions ss
       JOIN guards g ON g.id = ss.guard_id
       JOIN sites s  ON s.id = ss.site_id
@@ -1276,15 +1267,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
         TO_CHAR(DATE_TRUNC('month', ss.clocked_in_at), 'Mon YYYY') AS month,
         s.name AS site_name,
         ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS hours,
-        COALESCE(ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss.clocked_out_at, NOW()) - ss.clocked_in_at))/3600.0)) AS NUMERIC), 2), 0) AS h_actual,
-        COALESCE(ROUND(CAST(SUM((
-          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(bs.break_end, NOW()) - bs.break_start))/3600.0)
-            FROM break_sessions bs WHERE bs.shift_session_id = ss.id
-        )) AS NUMERIC), 2), 0) AS h_break,
-        COALESCE(ROUND(CAST(SUM((
-          SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(gv.resolved_at, NOW()) - gv.occurred_at))/3600.0)
-            FROM geofence_violations gv WHERE gv.shift_session_id = ss.id
-        )) AS NUMERIC), 2), 0) AS h_violation
+        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
       FROM shift_sessions ss
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
