@@ -52,8 +52,25 @@ async function fetchAnalyticsData(companyId: string | null, params: {
     const clauses: string[] = [];
     if (site_id)   { args.push(site_id);   clauses.push(`AND s.id = $${args.length}`); }
     if (guard_id)  { args.push(guard_id);  clauses.push(`AND g.id = $${args.length}`); }
-    if (date_from) { args.push(date_from); clauses.push(`AND ${dateFrom} >= $${args.length}`); }
-    if (date_to)   { args.push(date_to);   clauses.push(`AND ${dateTo} <= $${args.length}`); }
+    // Range bounds. Two defects fixed together (both were in this pair):
+    //
+    //   1. The upper bound was INCLUSIVE against a bare date string, so
+    //      `date_to=2026-08-25` compared against 2026-08-25 00:00:00 and
+    //      dropped the entire final day of every range. Measured on prod:
+    //      67 rows returned where 72 exist. Silent - the export looked
+    //      complete. It is now `< end + 1 day`, matching routes/billing.ts.
+    //
+    //   2. Neither bound was cast or anchored, so the implicit text ->
+    //      timestamptz coercion resolved them at the SESSION timezone (UTC on
+    //      Railway). Both are now ::date and anchored per-site on
+    //      sites.timezone, consistent with 8b08e62 - `s` is the sites row
+    //      every one of the three queries below already joins.
+    //
+    // This pair is shared by all three sheets via buildArgs, so the fix lands
+    // on hours (ss.clocked_in_at), reports (r.reported_at) and violations
+    // (gv.occurred_at) alike - all three were dropping their last day.
+    if (date_from) { args.push(date_from); clauses.push(`AND ${dateFrom} >= (($${args.length}::date)::timestamp AT TIME ZONE s.timezone)`); }
+    if (date_to)   { args.push(date_to);   clauses.push(`AND ${dateTo} <  (($${args.length}::date + INTERVAL '1 day') AT TIME ZONE s.timezone)`); }
     return { args, cidPredicate, filter: clauses.join(' ') };
   }
 
