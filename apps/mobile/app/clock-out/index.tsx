@@ -214,7 +214,7 @@ export default function ClockOutScreen() {
         breadcrumbCategory="clock_out"
         breadcrumbPrefix="clock_out"
         headerTitle="CLOCK OUT"
-        headerSubtitle="POST PHOTO (OPTIONAL)"
+        headerSubtitle="POST PHOTO"
         instruction="Photograph the post as you leave it."
         primaryButtonLabel="USE PHOTO"
         cancelButtonLabel="SKIP PHOTO"
@@ -259,15 +259,21 @@ export default function ClockOutScreen() {
         />
       </View>
 
-      {/* Clock-out photo — OPTIONAL. The confirm button below is never
-          gated on this; skipping is always one tap and never requires
-          dismissing an error first. */}
+      {/* Clock-out photo. The card carries the explanation and, once a
+          photo exists, the SECONDARY actions (retake / remove). The single
+          PRIMARY lives in the bottom action slot in both states — TAKE
+          PHOTO before, CONFIRM CLOCK OUT after — so exactly one blue
+          button is ever on screen, always in the same place.
+
+          The photo remains genuinely optional and manual_no_photo stays a
+          first-class recorded outcome; this copy simply states what the
+          photo is FOR rather than advertising the skip. */}
       <View style={styles.notesCard}>
         <Text style={styles.sectionLabel}>POST PHOTO</Text>
         <Text style={styles.notesHint}>
           {photoUrl
             ? 'Attached. This will be saved with your clock-out.'
-            : 'Optional — a photo of the post as you leave it. You can clock out without one.'}
+            : 'A photo of the post as you leave it — your record of the condition you handed over.'}
         </Text>
 
         {photoLocal && photoUrl ? (
@@ -290,15 +296,7 @@ export default function ClockOutScreen() {
               </TouchableOpacity>
             </View>
           </>
-        ) : (
-          <TouchableOpacity
-            style={[styles.photoBtn, submitting && styles.disabled]}
-            onPress={() => setPhase('camera')}
-            disabled={submitting}
-          >
-            <Text style={styles.photoBtnText}>TAKE PHOTO</Text>
-          </TouchableOpacity>
-        )}
+        ) : null}
       </View>
 
       {/* Handover notes */}
@@ -319,19 +317,51 @@ export default function ClockOutScreen() {
         <Text style={styles.charCount}>{notes.length}/1000</Text>
       </View>
 
-      {/* Confirm button */}
-      <TouchableOpacity
-        style={[styles.confirmBtn, submitting && styles.disabled]}
-        onPress={() => confirmClockOut()}
-        disabled={submitting}
-      >
-        {submitting
-          ? <ActivityIndicator color={Colors.structure} />
-          : <Text style={styles.confirmText}>
-              {photoUrl ? 'CONFIRM CLOCK OUT' : 'CLOCK OUT WITHOUT PHOTO'}
-            </Text>
-        }
-      </TouchableOpacity>
+      {/* Bottom action slot — the commit position. Exactly ONE primary
+          here in either state, same size and place:
+            no photo  -> TAKE PHOTO, with the skip demoted to a text link
+            attached  -> CONFIRM CLOCK OUT (state 4 is unchanged)
+          The skip is DEMOTED, never removed. It is still one tap, still
+          the same call with the same body, and the server still records
+          manual_no_photo. It is also NOT the only way out: both failure
+          alerts carry it as a button on the alert itself, which is the
+          path that matters when a photo has just failed at the end of a
+          shift. */}
+      {photoUrl ? (
+        <TouchableOpacity
+          style={[styles.confirmBtn, submitting && styles.disabled]}
+          onPress={() => confirmClockOut()}
+          disabled={submitting}
+        >
+          {submitting
+            ? <ActivityIndicator color={Colors.structure} />
+            : <Text style={styles.confirmText}>CONFIRM CLOCK OUT</Text>}
+        </TouchableOpacity>
+      ) : (
+        <>
+          <TouchableOpacity
+            style={[styles.confirmBtn, submitting && styles.disabled]}
+            onPress={() => setPhase('camera')}
+            disabled={submitting}
+          >
+            <Text style={styles.confirmText}>TAKE PHOTO</Text>
+          </TouchableOpacity>
+          {/* Sentence case + underline, deliberately unlike the tracked
+              caps of GO BACK TO SHIFT below it — two muted controls sit
+              adjacent here and must not read as the same kind of thing.
+              The spinner lives here because THIS is the control that
+              submits in this state. */}
+          <TouchableOpacity
+            style={styles.skipLink}
+            onPress={() => confirmClockOut()}
+            disabled={submitting}
+          >
+            {submitting
+              ? <ActivityIndicator color={Colors.muted} />
+              : <Text style={styles.skipLinkText}>Clock out without photo</Text>}
+          </TouchableOpacity>
+        </>
+      )}
 
       {/* Back button */}
       <TouchableOpacity style={styles.backBtn} onPress={() => router.back()} disabled={submitting}>
@@ -393,9 +423,12 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.structure,
   },
   photoRow: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.sm },
+  // Shared geometry for the in-card SECONDARY actions. No background of
+  // its own any more — the only remaining users are RETAKE and REMOVE,
+  // which pair it with photoBtnGhost. Leaving a Colors.action fill here
+  // would describe a blue button that no longer exists.
   photoBtn: {
     flex: 1,
-    backgroundColor: Colors.action,
     borderRadius: Radius.md,
     paddingVertical: Spacing.md,
     alignItems: 'center',
@@ -403,7 +436,6 @@ const styles = StyleSheet.create({
     minHeight: 48,
     marginTop: Spacing.sm,
   },
-  photoBtnText: { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 15, letterSpacing: 2 },
   photoBtnGhost: {
     backgroundColor: 'transparent',
     borderWidth: 1,
@@ -443,6 +475,14 @@ const styles = StyleSheet.create({
   },
   confirmText: { fontFamily: Fonts.heading, color: Colors.structure, fontSize: 18, letterSpacing: 4 },
   disabled:    { opacity: 0.4 },
+
+  skipLink: {
+    paddingVertical: Spacing.sm,
+    marginBottom: Spacing.sm,
+    minHeight: 44,            // tap target
+    justifyContent: 'center',
+  },
+  skipLinkText: { color: Colors.muted, fontSize: 15, textDecorationLine: 'underline' },
 
   backBtn:  { paddingVertical: Spacing.sm },
   backText: { color: Colors.muted, fontSize: 13, letterSpacing: 2 },
