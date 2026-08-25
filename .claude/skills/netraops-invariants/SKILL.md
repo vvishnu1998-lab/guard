@@ -88,7 +88,9 @@ Verified ground truth for the NetraOps platform. When live state may have change
 
 - Standing gate for API deploys touching guard/shift/login paths: push in the 0-90s window after a STARNET ping row lands. The ping is a *proxy* for "a guard's app is alive and just checked in, so we have maximum time before the next interaction".
 - **The gate is satisfied by the CONDITION, not the proxy.** With 0 active shifts and 0 open sessions for the customer, no ping can land — the proxy is unsatisfiable while the thing it protects (nobody on post to disrupt) is trivially true. Deploying in that state is the safest window, not a bypass.
-- Exercised 2026-08-24 16:28 UTC (`d497416..f2dae17`, deployment `e73be1b4`): 0 active STARNET shifts, 0 open sessions, last ping 2h55m stale, next shift 17:00 UTC. Approved explicitly on that reasoning.
+- Exercised 2026-08-24 16:28 UTC (`d497416..f2dae17`, deployment `e73be1b4`) on the CONDITION: 0 active STARNET shifts, 0 open sessions, last ping 2h55m stale. Approved explicitly on that reasoning.
+- Exercised again 2026-08-24 23:32 UTC (`e22cb2e..4c5be77`, deployment `f8f6aafa`) on the PROXY, the normal path: Nikith Reddy pinged 23:32:28.142Z and the push went 27s later. Three sessions were open, so the zero-open-sessions exception did NOT apply and was not leaned on. **Record which of the two you used — they are not interchangeable.**
+- Watching for the ping is a poll, and the predicate is the trap. A first attempt compared `pinged_at > '…20:35:42.698Z'` against a stored `…698954`, so a 2.5-hour-old row satisfied it and the watcher reported the gate open. Encode the gate itself — `pinged_at > NOW() - INTERVAL '75 seconds'` — and validate it returns NOTHING before arming.
 
 ## Verification norms for this project
 
