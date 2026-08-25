@@ -171,12 +171,42 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   // Session hijack fix (Interpretation B): a successful guard login
   // is a session-invalidating event. Bump tokens_not_before so any
   // JWT issued to a prior device (same guard, different phone) is
-  // rejected on next request. fcm_token write is now unconditional
-  // — an omitted body field coerces to NULL, which fails safe (no
-  // routing to the prior device) if this login's phone declined the
-  // notification permission prompt.
+  // rejected on next request. That half is unchanged.
+  //
+  // fcm_token, however, is COALESCEd: it is written only when this login
+  // actually supplies one. ABSENCE OF A TOKEN IS NOT INTENT TO REVOKE.
+  // The client (apps/mobile login.tsx) asks for notification permission and
+  // an Expo token before calling this route; if permission is not granted or
+  // getExpoPushTokenAsync throws, the field is omitted and the body carries
+  // no token at all. Writing NULL there wiped a perfectly good token
+  // belonging to a phone that was working a moment earlier, and the guard
+  // then received nothing until the app was next launched with permission
+  // granted (the durable re-register lives in mobile _layout.tsx).
+  //
+  // ACCEPTED TRADEOFF, stated plainly because it reverses an earlier
+  // decision: if the guard signs in on phone B and phone B supplies no
+  // token, phone A keeps receiving push CONTENT in its tray — shift times,
+  // site names, ping prompts. That is a real if narrow information leak, and
+  // it is accepted, because:
+  //   * phone A cannot ACT on any of it. tokens_not_before above kills its
+  //     JWT, so it cannot open the app, cannot read the Alerts tab, and
+  //     cannot re-register its own token via /guard/fcm-token either.
+  //   * a handset that logs out or uninstalls stops being reachable and Expo
+  //     answers DeviceNotRegistered; the seven compare-and-swap cleanups
+  //     (services/shiftPush.ts, services/swapPush.ts, jobs/breakExpiryCron.ts,
+  //     jobs/clockOutReminder.ts, routes/locations.ts, routes/shifts.ts,
+  //     routes/sites.ts) then clear the token for real.
+  //   * the failure this replaces was SILENT push starvation — a guard who
+  //     never sees a ping prompt still lands as non-compliant in the client
+  //     portal numbers the customer reads. A leak to a handset the guard is
+  //     holding is the smaller harm.
+  //
+  // The deliberate revocation paths are untouched and remain the only ways
+  // to clear a token: change-password below, POST /admin/revoke-guard,
+  // explicit {fcm_token: null} on /guard/fcm-token (mobile logout), and the
+  // DeviceNotRegistered cleanups.
   await pool.query(
-    'UPDATE guards SET tokens_not_before = NOW(), fcm_token = $1 WHERE id = $2',
+    'UPDATE guards SET tokens_not_before = NOW(), fcm_token = COALESCE($1, fcm_token) WHERE id = $2',
     [fcm_token ?? null, guard.id]
   );
   // WHICH BUNDLE IS THIS HANDSET ON?
