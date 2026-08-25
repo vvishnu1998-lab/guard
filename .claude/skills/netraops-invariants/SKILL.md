@@ -17,15 +17,15 @@ Verified ground truth for the NetraOps platform. When live state may have change
 ## Live customer — freeze policy
 
 - **STARNET SECURITY** (tenant `27c4d404-...`) is a REAL PAYING CUSTOMER. Admin: info@starnetsecurity.com (Nataniel); client Sai receives daily reports.
-- STARNET's FORWARD coverage is **Bethel AME Church** — deepak naik GRD0004 (20 future shifts) and Nikith Reddy GRD0005 (9). **23000 Cristo Rey Los Altos has ZERO future shifts.** Bhanu GRD0001 worked Cristo Rey on 2026-08-20 (his only shift there in 21 days); Nandu GRD0002 worked it 2026-08-16 → 08-19. Verified against `shifts` 2026-08-21.
-- **Rosters change — re-verify against `shifts` before asserting who is on post.** The line above is a snapshot, not a standing fact; "Bhanu works Cristo Rey overnights" was carried in this file long after his schedule there ended.
+- STARNET's FORWARD coverage spans BOTH sites. **Bethel AME Church** — deepak naik GRD0004 (18 future shifts) and Nikith Reddy GRD0005 (12), plus **11 future shifts still UNASSIGNED**. **23000 Cristo Rey Los Altos — Naveen Yatakari GRD0009 (7 future, through 2026-09-01)**, who was clocked in on post there at the time of writing. Bhanu GRD0001, Nandu GRD0002, vamshi krishna GRD0006 and Anil GRD0007 all have PAST Cristo Rey shifts and zero forward. Verified against `shifts` 2026-08-25.
+- **Rosters change — re-verify against `shifts` before asserting who is on post.** The line above is a snapshot, not a standing fact. This has now failed TWICE: "Bhanu works Cristo Rey overnights" was carried here long after his schedule ended, and the 2026-08-21 snapshot asserting Cristo Rey had **ZERO** future shifts survived until 2026-08-25, by which point the site had 7 future shifts and a guard this file had never named (Naveen Yatakari GRD0009) clocked in on it. **A named-guard claim in this file older than a few days is wrong until re-queried.**
 - No disruptive prod changes during active customer shifts without explicit approval. Check the clock before every deploy touching guard/shift/login paths.
 - Any temporary Apple-review accommodation (widened geofences, seeded reviewer accounts/shifts) is frozen until approval and carries a logged revert task with original values.
 
 ## Schema invariants
 
 - `site_geofence` is the source of truth for geofence validation — NOT `sites.geocoded_lat/lng` (editor pre-fill only).
-- `shifts`: no `tenant_id`, no `timezone`, no `updated_at`. Scope via `guard_id`+`site_id`. NOT NULL: `site_id`, `guard_id`, `scheduled_start`, `scheduled_end`, `status`.
+- `shifts`: no `tenant_id`, no `timezone`, no `updated_at`. Scope via `guard_id`+`site_id`. NOT NULL: `site_id`, `scheduled_start`, `scheduled_end`, `status`. **`guard_id` IS NULLABLE** — it is NULL for every `status='unassigned'` shift (15 in prod, 2026-08-25). This file previously listed `guard_id` as NOT NULL, which is wrong and would break any code that assumes a shift always has a guard. `status='unassigned'` <-> `guard_id IS NULL` holds across all 189 prod rows but is NOT enforced by any constraint — check both, never infer one from the other.
 - `task_instances` has no `guard_id` — derive via JOIN on `shifts.guard_id`.
 - `company_admins` has no `fcm_token` — including it in a SELECT throws 42703 and silently kills downstream awaits. Probe `information_schema` before referencing any column.
 - `notifications` has no TTL columns — retention is application-layer (LIMIT 100).
