@@ -20,7 +20,7 @@ import { pool } from '../db/pool';
 import { haversineDistance } from './geofence';
 import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
-import { completedTrackableWindows } from './pingWindows';
+import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
 
 // Central SendGrid error tag helper. Called from every sgMail.send catch
 // site so a Sentry.setTag('service','sendgrid') + flow tag lets us slice
@@ -417,8 +417,11 @@ export async function sendDailyShiftReport(shiftId: string) {
         `SELECT COUNT(*) AS total FROM task_instances WHERE shift_id = $1`,
         [shiftId],
       ),
+      // DISTINCT LABELS, not COUNT(*) — see the numerator note below. This
+      // is the half that makes the ratio dimensionally coherent.
       pool.query(
-        `SELECT COUNT(*) AS submitted FROM location_pings WHERE shift_session_id = $1`,
+        `SELECT DISTINCT window_label FROM location_pings
+          WHERE shift_session_id = $1 AND window_label IS NOT NULL`,
         [session?.id],
       ),
       pool.query(
@@ -437,15 +440,57 @@ export async function sendDailyShiftReport(shiftId: string) {
   // scheduled_end passed over an hour ago, so every window has closed and
   // the count is the shift's full complement. Rendering mid-shift (the
   // test-send script) would honestly count only closed windows.
-  const pingsExpected = session?.clocked_in_at
+  //
+  // DENOMINATOR — break-waived windows are now EXCLUDED, via the SAME
+  // predicate missedPingCron uses to waive the flag. completedTrackableWindows
+  // is deliberately NOT break-aware (pingWindows.ts:85-93) because a validator
+  // must not reject a guard who pinged anyway; the waiver belongs here, on the
+  // read side. Without it the client was billed for windows the platform
+  // itself had decided the guard did not owe — and this same email prints
+  // break_hours a few rows above the ratio, so the contradiction was on the
+  // page.
+  //
+  // NUMERATOR — this changed too, in a dispatch briefed as denominator-only,
+  // so the reason is recorded here rather than left to be rediscovered.
+  // It was COUNT(*) of ping ROWS compared against a count of WINDOWS: two
+  // different units. They agreed only because uq_location_pings_session_window
+  // happens to enforce one ping per window, and only for pings after the
+  // hardcoded date inside that index's predicate. Before that date the email
+  // really did render 20/12 and 24/23 to a paying client. Fixing the
+  // denominator alone would have taken the one real break shift from 20/12 to
+  // 20/10 — further from the truth, not closer.
+  //
+  // Both sides are distinct window labels now, so the ratio cannot exceed 1
+  // and no longer depends on that index holding. A ping submitted DURING a
+  // break is neither counted against the guard nor for them: the window is
+  // out of the denominator, so it is out of the numerator. A guard who works
+  // through a break is not penalised, which was the whole point.
+  //
+  // Keyed on the LABEL rather than the window start, because the label is the
+  // only join the ping rows carry. On a DST fall-back day a shift can hold the
+  // same label twice; collapsing to a Set drops one window from the
+  // denominator, which is the consistent choice — the numerator cannot tell
+  // those two windows apart either.
+  const trackableWindows = session?.clocked_in_at
     ? completedTrackableWindows(
         new Date(sh.scheduled_start),
         new Date(sh.scheduled_end),
         new Date(session.clocked_in_at),
         new Date(),
-      ).length
-    : 0;
-  const pingsSubmitted = parseInt(pingsResult.rows[0]?.submitted ?? 0);
+      )
+    : [];
+
+  const countedLabels = new Set<string>();
+  for (const w of trackableWindows) {
+    if (await breakOverlapsWindow(session.id, w.windowStart, w.windowEnd)) continue;
+    countedLabels.add(siteLocalLabel(w.windowStart, sh.site_tz));
+  }
+
+  const pingsExpected  = countedLabels.size;
+  const pingsSubmitted = pingsResult.rows.filter(
+    (r: { window_label: string | null }) =>
+      r.window_label !== null && countedLabels.has(r.window_label),
+  ).length;
 
   // Unresolved missed windows are computed for the operations log only.
   // They are deliberately NOT passed to the renderer: this email goes to the
