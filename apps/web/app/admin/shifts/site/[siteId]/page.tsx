@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { adminGet } from '../../../../../lib/adminApi';
 import InactiveSiteBadge from '../../../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../../../components/admin/ScheduleShiftModal';
@@ -57,6 +57,7 @@ const STATUS_STYLES: Record<string, string> = {
 
 export default function SiteShiftsPage() {
   const params = useParams<{ siteId: string }>();
+  const router = useRouter();
   const siteId = params?.siteId ?? '';
 
   const [site,    setSite]    = useState<Site | null>(null);
@@ -161,7 +162,29 @@ export default function SiteShiftsPage() {
               </thead>
               <tbody>
                 {siteShifts.map((s) => (
-                  <tr key={s.id} className="border-b border-[#1A3050] last:border-b-0 hover:bg-[#0B1526] transition-colors">
+                  // Rows navigate to shift detail, matching the guard view
+                  // (app/admin/shifts/page.tsx). Without this the by-site
+                  // path was a dead end: an admin could assign an
+                  // unassigned guard but could never reach the page that
+                  // carries EDIT SCHEDULE, REASSIGN and CANCEL.
+                  //
+                  // tabIndex + onKeyDown because a clickable <tr> is not
+                  // otherwise reachable by keyboard. The guard view omits
+                  // this; it is a gap there too, not a divergence here.
+                  <tr
+                    key={s.id}
+                    onClick={() => router.push(`/admin/shifts/${s.id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        router.push(`/admin/shifts/${s.id}`);
+                      }
+                    }}
+                    tabIndex={0}
+                    role="link"
+                    aria-label={`Open shift detail for ${fmtDateShort(s.scheduled_start)}`}
+                    className="border-b border-[#1A3050] last:border-b-0 hover:bg-[#0B1526] transition-colors cursor-pointer focus:outline-none focus:bg-[#0B1526] focus:ring-1 focus:ring-inset focus:ring-[#00C8FF]/50"
+                  >
                     <td className="p-4 text-gray-300 text-xs font-mono whitespace-nowrap">{fmtDateShort(s.scheduled_start)}</td>
                     <td className="p-4 text-gray-400 text-xs font-mono whitespace-nowrap">
                       {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
@@ -190,7 +213,10 @@ export default function SiteShiftsPage() {
                     <td className="p-4 text-right">
                       {!s.guard_id && (
                         <button
-                          onClick={() => setAssignShift(s)}
+                          // stopPropagation, or this also fires the row's
+                          // navigate and the modal opens on a page the
+                          // admin is already leaving.
+                          onClick={(e) => { e.stopPropagation(); setAssignShift(s); }}
                           className="text-xs text-amber-400 tracking-widest hover:underline whitespace-nowrap"
                         >
                           ASSIGN GUARD
