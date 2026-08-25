@@ -82,7 +82,11 @@ async function fetchAnalyticsData(companyId: string | null, params: {
       CASE WHEN s.is_active THEN s.name ELSE '[INACTIVE] ' || s.name END AS site_name,
       g.name                           AS guard_name,
       g.badge_number,
-      DATE(ss.clocked_in_at)           AS shift_date,
+      -- Site-local, matching routes/billing.ts (8b08e62). The UTC calendar
+      -- date used here before filed a 19:54 PT clock-in under the next day,
+      -- so the two customer-facing exports disagreed about the same session.
+      -- Column type is unchanged - still a date; only the value moves.
+      (ss.clocked_in_at AT TIME ZONE s.timezone)::date AS shift_date,
       ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
       ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
       ss.clocked_in_at,
