@@ -1013,6 +1013,308 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
   }
 });
 
+// PATCH /api/shifts/:id — admin edits a shift's scheduled hours.
+//
+// Writes shifts.scheduled_start/scheduled_end and an audit row in
+// shift_schedule_audit atomically, and re-arms the reminder chain via
+// clearScheduleDerivedLatches. Best-effort FCM to the assigned guard after
+// commit; push failures are logged but never fail the API call.
+//
+// WHY THE GATE IS status IN ('scheduled','unassigned') AND ZERO SESSIONS.
+//
+// Editing a schedule after the fact desynchronises rows that were DERIVED
+// from it at write time. Those rows split into three groups:
+//
+//   * 16 tables (location_pings, missed_pings, missed_reports,
+//     break_sessions, geofence_violations, reports, task_completions, …)
+//     carry a FK to shift_sessions. Zero session rows means zero
+//     attributable rows in ALL of them — enforced by Postgres, not by this
+//     route. That is what the session half of the gate buys, and it is why
+//     it is checked directly rather than inferred from status.
+//   * task_instances keys on shift_id, not on a session. It is empty before
+//     clock-in only because generateTaskInstancesForShift has exactly ONE
+//     call site (POST /:id/clock-in, below). That is an application
+//     invariant with no constraint behind it — a second call site would
+//     break this silently.
+//   * The six one-shot reminder latches live on the shifts row itself and
+//     are NOT covered by either half of the gate: every latch cron selects
+//     `status = 'scheduled'` with no session requirement, i.e. the exact
+//     rows this route admits. A shift 60 minutes out has already had
+//     pre_shift_reminder_sent_at stamped. Hence the
+//     clearScheduleDerivedLatches call below — it is load-bearing, not
+//     housekeeping. Without it the guard is silently never re-reminded.
+//
+// STATUS AND SESSIONS ARE BOTH CHECKED ON PURPOSE. They agree across all
+// production rows today, but nothing enforces that agreement, and two
+// routes are known to desynchronise status from session state (see the
+// cancel docblock above). Checking the invariant costs one query.
+//
+// 'unassigned' IS ADMITTED. A shift with no guard has nobody to disrupt, no
+// session, no possible overlap and no push to send — it is strictly safer
+// to edit than a 'scheduled' one, and refusing it would leave the 11
+// unassigned production rows uneditable for no reason.
+router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { user } = req;
+  const { id }   = req.params;
+  const { scheduled_start, scheduled_end, reason } = req.body as {
+    scheduled_start?: string; scheduled_end?: string; reason?: string;
+  };
+
+  if (!scheduled_start || !scheduled_end) {
+    return res.status(400).json({ error: 'scheduled_start and scheduled_end are required' });
+  }
+  const newStart = new Date(scheduled_start);
+  const newEnd   = new Date(scheduled_end);
+  if (Number.isNaN(newStart.getTime()) || Number.isNaN(newEnd.getTime())) {
+    return res.status(400).json({ error: 'scheduled_start and scheduled_end must be valid timestamps' });
+  }
+  if (newEnd <= newStart) {
+    return res.status(422).json({ error: 'scheduled_end must be after scheduled_start.' });
+  }
+  if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
+    return res.status(400).json({ error: 'reason must be a string up to 500 chars' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const shiftRes = await client.query(
+      `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
+              sh.scheduled_start, sh.scheduled_end,
+              si.company_id, si.name AS site_name, si.timezone AS site_tz
+         FROM shifts sh
+         JOIN sites si ON si.id = sh.site_id
+        WHERE sh.id = $1
+        FOR UPDATE OF sh`,
+      [id],
+    );
+    if (!shiftRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    const shift = shiftRes.rows[0];
+
+    // company_admin is scoped to its own company; vishnu has no company
+    // scope. 404 rather than 403 so we don't leak which shift ids exist.
+    if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+
+    // NO SITE-DEACTIVATED GATE HERE, DELIBERATELY. reassign refuses on an
+    // inactive site because "a deactivated site can't accept NEW WORK —
+    // reassignment is new work". An edit is not new work: it corrects a
+    // record that already exists, and correcting it does not schedule
+    // anybody onto a dead site. Symmetry with a sibling endpoint is not on
+    // its own a reason to refuse, and refusing here would manufacture a
+    // second terminal state — an unassigned shift at a deactivated site can
+    // already never be cancelled (the cancel switch admits only
+    // 'scheduled'), so gating the edit too would leave it uneditable AND
+    // uncancellable forever. If a deactivated site is later found to need
+    // this gate, add it with its own argument rather than by analogy.
+
+    // Status gate. Specific 409 per status so the admin knows why, matching
+    // the cancel route's switch.
+    switch (shift.status) {
+      case 'scheduled':
+      case 'unassigned':
+        break;
+      case 'active':
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This shift is in progress (guard clocked in). Its schedule can no longer be edited — cancel and re-create instead.',
+        });
+      case 'completed':
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This shift has already completed. Its schedule is historical and cannot be edited.',
+        });
+      case 'missed':
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'This shift was marked missed. Its schedule is historical and cannot be edited.',
+        });
+      case 'cancelled':
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'This shift is cancelled and cannot be edited.' });
+      default:
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: `Shift status '${shift.status}' cannot be edited.` });
+    }
+
+    // Session gate — the invariant itself, not the status proxy. See the
+    // docblock above for why this is checked separately.
+    const sessionRes = await client.query(
+      'SELECT id FROM shift_sessions WHERE shift_id = $1 LIMIT 1',
+      [id],
+    );
+    if (sessionRes.rows[0]) {
+      console.warn(
+        `[shifts.edit.blocked_session] shift=${id} session=${sessionRes.rows[0].id} ` +
+        `shift_status=${shift.status}`,
+      );
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'A guard has already clocked in on this shift. Its schedule can no longer be edited.',
+      });
+    }
+
+    const oldStart = new Date(shift.scheduled_start);
+    const oldEnd   = new Date(shift.scheduled_end);
+
+    // Back-dating guard. A shift whose start has already passed but which
+    // nobody clocked into is still editable (the guard is simply late, and
+    // the end time may be what needs fixing) — so a start that is already
+    // in the past is allowed to STAY there. What is refused is MOVING a
+    // start into the past, which would fabricate history.
+    if (newStart.getTime() !== oldStart.getTime() && newStart.getTime() < Date.now()) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'Cannot move a shift start into the past.' });
+    }
+
+    // No-op: nothing changed, so there is nothing to audit. Returning the
+    // row unchanged keeps a double-submit idempotent and keeps the audit
+    // free of rows that record no change.
+    if (newStart.getTime() === oldStart.getTime() && newEnd.getTime() === oldEnd.getTime()) {
+      await client.query('ROLLBACK');
+      return res.json(shift);
+    }
+
+    // Overlap check against the NEW window. Skipped when the shift has no
+    // guard — unassigned shifts are allowed to stack, matching the create
+    // path. An edit that moves the hours has a stronger claim on this check
+    // than reassign does, since reassign does not change the window at all.
+    if (shift.guard_id) {
+      const overlap = await client.query(
+        `SELECT s.id, s.scheduled_start, s.scheduled_end,
+                si.name AS site_name, si.timezone AS site_tz,
+                g.name AS guard_name
+           FROM shifts s
+           JOIN sites si ON si.id = s.site_id
+           LEFT JOIN guards g ON g.id = s.guard_id
+          WHERE s.guard_id = $1
+            AND s.id      != $2
+            AND s.status IN ('scheduled','active')
+            AND s.scheduled_start < $4
+            AND s.scheduled_end   > $3
+          ORDER BY s.scheduled_start
+          LIMIT 1`,
+        [shift.guard_id, id, newStart.toISOString(), newEnd.toISOString()],
+      );
+      if (overlap.rows[0]) {
+        const c  = overlap.rows[0];
+        const tz = (c.site_tz as string | null) ?? 'America/Los_Angeles';
+        const day = new Intl.DateTimeFormat('en-US', {
+          month: 'short', day: 'numeric', timeZone: tz,
+        }).format(new Date(c.scheduled_start));
+        const from = new Intl.DateTimeFormat('en-US', {
+          hour: 'numeric', minute: '2-digit', timeZone: tz,
+        }).format(new Date(c.scheduled_start));
+        const to = new Intl.DateTimeFormat('en-US', {
+          hour: 'numeric', minute: '2-digit', timeZone: tz,
+        }).format(new Date(c.scheduled_end));
+        await client.query('ROLLBACK');
+        // The message NAMES the collision — guard, site, date, time — because
+        // "overlaps an existing shift" tells an admin nothing they can act on.
+        // `conflict` carries the same facts in structured form so the UI can
+        // deep-link straight to the offending shift.
+        return res.status(409).json({
+          error:
+            `These hours overlap ${c.guard_name ?? 'this guard'}'s shift at ` +
+            `${c.site_name} on ${day}, ${from} – ${to}. Move or cancel that shift first.`,
+          conflict: {
+            shift_id:        c.id,
+            guard_name:      c.guard_name,
+            site_name:       c.site_name,
+            scheduled_start: c.scheduled_start,
+            scheduled_end:   c.scheduled_end,
+          },
+        });
+      }
+    }
+
+    // The schedule is changing, so every reminder already sent against the
+    // OLD hours is spent on a premise that no longer holds. Re-arm the whole
+    // chain. Shares this txn and the FOR UPDATE lock taken above.
+    // services/shiftLatches.ts owns the column list.
+    await clearScheduleDerivedLatches(id, client);
+
+    const updated = await client.query(
+      `UPDATE shifts
+          SET scheduled_start = $1,
+              scheduled_end   = $2
+        WHERE id = $3
+        RETURNING *`,
+      [newStart.toISOString(), newEnd.toISOString(), id],
+    );
+
+    // Narrow before/after — the mutable schedule columns only, never a
+    // whole-row snapshot. schema_v58's header has the reasoning.
+    await client.query(
+      `INSERT INTO shift_schedule_audit
+         (shift_id, action, changed_by, changed_by_role, reason, before, after)
+       VALUES ($1, 'shift_schedule_edited', $2, $3, $4, $5, $6)`,
+      [
+        id, user!.sub, user!.role, reason ?? null,
+        JSON.stringify({ scheduled_start: oldStart.toISOString(), scheduled_end: oldEnd.toISOString() }),
+        JSON.stringify({ scheduled_start: newStart.toISOString(), scheduled_end: newEnd.toISOString() }),
+      ],
+    );
+
+    await client.query('COMMIT');
+
+    res.json(updated.rows[0]);
+
+    // ── Best-effort FCM push to the assigned guard ───────────────────────
+    // A guard whose shift moved and was not told will arrive at the old
+    // time; that is the whole point of the edit reaching them. Pulled out of
+    // the transaction and fire-and-forget after the response, so a push
+    // failure can never undo a committed edit — same shape as reassign.
+    if (shift.guard_id) {
+      const tz = (shift.site_tz as string | null) ?? 'America/Los_Angeles';
+      const day = new Intl.DateTimeFormat('en-US', {
+        month: 'short', day: 'numeric', timeZone: tz,
+      }).format(newStart);
+      const from = new Intl.DateTimeFormat('en-US', {
+        hour: 'numeric', minute: '2-digit', timeZone: tz,
+      }).format(newStart);
+      const to = new Intl.DateTimeFormat('en-US', {
+        hour: 'numeric', minute: '2-digit', timeZone: tz,
+      }).format(newEnd);
+
+      pool.query(
+        'SELECT fcm_token FROM guards WHERE id = $1 AND fcm_token IS NOT NULL',
+        [shift.guard_id],
+      )
+        .then(({ rows }) => {
+          const token = rows[0]?.fcm_token;
+          if (!token) return;
+          return sendPushNotification({
+            token,
+            title: `Shift time changed at ${shift.site_name}`,
+            body:  `Now ${day}, ${from} – ${to}. Tap to view details.`,
+            data:  {
+              type: 'shift_schedule_edited',
+              shift_id: id,
+              scheduled_start: newStart.toISOString(),
+              scheduled_end:   newEnd.toISOString(),
+            },
+          });
+        })
+        .catch((err) => console.error('[shifts.edit] FCM push failed:', err));
+    }
+    return;
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[shifts.edit] error:', err);
+    Sentry.captureException(err, { tags: { route: 'shifts.edit' }, extra: { shift_id: id } });
+    return res.status(500).json({ error: err?.message ?? 'Failed to edit shift' });
+  } finally {
+    client.release();
+  }
+});
+
 // ── Guard-to-guard shift swap (Phase 1a: pre-shift) ─────────────────────────
 //
 // GET /api/shifts/:id/swap-eligible-guards
@@ -2397,7 +2699,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
     }
   }
 
-  const [historyResult, swapResult, geofenceResult] = await Promise.all([
+  const [historyResult, swapResult, geofenceResult, scheduleAuditResult, sessionProbe] = await Promise.all([
     pool.query(
       `SELECT sr.id, sr.created_at, sr.reason,
               sr.reassigned_by_admin_id, sr.reassigned_by_role,
@@ -2436,6 +2738,29 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
       `SELECT polygon_coordinates, center_lat, center_lng, radius_meters
          FROM site_geofence WHERE site_id = $1`,
       [shift.site_id],
+    ),
+    // schema_v58 — admin edits to this shift's scheduled hours. Rendered
+    // alongside reassignment/swap history so an admin sees every change to
+    // the shift in one place. LEFT JOIN company_admins mirrors the
+    // reassignment query above: a 'vishnu' actor has no row there, so
+    // changed_by_name is null and the UI falls back to the role.
+    pool.query(
+      `SELECT sa.id, sa.changed_at, sa.changed_by, sa.changed_by_role,
+              sa.reason, sa.before, sa.after,
+              ca.name AS changed_by_name
+         FROM shift_schedule_audit sa
+         LEFT JOIN company_admins ca ON ca.id = sa.changed_by
+        WHERE sa.shift_id = $1
+        ORDER BY sa.changed_at DESC`,
+      [req.params.id],
+    ),
+    // Session presence — the invariant half of the edit gate. The web UI
+    // must not render an EDIT action for a shift PATCH /api/shifts/:id
+    // would refuse, and status alone is a proxy the cancel docblock above
+    // already documents as unreliable.
+    pool.query(
+      'SELECT 1 FROM shift_sessions WHERE shift_id = $1 LIMIT 1',
+      [req.params.id],
     ),
   ]);
 
@@ -2484,6 +2809,12 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
     hours,
     reassignment_history: historyResult.rows,
     swap_history:         swapResult.rows,
+    schedule_audit:       scheduleAuditResult.rows,
+    // True when ANY session exists on this shift, open or closed. The web
+    // edit gate is (status IN ('scheduled','unassigned') AND !has_session),
+    // matching PATCH /api/shifts/:id exactly so no admin is shown an action
+    // the API will 409.
+    has_session:          (sessionProbe.rowCount ?? 0) > 0,
   });
 });
 
