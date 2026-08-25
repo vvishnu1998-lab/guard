@@ -445,6 +445,182 @@ router.patch('/violations/:id/legal-hold', requireAuth('company_admin', 'vishnu'
   }
 });
 
+// ── PATCH /api/admin/violations/:id/resolve ─────────────────────────────────
+//
+// Closes a geofence violation that no automatic path will ever close.
+//
+// Every other resolver needs either a live guard action (onsite ping, the
+// guard's own PATCH in routes/locations.ts) or a clock-out / auto-close
+// transaction. A row that misses all of them stays open forever, and until
+// f2b6f29 an open row accrued off-post against wall-clock without bound —
+// 0633b82b reported 405 h on a 3.09 h shift and grew an hour every hour.
+// The formula is bounded now and jobs/autoCompleteShifts.ts sweeps the
+// backlog, so this endpoint is the operator's manual lever for anything
+// both of those miss. No UI yet; endpoint only.
+//
+// Auth: company_admin scoped to their company; vishnu bypasses scope —
+// same shape as the legal-hold route above. A violation that does not exist
+// and one that belongs to another tenant both return 404, deliberately
+// indistinguishable.
+//
+// Error bodies use the CODE convention (`error` is a code, `message` is the
+// copy), NOT the prose style of the older legal-hold route beside it —
+// clients must be able to branch without matching sentences.
+//
+// ACTOR RECORD: override_by only. supervisor_override is deliberately left
+// false. It is customer-visible on the analytics violations sheet
+// (routes/exports.ts), where true reads as "a supervisor excused this
+// breach" — which is not what unsticking a stranded row means.
+//
+// override_by carries an FK to company_admins, and the vishnu token's sub is
+// the sentinel 00000000-0000-0000-0000-000000000000 (routes/auth.ts:555),
+// which is NOT a company_admins row. Writing it would raise 23503 on the
+// super-admin path only — invisible until a super-admin used it in prod. So
+// vishnu resolves store NULL and the actor survives in the structured log
+// below, which records the id and role either way.
+router.patch('/violations/:id/resolve', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) {
+    return res.status(400).json({ error: 'INVALID_ID', message: 'violation id must be a uuid' });
+  }
+
+  const isVishnu = req.user!.role === 'vishnu';
+  const actorId  = req.user!.sub;
+  // See the docblock: NULL for vishnu, or the FK rejects the write.
+  const overrideBy = isVishnu ? null : actorId;
+
+  const conn = await pool.connect();
+  try {
+    await conn.query('BEGIN');
+
+    // FOR UPDATE OF gv — without the lock, two concurrent resolves both read
+    // resolved_at IS NULL and the second silently overwrites the first's
+    // timestamp and actor. Locks the violation row only, not the joins.
+    const lookup = isVishnu
+      ? await conn.query<{ legal_hold: boolean; resolved_at: Date | null }>(
+          `SELECT gv.legal_hold, gv.resolved_at
+             FROM geofence_violations gv
+             JOIN shift_sessions ss ON ss.id = gv.shift_session_id
+            WHERE gv.id = $1
+              FOR UPDATE OF gv`,
+          [id],
+        )
+      : await conn.query<{ legal_hold: boolean; resolved_at: Date | null }>(
+          `SELECT gv.legal_hold, gv.resolved_at
+             FROM geofence_violations gv
+             JOIN shift_sessions ss ON ss.id = gv.shift_session_id
+             JOIN sites si          ON si.id = gv.site_id
+            WHERE gv.id = $1 AND si.company_id = $2
+              FOR UPDATE OF gv`,
+          [id, req.user!.company_id],
+        );
+
+    const existing = lookup.rows[0];
+    if (!existing) {
+      await conn.query('ROLLBACK');
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Violation not found' });
+    }
+    if (existing.legal_hold) {
+      await conn.query('ROLLBACK');
+      return res.status(423).json({
+        error:   'LEGAL_HOLD',
+        message: 'This violation is under legal hold and cannot be modified. Release the hold first.',
+      });
+    }
+    if (existing.resolved_at) {
+      await conn.query('ROLLBACK');
+      return res.status(409).json({
+        error:       'ALREADY_RESOLVED',
+        message:     'This violation is already resolved.',
+        resolved_at: existing.resolved_at,
+      });
+    }
+
+    // Resolution rule, identical to the sweep in jobs/autoCompleteShifts.ts:
+    //   open parent session                    → NOW()
+    //   closed, occurred_at >= clocked_out_at  → occurred_at  (zero interval)
+    //   closed, otherwise                      → clocked_out_at
+    // The middle branch is the post-clock-out birth. Resolving those to
+    // clocked_out_at would place resolved_at BEFORE occurred_at and write a
+    // negative duration — the defect already sitting on cf48688b (-3) and
+    // ffce3372 (-1). It matches the correction approved for 0633b82b.
+    // duration_minutes uses the sweep's GREATEST(0, ...) so the two paths
+    // can never disagree about the same row.
+    const updated = await conn.query<{
+      id: string; shift_session_id: string; occurred_at: Date; resolved_at: Date;
+      duration_minutes: number; override_by: string | null;
+      supervisor_override: boolean; branch: string;
+    }>(
+      `UPDATE geofence_violations gv
+          SET resolved_at = CASE
+                WHEN ss.clocked_out_at IS NULL              THEN NOW()
+                WHEN gv.occurred_at >= ss.clocked_out_at    THEN gv.occurred_at
+                ELSE ss.clocked_out_at
+              END,
+              duration_minutes = GREATEST(0, ROUND(EXTRACT(EPOCH FROM (
+                CASE
+                  WHEN ss.clocked_out_at IS NULL           THEN NOW()
+                  WHEN gv.occurred_at >= ss.clocked_out_at THEN gv.occurred_at
+                  ELSE ss.clocked_out_at
+                END - gv.occurred_at
+              )) / 60))::INT,
+              override_by = $2
+         FROM shift_sessions ss
+        WHERE gv.id = $1
+          AND gv.shift_session_id = ss.id
+          AND gv.resolved_at IS NULL
+        RETURNING gv.id, gv.shift_session_id, gv.occurred_at, gv.resolved_at,
+                  gv.duration_minutes, gv.override_by, gv.supervisor_override,
+                  CASE
+                    WHEN ss.clocked_out_at IS NULL           THEN 'now'
+                    WHEN gv.occurred_at >= ss.clocked_out_at THEN 'occurred_at'
+                    ELSE 'clocked_out_at'
+                  END AS branch`,
+      [id, overrideBy],
+    );
+
+    const violation = updated.rows[0];
+    if (!violation) {
+      // Unreachable under the FOR UPDATE lock; treated as a lost race rather
+      // than committing a no-op that reports success.
+      await conn.query('ROLLBACK');
+      return res.status(409).json({
+        error:   'ALREADY_RESOLVED',
+        message: 'This violation is already resolved.',
+      });
+    }
+
+    await conn.query('COMMIT');
+
+    console.info('[admin.violation_resolved]', {
+      violation_id:     violation.id,
+      admin_id:         actorId,
+      actor_role:       req.user!.role,
+      override_by:      violation.override_by,
+      shift_session_id: violation.shift_session_id,
+      branch:           violation.branch,
+    });
+    Sentry.addBreadcrumb({
+      category: 'admin',
+      message:  'geofence violation resolved by admin',
+      level:    'info',
+      data: {
+        violation_id: violation.id,
+        admin_id:     actorId,
+        actor_role:   req.user!.role,
+        branch:       violation.branch,
+      },
+    });
+
+    return res.json({ success: true, violation });
+  } catch (err) {
+    await conn.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    conn.release();
+  }
+});
+
 // ── GET /api/admin/vishnu/legal-holds ───────────────────────────────────────
 //
 // UNION of reports + geofence_violations currently on legal hold, with
