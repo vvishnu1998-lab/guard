@@ -23,6 +23,29 @@ export async function adminFetch(path: string, options?: RequestInit): Promise<R
   });
 }
 
+/**
+ * Error carrying the FULL parsed response body, not just `.error`.
+ *
+ * Some endpoints return structured detail alongside the message — e.g. the
+ * 409 from PATCH /api/shifts/:id includes a `conflict` object naming the
+ * colliding shift so the UI can link straight to it. Throwing a bare
+ * `Error(err.error)` discards that, leaving the admin with a sentence they
+ * cannot act on.
+ *
+ * `message` is unchanged, so every existing `catch (e) { e.message }` caller
+ * keeps working — this only adds.
+ */
+export class ApiError extends Error {
+  status: number;
+  body:   Record<string, unknown>;
+  constructor(message: string, status: number, body: Record<string, unknown>) {
+    super(message);
+    this.name   = 'ApiError';
+    this.status = status;
+    this.body   = body;
+  }
+}
+
 /** Throws if response is not ok, returns parsed JSON. */
 export async function adminGet<T>(path: string): Promise<T> {
   const res = await adminFetch(path);
@@ -46,7 +69,11 @@ export async function adminPatch<T>(path: string, body: unknown): Promise<T> {
   const res = await adminFetch(path, { method: 'PATCH', body: JSON.stringify(body) });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error((err as any).error ?? `Request failed: ${res.status}`);
+    throw new ApiError(
+      (err as any).error ?? `Request failed: ${res.status}`,
+      res.status,
+      err as Record<string, unknown>,
+    );
   }
   return res.json() as Promise<T>;
 }
