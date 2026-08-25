@@ -11,6 +11,7 @@ import { validatePhotoOrQuarantine } from '../services/photoValidation';
 import { sendPushNotification } from '../services/firebase';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
+import { clearScheduleDerivedLatches } from '../services/shiftLatches';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
@@ -586,14 +587,27 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
       });
     }
 
+    // Re-arm the reminder chain for the incoming guard. This used to be an
+    // inline `missed_alert_sent_at = NULL` in the UPDATE below, which was
+    // COMPLETE when it was written at schema_v15 — that was the only latch
+    // that existed. schema_v17 added two more and schema_v37 added three,
+    // neither revisiting this route, so it silently cleared 1 of 6 for two
+    // migrations: a reassigned guard inherited the previous guard's spent
+    // pre-shift, start and late reminders and was never nagged.
+    //
+    // Runs BEFORE the UPDATE so the `RETURNING *` below reflects the
+    // cleared stamps, and shares this txn's client so it lives or dies with
+    // the reassignment and inherits the FOR UPDATE lock taken above.
+    // services/shiftLatches.ts owns the column list — add new latches
+    // there, never here.
+    await clearScheduleDerivedLatches(id, client);
+
     // Atomic update + audit insert. status reset to 'scheduled' covers the
-    // case where the shift was already 'scheduled' with a missed-alert sent
-    // (clearing the timestamp lets the new guard's own no-show re-trigger).
+    // case where the shift was already 'scheduled' with a missed-alert sent.
     const updated = await client.query(
       `UPDATE shifts
           SET guard_id = $1,
-              status   = 'scheduled',
-              missed_alert_sent_at = NULL
+              status   = 'scheduled'
         WHERE id = $2
         RETURNING *`,
       [new_guard_id, id],
