@@ -204,6 +204,56 @@ export async function pushSwapExpiredToRequester(params: {
   );
 }
 
+/**
+ * To the recipient (B) at the halfway point of a pending pre-shift swap's
+ * window. Fired once per request, claimed atomically by
+ * jobs/expireSwapRequests.ts via shift_swap_requests.reminder_sent_at.
+ *
+ * TYPE IS DELIBERATELY REUSED, not new. This carries
+ * `swap_request_received` rather than a `swap_reminder` of its own, and the
+ * reason is cross-tier rather than aesthetic:
+ *
+ *   - Nothing in the DB would stop a new type — notifications.type has no
+ *     CHECK constraint — and VALID_TYPES (routes/notifications.ts:17) gates
+ *     only POST /api/notifications, the mobile self-report route, which no
+ *     server cron goes through.
+ *   - But mobile's navigateForNotification has no case for an unknown type,
+ *     so the switch falls through and THE TAP DOES NOTHING. Its
+ *     VISUAL_BY_TYPE lookup does have a `?? chat` fallback, so the row would
+ *     render — with a chat icon — and then be inert.
+ *   - The API deploys on its own schedule; the mobile half would trail it.
+ *     A server emitting something the client cannot route is precisely the
+ *     cross-tier gap that produced merge bd7e4e2, and the symptom is
+ *     invisible server-side because nothing errors.
+ *
+ * Reusing the invite's own type needs no server union change and no mobile
+ * change, and on the currently shipped bundle it already routes to
+ * /(tabs)/notifications — which is exactly where the accept/decline card
+ * lives. Same history_id, same shift_id, same destination; only the copy
+ * differs, which is what tells the two rows apart in the feed.
+ *
+ * If a distinct type is ever wanted for analytics, it needs the mobile case
+ * shipped FIRST, then the server switched over.
+ */
+export async function pushSwapReminderToRecipient(params: {
+  toGuardId:      string;
+  fromGuardName:  string;
+  siteName:       string;
+  siteTz:         string | null;
+  scheduledStart: Date | string;
+  shiftId:        string;
+  historyId:      string;
+}): Promise<void> {
+  const tz = params.siteTz ?? PACIFIC;
+  const day = fmtDayAt(params.scheduledStart, tz);
+  return fireOne(
+    params.toGuardId,
+    'Swap request still waiting',
+    `${params.fromGuardName} is still waiting on your swap request for ${params.siteName} ${day}.`,
+    { type: 'swap_request_received', shift_id: params.shiftId, history_id: params.historyId },
+  );
+}
+
 // ── Phase 2: mid-shift handoff pushes ────────────────────────────────────
 // Distinct `type` strings from the pre-shift swap helpers so mobile's
 // navigateForNotification can route handoffs to their own cards + flows

@@ -63,7 +63,11 @@
  */
 import cron from 'node-cron';
 import { pool } from '../db/pool';
-import { pushSwapExpiredToRequester, pushHandoffExpiredToRequester } from '../services/swapPush';
+import {
+  pushSwapExpiredToRequester,
+  pushHandoffExpiredToRequester,
+  pushSwapReminderToRecipient,
+} from '../services/swapPush';
 
 /** A is stuck on post while this runs. Deliberately short. */
 export const HANDOFF_EXPIRY_MINUTES = 30;
@@ -159,10 +163,95 @@ export async function runExpireSwapRequestsOnce(): Promise<number> {
   return result.rowCount;
 }
 
+/**
+ * Remind the RECIPIENT once, at the halfway point of a pending pre-shift
+ * swap's window.
+ *
+ * ── PRE-SHIFT ONLY ──────────────────────────────────────────────────────
+ *
+ * guard_handoff rows are excluded. Their window is 30 minutes, so "halfway"
+ * is 15 — close enough to the invite itself that a second push is noise
+ * rather than information — and the handoff family already has its own
+ * follow-up job (jobs/handoffNudge.ts) for the state that actually strands
+ * someone, which is accepted-but-not-arrived.
+ *
+ * ── THE CLAIM IS THE UPDATE ─────────────────────────────────────────────
+ *
+ * This runs every minute and a swap window can be 24 hours, so the same row
+ * is eligible on hundreds of consecutive ticks. The UPDATE stamps
+ * reminder_sent_at and RETURNS only the rows it actually claimed; the push
+ * loop iterates that result. A racing tick sees the stamped value, matches
+ * nothing, and pushes nothing. Read-then-decide would not hold here — that
+ * is the pingReminder bug schema_v57 was written to fix.
+ *
+ * Stamping BEFORE the push (rather than after a successful send) is
+ * deliberate: a push failure must not re-arm the reminder, or a guard whose
+ * token is stale gets one attempt per minute for the rest of the window.
+ * One reminder, delivered or not.
+ *
+ * ── ORDERING ────────────────────────────────────────────────────────────
+ *
+ * Called AFTER the expiry pass in the same tick. Expiry flips anything past
+ * its deadline to 'expired', so by the time this runs the pending pool
+ * contains only live requests and a row can never be reminded in the same
+ * minute it dies.
+ */
+export async function runSwapRemindersOnce(): Promise<number> {
+  const result = await pool.query<{
+    id:              string;
+    shift_id:        string;
+    to_guard_id:     string;
+    from_guard_name: string;
+    site_name:       string;
+    site_tz:         string | null;
+    scheduled_start: Date;
+  }>(
+    // The target table is not visible inside a FROM-list JOIN's ON clause,
+    // so every correlation to ssr lives in WHERE — same shape the expiry
+    // statement above uses for sh.id = ssr.shift_id.
+    `UPDATE shift_swap_requests ssr
+        SET reminder_sent_at = NOW()
+      FROM shifts sh, sites si, guards fg
+      WHERE ssr.status            = 'pending'
+        AND ssr.initiated_by     <> 'guard_handoff'
+        AND ssr.reminder_sent_at IS NULL
+        AND sh.id = ssr.shift_id
+        AND si.id = sh.site_id
+        AND fg.id = ssr.from_guard_id
+        AND NOW() >= ssr.requested_at + ((${SWAP_DEADLINE_SQL}) - ssr.requested_at) / 2
+      RETURNING ssr.id, ssr.shift_id, ssr.to_guard_id,
+                fg.name AS from_guard_name, si.name AS site_name,
+                si.timezone AS site_tz, sh.scheduled_start`,
+  );
+  if (!result.rowCount) return 0;
+
+  for (const row of result.rows) {
+    pushSwapReminderToRecipient({
+      toGuardId:      row.to_guard_id,
+      fromGuardName:  row.from_guard_name,
+      siteName:       row.site_name,
+      siteTz:         row.site_tz,
+      scheduledStart: row.scheduled_start,
+      shiftId:        row.shift_id,
+      historyId:      row.id,
+    }).catch((err) => console.error('[expire-swap] reminder push failed for history', row.id, err));
+  }
+  console.log(`[expire-swap] reminder: ${result.rowCount} pending swap(s) reminded at halfway`);
+  return result.rowCount;
+}
+
 cron.schedule('* * * * *', async () => {
+  // Expiry first — see runSwapRemindersOnce's ORDERING note. Each is
+  // guarded separately so a failure in one does not skip the other; a
+  // reminder outage must not also stop requests expiring.
   try {
     await runExpireSwapRequestsOnce();
   } catch (err) {
     console.error('[expire-swap] tick failed:', err);
+  }
+  try {
+    await runSwapRemindersOnce();
+  } catch (err) {
+    console.error('[expire-swap] reminder tick failed:', err);
   }
 });
