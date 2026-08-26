@@ -110,6 +110,13 @@ app.use(cors({
     return cb(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
+  // Content-Disposition is NOT a CORS-safelisted response header, so without
+  // this the browser cannot read it and the download filename the server
+  // chose is invisible to apps/web. A blob: URL carries no filename of its
+  // own, so the anchor would fall back to the blob UUID. The billing page
+  // parses this header to name the file; everything else about the response
+  // is unchanged.
+  exposedHeaders: ['Content-Disposition'],
 }));
 app.use(globalLimiter);
 app.use(express.json());
