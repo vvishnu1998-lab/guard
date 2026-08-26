@@ -40,6 +40,10 @@ interface Breach {
   guard_name:       string;
   badge_number:     string;
   site_name:        string;
+  /** IANA zone of the site (sites.timezone). Optional so the web can deploy
+   *  ahead of the API: Intl reads an undefined timeZone as "the browser's",
+   *  which is exactly what this page did before the field existed. */
+  site_timezone?:   string;
 }
 
 type SinceFilter  = '24h' | '7d' | '30d';
@@ -63,14 +67,33 @@ function shiftDuration(iso: string): string {
   return `${h}h ${m.toString().padStart(2, '0')}m`;
 }
 
-function fmtBreachTime(iso: string): string {
+/** A breach timestamp as read AT THE SITE. Without an explicit zone this
+ *  rendered in whatever zone the admin's browser happens to be in, so the same
+ *  breach read "17 Aug 22:35" in California and "18 Aug 11:05" in India — the
+ *  row then disagreed with the date filter that selected it.
+ *
+ *  "today"/"yesterday" are calendar words and now compare calendar days at the
+ *  site. The old code bucketed elapsed milliseconds, which labelled a 23:00
+ *  breach "today" when the page was read at 02:00 the next morning. */
+function fmtBreachTime(iso: string, timeZone?: string): string {
   const d = new Date(iso);
-  const now = new Date();
-  const diffDays = Math.floor((now.getTime() - d.getTime()) / 86_400_000);
-  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  if (diffDays === 0) return `${time} today`;
-  if (diffDays === 1) return `${time} yesterday`;
-  return `${d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} ${time}`;
+  const day  = new Intl.DateTimeFormat('en-CA', {   // ISO-ordered: YYYY-MM-DD
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const time = new Intl.DateTimeFormat('en-GB', {
+    timeZone, hour: '2-digit', minute: '2-digit' }).format(d);
+
+  const today = day.format(new Date());
+  // Step back one calendar day on a noon-UTC anchor, so a DST shift on either
+  // side cannot move the date.
+  const anchor = new Date(`${today}T12:00:00Z`);
+  anchor.setUTCDate(anchor.getUTCDate() - 1);
+  const yesterday = anchor.toISOString().slice(0, 10);
+
+  const dayOf = day.format(d);
+  if (dayOf === today)     return `${time} today`;
+  if (dayOf === yesterday) return `${time} yesterday`;
+  return `${new Intl.DateTimeFormat('en-GB', {
+    timeZone, day: '2-digit', month: 'short' }).format(d)} ${time}`;
 }
 
 function fmtDuration(mins: number | null): string {
@@ -505,7 +528,7 @@ export default function LiveMapPage() {
                   } ${highlightedBreachId === b.id ? 'ring-2 ring-amber-400 ring-inset' : ''}`}
                 >
                   <td className="p-4 text-gray-300 text-xs whitespace-nowrap">
-                    {fmtBreachTime(b.occurred_at)}
+                    {fmtBreachTime(b.occurred_at, b.site_timezone)}
                   </td>
                   <td className="p-4">
                     <p className="text-gray-200 text-sm">{b.guard_name}</p>

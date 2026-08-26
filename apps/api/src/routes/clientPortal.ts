@@ -258,7 +258,8 @@ router.get('/violations', requireAuth('client'), async (req: Request, res: Respo
             gv.resolved_at,
             gv.duration_minutes,
             (gv.resolved_at IS NOT NULL) AS is_resolved,
-            g.name AS guard_name,
+            g.name      AS guard_name,
+            s.timezone  AS site_timezone,
             COUNT(*) OVER() AS total_count
        FROM geofence_violations gv
        JOIN guards g ON g.id = gv.guard_id

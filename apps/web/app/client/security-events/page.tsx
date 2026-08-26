@@ -14,6 +14,10 @@ interface Violation {
   duration_minutes: number | null;
   is_resolved:      boolean;
   guard_name:       string;
+  /** IANA zone of the site (sites.timezone). Optional so the web can deploy
+   *  ahead of the API: Intl reads an undefined timeZone as "the browser's",
+   *  which is exactly what this page did before the field existed. */
+  site_timezone?:   string;
 }
 
 interface Resp {
@@ -137,7 +141,11 @@ export default function SecurityEventsPage() {
                 {rows.map((v) => (
                   <tr key={v.id} className="border-b border-[#1A3050] last:border-b-0 hover:bg-[#0B1526] transition-colors">
                     <td className="p-4 text-gray-300 text-xs font-mono whitespace-nowrap">
+                      {/* Read AT THE SITE, not in the viewer's zone: a client
+                          admin abroad was otherwise shown a date that
+                          disagreed with the range that selected the row. */}
                       {new Date(v.occurred_at).toLocaleString('en-GB', {
+                        timeZone: v.site_timezone,
                         day: '2-digit', month: 'short', year: 'numeric',
                         hour: '2-digit', minute: '2-digit',
                       })}

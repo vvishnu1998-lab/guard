@@ -1056,7 +1056,8 @@ router.get('/violations', requireAuth('company_admin', 'vishnu'), async (req, re
             (gv.resolved_at IS NOT NULL) AS is_resolved,
             g.name         AS guard_name,
             g.badge_number,
-            s.name         AS site_name
+            s.name         AS site_name,
+            s.timezone     AS site_timezone
      FROM geofence_violations gv
      JOIN sites  s ON s.id = gv.site_id
      JOIN guards g ON g.id = gv.guard_id
