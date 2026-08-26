@@ -56,6 +56,7 @@ import { useUnreadStore } from '../../store/unreadStore';
 import { visibleNotifications, groupNotifications } from '../../lib/notificationSections';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
+import { NOTIFY_SUPERVISOR } from '../../lib/copy';
 
 type NotificationType =
   | 'ping_reminder'
@@ -311,7 +312,8 @@ export default function NotificationsScreen() {
       Alert.alert(
         'Accept handoff?',
         `You'll need to travel to ${req.site_name} and clock in when you arrive. ` +
-        `${req.from_guard_name ?? 'They'} will stay on shift until then.`,
+        `${req.from_guard_name ?? 'They'} will stay on shift until then.\n\n` +
+        NOTIFY_SUPERVISOR,
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Accept', style: 'default', onPress: () => performRespond(req, true, isHandoff) },
@@ -343,6 +345,11 @@ export default function NotificationsScreen() {
       await fetchInbound();
       refresh();
 
+      // Accepting is the moment the roster actually moves, and no admin is
+      // told: the FYI email fires on accept for the ADMIN's benefit, but
+      // nothing routes back to whoever is running the post. So the acceptor
+      // gets the same instruction the requester got when they sent it.
+      //
       // Navigation diverges by kind and this is not cosmetic. A pre-shift
       // accept rotates shifts.guard_id server-side (shifts.ts:1766), so the
       // shift is genuinely the guard's and /shifts/{id} resolves. A handoff
@@ -350,8 +357,20 @@ export default function NotificationsScreen() {
       // handoff clock-in txn — so pushing there would land on the exact 404
       // this change exists to fix. Stay on the list; the row re-renders as
       // the arrival card.
-      if (accept && !isHandoff) {
-        router.push(`/shifts/${req.shift_id}`);
+      //
+      // The push is deferred into the OK handler so the confirmation is read
+      // before the screen changes underneath it. cancelable:false so a
+      // stray tap outside cannot skip both the copy and the navigation.
+      if (accept) {
+        Alert.alert(
+          "You've accepted",
+          NOTIFY_SUPERVISOR,
+          [{
+            text: 'OK',
+            onPress: () => { if (!isHandoff) router.push(`/shifts/${req.shift_id}`); },
+          }],
+          { cancelable: false },
+        );
       }
     } catch (err: any) {
       Sentry.captureException(err, {

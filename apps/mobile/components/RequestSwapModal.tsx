@@ -18,6 +18,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
 import { guardMessage } from '../lib/errorCopy';
+import { NOTIFY_SUPERVISOR } from '../lib/copy';
 
 interface EligibleGuard {
   guard_id:     string;
@@ -96,7 +97,20 @@ export default function RequestSwapModal(props: Props) {
         to_guard_id: selected,
         reason:      reason.trim() || undefined,
       });
-      props.onSubmitted();
+      // This flow had NO success surface at all — it closed straight back to
+      // the shift screen, which reads identically to a tap that did nothing.
+      // The confirmation now also carries the supervisor line, because the
+      // request itself notifies no admin: the FYI email fires only on accept.
+      //
+      // onSubmitted is deferred to the OK handler so the modal is still up
+      // behind the dialog; cancelable:false because dismissing without OK
+      // would strand the modal open with the request already sent.
+      Alert.alert(
+        'Request sent',
+        NOTIFY_SUPERVISOR,
+        [{ text: 'OK', onPress: () => props.onSubmitted() }],
+        { cancelable: false },
+      );
     } catch (err: any) {
       Alert.alert('Could not send request', guardMessage(err, 'Could not send the swap request. Try again.', 'swap-modal.send'));
     } finally {

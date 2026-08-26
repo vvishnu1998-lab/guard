@@ -24,6 +24,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
 import { guardMessage } from '../lib/errorCopy';
+import { NOTIFY_SUPERVISOR } from '../lib/copy';
 
 interface EligibleGuard {
   guard_id:     string;
@@ -42,7 +43,16 @@ interface Props {
 }
 
 const REASON_MAX = 200;
-const WAITING_HOLD_MS = 1500;
+/**
+ * How long the "Waiting for X to respond…" screen holds before the modal
+ * dismisses itself.
+ *
+ * Raised 1500 -> 3000 when the supervisor-notify line was added beneath it.
+ * 1.5s is a beat — long enough to register that the send succeeded, not long
+ * enough to READ a second sentence. Shipping an instruction that dismisses
+ * before it can be read is the same as not shipping it.
+ */
+const WAITING_HOLD_MS = 3000;
 
 function fmtInTz(iso: string, tz: string | null, opts: Intl.DateTimeFormatOptions): string {
   return new Intl.DateTimeFormat('en-GB', { ...opts, timeZone: tz ?? undefined }).format(new Date(iso));
@@ -180,6 +190,10 @@ export default function HandoffRequestModal(props: Props) {
             <View style={styles.center}>
               <ActivityIndicator color={Colors.warning} size="large" />
               <Text style={styles.waitingText}>Waiting for {waiting} to respond…</Text>
+              {/* The request notifies no admin — the FYI email fires only on
+                  accept — so the roster has changed in the app and nowhere
+                  else until someone answers. */}
+              <Text style={styles.waitingSupervisor}>{NOTIFY_SUPERVISOR}</Text>
             </View>
           ) : error ? (
             <View style={styles.center}>
@@ -425,6 +439,13 @@ const styles = StyleSheet.create({
 
   center: { alignItems: 'center', justifyContent: 'center', padding: Spacing.xl, gap: Spacing.md },
   waitingText: { color: Colors.textPrimary, fontSize: 15, textAlign: 'center' },
+  waitingSupervisor: {
+    color: Colors.warning,
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: Spacing.sm,
+    lineHeight: 18,
+  },
   errorText: { color: Colors.textPrimary, fontSize: 14, textAlign: 'center' },
   emptyText: { color: Colors.textPrimary, fontSize: 16, marginBottom: Spacing.xs },
   emptySub:  { color: Colors.muted, fontSize: 13, textAlign: 'center' },
