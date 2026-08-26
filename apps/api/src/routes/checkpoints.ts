@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
+import { siteLocalDayRange } from '../services/dateRange';
 import { validateAtCheckpoint } from '../services/geofence';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
@@ -231,16 +232,37 @@ router.get('/scans', requireAuth('company_admin'), async (req, res) => {
   );
   if (!siteCheck.rows[0]) return res.status(404).json({ error: 'Site not found' });
 
+  // Bounds are built from the RAW params, not the parsed Dates: a bare
+  // 'YYYY-MM-DD' must mean a whole day at the SITE, and parsing it into a JS
+  // Date has already flattened it to UTC midnight. The Dates above stay for
+  // validation only (NaN, ordering, the 92-day cap), where a seven-hour
+  // difference at the edges is immaterial.
+  //
+  // The site-detail page sends bare dates and is the ONLY caller — grepped
+  // across apps/web and apps/mobile. Instant support is kept anyway via the
+  // shared builder's bare-date-vs-T rule, so the absent-param defaults below
+  // (which are instants) and any future caller both keep working.
+  const args: unknown[] = [site_id];
+  const rangeClauses = siteLocalDayRange({
+    column: 'cs.scanned_at',
+    siteAlias: 's',
+    from: from !== undefined ? String(from) : fromDate.toISOString(),
+    to:   to   !== undefined ? String(to)   : toDate.toISOString(),
+    args,
+  });
+
   const CAP = 1000;
   const result = await pool.query(
     `SELECT cs.*, sc.label AS checkpoint_label, g.name AS guard_name
      FROM checkpoint_scans cs
      JOIN site_checkpoints sc ON sc.id = cs.checkpoint_id
      JOIN guards g ON g.id = cs.guard_id
-     WHERE cs.site_id = $1 AND cs.scanned_at >= $2 AND cs.scanned_at <= $3
+     JOIN sites  s ON s.id = cs.site_id
+     WHERE cs.site_id = $1
+       ${rangeClauses.join(' ')}
      ORDER BY cs.scanned_at DESC
      LIMIT ${CAP + 1}`,
-    [site_id, fromDate.toISOString(), toDate.toISOString()]
+    args
   );
 
   const truncated = result.rows.length > CAP;

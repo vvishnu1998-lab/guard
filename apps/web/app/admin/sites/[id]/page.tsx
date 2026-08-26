@@ -178,19 +178,28 @@ function makeRoundLabeller(timeZone: string) {
   };
 }
 
-/** YYYY-MM-DD for <input type="date">, offset by `days` from today. */
-function dateInputValue(daysAgo: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - daysAgo);
-  return d.toISOString().slice(0, 10);
+/** An instant -> YYYY-MM-DD **at the site**. `toISOString().slice(0, 10)` — what
+ *  this did — answers in UTC, and UTC is already the next calendar day through
+ *  most of the evening anywhere west of Greenwich: at 5pm Pacific it reads as
+ *  tomorrow, so the "24 HOURS" chip asked the server for a day that had not
+ *  happened yet. en-CA is the ISO-ordered locale, hence YYYY-MM-DD. */
+function isoDate(d: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(d);
 }
 
 const MAX_RANGE_DAYS = 92;
 
-/** Date -> YYYY-MM-DD, same UTC-slice convention dateInputValue() already uses
- *  so a preset and a typed date are directly comparable. */
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+/** YYYY-MM-DD for <input type="date">, `daysAgo` calendar days before today
+ *  **at the site**. The step back runs on a synthetic noon-UTC anchor built
+ *  from the site's own calendar day: noon sits far enough from midnight that a
+ *  DST shift on either side cannot move the date, so the slice below is plain
+ *  arithmetic on a date rather than a conversion of a real instant. */
+function dateInputValue(daysAgo: number, timeZone: string): string {
+  const anchor = new Date(`${isoDate(new Date(), timeZone)}T12:00:00Z`);
+  anchor.setUTCDate(anchor.getUTCDate() - daysAgo);
+  return anchor.toISOString().slice(0, 10);
 }
 
 /** Preset chip styling; active chip uses the same amber the tab bar does. */
@@ -448,7 +457,14 @@ function SiteDetailPageInner() {
   // changes, and — because tabHref() clones every param — carries the range
   // across a tab switch by construction rather than by the client component
   // happening not to remount.
-  const rangeDefaults = useMemo(() => ({ from: dateInputValue(7), to: dateInputValue(0) }), []);
+  // Same fallback zone the scan-timestamp formatter below uses, so the first
+  // render (site still null) is consistent; when `site` lands the defaults
+  // re-anchor to its real zone and the effect below refetches the right days.
+  const siteTz = site?.timezone ?? 'America/Los_Angeles';
+  const rangeDefaults = useMemo(
+    () => ({ from: dateInputValue(7, siteTz), to: dateInputValue(0, siteTz) }),
+    [siteTz],
+  );
   const scanFrom = searchParams?.get('from') || rangeDefaults.from;
   const scanTo   = searchParams?.get('to')   || rangeDefaults.to;
   const fGuard      = searchParams?.get('guard') ?? '';
@@ -637,11 +653,13 @@ function SiteDetailPageInner() {
     (async () => {
       setScansLoading(true);
       try {
-        // Whole-day bounds: FROM at 00:00 UTC, TO at end of day.
-        const fromIso = `${scanFrom}T00:00:00.000Z`;
-        const toIso   = `${scanTo}T23:59:59.999Z`;
+        // Bare YYYY-MM-DD, deliberately: the server anchors each bound to a
+        // whole day in the SITE's timezone (siteLocalDayRange). Pinning them
+        // here as 00:00:00.000Z/23:59:59.999Z — what this did — asked for a UTC
+        // day, which at a Pacific site opens at 5pm the previous afternoon and
+        // so dragged the prior evening's scans into the range.
         const data = await adminGet<{ scans: CheckpointScan[]; truncated: boolean }>(
-          `/api/checkpoints/scans?site_id=${siteId}&from=${fromIso}&to=${toIso}`,
+          `/api/checkpoints/scans?site_id=${siteId}&from=${scanFrom}&to=${scanTo}`,
         );
         if (cancelled) return;
         setScans(data.scans);
@@ -1527,29 +1545,30 @@ function SiteDetailPageInner() {
 
         {/* Range presets. Every one writes searchParams — a range is a link.
             The custom FROM/TO pair below is retained and stays authoritative;
-            a preset just fills it in. Bounds are whole days (the request is
-            built as FROM 00:00Z -> TO 23:59:59Z), so "24 HOURS" means
-            yesterday and today rather than a rolling 24h — day-granular inputs
-            cannot express the latter, and widening them is not this commit. */}
+            a preset just fills it in. Bounds are whole days *at the site* (the
+            request sends bare dates and the server anchors them), so "24 HOURS"
+            means yesterday and today rather than a rolling 24h — day-granular
+            inputs cannot express the latter, and widening them is not this
+            commit. */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <span className="text-gray-500 text-xs tracking-widest mr-1">RANGE</span>
           {lastShift && (
             <button
               onClick={() => setParams({
-                from: isoDate(new Date(lastShift.scheduled_start)),
-                to:   isoDate(new Date(lastShift.scheduled_end)),
+                from: isoDate(new Date(lastShift.scheduled_start), siteTz),
+                to:   isoDate(new Date(lastShift.scheduled_end),   siteTz),
               })}
               className={presetCls(
-                scanFrom === isoDate(new Date(lastShift.scheduled_start)) &&
-                scanTo   === isoDate(new Date(lastShift.scheduled_end)),
+                scanFrom === isoDate(new Date(lastShift.scheduled_start), siteTz) &&
+                scanTo   === isoDate(new Date(lastShift.scheduled_end),   siteTz),
               )}
             >
               LAST SHIFT
             </button>
           )}
           {([[1, '24 HOURS'], [7, '7 DAYS'], [30, '30 DAYS']] as const).map(([days, label]) => {
-            const from = dateInputValue(days);
-            const to   = dateInputValue(0);
+            const from = dateInputValue(days, siteTz);
+            const to   = dateInputValue(0,    siteTz);
             return (
               <button
                 key={days}
