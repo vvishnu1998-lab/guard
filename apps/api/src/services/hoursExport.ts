@@ -127,7 +127,10 @@ export interface HoursAggregate {
 }
 
 export interface HoursExportDataset {
-  company_id:  string;
+  company_id:    string;
+  company_name:  string;
+  /** Filename-safe tenant identity — see slugify(). */
+  company_slug:  string;
   start_date:  string | null;
   end_date:    string | null;
   rows:        HoursExportRow[];
@@ -143,6 +146,17 @@ export interface HoursExportParams {
   end_date?:   string;
   site_id?:    string;
   guard_id?:   string;
+}
+
+/**
+ * Filename-safe tenant slug: lowercase, every non-alphanumeric run collapsed
+ * to a single '-', trimmed. Exists because the monthly S3 archive writes
+ * netraops-hours-{slug}-{YYYY-MM}.xlsx — before that every tenant's monthly
+ * file was named 2026-07.xlsx and the tenant lived only in the S3 key path,
+ * so four tenants' downloads collided on one local filename.
+ */
+export function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
@@ -191,6 +205,14 @@ export async function buildHoursExport(
   if (end_date)   { args.push(end_date);   clauses.push(`AND ss.clocked_in_at <  (($${args.length}::date + INTERVAL '1 day') AT TIME ZONE s.timezone)`); }
   if (site_id)    { args.push(site_id);    clauses.push(`AND s.id = $${args.length}`); }
   if (guard_id)   { args.push(guard_id);   clauses.push(`AND g.id = $${args.length}`); }
+
+  // Looked up independently of the rows: a real tenant with no sessions in
+  // the month still needs a correctly-named file, and an empty row set
+  // carries no company name to derive one from.
+  const companyRow = await pool.query<{ name: string }>(
+    'SELECT name FROM companies WHERE id = $1', [company_id],
+  );
+  const company_name = companyRow.rows[0]?.name ?? 'unknown';
 
   const result = await pool.query<RawRow>(`
     SELECT
@@ -331,6 +353,8 @@ export async function buildHoursExport(
 
   return {
     company_id,
+    company_name,
+    company_slug: slugify(company_name),
     start_date: start_date ?? null,
     end_date:   end_date   ?? null,
     rows, by_guard, by_site, by_guard_site, overall,

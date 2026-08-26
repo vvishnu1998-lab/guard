@@ -1,6 +1,8 @@
 {
   "star-guard": {
     "company_id": "b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee",
+    "company_name": "Star Guard",
+    "company_slug": "star-guard",
     "start_date": "2026-07-01",
     "end_date": "2026-08-23",
     "rows": [
@@ -1546,6 +1548,8 @@
   },
   "starnet-security": {
     "company_id": "27c4d404-8769-49ca-bfd6-93cb9b890067",
+    "company_name": "STARNET SECURITY",
+    "company_slug": "starnet-security",
     "start_date": "2026-07-01",
     "end_date": "2026-08-23",
     "rows": [

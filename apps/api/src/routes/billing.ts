@@ -31,9 +31,9 @@ router.get('/hours-export', requireAuth('company_admin', 'vishnu'), async (req, 
 
   const sd = start_date ?? 'all';
   const ed = end_date   ?? 'all';
-  const fileName = `netra-hours-${sd}-to-${ed}.xlsx`;
+  const fileName = `netraops-hours-${data.company_slug}-${sd}-to-${ed}.xlsx`;
 
-  const buf = workbookToBuffer(buildHoursWorkbook(data));
+  const buf = await workbookToBuffer(buildHoursWorkbook(data));
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
@@ -82,7 +82,7 @@ router.post('/hours-export/schedule', requireAuth('company_admin', 'vishnu'), as
   const data = await buildHoursExport({ company_id: companyId, start_date: monthStart, end_date: monthEnd });
 
   const fileName = `netra-hours-${monthStart}-to-${monthEnd}.xlsx`;
-  const buf = workbookToBuffer(buildHoursWorkbook(data));
+  const buf = await workbookToBuffer(buildHoursWorkbook(data));
 
   const key = `monthly-reports/${companyId}/${year}-${String(month).padStart(2, '0')}.xlsx`;
   const s3Url = await uploadBufferToS3(key, buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

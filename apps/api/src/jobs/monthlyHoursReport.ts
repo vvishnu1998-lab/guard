@@ -63,8 +63,14 @@ cron.schedule('0 12 1 * *', async () => {
         end_date:   monthEnd,
       });
 
-      const buf = workbookToBuffer(buildHoursWorkbook(data));
-      const key = `monthly-reports/${companyId}/${year}-${String(month).padStart(2, '0')}.xlsx`;
+      const buf = await workbookToBuffer(buildHoursWorkbook(data));
+      // The KEY PREFIX keeps its shape (monthly-reports/{companyId}/) so the
+      // existing rows in monthly_hours_reports stay resolvable. The BASENAME
+      // gains the tenant slug: every tenant's file used to be named
+      // {YYYY-MM}.xlsx, so four tenants' downloads collided on one local
+      // filename and the tenant lived only in the key path, invisible to
+      // whoever opened the file.
+      const key = `monthly-reports/${companyId}/netraops-hours-${data.company_slug}-${year}-${String(month).padStart(2, '0')}.xlsx`;
       const s3Url = await uploadBufferToS3(key, buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 
       await pool.query(
