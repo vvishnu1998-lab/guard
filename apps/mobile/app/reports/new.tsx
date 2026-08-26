@@ -35,12 +35,15 @@ import { guardMessage } from '../../lib/errorCopy';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
 
-// P2 UX bundle 2026-07-10 — lowered from 75 → 25. Field feedback:
-// guards were getting stranded on the write-more-then-enhance loop for
-// short, valid observations (e.g. "vehicle parked in fire lane, plate
-// 8XY123, informed driver"). 25 gives the model enough substrate to
-// enhance without gatekeeping legitimate short reports.
-const MIN_ENHANCE_WORDS = 25;
+// Threshold history: 75 → 25 (P2 UX bundle 2026-07-10) → 10 (2026-08-26).
+// The 2026-07-10 drop came from field feedback: guards were stranded on the
+// write-more-then-enhance loop for short, valid observations (e.g. "vehicle
+// parked in fire lane, plate 8XY123, informed driver"). 25 still gatekept
+// most of those, so the floor now sits at 10 — enough substrate for the
+// model to work with, without turning a one-line observation into a chore.
+// The server's own floor is 10 CHARACTERS, not words (routes/ai.ts:82), so
+// it never binds at this threshold.
+const MIN_ENHANCE_WORDS = 10;
 function countWords(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
