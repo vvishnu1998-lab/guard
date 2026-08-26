@@ -36,7 +36,7 @@ export default function BillingPage() {
   const [endDate,    setEndDate]    = useState('');
   const [siteFilter, setSiteFilter] = useState('');
   const [guardFilter,setGuardFilter] = useState('');
-  const [exporting,  setExporting]  = useState(false);
+  const [exporting,  setExporting]  = useState<'overall' | 'guard' | 'site' | null>(null);
   const [exportError,setExportError] = useState('');
 
   const load = useCallback(async () => {
@@ -56,14 +56,43 @@ export default function BillingPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  async function exportExcel() {
-    setExporting(true); setExportError('');
+  /**
+   * The server names the file. Content-Disposition carries the tenant slug and
+   * the real end date for an open range, both of which the client cannot
+   * derive — so the page must not invent a name.
+   *
+   * A blob: URL has no filename of its own, so the anchor's download attribute
+   * is what the browser saves as. That means the header has to be READ and
+   * copied across; letting the anchor "inherit" it is not a thing. The header
+   * is only readable because the API sends
+   * Access-Control-Expose-Headers: Content-Disposition (7c7cace) — this fetch
+   * is cross-origin, Vercel to Railway, and Content-Disposition is not
+   * CORS-safelisted.
+   */
+  function filenameFromDisposition(header: string | null): string | null {
+    if (!header) return null;
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header);
+    if (encoded) { try { return decodeURIComponent(encoded[1]); } catch { /* fall through */ } }
+    const plain = /filename="?([^";]+)"?/i.exec(header);
+    return plain ? plain[1].trim() : null;
+  }
+
+  type Scope = 'overall' | 'guard' | 'site';
+
+  async function exportExcel(scope: Scope) {
+    setExporting(scope); setExportError('');
     try {
       const params = new URLSearchParams();
-      if (startDate)  params.set('start_date', startDate);
-      if (endDate)    params.set('end_date',   endDate);
-      if (siteFilter) params.set('site_id',    siteFilter);
-      if (guardFilter)params.set('guard_id',   guardFilter);
+      if (startDate) params.set('start_date', startDate);
+      if (endDate)   params.set('end_date',   endDate);
+      if (scope === 'guard') {
+        if (!guardFilter) throw new Error('Choose a guard first.');
+        params.set('guard_id', guardFilter);
+      }
+      if (scope === 'site') {
+        if (!siteFilter) throw new Error('Choose a site first.');
+        params.set('site_id', siteFilter);
+      }
 
       const res = await fetch(`${API}/api/billing/hours-export?${params.toString()}`, {
         headers: { Authorization: `Bearer ${getAdminToken()}` },
@@ -73,24 +102,26 @@ export default function BillingPage() {
         throw new Error((err as any).error ?? `Export failed: ${res.status}`);
       }
 
-      // Trigger browser download
+      const serverName = filenameFromDisposition(res.headers.get('content-disposition'));
       const blob = await res.blob();
-      const sd = startDate || 'all';
-      const ed = endDate   || 'all';
-      const url = URL.createObjectURL(blob);
-      const a   = document.createElement('a');
-      a.href     = url;
-      a.download = `netra-hours-${sd}-to-${ed}.xlsx`;
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url;
+      // Only set a name if the server gave one. Left unset the browser saves
+      // the blob UUID, so a missing header is worth surfacing rather than
+      // papering over with a guess that contradicts the file's own title.
+      if (serverName) a.download = serverName;
+      else console.warn('[billing] no Content-Disposition filename on the export response');
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: any) { setExportError(e.message); }
-    finally { setExporting(false); }
+    finally { setExporting(null); }
   }
 
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold tracking-widest text-amber-400">BILLING</h1>
+        <h1 className="text-3xl font-bold tracking-widest text-[#C9A84C]">BILLING</h1>
       </div>
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
@@ -106,50 +137,84 @@ export default function BillingPage() {
           <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-4">{exportError}</div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        {/* Date range — applies to all three exports below. */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
           <div>
-            <label className="block text-gray-500 text-xs tracking-widest mb-1">START DATE</label>
+            <label htmlFor="start-date" className="block text-gray-500 text-xs tracking-widest mb-1">START DATE</label>
             <input
-              type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)}
-              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+              id="start-date" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)}
+              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-[#00C8FF]"
             />
           </div>
           <div>
-            <label className="block text-gray-500 text-xs tracking-widest mb-1">END DATE</label>
+            <label htmlFor="end-date" className="block text-gray-500 text-xs tracking-widest mb-1">END DATE</label>
             <input
-              type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)}
-              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+              id="end-date" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)}
+              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-[#00C8FF]"
             />
-          </div>
-          <div>
-            <label className="block text-gray-500 text-xs tracking-widest mb-1">SITE</label>
-            <select
-              value={siteFilter} onChange={(e) => setSiteFilter(e.target.value)}
-              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-            >
-              <option value="">All Sites</option>
-              {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-gray-500 text-xs tracking-widest mb-1">GUARD</label>
-            <select
-              value={guardFilter} onChange={(e) => setGuardFilter(e.target.value)}
-              className="w-full bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
-            >
-              <option value="">All Guards</option>
-              {guards.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-            </select>
           </div>
         </div>
+        <p className="text-gray-600 text-xs mb-5">
+          Leave END DATE empty for an open range — the report runs to today and says so.
+        </p>
 
-        <button
-          onClick={exportExcel}
-          disabled={exporting || loading}
-          className="bg-amber-400 text-gray-900 font-bold tracking-widest text-sm px-6 py-2.5 rounded-lg hover:bg-amber-300 disabled:opacity-40 transition-colors"
-        >
-          {exporting ? 'GENERATING…' : '⬇ EXPORT EXCEL'}
-        </button>
+        {/* Three scoped exports. Each is its own control so the scope of the
+            file is chosen deliberately, rather than inferred from whichever
+            filters happen to be set. */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* Overall */}
+          <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 flex flex-col">
+            <h3 className="text-[#C9A84C] font-bold tracking-widest text-xs mb-1">OVERALL</h3>
+            <p className="text-gray-500 text-xs mb-4 flex-1">Every guard and every site in the range.</p>
+            <button
+              onClick={() => exportExcel('overall')}
+              disabled={exporting !== null || loading}
+              className="w-full bg-[#00C8FF] text-[#0B1526] font-bold tracking-widest text-sm px-4 py-2.5 rounded-lg hover:bg-[#33D4FF] disabled:opacity-40 transition-colors"
+            >
+              {exporting === 'overall' ? 'GENERATING…' : '⬇ EXPORT'}
+            </button>
+          </div>
+
+          {/* Per guard */}
+          <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 flex flex-col">
+            <h3 className="text-[#C9A84C] font-bold tracking-widest text-xs mb-1">PER GUARD</h3>
+            <label htmlFor="guard-select" className="sr-only">Guard</label>
+            <select
+              id="guard-select" value={guardFilter} onChange={(e) => setGuardFilter(e.target.value)}
+              className="w-full bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm mb-4 focus:outline-none focus:border-[#00C8FF]"
+            >
+              <option value="">Choose a guard…</option>
+              {guards.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+            <button
+              onClick={() => exportExcel('guard')}
+              disabled={exporting !== null || loading || !guardFilter}
+              className="w-full bg-[#00C8FF] text-[#0B1526] font-bold tracking-widest text-sm px-4 py-2.5 rounded-lg hover:bg-[#33D4FF] disabled:opacity-40 transition-colors"
+            >
+              {exporting === 'guard' ? 'GENERATING…' : '⬇ EXPORT'}
+            </button>
+          </div>
+
+          {/* Per site */}
+          <div className="bg-[#0B1526] border border-[#1A3050] rounded-lg p-4 flex flex-col">
+            <h3 className="text-[#C9A84C] font-bold tracking-widest text-xs mb-1">PER SITE</h3>
+            <label htmlFor="site-select" className="sr-only">Site</label>
+            <select
+              id="site-select" value={siteFilter} onChange={(e) => setSiteFilter(e.target.value)}
+              className="w-full bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm mb-4 focus:outline-none focus:border-[#00C8FF]"
+            >
+              <option value="">Choose a site…</option>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <button
+              onClick={() => exportExcel('site')}
+              disabled={exporting !== null || loading || !siteFilter}
+              className="w-full bg-[#00C8FF] text-[#0B1526] font-bold tracking-widest text-sm px-4 py-2.5 rounded-lg hover:bg-[#33D4FF] disabled:opacity-40 transition-colors"
+            >
+              {exporting === 'site' ? 'GENERATING…' : '⬇ EXPORT'}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* ── Section 2: Monthly Reports ────────────────────────────── */}
@@ -190,7 +255,7 @@ export default function BillingPage() {
                         href={r.s3_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-block bg-[#0B1526] border border-[#1A3050] text-amber-400 text-xs tracking-widest px-3 py-1.5 rounded hover:border-amber-400 transition-colors"
+                        className="inline-block bg-[#0B1526] border border-[#1A3050] text-[#00C8FF] text-xs tracking-widest px-3 py-1.5 rounded hover:border-[#00C8FF] transition-colors"
                       >
                         ⬇ DOWNLOAD
                       </a>
