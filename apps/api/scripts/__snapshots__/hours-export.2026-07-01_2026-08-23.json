@@ -1066,7 +1066,7 @@
         "variance_hours": -0.2,
         "coverage_pct": 98.3,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "2945918a-d8bd-4309-9a39-30abeee836e7",
@@ -1084,7 +1084,7 @@
         "variance_hours": 0.11,
         "coverage_pct": 100.6,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "9a92092e-b393-4003-9f7e-8c7b607a5d9b",
@@ -1102,7 +1102,7 @@
         "variance_hours": -25.74,
         "coverage_pct": 82.1,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 12
       },
       {
         "guard_id": "b64c2f72-ed1e-4a84-b6fe-8c1962cf2d3e",
@@ -1120,7 +1120,7 @@
         "variance_hours": 0.06,
         "coverage_pct": 106,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "47ade438-b80b-4029-b5fe-a50d48e0481c",
@@ -1138,9 +1138,7 @@
         "variance_hours": -1.94,
         "coverage_pct": 3,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 1
       },
       {
         "guard_id": "e8274964-c274-4fde-ad4d-82bb1e128bc2",
@@ -1158,9 +1156,7 @@
         "variance_hours": -8.53,
         "coverage_pct": 79.4,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 4
       }
     ],
     "by_site": [
@@ -1180,9 +1176,7 @@
         "variance_hours": -4.73,
         "coverage_pct": 72.2,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 1
       },
       {
         "guard_id": null,
@@ -1200,7 +1194,7 @@
         "variance_hours": 0.11,
         "coverage_pct": 100.6,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": null,
@@ -1218,9 +1212,7 @@
         "variance_hours": -7.91,
         "coverage_pct": 58.9,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 7
       },
       {
         "guard_id": null,
@@ -1238,7 +1230,7 @@
         "variance_hours": -13.23,
         "coverage_pct": 89.2,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 4
       },
       {
         "guard_id": null,
@@ -1256,7 +1248,7 @@
         "variance_hours": -5.03,
         "coverage_pct": 80.7,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 1
       },
       {
         "guard_id": null,
@@ -1274,9 +1266,7 @@
         "variance_hours": -1.94,
         "coverage_pct": 3,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 1
       },
       {
         "guard_id": null,
@@ -1294,9 +1284,7 @@
         "variance_hours": -3.51,
         "coverage_pct": 74.8,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 3
       }
     ],
     "by_guard_site": [
@@ -1316,7 +1304,7 @@
         "variance_hours": -0.2,
         "coverage_pct": 98.3,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "2945918a-d8bd-4309-9a39-30abeee836e7",
@@ -1334,7 +1322,7 @@
         "variance_hours": 0.11,
         "coverage_pct": 100.6,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "9a92092e-b393-4003-9f7e-8c7b607a5d9b",
@@ -1352,9 +1340,7 @@
         "variance_hours": -4.53,
         "coverage_pct": 9.4,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 1
       },
       {
         "guard_id": "9a92092e-b393-4003-9f7e-8c7b607a5d9b",
@@ -1372,9 +1358,7 @@
         "variance_hours": -4.21,
         "coverage_pct": 62.6,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 4
       },
       {
         "guard_id": "9a92092e-b393-4003-9f7e-8c7b607a5d9b",
@@ -1392,7 +1376,7 @@
         "variance_hours": -13.48,
         "coverage_pct": 88.3,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 4
       },
       {
         "guard_id": "9a92092e-b393-4003-9f7e-8c7b607a5d9b",
@@ -1410,9 +1394,7 @@
         "variance_hours": -3.52,
         "coverage_pct": 70.5,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 3
       },
       {
         "guard_id": "b64c2f72-ed1e-4a84-b6fe-8c1962cf2d3e",
@@ -1430,7 +1412,7 @@
         "variance_hours": 0.06,
         "coverage_pct": 106,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "47ade438-b80b-4029-b5fe-a50d48e0481c",
@@ -1448,9 +1430,7 @@
         "variance_hours": -1.94,
         "coverage_pct": 3,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 1
       },
       {
         "guard_id": "e8274964-c274-4fde-ad4d-82bb1e128bc2",
@@ -1468,9 +1448,7 @@
         "variance_hours": -3.7,
         "coverage_pct": 53.6,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 3
       },
       {
         "guard_id": "e8274964-c274-4fde-ad4d-82bb1e128bc2",
@@ -1488,7 +1466,7 @@
         "variance_hours": 0.19,
         "coverage_pct": 103.5,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "e8274964-c274-4fde-ad4d-82bb1e128bc2",
@@ -1506,7 +1484,7 @@
         "variance_hours": -5.03,
         "coverage_pct": 80.7,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 1
       },
       {
         "guard_id": "e8274964-c274-4fde-ad4d-82bb1e128bc2",
@@ -1524,7 +1502,7 @@
         "variance_hours": 0.01,
         "coverage_pct": 100.5,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       }
     ],
     "overall": {
@@ -1543,7 +1521,7 @@
       "variance_hours": -36.24,
       "coverage_pct": 83.5,
       "auto_closed_sessions": 0,
-      "flags": []
+      "flagged_count": 17
     }
   },
   "starnet-security": {
@@ -2009,7 +1987,7 @@
         "variance_hours": 0.44,
         "coverage_pct": 103.7,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "74f311f1-69b4-4c61-997a-8fbcb1591f0c",
@@ -2027,7 +2005,7 @@
         "variance_hours": -0.49,
         "coverage_pct": 98.6,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "bdc24374-29e0-48fe-9b25-e76bc155e875",
@@ -2045,7 +2023,7 @@
         "variance_hours": 0.1,
         "coverage_pct": 100.6,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "802a842f-da79-44a9-aa0e-f549a9420cef",
@@ -2063,7 +2041,7 @@
         "variance_hours": -1.72,
         "coverage_pct": 96,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "866c4d2a-8acf-425b-bc54-9269885c1b59",
@@ -2081,7 +2059,7 @@
         "variance_hours": -0.1,
         "coverage_pct": 99.2,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "4a71d17d-d74a-4437-8269-cb1da0802d0d",
@@ -2099,9 +2077,7 @@
         "variance_hours": -4.69,
         "coverage_pct": 73.9,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 2
       },
       {
         "guard_id": "6b1402ba-5b7c-4037-9d5c-47a1363875a1",
@@ -2119,9 +2095,7 @@
         "variance_hours": -15.66,
         "coverage_pct": 13,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 1
       },
       {
         "guard_id": "7449cf43-c6e4-46bc-ba29-4e1297270726",
@@ -2139,7 +2113,7 @@
         "variance_hours": -1.83,
         "coverage_pct": 92.4,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       }
     ],
     "by_site": [
@@ -2159,7 +2133,7 @@
         "variance_hours": -3.7,
         "coverage_pct": 97.1,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": null,
@@ -2177,9 +2151,7 @@
         "variance_hours": -20.25,
         "coverage_pct": 60.7,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 3
       }
     ],
     "by_guard_site": [
@@ -2199,7 +2171,7 @@
         "variance_hours": 0.44,
         "coverage_pct": 103.7,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "74f311f1-69b4-4c61-997a-8fbcb1591f0c",
@@ -2217,7 +2189,7 @@
         "variance_hours": -0.49,
         "coverage_pct": 98.6,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "bdc24374-29e0-48fe-9b25-e76bc155e875",
@@ -2235,7 +2207,7 @@
         "variance_hours": 0.1,
         "coverage_pct": 100.6,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "802a842f-da79-44a9-aa0e-f549a9420cef",
@@ -2253,7 +2225,7 @@
         "variance_hours": -1.72,
         "coverage_pct": 96,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "866c4d2a-8acf-425b-bc54-9269885c1b59",
@@ -2271,7 +2243,7 @@
         "variance_hours": -0.1,
         "coverage_pct": 99.2,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       },
       {
         "guard_id": "4a71d17d-d74a-4437-8269-cb1da0802d0d",
@@ -2289,9 +2261,7 @@
         "variance_hours": -4.69,
         "coverage_pct": 73.9,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 2
       },
       {
         "guard_id": "6b1402ba-5b7c-4037-9d5c-47a1363875a1",
@@ -2309,9 +2279,7 @@
         "variance_hours": -15.66,
         "coverage_pct": 13,
         "auto_closed_sessions": 0,
-        "flags": [
-          "SHORT"
-        ]
+        "flagged_count": 1
       },
       {
         "guard_id": "7449cf43-c6e4-46bc-ba29-4e1297270726",
@@ -2329,7 +2297,7 @@
         "variance_hours": -1.83,
         "coverage_pct": 92.4,
         "auto_closed_sessions": 0,
-        "flags": []
+        "flagged_count": 0
       }
     ],
     "overall": {
@@ -2348,7 +2316,7 @@
       "variance_hours": -23.95,
       "coverage_pct": 86.7,
       "auto_closed_sessions": 0,
-      "flags": []
+      "flagged_count": 3
     }
   }
 }

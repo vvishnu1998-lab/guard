@@ -123,7 +123,17 @@ export interface HoursAggregate {
   variance_hours:  number;
   coverage_pct:    number | null;
   auto_closed_sessions: number;
-  flags:           HoursFlag[];
+  /**
+   * How many distinct SHIFTS in this group carry at least one flag.
+   *
+   * Aggregates used to carry a flags[] recomputed from the group's own
+   * totals, which read as if the guard or site itself were SHORT. A group
+   * whose sessions net out near 100% could show no flag while containing
+   * several flagged shifts, and a totals row could sprout a flag no
+   * individual row had. Flag LABELS are a per-session judgement and stay on
+   * the detail rows; at aggregate level the honest number is a count.
+   */
+  flagged_count:   number;
 }
 
 export interface HoursExportDataset {
@@ -138,6 +148,29 @@ export interface HoursExportDataset {
   by_site:       HoursAggregate[];
   by_guard_site: HoursAggregate[];
   overall:       HoursAggregate;
+}
+
+/**
+ * The end date a reader should see for an OPEN-ENDED range.
+ *
+ * end_date absent means "up to now", and the workbook used to print the
+ * literal string "all" in its title, its NOTES period line and its filename —
+ * which reads as "all time" and is wrong at both ends. Today's date at the
+ * site is what the range actually covers.
+ *
+ * Uses the first row's site timezone; every site shares one zone today, and
+ * an empty result set has no site to ask, so it falls back to the platform
+ * default. Deliberately NOT a field on the dataset: it moves with the wall
+ * clock, and the contract's determinism guarantee (and its snapshot) depend
+ * on nothing in the dataset doing that. Renderers and the filename call it.
+ */
+export function effectiveEndDate(data: HoursExportDataset): string {
+  if (data.end_date) return data.end_date;
+  const tz = data.rows[0]?.site_timezone ?? 'America/Los_Angeles';
+  // en-CA gives YYYY-MM-DD, matching the contract's shift_date shape.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
 }
 
 export interface HoursExportParams {
@@ -293,14 +326,15 @@ export async function buildHoursExport(
     shape: (r: HoursExportRow) => Pick<HoursAggregate,
       'guard_id' | 'guard_name' | 'badge_number' | 'site_id' | 'site_name' | 'label'>,
   ): HoursAggregate[] => {
-    const acc = new Map<string, HoursAggregate & { _shifts: Set<string> }>();
+    const acc = new Map<string, HoursAggregate & { _shifts: Set<string>; _flagged: Set<string> }>();
     for (const r of rows) {
       const k = keyOf(r);
       let a = acc.get(k);
       if (!a) {
         a = { ...shape(r), sessions: 0, shifts: 0, scheduled_hours: 0, actual_hours: 0,
               break_hours: 0, offpost_hours: 0, variance_hours: 0, coverage_pct: null,
-              auto_closed_sessions: 0, flags: [], _shifts: new Set<string>() };
+              auto_closed_sessions: 0, flagged_count: 0,
+              _shifts: new Set<string>(), _flagged: new Set<string>() };
         acc.set(k, a);
       }
       a.sessions        += 1;
@@ -310,16 +344,17 @@ export async function buildHoursExport(
       a.offpost_hours   += r.offpost_hours;
       if (r.flags.includes('AUTO_CLOSED')) a.auto_closed_sessions += 1;
       a._shifts.add(r.shift_id);
+      if (r.flags.length > 0) a._flagged.add(r.shift_id);
     }
-    return [...acc.values()].map(({ _shifts, ...a }) => {
+    return [...acc.values()].map(({ _shifts, _flagged, ...a }) => {
       a.shifts          = _shifts.size;
+      a.flagged_count   = _flagged.size;
       a.scheduled_hours = round2(a.scheduled_hours);
       a.actual_hours    = round2(a.actual_hours);
       a.break_hours     = round2(a.break_hours);
       a.offpost_hours   = round2(a.offpost_hours);
       a.variance_hours  = round2(a.actual_hours - a.scheduled_hours);
       a.coverage_pct    = coverage(a.actual_hours, a.scheduled_hours);
-      a.flags           = flagsFor(a.actual_hours, a.scheduled_hours, a.offpost_hours, false);
       return a;
     }).sort((x, y) => x.label.localeCompare(y.label));
   };
@@ -348,7 +383,7 @@ export async function buildHoursExport(
     guard_id: null, guard_name: null, badge_number: null, site_id: null, site_name: null,
     label: 'ALL', sessions: 0, shifts: 0, scheduled_hours: 0, actual_hours: 0,
     break_hours: 0, offpost_hours: 0, variance_hours: 0, coverage_pct: null,
-    auto_closed_sessions: 0, flags: [],
+    auto_closed_sessions: 0, flagged_count: 0,
   };
 
   return {

@@ -12,7 +12,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { uploadBufferToS3, urlOrPresign } from '../services/s3';
-import { buildHoursExport } from '../services/hoursExport';
+import { buildHoursExport, effectiveEndDate } from '../services/hoursExport';
 import { buildHoursWorkbook, workbookToBuffer } from '../services/hoursWorkbook';
 
 const router = Router();
@@ -29,8 +29,10 @@ router.get('/hours-export', requireAuth('company_admin', 'vishnu'), async (req, 
 
   const data = await buildHoursExport({ company_id: companyId, start_date, end_date, site_id, guard_id });
 
-  const sd = start_date ?? 'all';
-  const ed = end_date   ?? 'all';
+  // An open range names today's site-local date, not "all" — the same
+  // treatment the workbook title and NOTES get. "all" read as "all time".
+  const sd = start_date ?? 'start';
+  const ed = effectiveEndDate(data);
   const fileName = `netraops-hours-${data.company_slug}-${sd}-to-${ed}.xlsx`;
 
   const buf = await workbookToBuffer(buildHoursWorkbook(data));
