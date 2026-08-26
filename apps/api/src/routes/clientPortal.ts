@@ -17,6 +17,7 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
+import { siteLocalDayRange } from '../services/dateRange';
 import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
@@ -236,10 +237,13 @@ router.get('/violations', requireAuth('client'), async (req: Request, res: Respo
   const args: unknown[] = [req.user!.site_id];
   let dateClause: string;
   if (fromQ || toQ) {
-    const parts: string[] = [];
-    if (fromQ) { args.push(fromQ); parts.push(`AND gv.occurred_at >= $${args.length}`); }
-    if (toQ)   { args.push(toQ);   parts.push(`AND gv.occurred_at <= $${args.length}`); }
-    dateClause = parts.join(' ');
+    // Same builder the admin breaches route uses — these two carried
+    // identical wrong copies of the predicate. `s` is the sites row joined
+    // below purely to supply s.timezone; the query is already single-site
+    // (WHERE gv.site_id = $1) so the join is 1:1 and changes no row count.
+    dateClause = siteLocalDayRange({
+      column: 'gv.occurred_at', siteAlias: 's', from: fromQ, to: toQ, args,
+    }).join(' ');
   } else {
     // sinceInterval is a whitelist lookup — safe to interpolate.
     dateClause = `AND gv.occurred_at >= NOW() - INTERVAL '${sinceInterval}'`;
@@ -258,6 +262,7 @@ router.get('/violations', requireAuth('client'), async (req: Request, res: Respo
             COUNT(*) OVER() AS total_count
        FROM geofence_violations gv
        JOIN guards g ON g.id = gv.guard_id
+       JOIN sites  s ON s.id = gv.site_id
       WHERE gv.site_id = $1
         ${dateClause}
         ${statusClause}

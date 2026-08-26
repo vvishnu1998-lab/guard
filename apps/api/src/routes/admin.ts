@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import PDFDocument from 'pdfkit';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
+import { siteLocalDayRange } from '../services/dateRange';
 import bcrypt from 'bcrypt';
 import { validatePassword, logEvent } from './auth';
 import { generateTempPassword } from '../utils/tempPassword';
@@ -1026,8 +1027,14 @@ router.get('/violations', requireAuth('company_admin', 'vishnu'), async (req, re
 
   const useExplicitDates = Boolean(fromQ || toQ);
   if (useExplicitDates) {
-    if (fromQ) { args.push(fromQ); extraClauses.push(`AND gv.occurred_at >= $${args.length}`); }
-    if (toQ)   { args.push(toQ);   extraClauses.push(`AND gv.occurred_at <= $${args.length}`); }
+    // Site-local whole days, not UTC midnights — see services/dateRange.ts.
+    // `s` is the sites row already joined by the query below, so the bound is
+    // per row. The old pair was `>= $n` / `<= $n` uncast, which anchored at
+    // UTC and dropped the entire final day: a 17->19 Aug filter returned one
+    // of the four violations in that window.
+    extraClauses.push(...siteLocalDayRange({
+      column: 'gv.occurred_at', siteAlias: 's', from: fromQ, to: toQ, args,
+    }));
   } else {
     extraClauses.push(`AND gv.occurred_at >= NOW() - INTERVAL '${sinceInterval}'`);
   }
