@@ -119,7 +119,9 @@ Verified ground truth for the NetraOps platform. When live state may have change
 - **Open, unaddressed:** halfway on a 24h window lands ~12h out and can fire at ~03:30 site-local. There is no quiet-hours suppression anywhere in the push path.
 - **Unverified on any device:** the halfway reminder has never fired (0 pending rows since deploy), and `b55a895`'s three Alert dialogs + `WAITING_HOLD_MS` 1500→3000 have not been seen running.
 - `eas update:republish --group <id>` targets **that group's branch only** — production, here. Smoke and preview stay put unless you pass `--destination-branch`. It creates a new group carrying the old bundle; it does not delete the newer one.
-- Pushing to `main` with changes confined to `.claude/` does NOT trigger a Railway deploy: the service root is `apps/api` (its `railway.json` lives there, and no `watchPatterns` are configured). Verified against `0e9aa1d`, a SKILL.md-only commit that produced no deployment.
+- **EVERY push to `main` triggers a Railway rebuild and API restart — including a docs-only or `.claude/`-only push. There is no path filter.** `apps/api/railway.json` sets build/deploy commands only; no `watchPatterns` exist anywhere. Confirmed the hard way 2026-08-25 19:27: a SKILL.md-only commit (`47fd899`) started deployment `9723b65b` one second after the push, with two STARNET guards on post and no gate held. The API bytes were identical, so nothing shipped — but the restart was real.
+  - The bad inference that caused it: `0e9aa1d` (a SKILL.md-only commit on 08-24) has no deployment next to it in the list, which read as proof of a path filter. It is not. **Railway deploys per PUSH, not per COMMIT** — that commit was pushed alongside neighbours and absorbed into their deploy.
+  - So: **the deploy gate applies to any push to `main`, whatever the diff touches.** The only genuinely gate-free push is to a branch with no CI target, e.g. `batch/mobile-*`.
 
 ## Verification norms for this project
 
