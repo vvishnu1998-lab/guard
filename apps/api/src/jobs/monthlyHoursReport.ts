@@ -5,10 +5,10 @@
  */
 
 import cron from 'node-cron';
-import * as XLSX from 'xlsx';
 import { pool } from '../db/pool';
 import { uploadBufferToS3 } from '../services/s3';
-import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
+import { buildHoursExport } from '../services/hoursExport';
+import { buildHoursWorkbook, workbookToBuffer } from '../services/hoursWorkbook';
 
 // 12:00 UTC on the 1st, not 02:00. The job must not run until the reported
 // month has CLOSED in every site's local timezone, because the range bounds
@@ -43,72 +43,27 @@ cron.schedule('0 12 1 * *', async () => {
   // value on Railway today; no longer dependent on the process TZ.
   const monthEnd   = new Date(Date.UTC(year, month, 0)).toISOString().split('T')[0];
 
-  const companies = await pool.query('SELECT id FROM companies WHERE is_active = true');
+  // is_test (schema_v60) excludes the stale duplicate tenant and the scratch
+  // tenant. is_active alone was the filter, and it means "not decommissioned",
+  // not "is a customer" — so this job uploaded an empty XLSX to
+  // guard-media-prod for both of them every month. The bucket has versioning
+  // on with no NoncurrentVersionExpiration, so those never went away.
+  const companies = await pool.query(
+    'SELECT id FROM companies WHERE is_active = true AND is_test = false',
+  );
 
   for (const { id: companyId } of companies.rows) {
     try {
-      // Monthly payroll includes hours at now-deactivated sites —
-      // historical completeness. `[INACTIVE] ` prefix matches the
-      // hours-export streaming route so both surfaces render identically
-      // for a decommissioned site.
-      const rows = await pool.query(`
-        SELECT
-          g.name                                          AS guard_name,
-          CASE WHEN s.is_active
-            THEN s.name
-            ELSE '[INACTIVE] ' || s.name
-          END                                             AS site_name,
-          (ss.clocked_in_at AT TIME ZONE s.timezone)::date AS shift_date,
-          TO_CHAR((ss.clocked_in_at AT TIME ZONE s.timezone)::date, 'DD/MM/YYYY')
-                                                         AS shift_date_label,
-          s.timezone                                     AS site_timezone,
-          ss.clocked_in_at                               AS clock_in_time,
-          ss.clocked_out_at                              AS clock_out_time,
-          COALESCE(
-            (SELECT SUM(bs.duration_minutes) FROM break_sessions bs
-             WHERE bs.shift_session_id = ss.id AND bs.break_end IS NOT NULL), 0
-          )                                              AS break_duration_mins,
-          ROUND(CAST(COALESCE(ss.total_hours, 0) AS NUMERIC), 2) AS total_hours_worked,
-          ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
-          sh.status
-        FROM shift_sessions ss
-        JOIN shifts sh ON sh.id = ss.shift_id
-        JOIN sites  s  ON s.id  = ss.site_id
-        JOIN guards g  ON g.id  = ss.guard_id
-        WHERE s.company_id = $1
-          AND ss.clocked_in_at >= (($2::date)::timestamp AT TIME ZONE s.timezone)
-          AND ss.clocked_in_at <  (($3::date + INTERVAL '1 day') AT TIME ZONE s.timezone)
-          AND ss.clocked_out_at IS NOT NULL
-        ORDER BY ss.clocked_in_at DESC
-        LIMIT 10000
-      `, [companyId, monthStart, monthEnd]);
+      // Same data contract and the same renderer the on-demand billing export
+      // uses. This job used to carry its own copy of the query AND its own
+      // workbook builder, and both had drifted from routes/billing.ts.
+      const data = await buildHoursExport({
+        company_id: companyId,
+        start_date: monthStart,
+        end_date:   monthEnd,
+      });
 
-      const wb = XLSX.utils.book_new();
-      // Phase 1 — 4-field breakdown columns appended (Scheduled/Actual/Break/Violation).
-      const detailData = [
-        ['Guard Name', 'Site Name', 'Shift Date', 'Clock In', 'Clock Out',
-         'Break (mins)', 'Total Hours (legacy)',
-         'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Off-post Hours',
-         'Status'],
-        ...rows.rows.map((r: Record<string, unknown>) => [
-          r.guard_name,
-          r.site_name,
-          r.shift_date_label ?? '',
-          r.clock_in_time  ? new Date(r.clock_in_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
-          r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
-          r.break_duration_mins,
-          r.total_hours_worked,
-          Number(r.scheduled_hours) || 0,
-          Number(r.actual_hours)    || 0,
-          Number(r.break_hours)     || 0,
-          Number(r.violation_hours) || 0,
-          r.status,
-        ]),
-      ];
-      const ws = XLSX.utils.aoa_to_sheet(detailData);
-      XLSX.utils.book_append_sheet(wb, ws, 'Hours Detail');
-
-      const buf = Buffer.from(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }));
+      const buf = workbookToBuffer(buildHoursWorkbook(data));
       const key = `monthly-reports/${companyId}/${year}-${String(month).padStart(2, '0')}.xlsx`;
       const s3Url = await uploadBufferToS3(key, buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 

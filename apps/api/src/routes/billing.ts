@@ -1,5 +1,7 @@
 /**
- * Billing routes — hours export (XLSX) and monthly report archive.
+ * Billing routes — hours export and monthly report archive. The workbook
+ * itself is rendered by services/hoursWorkbook.ts from the data contract in
+ * services/hoursExport.ts; this file only wires HTTP and S3.
  *
  * GET  /api/billing/hours-export        → .xlsx file download
  * GET  /api/billing/hours-export/monthly → list of auto-generated monthly reports
@@ -7,149 +9,15 @@
  */
 
 import { Router } from 'express';
-import * as XLSX from 'xlsx';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { uploadBufferToS3, urlOrPresign } from '../services/s3';
-import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
+import { buildHoursExport } from '../services/hoursExport';
+import { buildHoursWorkbook, workbookToBuffer } from '../services/hoursWorkbook';
 
 const router = Router();
 
 // ── Shared query ─────────────────────────────────────────────────────────────
-
-async function fetchHoursData(companyId: string, params: {
-  start_date?: string;
-  end_date?:   string;
-  site_id?:    string;
-  guard_id?:   string;
-}) {
-  const { start_date, end_date, site_id, guard_id } = params;
-  const args: unknown[] = [companyId];
-  const clauses: string[] = [];
-
-  // Range bounds are anchored in each row's OWN site timezone, not UTC.
-  // `s` is the sites row joined below, so the comparison instant is per-row:
-  // start_date '2026-07-01' means midnight AT THAT SITE. Anchored to UTC the
-  // cut landed at 17:00 PDT the previous day, so every Pacific shift starting
-  // after 17:00 was filed under the wrong date — 28 of 72 sessions in prod,
-  // and 45% of STARNET's, whose Cristo Rey post runs 19:00–06:00 PT.
-  // sites.timezone is the platform's anchor everywhere else (schema_v21,
-  // schema_v40, services/siteTime.ts, routes/checkpoints.ts round windows).
-  if (start_date) { args.push(start_date); clauses.push(`AND ss.clocked_in_at >= (($${args.length}::date)::timestamp AT TIME ZONE s.timezone)`); }
-  if (end_date)   { args.push(end_date);   clauses.push(`AND ss.clocked_in_at <  (($${args.length}::date + INTERVAL '1 day') AT TIME ZONE s.timezone)`); }
-  if (site_id)    { args.push(site_id);    clauses.push(`AND s.id = $${args.length}`); }
-  if (guard_id)   { args.push(guard_id);   clauses.push(`AND g.id = $${args.length}`); }
-
-  // Payroll must include hours worked at now-deactivated sites — historical
-  // completeness. Prefix "[INACTIVE] " on the site name at SELECT time so
-  // the XLSX + streaming exports flag it visibly (there's no client-side
-  // badge component available in Excel).
-  const result = await pool.query(`
-    SELECT
-      g.name                                          AS guard_name,
-      CASE WHEN s.is_active
-        THEN s.name
-        ELSE '[INACTIVE] ' || s.name
-      END                                             AS site_name,
-      (ss.clocked_in_at AT TIME ZONE s.timezone)::date AS shift_date,
-      -- shift_date_label is formatted in SQL on purpose. node-postgres parses
-      -- a DATE column into a JS Date at PROCESS-LOCAL midnight, so re-formatting
-      -- it with a timeZone option in JS would shift an already-correct calendar
-      -- date backwards by the offset and undo the fix. Only true instants
-      -- (clock_in/out below) may be rendered with a timeZone option.
-      TO_CHAR((ss.clocked_in_at AT TIME ZONE s.timezone)::date, 'DD/MM/YYYY')
-                                                      AS shift_date_label,
-      s.timezone                                      AS site_timezone,
-      ss.clocked_in_at                                AS clock_in_time,
-      ss.clocked_out_at                               AS clock_out_time,
-      COALESCE(
-        (SELECT SUM(bs.duration_minutes)
-         FROM break_sessions bs
-         WHERE bs.shift_session_id = ss.id
-           AND bs.break_end IS NOT NULL), 0
-      )                                               AS break_duration_mins,
-      ROUND(CAST(COALESCE(ss.total_hours, 0) AS NUMERIC), 2) AS total_hours_worked,
-      ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
-      sh.status
-    FROM shift_sessions ss
-    JOIN shifts sh ON sh.id = ss.shift_id
-    JOIN sites  s  ON s.id  = ss.site_id
-    JOIN guards g  ON g.id  = ss.guard_id
-    WHERE s.company_id = $1
-      AND ss.clocked_out_at IS NOT NULL
-      ${clauses.join(' ')}
-    ORDER BY ss.clocked_in_at DESC
-    LIMIT 10000
-  `, args);
-
-  return result.rows;
-}
-
-function buildWorkbook(rows: Record<string, unknown>[], fileName: string): XLSX.WorkBook {
-  const wb = XLSX.utils.book_new();
-
-  // ── Detail sheet ─────────────────────────────────────────────────────────
-  // Phase 1 — 4-field breakdown columns appended (Scheduled/Actual/Break/Violation)
-  // alongside legacy Total Hours. Summary aggregates on actual_hours per (guard, site).
-  const detailData: unknown[][] = [
-    ['Guard Name', 'Site Name', 'Shift Date', 'Clock In Time', 'Clock Out Time',
-     'Break (mins)', 'Total Hours (legacy)',
-     'Scheduled Hours', 'Actual Hours', 'Break Hours', 'Off-post Hours',
-     'Status'],
-    ...rows.map(r => [
-      r.guard_name,
-      r.site_name,
-      r.shift_date_label ?? '',
-      // Explicit timeZone — never the process TZ. Railway runs UTC, so the
-      // bare toLocaleString printed UTC wall-clock under an en-GB label: a
-      // 19:54 PT clock-in rendered as 02:54 the next day.
-      r.clock_in_time  ? new Date(r.clock_in_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
-      r.clock_out_time ? new Date(r.clock_out_time as string).toLocaleString('en-GB', { timeZone: r.site_timezone as string }) : '',
-      r.break_duration_mins,
-      r.total_hours_worked,
-      Number(r.scheduled_hours) || 0,
-      Number(r.actual_hours)    || 0,
-      Number(r.break_hours)     || 0,
-      Number(r.violation_hours) || 0,
-      r.status,
-    ]),
-  ];
-
-  // Summary row: total actual hours per guard per site (Phase 1 canonical).
-  type Agg = { actual: number; breaks: number; violations: number; scheduled: number };
-  const summaryMap = new Map<string, Agg>();
-  for (const r of rows) {
-    const key = `${r.guard_name} @ ${r.site_name}`;
-    const agg = summaryMap.get(key) ?? { actual: 0, breaks: 0, violations: 0, scheduled: 0 };
-    agg.actual     += Number(r.actual_hours)    || 0;
-    agg.breaks     += Number(r.break_hours)     || 0;
-    agg.violations += Number(r.violation_hours) || 0;
-    agg.scheduled  += Number(r.scheduled_hours) || 0;
-    summaryMap.set(key, agg);
-  }
-  detailData.push([]);
-  detailData.push(['SUMMARY', '', '', '', '', '', '', '', '', '', '', '']);
-  detailData.push(['Guard @ Site', '', '', '', '', '', '', 'Scheduled', 'Actual', 'Breaks', 'Off-post', '']);
-  for (const [key, agg] of summaryMap) {
-    detailData.push([
-      key, '', '', '', '', '', '',
-      Math.round(agg.scheduled  * 100) / 100,
-      Math.round(agg.actual     * 100) / 100,
-      Math.round(agg.breaks     * 100) / 100,
-      Math.round(agg.violations * 100) / 100,
-      '',
-    ]);
-  }
-
-  const ws = XLSX.utils.aoa_to_sheet(detailData);
-  ws['!cols'] = [
-    { wch: 24 }, { wch: 24 }, { wch: 14 }, { wch: 22 }, { wch: 22 },
-    { wch: 14 }, { wch: 20 }, { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 12 },
-  ];
-  XLSX.utils.book_append_sheet(wb, ws, 'Hours Detail');
-
-  return wb;
-}
 
 // ── GET /api/billing/hours-export ────────────────────────────────────────────
 
@@ -159,14 +27,13 @@ router.get('/hours-export', requireAuth('company_admin', 'vishnu'), async (req, 
 
   if (!companyId) return res.status(400).json({ error: 'company_id required for vishnu role' });
 
-  const rows = await fetchHoursData(companyId, { start_date, end_date, site_id, guard_id });
+  const data = await buildHoursExport({ company_id: companyId, start_date, end_date, site_id, guard_id });
 
   const sd = start_date ?? 'all';
   const ed = end_date   ?? 'all';
   const fileName = `netra-hours-${sd}-to-${ed}.xlsx`;
 
-  const wb = buildWorkbook(rows, fileName);
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const buf = workbookToBuffer(buildHoursWorkbook(data));
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
@@ -212,11 +79,10 @@ router.post('/hours-export/schedule', requireAuth('company_admin', 'vishnu'), as
   // makes it independent of the process TZ rather than lucky.
   const monthEnd   = new Date(Date.UTC(year, month, 0)).toISOString().split('T')[0]; // last day of month
 
-  const rows = await fetchHoursData(companyId, { start_date: monthStart, end_date: monthEnd });
+  const data = await buildHoursExport({ company_id: companyId, start_date: monthStart, end_date: monthEnd });
 
   const fileName = `netra-hours-${monthStart}-to-${monthEnd}.xlsx`;
-  const wb = buildWorkbook(rows, fileName);
-  const buf = Buffer.from(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }));
+  const buf = workbookToBuffer(buildHoursWorkbook(data));
 
   const key = `monthly-reports/${companyId}/${year}-${String(month).padStart(2, '0')}.xlsx`;
   const s3Url = await uploadBufferToS3(key, buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
