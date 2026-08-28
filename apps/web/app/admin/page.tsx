@@ -41,7 +41,6 @@ interface DashboardSite {
     break_hours:     number;
     violation_hours: number;
   };
-  status:              'active' | 'inactive';
   days_until_deletion: number | null;
 }
 

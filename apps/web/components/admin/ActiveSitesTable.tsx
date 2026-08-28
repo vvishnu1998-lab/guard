@@ -21,13 +21,14 @@ interface Site {
   // formula.
   hours_this_week: number;
   hours?: ShiftHours;
-  status: 'active' | 'inactive';
   days_until_deletion: number | null;
 }
 
-// Derive display status from OPERATIONAL state, not from the API's `status`
-// field. The API's `status` reflects contract_end (contract active vs expired),
-// which surfaced as "INACTIVE" on sites with a live guard on-shift. Order:
+// The site's display status, derived from OPERATIONAL state. This function is
+// the only definition of it; the API sends no status of its own. It once sent
+// one derived from contract_end, which read "INACTIVE" for a site with a guard
+// on post, and this function was added to override it. That column is gone now.
+// Order:
 //   guards on-post   → ACTIVE  (green)
 //   completed shifts → SCHEDULED (amber) — no one on-post right now but the
 //                      site had activity this week
