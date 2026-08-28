@@ -42,8 +42,13 @@ import {
   getShiftHours,
   type ShiftHours,
 } from '../services/shiftHours';
+import { siteLocalDayRange } from '../services/dateRange';
 
 const router = Router();
+
+/** Format-only checks — the DB still rejects unknown UUIDs. Mirrors routes/admin.ts. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISO_RE  = /^\d{4}-\d{2}-\d{2}(T[\d:.+Z-]+)?$/;
 
 /**
  * Build the JWT-scoped streaming URL for a shift's site instructions PDF.
@@ -2467,6 +2472,53 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
   } else {
     // Company-admin path + vishnu (all-companies) bypass.
     const isVishnu = user!.role === 'vishnu';
+
+    // Optional filters. All three are absent on the legacy no-param call,
+    // which still returns the same shape and ordering — only the backstop
+    // cap moved (100 -> 2000). apps/mobile calls this route bare, but as a
+    // guard it lands on the branch above; nothing here can reach it.
+    const siteQ = (req.query.site_id as string | undefined)?.trim();
+    const fromQ = (req.query.from    as string | undefined)?.trim();
+    const toQ   = (req.query.to      as string | undefined)?.trim();
+
+    // Format-only checks, so bad input is a 400 rather than a 500 out of the
+    // driver. Mirrors the pair in routes/admin.ts.
+    if (siteQ && !UUID_RE.test(siteQ)) return res.status(400).json({ error: 'invalid site_id' });
+    if (fromQ && !ISO_RE.test(fromQ))  return res.status(400).json({ error: 'invalid from' });
+    if (toQ   && !ISO_RE.test(toQ))    return res.status(400).json({ error: 'invalid to' });
+
+    // Params are positional: push, then reference by args.length.
+    // siteLocalDayRange MUTATES args, so it is invoked at the point in the
+    // sequence where its placeholders belong. For vishnu the tenancy
+    // predicate is the literal `true` and company_id is never pushed, so
+    // every later $N still resolves correctly.
+    const args: unknown[] = [];
+    let cidPredicate: string;
+    if (isVishnu) {
+      cidPredicate = 'true';
+    } else {
+      args.push(user!.company_id);
+      cidPredicate = `si.company_id = $${args.length}`;
+    }
+
+    const extraClauses: string[] = [];
+    if (siteQ) { args.push(siteQ); extraClauses.push(`AND s.site_id = $${args.length}`); }
+
+    // Whole days anchored in the SITE's timezone, evaluated per row — a bare
+    // YYYY-MM-DD is that site's calendar day, not a UTC midnight, and the
+    // upper bound is exclusive-plus-one-day so the final day is included.
+    // See services/dateRange.ts. `si` is the sites row joined below.
+    extraClauses.push(...siteLocalDayRange({
+      column: 's.scheduled_start', siteAlias: 'si', from: fromQ, to: toQ, args,
+    }));
+
+    // Backstop only, applied AFTER filtering. The previous hardcoded 100 cut
+    // company-wide BEFORE any site filter, so a tenant crossing 100 rows lost
+    // the oldest ones from every site at once — with no date bound to explain
+    // it. Star Guard crossed it; STARNET had not yet.
+    args.push(2000);
+    const limitPos = args.length;
+
     result = await pool.query(
       `SELECT s.*, si.name as site_name, si.is_active AS site_is_active,
               si.instructions_pdf_url, g.name as guard_name,
@@ -2497,9 +2549,10 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
          FROM shift_sessions ss
          GROUP BY ss.shift_id
        ) ss_hrs ON ss_hrs.shift_id = s.id
-       ${isVishnu ? '' : 'WHERE si.company_id = $1'}
-       ORDER BY s.scheduled_start DESC LIMIT 100`,
-      isVishnu ? [] : [user!.company_id]
+       WHERE ${cidPredicate}
+       ${extraClauses.join('\n       ')}
+       ORDER BY s.scheduled_start DESC LIMIT $${limitPos}`,
+      args
     );
   }
   // Build 38: swap raw / presigned S3 URL for the JWT-scoped streaming
