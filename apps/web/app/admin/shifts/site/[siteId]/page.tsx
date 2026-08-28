@@ -2,9 +2,12 @@
 /**
  * Admin — Site Shifts Drill-In (/admin/shifts/site/[siteId])
  *
- * Reached from the site cards on /admin/shifts?view=site. Shows the same
- * rolling 2-week window as the parent grid, filtered to a single site,
- * as an ascending-date table. Local SCHEDULE SHIFT and ASSIGN GUARD
+ * Reached from the site cards on /admin/shifts?view=site. Asks the server
+ * for this site's shifts from yesterday to +90d — site_id and the date
+ * bounds are query params, and the bounds are bare dates resolved against
+ * the SITE's calendar days, not the browser's. Rendered as an
+ * ascending-date table with no further date filtering client-side.
+ * Local SCHEDULE SHIFT and ASSIGN GUARD
  * modals share components with the parent page (see
  * apps/web/components/admin/ScheduleShiftModal.tsx and
  * AssignGuardModal.tsx). Site dropdown in the schedule modal is pre-
@@ -18,7 +21,7 @@ import { adminGet } from '../../../../../lib/adminApi';
 import InactiveSiteBadge from '../../../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../../../components/admin/ScheduleShiftModal';
 import AssignGuardModal, { AssignableShift } from '../../../../../components/admin/AssignGuardModal';
-import { fmtDateShort, fmtDuration, fmtTime } from '../../../../../lib/shiftFormat';
+import { dayOffsetInZone, fmtDateShort, fmtDuration, fmtTime } from '../../../../../lib/shiftFormat';
 
 interface Site {
   id:             string;
@@ -27,6 +30,10 @@ interface Site {
   radius_meters?: number | null;
   is_active?:     boolean;
   company_name?:  string;
+  // sites.timezone is NOT NULL server-side, but this page tolerates a stale
+  // API that predates it — dayOffsetInZone(undefined) falls back to the
+  // browser's zone rather than throwing.
+  timezone?:      string;
 }
 
 interface Shift {
@@ -69,22 +76,34 @@ export default function SiteShiftsPage() {
   const [showModal,   setShowModal]   = useState(false);
   const [assignShift, setAssignShift] = useState<Shift | null>(null);
 
-  const today = useMemo(() => new Date(), []);
-  const { twoWeekStart, twoWeekEnd } = useMemo(() => {
-    const s = new Date(today); s.setHours(0, 0, 0, 0);
-    const e = new Date(s); e.setDate(s.getDate() + 14); e.setHours(23, 59, 59, 999);
-    return { twoWeekStart: s, twoWeekEnd: e };
-  }, [today]);
+  // The window this page asks the server for, and the only one it shows.
+  // There is no client-side date filter any more: the server returns exactly
+  // this range, site-local. Held in state so the header can name it.
+  const [windowFrom, setWindowFrom] = useState('');
+  const [windowTo,   setWindowTo]   = useState('');
 
   const load = useCallback(async () => {
     if (!siteId) return;
     try {
-      const [siteData, shiftData, guardData] = await Promise.all([
-        adminGet<Site>(`/api/sites/${siteId}`),
-        adminGet<Shift[]>('/api/shifts'),
+      // The site is fetched FIRST, not in parallel, because its timezone
+      // decides which calendar dates the shift query asks for. A browser in
+      // IST resolves "today" to a different date than a Los Angeles site
+      // does, and that one-day slip is the whole reason this page was
+      // showing a partial schedule.
+      const siteData = await adminGet<Site>(`/api/sites/${siteId}`);
+      setSite(siteData);
+
+      // -1d, not 0: an overnight shift (19:30 -> 11:30 next day) carries
+      // scheduled_start on the PRIOR day, so `from = today` would hide a
+      // shift that is in progress right now.
+      const from = dayOffsetInZone(-1, siteData.timezone);
+      const to   = dayOffsetInZone(90, siteData.timezone);
+      setWindowFrom(from); setWindowTo(to);
+
+      const [shiftData, guardData] = await Promise.all([
+        adminGet<Shift[]>(`/api/shifts?site_id=${encodeURIComponent(siteId)}&from=${from}&to=${to}`),
         adminGet<Guard[]>('/api/guards'),
       ]);
-      setSite(siteData);
       setShifts(shiftData);
       setGuards(guardData);
       setError('');
@@ -94,16 +113,14 @@ export default function SiteShiftsPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // No date predicate: the server already returned exactly windowFrom..
+  // windowTo for this site, anchored in the site's own calendar days. The
+  // site_id check is retained as a cheap guard against a dropped param.
   const siteShifts = useMemo(() => {
     return shifts
-      .filter((s) =>
-        s.site_id === siteId &&
-        s.status !== 'cancelled' &&
-        new Date(s.scheduled_start) >= twoWeekStart &&
-        new Date(s.scheduled_start) <= twoWeekEnd
-      )
+      .filter((s) => s.site_id === siteId && s.status !== 'cancelled')
       .sort((a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime());
-  }, [shifts, siteId, twoWeekStart, twoWeekEnd]);
+  }, [shifts, siteId]);
 
   return (
     <div className="space-y-6">
@@ -147,7 +164,9 @@ export default function SiteShiftsPage() {
         {loading ? (
           <div className="p-10 text-center text-gray-500 text-sm">Loading…</div>
         ) : siteShifts.length === 0 ? (
-          <div className="p-10 text-center text-gray-500 text-sm">No shifts in the next 2 weeks at this site.</div>
+          <div className="p-10 text-center text-gray-500 text-sm">
+            No shifts at this site{windowFrom && windowTo ? ` between ${windowFrom} and ${windowTo}` : ''}.
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">

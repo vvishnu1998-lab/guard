@@ -4,7 +4,10 @@
  *
  * Two views, toggled via ?view=site|guard (default: site).
  *   • VIEW BY SITE  — grid of site cards summarising shift counts +
- *     assigned/unassigned split for a rolling 2-week window from now.
+ *     assigned/unassigned split. The window is requested from the server
+ *     (GET /api/shifts?from&to, -30d..+90d) and rendered as-is; this page
+ *     no longer date-filters client-side. The gap pill is a separate
+ *     endpoint on its own 14-day horizon and is unrelated to that window.
  *     Clicking a card drills into /admin/shifts/site/<siteId>.
  *   • VIEW BY GUARD — the previous guard-centric card grid, unchanged
  *     apart from being wrapped in the view switch. Selecting a guard
@@ -21,7 +24,7 @@ import { adminGet } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../components/admin/ScheduleShiftModal';
 import AssignGuardModal, { AssignableShift } from '../../../components/admin/AssignGuardModal';
-import { fmtDateShort, fmtDuration, fmtTime } from '../../../lib/shiftFormat';
+import { dayOffsetInZone, fmtDateShort, fmtDuration, fmtTime } from '../../../lib/shiftFormat';
 import { formatHoursHHMM } from '../../../lib/formatHours';
 
 interface Shift {
@@ -142,18 +145,30 @@ function ShiftsPageInner() {
   const { start: weekStart, end: weekEnd } = useMemo(() => getWeekBounds(weekRef), [weekRef]);
   const [selectedGuard, setSelectedGuard] = useState<Guard | null>(null);
 
-  // Rolling 2-week window (site view). Anchored at midnight local to avoid
-  // off-by-fractional-day drift as the tab sits open.
-  const { twoWeekStart, twoWeekEnd } = useMemo(() => {
-    const s = new Date(today); s.setHours(0, 0, 0, 0);
-    const e = new Date(s); e.setDate(s.getDate() + 14); e.setHours(23, 59, 59, 999);
-    return { twoWeekStart: s, twoWeekEnd: e };
-  }, [today]);
+  // The window this page asks the server for, and the only one it shows.
+  // There is no client-side date filter any more.
+  //
+  // TIMEZONE CHOICE, STATED DELIBERATELY: this grid spans every site in the
+  // company and /api/sites carries no timezone, so there is no single zone to
+  // anchor to — these bounds are resolved in the BROWSER's zone. The server
+  // still re-anchors each bare date to each row's own site-local calendar day
+  // (services/dateRange.ts), so only the choice of calendar date is
+  // browser-relative. That is tolerable here and nowhere else on this arc:
+  // the bounds are a wide fetch envelope, not a display window, so a browser
+  // in IST naming a date one off shifts a 120-day net by a day at its edges.
+  // The drill-down, which knows its site, anchors in the site's zone instead.
+  //
+  // -30d, not 0: an overnight shift (19:30 -> 11:30 next day) carries
+  // scheduled_start on the PRIOR day, so a `from` of today would drop a shift
+  // that is in progress — marking its guard AVAILABLE while they are on post.
+  // The 30-day reach back also keeps the ± week navigator usable.
+  const windowFrom = useMemo(() => dayOffsetInZone(-30), []);
+  const windowTo   = useMemo(() => dayOffsetInZone(90),  []);
 
   const load = useCallback(async () => {
     try {
       const [sh, g, s, cov] = await Promise.all([
-        adminGet<Shift[]>('/api/shifts'),
+        adminGet<Shift[]>(`/api/shifts?from=${windowFrom}&to=${windowTo}`),
         adminGet<Guard[]>('/api/guards'),
         adminGet<Site[]>('/api/sites'),
         // Session S6 — bundle the coverage snapshot in the initial fetch so
@@ -167,7 +182,7 @@ function ShiftsPageInner() {
       setError('');
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, []);
+  }, [windowFrom, windowTo]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -232,6 +247,10 @@ function ShiftsPageInner() {
     }
   }
 
+  // Scoped to the fetched window, not all time — previously it counted
+  // whatever the server's blind top-100 happened to contain, which was
+  // neither. The banner names the range so the number cannot be misread as
+  // a company-wide total.
   const unassignedCount = shifts.filter((s) => s.status === 'unassigned').length;
   const activeGuards    = guards.filter((g) => g.is_active !== false);
 
@@ -274,10 +293,11 @@ function ShiftsPageInner() {
               </button>
             ))}
           </div>
-          {/* Range display — site view shows 2-week window; guard view keeps the ± week navigator */}
+          {/* Range display — site view names the window actually fetched;
+              guard view keeps the ± week navigator */}
           {view === 'site' ? (
             <div className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-1.5 text-gray-400 text-xs tracking-widest whitespace-nowrap">
-              {isoWeek(twoWeekStart)} — {isoWeek(twoWeekEnd)} · rolling 2 weeks
+              {windowFrom} — {windowTo}
             </div>
           ) : (
             <div className="flex items-center gap-2 bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-1.5">
@@ -304,7 +324,8 @@ function ShiftsPageInner() {
         <div className="bg-amber-400/10 border border-amber-400/40 rounded-lg px-4 py-3 flex items-center gap-3">
           <span className="text-amber-400 text-lg">⚠</span>
           <span className="text-amber-300 text-sm">
-            <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard.
+            <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard
+            {' '}between {windowFrom} and {windowTo}.
           </span>
         </div>
       )}
@@ -318,11 +339,11 @@ function ShiftsPageInner() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {[...sites].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map((site) => {
+              // No date predicate: the payload IS the window (windowFrom..
+              // windowTo), already anchored per-site by the server.
               const inWindow = shifts.filter((s) =>
                 s.site_id === site.id &&
-                s.status !== 'cancelled' &&
-                new Date(s.scheduled_start) >= twoWeekStart &&
-                new Date(s.scheduled_start) <= twoWeekEnd
+                s.status !== 'cancelled'
               );
               const assigned   = inWindow.filter((s) => s.guard_id !== null).length;
               const unassigned = inWindow.length - assigned;

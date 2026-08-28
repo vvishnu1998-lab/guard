@@ -99,3 +99,26 @@ export function zonedInputsToISO(date: string, time: string, tz: string): string
   const secondPass = new Date(naive.getTime() + tzOffsetMs(firstPass, tz));
   return secondPass.toISOString();
 }
+
+/**
+ * `YYYY-MM-DD` for today ± `offsetDays`, resolved in `tz` (IANA). Omit `tz`
+ * to resolve in the browser's zone.
+ *
+ * Backs the from/to bounds the shift pages send to GET /api/shifts. The
+ * server re-anchors a bare date to the SITE's whole calendar day
+ * (services/dateRange.ts), so the only thing decided here is WHICH calendar
+ * date gets named — and a browser in IST names a different one than the site
+ * does. Pass the site's zone wherever the page knows it.
+ *
+ * Day arithmetic runs on a UTC midnight rather than by adding 86_400_000 ms
+ * to the current instant: every UTC day is 24h, so ±N days can never land
+ * short or long across a DST transition.
+ */
+export function dayOffsetInZone(offsetDays: number, tz?: string): string {
+  const todayThere = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+  const d = new Date(`${todayThere}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
+}
