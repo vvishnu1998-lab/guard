@@ -114,7 +114,7 @@ router.get('/companies', requireAuth('vishnu'), async (_req, res) => {
   const result = await pool.query(
     `SELECT
        co.id, co.name, co.default_photo_limit, co.is_active, co.created_at,
-       COUNT(DISTINCT s.id)  FILTER (WHERE s.is_active = true AND s.contract_end >= NOW()) AS active_sites,
+       COUNT(DISTINCT s.id)  FILTER (WHERE s.is_active = true AND (s.contract_end IS NULL OR s.contract_end >= NOW())) AS active_sites,
        COUNT(DISTINCT g.id)  FILTER (WHERE g.is_active = true)                             AS active_guards,
        COUNT(DISTINCT ca.id)                                                                AS admin_count
      FROM companies co
@@ -863,11 +863,24 @@ router.patch('/companies/:company_id/primary-admin/:admin_id', requireAuth('vish
 });
 
 // GET /api/admin/kpis — dashboard summary for company_admin
+//
+// active_sites counts sites with a guard on post right now — an open
+// shift_sessions row — not sites with a live contract. It mirrors the
+// `duty` query below, realigning the card with the other three in that
+// row, all of which report operational state. The old
+// `contract_end >= NOW()` predicate read 0 for every company: every
+// prod site has contract_end NULL, the create form no longer collects
+// it, and NULL >= NOW() is NULL, never true.
 router.get('/kpis', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
   const [sites, duty, reports, alerts] = await Promise.all([
     pool.query(
-      `SELECT COUNT(*) FROM sites WHERE company_id = $1 AND is_active = true AND contract_end >= NOW()`,
+      `SELECT COUNT(DISTINCT ss.site_id)
+       FROM shift_sessions ss
+       JOIN sites s ON s.id = ss.site_id
+       WHERE s.company_id = $1
+         AND s.is_active = true
+         AND ss.clocked_out_at IS NULL`,
       [cid]
     ),
     pool.query(
@@ -1130,12 +1143,11 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
            JOIN shift_sessions ss6 ON ss6.id = gv.shift_session_id
           WHERE ss6.site_id = s.id
             AND ss6.clocked_in_at >= DATE_TRUNC('week', NOW())
-       ), 0) AS h_violation,
-       CASE WHEN s.contract_end >= NOW() THEN 'active' ELSE 'inactive' END AS status
+       ), 0) AS h_violation
      FROM sites s
      LEFT JOIN reports r ON r.site_id = s.id
      WHERE s.company_id = $1 AND s.is_active = true
-     GROUP BY s.id, s.name, s.contract_end
+     GROUP BY s.id, s.name
      ORDER BY s.name`,
     [cid]
   );
