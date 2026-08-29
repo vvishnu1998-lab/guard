@@ -18,7 +18,6 @@ import { formatDurationMs, formatHoursHHMM, type ShiftHours } from '../../lib/fo
 import { shiftDayLabel, fmtTimeInTz, tzAbbreviation } from '../../lib/shiftTime';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-import { BreakType } from '../../constants/breakDurations';
 import { guardMessage } from '../../lib/errorCopy';
 import UnsentWritesBanner from '../../components/UnsentWritesBanner';
 
@@ -839,11 +838,16 @@ export default function HomeScreen() {
   );
 }
 
-const BREAK_ICONS: Record<BreakType, string> = { meal: '🍱', rest: '☕', other: '⏸' };
-const BREAK_LABELS: Record<BreakType, string> = { meal: 'MEAL BREAK', rest: 'REST BREAK', other: 'BREAK' };
+// One break type from 2026-08-29. `breakType` is still a free string because
+// a row written before schema_v61 says 'meal' | 'rest' | 'other', and a build
+// from this branch can run against the pre-Phase-2 API which still sends
+// those for new rows. Unknown values fall back to the generic icon and label
+// rather than rendering blank.
+const BREAK_ICONS: Record<string, string> = { break: '⏸', meal: '🍱', rest: '☕', other: '⏸' };
+const BREAK_LABELS: Record<string, string> = { break: 'BREAK', meal: 'MEAL BREAK', rest: 'REST BREAK', other: 'BREAK' };
 
 function BreakBanner({ breakType, breakStartMs, durationMs }: {
-  breakType: BreakType; breakStartMs: number; durationMs: number;
+  breakType: string; breakStartMs: number; durationMs: number;
 }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -863,8 +867,8 @@ function BreakBanner({ breakType, breakStartMs, durationMs }: {
       onPress={() => router.push('/break')}
       activeOpacity={0.85}
     >
-      <Text style={styles.breakBannerIcon}>{BREAK_ICONS[breakType]}</Text>
-      <Text style={styles.breakBannerLabel}>{BREAK_LABELS[breakType]}</Text>
+      <Text style={styles.breakBannerIcon}>{BREAK_ICONS[breakType] ?? '⏸'}</Text>
+      <Text style={styles.breakBannerLabel}>{BREAK_LABELS[breakType] ?? 'BREAK'}</Text>
       <Text style={styles.breakBannerSpacer}>·</Text>
       <Text style={[styles.breakBannerRemaining, expired && styles.breakBannerRemainingExpired]}>
         {label}

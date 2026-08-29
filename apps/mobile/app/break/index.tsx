@@ -1,6 +1,8 @@
 /**
  * Break Session Flow — server-truth timer (Phase D Bug A).
- * Step 1: Break type selector (Meal / Rest / Other)
+ * Step 1: Start a single 30-minute PAID break, gated by a server-computed
+ *         allowance (one type since 2026-08-29 — the meal/rest/other chooser
+ *         is gone; allowance comes from scheduled shift length, not type).
  * Step 2: Circular countdown timer derived from (break_start + duration) − Date.now().
  *
  * Why server-truth:
@@ -27,24 +29,14 @@ import { useShiftStore } from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { uuidv4 } from '../../lib/uuid';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-import { BREAK_DURATIONS, BreakType } from '../../constants/breakDurations';
+import { BREAK_TYPE, BREAK_DURATION_MINUTES } from '../../constants/breakDurations';
+import { parseAllowance, blockedCopy } from '../../lib/breakAllowance';
 import { guardMessage } from '../../lib/errorCopy';
-
-// UI-facing metadata. Numbers pulled from BREAK_DURATIONS so this list
-// cannot drift from server / mobile constants file.
-const BREAK_OPTIONS: { type: BreakType; label: string; duration: number; icon: string }[] = [
-  { type: 'meal',  label: 'MEAL BREAK', duration: BREAK_DURATIONS.meal,  icon: '🍱' },
-  { type: 'rest',  label: 'REST BREAK', duration: BREAK_DURATIONS.rest,  icon: '☕' },
-  { type: 'other', label: 'OTHER',      duration: BREAK_DURATIONS.other, icon: '⏸' },
-];
-
-const LABEL_FOR_TYPE: Record<BreakType, string> =
-  Object.fromEntries(BREAK_OPTIONS.map((o) => [o.type, o.label])) as Record<BreakType, string>;
 
 interface BreakStartResponse {
   break_id: string;
   break_start: string;
-  break_type: BreakType;
+  break_type: string;
   planned_duration_minutes: number;
 }
 
@@ -79,7 +71,7 @@ async function bestEffortPosition(): Promise<{ lat: number; lng: number; accurac
 export default function BreakScreen() {
   const [phase,   setPhase]   = useState<'select' | 'timer'>('select');
   const [breakId, setBreakId] = useState<string | null>(null);
-  const [breakType,  setBreakType]  = useState<BreakType | null>(null);
+  const [breakType,  setBreakType]  = useState<string | null>(null);
   const [breakLabel, setBreakLabel] = useState('');
   /** ms since epoch of the server-authoritative break_start. */
   const [breakStartMs, setBreakStartMs] = useState<number | null>(null);
@@ -144,7 +136,9 @@ export default function BreakScreen() {
     }
     setBreakId(cb.break_id);
     setBreakType(cb.break_type);
-    setBreakLabel(LABEL_FOR_TYPE[cb.break_type] ?? cb.break_type.toUpperCase());
+    // One type now, so the label is a constant. A pre-schema_v61 row can
+    // still say 'meal'; uppercase it rather than mislabelling it 'BREAK'.
+    setBreakLabel(cb.break_type === BREAK_TYPE ? 'BREAK' : String(cb.break_type).toUpperCase());
     setBreakStartMs(new Date(cb.break_start).getTime());
     setDurationMs(cb.planned_duration_minutes * 60 * 1000);
     setPhase('timer');
@@ -209,7 +203,7 @@ export default function BreakScreen() {
   // which no key-based scheme dedups.
   const [breakIdempotencyKey] = useState(() => uuidv4());
 
-  async function startBreak(option: typeof BREAK_OPTIONS[0]) {
+  async function startBreak() {
     if (!activeSession) {
       Alert.alert('No Active Shift', 'You must be clocked in to take a break.');
       return;
@@ -221,7 +215,7 @@ export default function BreakScreen() {
       const pos = await bestEffortPosition();
       const data = await apiClient.post<BreakStartResponse>('/shifts/break-start', {
         session_id: activeSession.id,
-        break_type: option.type,
+        break_type: BREAK_TYPE,
         ...(pos ? { lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy ?? 30, ...pos.signals } : {}),
       }, { headers: { 'Idempotency-Key': breakIdempotencyKey } });
       const cb = {
@@ -236,9 +230,17 @@ export default function BreakScreen() {
       // Quota state changed server-side; re-pull so "1/2" is current.
       refreshFromServer();
     } catch (err: any) {
-      if (err instanceof ApiError && err.status === 422 && err.code === 'BREAK_QUOTA_EXCEEDED') {
+      // All three gates arrive as a 422 with a code. Branch on .code, not on
+      // status alone — these routes emit real enum codes (unlike swap/handoff,
+      // which emit prose). The server's message already names the time, so
+      // pass it through rather than re-deriving it here.
+      const gate = err instanceof ApiError && err.status === 422 ? err.code : null;
+      if (gate === 'BREAK_QUOTA_EXCEEDED') {
         Alert.alert('Break Limit Reached', err.message);
         refreshFromServer(); // sync the counts that gated us
+      } else if (gate === 'BREAK_TOO_EARLY' || gate === 'BREAK_TOO_SOON') {
+        Alert.alert('Break Not Available Yet', err.message);
+        refreshFromServer(); // pull the eligible_at that gated us
       } else {
         Alert.alert('Error', guardMessage(err, 'Could not start your break. Try again.', 'break.start'));
       }
@@ -273,41 +275,42 @@ export default function BreakScreen() {
   const mins = Math.floor(remaining / 60);
   const secs = remaining % 60;
 
-  // ── Phase 1: Select break type ────────────────────────────────────────
+  // ── Phase 1: Start a break ────────────────────────────────────────────
+  //
+  // One break type, so this is one card, not a chooser. The allowance line
+  // and the disabled state come entirely from the server (parseAllowance);
+  // when it yields null — old API shape, malformed, or absent — the card
+  // renders with no allowance line and nothing disabled, and the server's
+  // 422 does the enforcing.
   if (phase === 'select') {
+    const allowance = parseAllowance(breakQuotas);
+    const blocked   = allowance !== null && !allowance.canStart;
     return (
       <View style={styles.container}>
         <Text style={styles.title}>START BREAK</Text>
-        <Text style={styles.subtitle}>Select break type</Text>
+        <Text style={styles.subtitle}>
+          {allowance
+            ? `${allowance.used} of ${allowance.limit} used this shift`
+            : 'Paid break'}
+        </Text>
 
         <View style={styles.optionList}>
-          {BREAK_OPTIONS.map((opt) => {
-            // 5.3 — server-truth quota state ("1/2 USED"). Absent quotas
-            // (pre-v46 API) → no row shown, nothing disabled; the server
-            // still enforces and the 422 handler explains.
-            const q = breakQuotas?.[opt.type] ?? null;
-            const exhausted = q !== null && q.used >= q.limit;
-            return (
-              <TouchableOpacity
-                key={opt.type}
-                style={[styles.optionCard, (starting || exhausted) && styles.disabled]}
-                onPress={() => startBreak(opt)}
-                disabled={starting || exhausted}
-              >
-                <Text style={styles.optionIcon}>{opt.icon}</Text>
-                <View style={styles.optionInfo}>
-                  <Text style={styles.optionLabel}>{opt.label}</Text>
-                  <Text style={styles.optionDuration}>{opt.duration} MINUTES</Text>
-                  {q !== null && (
-                    <Text style={[styles.optionQuota, exhausted && styles.optionQuotaUsed]}>
-                      {exhausted ? 'NONE LEFT THIS SHIFT' : `${q.used}/${q.limit} USED`}
-                    </Text>
-                  )}
-                </View>
-                <Text style={styles.chevron}>›</Text>
-              </TouchableOpacity>
-            );
-          })}
+          <TouchableOpacity
+            style={[styles.optionCard, (starting || blocked) && styles.disabled]}
+            onPress={startBreak}
+            disabled={starting || blocked}
+          >
+            <View style={styles.optionInfo}>
+              <Text style={styles.optionLabel}>BREAK</Text>
+              <Text style={styles.optionDuration}>{BREAK_DURATION_MINUTES} MINUTES · PAID</Text>
+              {allowance !== null && (
+                <Text style={[styles.optionQuota, blocked && styles.optionQuotaUsed]}>
+                  {blocked ? blockedCopy(allowance) : `${allowance.used}/${allowance.limit} USED`}
+                </Text>
+              )}
+            </View>
+            <Text style={styles.chevron}>›</Text>
+          </TouchableOpacity>
         </View>
 
         <TouchableOpacity style={styles.cancelBtn} onPress={() => router.back()}>

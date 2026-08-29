@@ -52,18 +52,40 @@ interface CurrentBreak {
   break_id: string;
   /** Server timestamptz — parseable via new Date(). */
   break_start: string;
-  break_type: 'meal' | 'rest' | 'other';
+  /** `string`, not a union. From schema_v61 the server only ever sends
+   *  'break', but a row written before that migration still carries
+   *  'meal' | 'rest' | 'other', and a binary from this branch can run
+   *  against the pre-Phase-2 API which sends the old values for NEW rows
+   *  too. Narrowing this to 'break' would make the type lie in the exact
+   *  window this build ships into. Consumers render it, never branch on it. */
+  break_type: string;
   planned_duration_minutes: number;
 }
 
-/** Break-enforcement package — per-type used/limit from
- *  /shifts/active-session's break_quotas (schema_v46 API). Optional on the
- *  wire: a pre-v46 API omits it and the break screen renders no quota row
- *  and disables nothing (server still enforces). */
-export type BreakQuotas = Record<
-  'meal' | 'rest' | 'other',
-  { used: number; limit: number }
->;
+/**
+ * Whatever GET /shifts/active-session put in `break_quotas`, carried through
+ * UNINTERPRETED.
+ *
+ * Deliberately `unknown` rather than a shape. This field has had two
+ * incompatible shapes in production and this store may run against either:
+ *
+ *   OLD (schema_v46 API, currently deployed)
+ *     { meal: {used,limit}, rest: {used,limit}, other: {used,limit} }
+ *   NEW (one-break-type API)
+ *     { used, limit, can_start, eligible_at, reason }
+ *
+ * A binary built from this branch can install BEFORE the API deploys, so the
+ * old shape is not merely legacy — it is the shape this code will meet first.
+ * Typing it as either one would be a lie in one of those worlds, and a `.map`
+ * or an index on the wrong shape is how a screen dies.
+ *
+ * The store's only jobs are to stringify-compare and hold it. All
+ * interpretation happens in app/break/index.tsx's parseAllowance(), which
+ * recognises the NEW shape and treats everything else — old shape, malformed,
+ * absent — as "no information", failing open. The server's 422 is the only
+ * real enforcement either way.
+ */
+export type BreakQuotas = unknown;
 
 interface ShiftState {
   pendingShift: Shift | null;
