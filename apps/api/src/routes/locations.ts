@@ -12,6 +12,7 @@ import { scheduleWindows } from '../services/pingWindows';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
+import { recordOffPostEvent } from '../services/offPostEvents';
 
 /**
  * Fire guard notification row + admin email for a geofence violation.
@@ -422,19 +423,40 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     // region-exit event (see session 94906fee — three rejections, no
     // violations). Failure to persist must not block the 422 the guard
     // is waiting on.
+    // 4.3 — the rejection is UNCHANGED (still 422 PING_OFF_POST below);
+    // only the evidence row gains a link. If a break is open, stamp
+    // break_session_id so a rejection taken during a break can later be told
+    // apart from one taken on duty. This route deliberately has NO
+    // break-aware branch — geofence decides submissions, break decides
+    // obligations, and the two never interact — so the lookup exists purely
+    // to label the evidence.
+    //
+    // Best-effort in both halves: the lookup is wrapped, and
+    // recordOffPostEvent never throws. A guard's 422 does not depend on
+    // either succeeding.
+    let pingBreakId: string | null = null;
     try {
-      await pool.query(
-        `INSERT INTO off_post_events
-           (shift_session_id, guard_id, site_id, source, lat, lng,
-            accuracy_m, distance_m, reason, expires_at)
-         VALUES ($1, $2, $3, 'ping_reject', $4, $5, $6, $7, $8, $9)`,
-        [shift_session_id, req.user!.sub, site_id, latitude, longitude,
-         accuracyM, fence.distance_m, fence.reason,
-         expiresAtFor('off_post_event')]
+      const ob = await pool.query<{ id: string }>(
+        'SELECT id FROM break_sessions WHERE shift_session_id = $1 AND break_end IS NULL LIMIT 1',
+        [shift_session_id],
       );
+      pingBreakId = ob.rows[0]?.id ?? null;
     } catch (err) {
-      console.error('[ping.reject] off_post_events INSERT failed:', err);
+      console.error('[ping.reject] open-break lookup failed:', err);
     }
+    await recordOffPostEvent(pool, {
+      shiftSessionId: shift_session_id,
+      guardId:        req.user!.sub,
+      siteId:         site_id,
+      source:         'ping_reject',
+      lat:            latitude,
+      lng:            longitude,
+      accuracyM:      accuracyM,
+      distanceM:      fence.distance_m,
+      reason:         fence.reason,
+      breakSessionId: pingBreakId,
+      expiresAt:      expiresAtFor('off_post_event'),
+    });
     console.log(
       `[ping.reject] session=${shift_session_id} distance=${fence.distance_m?.toFixed(1) ?? 'null'}m ` +
       `accuracy=${accuracyM ?? 'null'}m reason=${fence.reason}`,
@@ -676,21 +698,32 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
     const haveCoords =
       typeof latitude === 'number' && Number.isFinite(latitude) &&
       typeof longitude === 'number' && Number.isFinite(longitude);
-    if (haveCoords) {
-      try {
-        await pool.query(
-          `INSERT INTO off_post_events
-             (shift_session_id, guard_id, site_id, source, lat, lng,
-              accuracy_m, distance_m, reason, expires_at)
-           VALUES ($1, $2, $3, 'break_exit', $4, $5, NULL, NULL, $6, $7)`,
-          [shift_session_id, guardId, siteId, latitude, longitude,
-           'boundary exit during active break', expiresAtFor('off_post_event')],
-        );
-      } catch (err) {
-        // Evidence write is best-effort; suppression must never 500.
-        console.error('[violation.suppressed.on_break] off_post_events INSERT failed:', err);
-      }
-    }
+    // 4.4 — the evidence row is now written UNCONDITIONALLY, with NULL where
+    // the position is unknown. It used to be written only when coordinates
+    // were present, so a no-coords exit produced suppression with ZERO
+    // evidence — and finalizeOverruns (jobs/breakExpiryCron.ts:101) reads
+    // this table as its off-post proof, so that silence read as "the guard
+    // never left". A row with a source, an occurred_at and NULL coordinates
+    // is strictly better evidence than no row.
+    //
+    // Requires schema_v61's DROP NOT NULL on lat/lng. On a pre-v61 database
+    // recordOffPostEvent detects that and skips the null-coordinate write
+    // with an explicit log line rather than firing a 23502 — i.e. exactly
+    // today's behaviour, no regression, and it starts working the moment
+    // v61 lands. Coordinate-bearing exits write on both schemas.
+    await recordOffPostEvent(pool, {
+      shiftSessionId: shift_session_id,
+      guardId,
+      siteId,
+      source:         'break_exit',
+      lat:            haveCoords ? latitude  : null,
+      lng:            haveCoords ? longitude : null,
+      accuracyM:      null,
+      distanceM:      null,
+      reason:         'boundary exit during active break',
+      breakSessionId: openBreak.rows[0].id,
+      expiresAt:      expiresAtFor('off_post_event'),
+    });
     console.log('[violation.suppressed.on_break]', {
       shift_session_id,
       guard_id: guardId,

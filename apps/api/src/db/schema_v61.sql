@@ -176,6 +176,29 @@ END $$;
 ALTER TABLE off_post_events
   ADD COLUMN IF NOT EXISTS break_session_id UUID;
 
+-- ── lat/lng become NULLABLE ─────────────────────────────────────────────
+--
+-- ADDED 2026-08-29 while implementing Phase 4.4, which requires the break
+-- suppression on POST /locations/violation to record evidence even when the
+-- device sent no coordinates. Both columns are NOT NULL as shipped in
+-- schema_v46:31-32 (re-verified against prod: is_nullable = 'NO' on both),
+-- so a null-coordinate INSERT raises 23502, and because that write is
+-- best-effort and swallowed, the row would silently not appear — which is
+-- exactly the "suppression with zero evidence" hole 4.4 exists to close.
+--
+-- NULL means "we do not know where the guard was", and that is a truthful
+-- and useful thing to record next to a source and an occurred_at. The
+-- rejected alternative was a 0,0 sentinel: it satisfies the constraint and
+-- fabricates a position in an evidence log that finalizeOverruns reads.
+--
+-- No backfill and no data change — the single existing row carries real
+-- coordinates. Dropping NOT NULL is catalog-only; it does not rewrite the
+-- table.
+--
+-- Idempotent: DROP NOT NULL on an already-nullable column is a no-op.
+ALTER TABLE off_post_events ALTER COLUMN lat DROP NOT NULL;
+ALTER TABLE off_post_events ALTER COLUMN lng DROP NOT NULL;
+
 DO $$
 BEGIN
   IF NOT EXISTS (

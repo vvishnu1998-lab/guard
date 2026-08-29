@@ -12,6 +12,7 @@ import { Sentry } from '../services/sentry';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { idempotent } from '../services/idempotency';
+import { recordOffPostEvent } from '../services/offPostEvents';
 
 const router = Router();
 
@@ -520,9 +521,45 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
     }
   }
 
+  // Break-time quiet policy, extended to the incident path (2026-08-29).
+  //
+  // The 2026-07-12 geofence policy is UNCHANGED and still governs whether a
+  // report is accepted: an off-post incident is accepted with
+  // is_within_geofence = false, and activity/maintenance are still refused.
+  // Nothing below alters a single accept-or-reject decision.
+  //
+  // What changes is the ALERT CASCADE. An off-post incident filed during a
+  // break was still inserting a geofence_violations row and calling
+  // fireBreachAlerts, which is the same admin-email storm 99d09bd closed on
+  // POST /locations/violation — reached through a different endpoint. During
+  // a break the guard owes no geofence obligation, so a boundary excursion is
+  // expected and must not wake anyone. The report is still filed, still
+  // flagged off-post, and the excursion is still recorded — quietly, as an
+  // off_post_events row instead of a violation.
+  //
+  // Read here, before the transaction, so the flag is available both inside
+  // it (to skip the violation INSERT) and after the commit (to skip the
+  // alert and write the evidence row). Best-effort: a failed lookup means
+  // onBreakId stays null and the pre-existing cascade runs — the safe
+  // direction, because the failure mode is a spurious alert, never a
+  // silently swallowed one.
+  let onBreakId: string | null = null;
+  if (isWithin === false && report_type === 'incident') {
+    try {
+      const ob = await pool.query<{ id: string }>(
+        'SELECT id FROM break_sessions WHERE shift_session_id = $1 AND break_end IS NULL LIMIT 1',
+        [shift_session_id],
+      );
+      onBreakId = ob.rows[0]?.id ?? null;
+    } catch (err) {
+      console.error('[reports] open-break lookup failed; alert cascade left intact:', err);
+    }
+  }
+
   // Non-incident reports MUST be at the post. Incidents are always
   // accepted (with the off-post flag if applicable) — emergencies
-  // trump the routine-report rule.
+  // trump the routine-report rule. UNCHANGED by the break policy above:
+  // activity and maintenance keep their 422 whether or not a break is open.
   if (isWithin === false && report_type !== 'incident') {
     console.log(
       `[report.reject] session=${shift_session_id} type=${report_type} ` +
@@ -695,7 +732,7 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
     // ALWAYS wakes the admin even during an active breach.
     // SAVEPOINT: losing the violation row must never cost us the incident
     // report itself.
-    if (isWithin === false && report_type === 'incident') {
+    if (isWithin === false && report_type === 'incident' && !onBreakId) {
       await client.query('SAVEPOINT violation_insert');
       try {
         const violationInsert = await client.query(
@@ -745,19 +782,46 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
   }
 
   if (isWithin === false && report_type === 'incident') {
-    console.log(
-      `[report.flag] report=${report.id} session=${shift_session_id} ` +
-      `type=incident violation=${violationId ?? 'none'}`,
-    );
-    if (violationId) {
-      fireBreachAlerts({
+    if (onBreakId) {
+      // Quiet path. No violation row was inserted above and no alert fires
+      // here; the excursion is recorded as evidence instead. Written after
+      // the COMMIT, alongside the other post-commit side effects, so a
+      // failed evidence write can never cost us the accepted report —
+      // recordOffPostEvent never throws in any case.
+      console.log('[report.flag.suppressed.on_break]', {
+        report_id:        report.id,
+        shift_session_id,
+        guard_id:         req.user!.sub,
+        break_id:         onBreakId,
+      });
+      await recordOffPostEvent(pool, {
         shiftSessionId: shift_session_id,
         guardId:        req.user!.sub,
-        violationId,
-        eventType:      'off_post_report',
-        context:        { kind: 'report', reportType: report_type },
-        extraData:      { reportId: report.id },
-      }).catch((err) => console.error('[report.flag] alert dispatch failed:', err));
+        siteId:         site_id,
+        source:         'incident_break',
+        lat:            haveCoords ? latitude  : null,
+        lng:            haveCoords ? longitude : null,
+        accuracyM:      haveCoords ? accuracy  : null,
+        distanceM:      fenceDistance,
+        reason:         'off-post incident during active break',
+        breakSessionId: onBreakId,
+        expiresAt:      expiresAtFor('off_post_event'),
+      });
+    } else {
+      console.log(
+        `[report.flag] report=${report.id} session=${shift_session_id} ` +
+        `type=incident violation=${violationId ?? 'none'}`,
+      );
+      if (violationId) {
+        fireBreachAlerts({
+          shiftSessionId: shift_session_id,
+          guardId:        req.user!.sub,
+          violationId,
+          eventType:      'off_post_report',
+          context:        { kind: 'report', reportType: report_type },
+          extraData:      { reportId: report.id },
+        }).catch((err) => console.error('[report.flag] alert dispatch failed:', err));
+      }
     }
   }
 
