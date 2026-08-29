@@ -35,7 +35,7 @@
  * two reasons that the code makes concrete:
  *
  *   1. IT WOULD INVENT BILLABLE HOURS. The total_hours expression below is
- *      NOW() - GREATEST(clocked_in_at, scheduled_start) - breaks. Run against
+ *      NOW() - GREATEST(clocked_in_at, scheduled_start). Run against
  *      a cancelled shift it produces paid hours for a shift the admin
  *      explicitly cancelled, and stamps clock_out_reason = 'auto', which is
  *      indistinguishable from an ordinary overrun. The payroll artifact would
@@ -70,9 +70,13 @@
  *   1. Close any open break_sessions inside the affected shift_sessions
  *      (set break_end = NOW(), compute duration_minutes).
  *   2. Close any open shift_sessions (set clocked_out_at = NOW(),
- *      compute total_hours = gross hours minus the break minutes from
- *      step 1).
+ *      compute total_hours = gross hours from the pay start).
  *   3. Mark the shift as 'completed'.
+ *
+ * Step 1 still runs and still computes duration_minutes even though step 2
+ * no longer subtracts it: breaks became PAID on 2026-08-29, and break_hours
+ * is still displayed on every admin surface. Recording is unchanged; only
+ * the pay arithmetic changed.
  *
  * Sessions closed here are stamped clock_out_reason = 'auto'. Before this
  * they were left NULL, and NULL was the only thing distinguishing an
@@ -130,9 +134,19 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     );
 
     // Step 2: Close any open shift_sessions, computing total_hours as
-    //         (clock_out − MAX(clock_in, scheduled_start)) − breaks
+    //         clock_out − MAX(clock_in, scheduled_start)
     //         (option C: early arrivals not paid, late stays paid).
     //         Matches manual clock-out math in routes/shifts.ts.
+    //
+    //         Breaks are PAID from 2026-08-29 — the break-minutes
+    //         subtraction that used to follow the gross term is gone. Step 1
+    //         above still closes open breaks and still computes their
+    //         duration_minutes, because break_hours remains a display field
+    //         on every admin surface; it simply no longer reduces pay.
+    //         The pay-start anchor is deliberately left as
+    //         MAX(clocked_in_at, scheduled_start) and is NOT aligned with
+    //         services/shiftHours.ts's actual_hours, which uses raw
+    //         clocked_in_at. That divergence is intentional and locked.
     const sessions = await client.query(
       `UPDATE shift_sessions ss
        SET clocked_out_at = NOW(),
@@ -140,11 +154,6 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
            total_hours = GREATEST(
              0,
              EXTRACT(EPOCH FROM (NOW() - GREATEST(ss.clocked_in_at, s.scheduled_start))) / 3600.0
-             - COALESCE((
-                 SELECT SUM(duration_minutes)
-                   FROM break_sessions bs
-                  WHERE bs.shift_session_id = ss.id
-               ), 0) / 60.0
            )
        FROM shifts s
        WHERE ss.shift_id = s.id

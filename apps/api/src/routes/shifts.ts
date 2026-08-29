@@ -2254,6 +2254,13 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       // UPDATE. Clamp with GREATEST(0, …) to match the manual clock-out and
       // autoCompleteShifts patterns; option-C accounting still holds because
       // pay only starts at scheduled_start regardless.
+      //
+      // Breaks are PAID from 2026-08-29 — the break-minutes subtraction that
+      // used to sit under the gross term is gone. break_sessions is still
+      // written and break_hours still displays; this changes what is paid,
+      // not what is recorded. The pay-start anchor is deliberately unchanged
+      // (see the manual clock-out path for why it stays divergent from
+      // actual_hours).
       `UPDATE shift_sessions ss
           SET clocked_out_at = NOW(),
               clock_out_reason = $2,
@@ -2261,10 +2268,6 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
                 EXTRACT(EPOCH FROM (NOW() - GREATEST(ss.clocked_in_at, (
                   SELECT sh.scheduled_start FROM shifts sh WHERE sh.id = ss.shift_id
                 )))) / 3600.0
-                - COALESCE((
-                    SELECT SUM(bs.duration_minutes) / 60.0
-                      FROM break_sessions bs WHERE bs.shift_session_id = ss.id
-                  ), 0)
               )::NUMERIC, 2))
         WHERE ss.id = $1
         RETURNING ss.id, ss.total_hours`,
@@ -3372,7 +3375,8 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
 // Wrapped in an explicit transaction (CB2/CB3): previously four independent
 // queries fired outside any transaction, so a crash between them could leave
 // total_hours NULL or shifts.status stuck on 'active'.  Now closes the open
-// session, sets total_hours = gross − breaks, and completes the shift in one
+// session, sets total_hours = gross from the pay start (breaks are paid from
+// 2026-08-29 and no longer subtracted), and completes the shift in one
 // atomic unit.
 //
 // T2-A geofence validation (2026-05-17 audit Wave A) is EVALUATED AND
@@ -3541,20 +3545,35 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
       [session.id]
     );
 
-    // Compute total_hours = (clock_out − MAX(clock_in, scheduled_start)) − breaks.
+    // Compute total_hours = clock_out − MAX(clock_in, scheduled_start).
     // Early arrivals don't earn pay before scheduled_start; late stays still count.
     // Matches autoCompleteShifts math (kept identical so manual + auto closes agree).
-    const breaksResult = await client.query(
-      'SELECT COALESCE(SUM(duration_minutes), 0) AS total_break_mins FROM break_sessions WHERE shift_session_id = $1',
-      [session.id]
-    );
+    //
+    // ── BREAKS ARE PAID (2026-08-29) ────────────────────────────────────
+    //
+    // The break subtraction that used to sit here is gone. Breaks are paid,
+    // so a guard who takes one is not docked for it. break_sessions is still
+    // written in full and break_hours still surfaces on every admin surface
+    // (SHIFT_HOURS_SQL_FIELDS) — this changes what is PAID, not what is
+    // RECORDED, and an admin can still see the break was taken.
+    //
+    // Deliberately NOT changed in the same edit: the pay-start anchor stays
+    // MAX(clocked_in_at, scheduled_start). It differs from
+    // services/shiftHours.ts's actual_hours, which uses RAW clocked_in_at,
+    // and that divergence is intentional and locked — actual_hours reports
+    // time on site, total_hours reports time paid. Aligning them is a
+    // separate decision that has been made and declined; do not "tidy" it.
+    //
+    // Overrun is likewise untouched: still flagged for human review on the
+    // break row, still never auto-deducted from anything.
     const clockOutMs    = new Date(session.clocked_out_at).getTime();
     const clockInMs     = new Date(session.clocked_in_at).getTime();
     const scheduledMs   = new Date(session.scheduled_start).getTime();
     const payStartMs    = Math.max(clockInMs, scheduledMs);
-    const grossHours    = Math.max(0, (clockOutMs - payStartMs) / 3_600_000);
-    const breakHours    = Number(breaksResult.rows[0].total_break_mins) / 60;
-    const netHours      = Math.max(0, grossHours - breakHours);
+    // GREATEST(0, …) equivalent — chk_total_hours_nonneg still applies, and a
+    // handoff-clock-in landing before scheduled_start once drove this
+    // negative (see the note on the handoff path).
+    const netHours      = Math.max(0, (clockOutMs - payStartMs) / 3_600_000);
 
     await client.query(
       `UPDATE shift_sessions
