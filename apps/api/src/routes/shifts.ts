@@ -16,7 +16,8 @@ import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
-import { BREAK_DURATIONS, BREAK_QUOTAS, BREAK_MISTAP_SECONDS, isBreakType } from '../constants/breakDurations';
+import { BREAK_DURATION_MINUTES, normalizeWireBreakType } from '../constants/breakDurations';
+import { getBreakAllowance, breakBlockMessage } from '../services/breakAllowance';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
   pushSwapRequestToRecipient,
@@ -2634,27 +2635,48 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
       }
     : null;
 
-  // Break quotas (schema_v46 package) — used/limit per type so the break
-  // screen can render "Lunch 1/2" and pre-disable exhausted types. Same
-  // counting rule as the break-start gate: open rows count, mis-taps
-  // (closed within BREAK_MISTAP_SECONDS) don't.
-  const quotaUsage = await pool.query<{ break_type: string; n: string }>(
-    `SELECT break_type, COUNT(*) AS n
-       FROM break_sessions
-      WHERE shift_session_id = $1
-        AND (break_end IS NULL
-             OR break_end >= break_start + make_interval(secs => $2))
-      GROUP BY break_type`,
-    [r.session_id, BREAK_MISTAP_SECONDS]
-  );
-  const usedByType: Record<string, number> = {};
-  for (const row of quotaUsage.rows) usedByType[row.break_type] = Number(row.n);
-  const breakQuotas = Object.fromEntries(
-    (Object.keys(BREAK_QUOTAS) as Array<keyof typeof BREAK_QUOTAS>).map((t) => [
-      t,
-      { used: usedByType[t] ?? 0, limit: BREAK_QUOTAS[t] },
-    ])
-  );
+  // Break allowance — used/limit plus WHY a break is unavailable and WHEN it
+  // becomes available, so the break screen can render a disabled card with a
+  // real time on it instead of a bare greyed button.
+  //
+  // Computed by services/breakAllowance.ts, the same function POST
+  // /break-start gates on, so this can never promise something the button
+  // then refuses.
+  //
+  // ── BACKWARD TOLERANCE (how it is guaranteed, not hoped for) ───────────
+  //
+  // The shape of break_quotas changes here: it was
+  // { meal: {used,limit}, rest: {...}, other: {...} }, keyed by type; it is
+  // now a single flat object, because there is only one type.
+  //
+  // Every mobile bundle in the field reads this field in exactly one place
+  // and in exactly one way — verified 2026-08-29 by reading BOTH refs, main
+  // and origin/batch/mobile-14 (the commit behind production OTA group
+  // 20e07590):
+  //
+  //     const q = breakQuotas?.[opt.type] ?? null;      // opt.type is 'meal' | 'rest' | 'other'
+  //     const exhausted = q !== null && q.used >= q.limit;
+  //     {q !== null && ( ...render `${q.used}/${q.limit} USED`... )}
+  //
+  // Against the new shape, breakQuotas['meal'] is undefined, `?? null` makes
+  // q null, `exhausted` is false, and the quota row simply does not render.
+  // No property is read off undefined, so there is nothing to throw. The old
+  // client degrades to no quota text and no pre-disabled card — which is the
+  // documented pre-v46 fallback that break/index.tsx:273-275 was written for
+  // ("Absent quotas -> no row shown, nothing disabled; the server still
+  // enforces and the 422 handler explains"), and the server still enforces.
+  //
+  // The store side is equally safe: shiftStore.ts only JSON.stringify-compares
+  // the object and set()s it, never indexes it.
+  //
+  // This is fail-open on DISPLAY only. It is not fail-open on POLICY — an old
+  // client that shows an enabled button still gets a 422 with the reason and
+  // eligible_at when it taps.
+  const breakQuotas = await getBreakAllowance(pool, {
+    shiftId:        r.shift_id,
+    scheduledStart: r.scheduled_start,
+    scheduledEnd:   r.scheduled_end,
+  });
 
   // Phase 1 — 4-field live hours for the active session. break_hours /
   // violation_hours count open intervals up to NOW() so the mobile can
@@ -2962,8 +2984,12 @@ router.post('/break-start', requireAuth('guard'), idempotent('break-start'), asy
   if (!session_id || !break_type) {
     return res.status(400).json({ error: 'session_id and break_type are required' });
   }
-  if (!isBreakType(break_type)) {
-    return res.status(400).json({ error: 'break_type must be one of meal, rest, other' });
+  // One stored type. Legacy labels from bundles in the field are accepted on
+  // the wire and normalised — see normalizeWireBreakType for why that shim
+  // exists and when to delete it. An unrecognised string is still a 400.
+  const storedBreakType = normalizeWireBreakType(break_type);
+  if (!storedBreakType) {
+    return res.status(400).json({ error: 'break_type must be break' });
   }
 
   // schema_v46 — break-start coordinates. Optional on the wire (a pre-v46
@@ -2981,12 +3007,25 @@ router.post('/break-start', requireAuth('guard'), idempotent('break-start'), asy
 
   try {
     // Verify session belongs to this guard and is open
-    const sessionResult = await pool.query(
-      'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2 AND clocked_out_at IS NULL',
+    // Widened to carry the parent shift: allowance and both eligibility
+    // timers are SHIFT-scoped, so every gate below needs shift_id and the
+    // scheduled window. Same join shape getShiftHours uses
+    // (services/shiftHours.ts:278-281); shift_id is the PK on the other side,
+    // so this stays a single indexed lookup.
+    const sessionResult = await pool.query<{
+      site_id: string;
+      shift_id: string;
+      scheduled_start: Date;
+      scheduled_end: Date;
+    }>(
+      `SELECT ss.site_id, ss.shift_id, sh.scheduled_start, sh.scheduled_end
+         FROM shift_sessions ss
+         JOIN shifts sh ON sh.id = ss.shift_id
+        WHERE ss.id = $1 AND ss.guard_id = $2 AND ss.clocked_out_at IS NULL`,
       [session_id, req.user!.sub]
     );
     if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
-    const { site_id } = sessionResult.rows[0];
+    const { site_id, shift_id, scheduled_start, scheduled_end } = sessionResult.rows[0];
 
     // Mock-location gate — break-start. No transaction on this route
     // (plain pool.query), so a reject is a plain early return. site_id
@@ -3014,12 +3053,14 @@ router.post('/break-start', requireAuth('guard'), idempotent('break-start'), asy
     );
     if (existing.rows[0]) {
       const row = existing.rows[0];
-      if (row.break_type !== break_type) {
+      // With one stored type this can now only fire on a row written before
+      // schema_v61 relabelled everything. Kept as a breadcrumb, not an error.
+      if (row.break_type !== storedBreakType) {
         Sentry.addBreadcrumb({
           category: 'break',
           message: 'break-start type mismatch',
           level: 'warning',
-          data: { requested: break_type, existing: row.break_type, break_id: row.id },
+          data: { wire: break_type, stored: storedBreakType, existing: row.break_type, break_id: row.id },
         });
       }
       return res.status(200).json({
@@ -3030,38 +3071,43 @@ router.post('/break-start', requireAuth('guard'), idempotent('break-start'), asy
       });
     }
 
-    // Per-shift quota by type (schema_v46 package). Counted AFTER the
+    // Allowance + eligibility, all SHIFT-scoped. Evaluated AFTER the
     // idempotent open-break return above — a re-mount fetching its own open
-    // break must never see a quota error. Mis-taps (closed within
-    // BREAK_MISTAP_SECONDS of starting) don't burn allowance.
-    const quota = BREAK_QUOTAS[break_type];
-    const usedResult = await pool.query<{ n: string }>(
-      `SELECT COUNT(*) AS n
-         FROM break_sessions
-        WHERE shift_session_id = $1
-          AND break_type = $2
-          AND (break_end IS NULL
-               OR break_end >= break_start + make_interval(secs => $3))`,
-      [session_id, break_type, BREAK_MISTAP_SECONDS]
-    );
-    const used = Number(usedResult.rows[0].n);
-    if (used >= quota) {
+    // break must never see a gate error, which is why that branch stays
+    // first and this block must not move above it.
+    //
+    // Three gates, in services/breakAllowance.ts so this route and
+    // GET /active-session can never disagree about what the app should show
+    // versus what the button will do:
+    //   * allowance   1 break at <= 8 scheduled hours, 2 above
+    //   * first break 4h after the shift's FIRST actual clock-in
+    //   * next break  2h after the previous break's end
+    // Mis-taps (closed within BREAK_MISTAP_SECONDS) count for neither.
+    //
+    // "for this shift" in the copy below is now literally true: the count
+    // spans every session on the shift, so a handoff no longer resets it.
+    const allowance = await getBreakAllowance(pool, {
+      shiftId:        shift_id,
+      scheduledStart: scheduled_start,
+      scheduledEnd:   scheduled_end,
+    });
+    if (!allowance.can_start) {
       return res.status(422).json({
-        error: 'BREAK_QUOTA_EXCEEDED',
-        message: `You have used all ${quota} ${break_type} break${quota === 1 ? '' : 's'} for this shift.`,
-        break_type,
-        used,
-        limit: quota,
+        error:       allowance.reason,
+        message:     breakBlockMessage(allowance),
+        used:        allowance.used,
+        limit:       allowance.limit,
+        eligible_at: allowance.eligible_at,
       });
     }
 
-    const planned = BREAK_DURATIONS[break_type];
+    const planned = BREAK_DURATION_MINUTES;
     const result = await pool.query(
       `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes,
                                    start_lat, start_lng, start_accuracy_m,
                                    start_location_mocked, start_fix_age_ms)
        VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10) RETURNING id, break_start, break_type, planned_duration_minutes`,
-      [session_id, req.user!.sub, site_id, break_type, planned, startLat, startLng, startAccuracyM,
+      [session_id, req.user!.sub, site_id, storedBreakType, planned, startLat, startLng, startAccuracyM,
        // Shadow capture (Wave 2) — recorded, never evaluated here.
        breakSignals.locationMocked, breakSignals.fixAgeMs]
     );
