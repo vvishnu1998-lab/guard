@@ -2,7 +2,7 @@
   "expo": {
     "name": "NetraOps",
     "slug": "guard",
-    "version": "1.0.16",
+    "version": "1.0.17",
     "runtimeVersion": {
       "policy": "appVersion"
     },
