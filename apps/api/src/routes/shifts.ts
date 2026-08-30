@@ -2825,6 +2825,21 @@ router.get('/my-hours.pdf', requireAuth('guard'), async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Cache-Control', 'private, no-store');
+    // How many sessions the document describes.
+    //
+    // Set on EVERY successful response, including non-empty ones, so the
+    // client has one rule to follow instead of an absence to interpret: an
+    // empty period is `0`, not a missing header. A missing header means "this
+    // server predates the feature" and nothing more — which is exactly the
+    // distinction a client running against a not-yet-deployed API needs.
+    //
+    // MUST be set before the first byte. renderGuardHoursPdf calls
+    // doc.pipe(res) internally, and the first write flushes the header block;
+    // any setHeader after that throws ERR_HTTP_HEADERS_SENT and would be
+    // swallowed by the catch below into a destroyed stream. All four headers
+    // are therefore set here, above the render call, and nothing between them
+    // and it may write to `res`.
+    res.setHeader('X-NetraOps-Shift-Count', String(rows.rows.length));
 
     await renderGuardHoursPdf({
       guardName:   guard.name,
