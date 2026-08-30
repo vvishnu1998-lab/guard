@@ -72,17 +72,25 @@ export const FOOTNOTE_BREAK_PAID =
   'for transparency; it should not be subtracted.';
 
 /**
- * What the Unverified column measures, and — as importantly — what it does
- * not. The column was called "Off-post" until 2026-08-30, which asserted the
- * guard had left the site. The data supports no such claim: it records only
- * that presence went unconfirmed. A guard standing on post who does not
- * check in accrues unverified time, and the footnote has to say so or the
- * reader will draw the old conclusion from the new label.
+ * What the Geofence violation column measures, and — as importantly — what it
+ * does not.
+ *
+ * The heading has now been through three names: "Off-post" until 2026-08-30,
+ * then "Unverified", now "Geofence violation" at the customer's request
+ * (Nataniel, STARNET). Each rename made the heading assert MORE than the data
+ * supports, and this one asserts the most: a boundary crossing. The underlying
+ * measurement never changed — it is still "ping windows inside an open
+ * boundary alert that received no check-in", which a guard standing on post
+ * with a dead phone accrues just as fast as one who walked away.
+ *
+ * THE SECOND SENTENCE IS LOAD BEARING AND MUST NOT BE SHORTENED. It is the
+ * only thing on the page standing between the heading's claim and the reader's
+ * conclusion. Wording locked by dispatch V5.4 — change it only on the record.
  */
-export const FOOTNOTE_UNVERIFIED =
-  'Unverified hours are ping windows spanned by an open boundary alert in which no location ' +
-  'check-in was received. This is not a measure of time away from the post — a guard who is ' +
-  'present but does not check in accrues unverified time.';
+export const FOOTNOTE_GEOFENCE_VIOLATION =
+  'Geofence violation hours count ping windows spanned by an open boundary alert in which no ' +
+  'location check-in was received. A guard who is at the post but does not check in accrues time ' +
+  'in this column, so it is not a confirmed measure of time away from the post.';
 
 /** Why the Scheduled column has an em dash where a total would be. */
 export const FOOTNOTE_SCHEDULED_NOT_TOTALLED =
@@ -97,6 +105,16 @@ export interface GuardHoursRow {
   /** shift_sessions.id — not rendered, used for stable ordering and tests. */
   session_id: string;
   clocked_in_at: Date | string;
+  /** null while the session is still open. */
+  clocked_out_at: Date | string | null;
+  /** The SHIFT's window — rendered as the Scheduled cell's first line. Both
+   *  columns are NOT NULL in schema, so neither can be absent. */
+  scheduled_start: Date | string;
+  scheduled_end: Date | string;
+  /** V5.5 — this guard handed the shift to someone else mid-shift. */
+  handed_off: boolean;
+  /** V5.5 — this guard took the shift over from someone else mid-shift. */
+  took_over: boolean;
   site_name: string;
   scheduled_hours: number | string;
   actual_hours: number | string;
@@ -121,16 +139,33 @@ export interface GuardHoursDoc {
 // ── Column geometry ───────────────────────────────────────────────────────
 // Widths sum to CW (495) exactly; a mismatch shows up immediately as a
 // right edge that does not meet the rule above the totals row.
+// Widths re-cut for V5: SCHEDULED now carries a time RANGE rather than a
+// single duration ("10:00 AM – 10:00 PM" measures 78pt at 8pt Helvetica, so
+// 64 could not hold it), and the heading "GEOFENCE VIOLATION" measures 84pt
+// at 7.5pt Helvetica-Bold against the 66pt of usable space the old 74-wide
+// column had. Both were measured, not estimated. SITE gives up the room; the
+// longest production site name is "william pen hotel" at 63pt, and fit()
+// still truncates anything longer.
+//
+// Key stays 'offpost' — see the note on the heading rename below.
 const COLS = [
-  { key: 'date',      label: 'DATE',      w:  72, align: 'left'  as const },
-  { key: 'site',      label: 'SITE',      w: 157, align: 'left'  as const },
-  { key: 'scheduled', label: 'SCHEDULED', w:  64, align: 'right' as const },
-  { key: 'actual',    label: 'ACTUAL',    w:  64, align: 'right' as const },
-  { key: 'break',     label: 'BREAK',     w:  64, align: 'right' as const },
-  { key: 'offpost',   label: 'UNVERIFIED', w: 74, align: 'right' as const },
+  { key: 'date',      label: 'DATE',      w:  68, align: 'left'  as const },
+  { key: 'site',      label: 'SITE',      w: 130, align: 'left'  as const },
+  { key: 'scheduled', label: 'SCHEDULED', w:  90, align: 'right' as const },
+  { key: 'actual',    label: 'ACTUAL',    w:  54, align: 'right' as const },
+  { key: 'break',     label: 'BREAK',     w:  54, align: 'right' as const },
+  // V5.3 — DISPLAY STRING ONLY. The key stays 'offpost' and the wire field
+  // stays violation_hours / h_violation / offpost_hours, because Build 48 is
+  // in TestFlight parsing those names. Renaming the key here would be a
+  // silent client break for zero reader benefit.
+  { key: 'offpost',   label: 'GEOFENCE VIOLATION', w: 99, align: 'right' as const },
 ];
-const ROW_H = 18;
+// 24, not 18: the Scheduled cell is now two stacked lines (window, then
+// duration). Every other column stays single-line and centres against them.
+const ROW_H = 24;
 const HEADER_ROW_H = 20;
+/** Scheduled line 1 / line 2 / every other column, as offsets within a row. */
+const SCHED_L1_DY = 4, SCHED_L2_DY = 13.5, CELL_DY = 7.5;
 
 function colX(i: number): number {
   let x = ML;
@@ -151,6 +186,62 @@ function fmtDate(d: Date | string, tz: string): string {
     return new Intl.DateTimeFormat('en-GB',
       { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(d));
   }
+}
+
+/**
+ * Clock time in the document's zone — "8:00 AM".
+ *
+ * en-US, not the en-GB used for dates: en-GB renders the meridiem lowercase
+ * ("8:00 am") and the locked mock is uppercase.
+ */
+function fmtTime(d: Date | string, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-US',
+      { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: tz }).format(new Date(d));
+  } catch {
+    return new Intl.DateTimeFormat('en-US',
+      { hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(d));
+  }
+}
+
+/** "26 Aug" — the short form the handover remarks open with. */
+function fmtDayShort(d: Date | string, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-GB',
+      { day: '2-digit', month: 'short', timeZone: tz }).format(new Date(d));
+  } catch {
+    return new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: 'short' }).format(new Date(d));
+  }
+}
+
+/**
+ * V5.5 — the handover sentences for one row, in the order they happened.
+ *
+ * A row can produce TWO sentences. A shift passed A -> B -> C leaves B with a
+ * single session that was both taken over and handed off, and B is entitled to
+ * both halves of that story; took-over is emitted first because it happened
+ * first. The A -> B -> A case is different and needs no special handling here:
+ * it gives A two SEPARATE session rows, and each one independently renders its
+ * own single correct sentence.
+ *
+ * Times come from this guard's OWN session record — clocked_in_at for a
+ * take-over, clocked_out_at for a hand-off — never from the other guard's
+ * session, so a row can always be explained from the row itself.
+ */
+function handoverRemarks(r: GuardHoursRow, tz: string): string[] {
+  const out: string[] = [];
+  const day = fmtDayShort(r.clocked_in_at, tz);
+  const tail =
+    ' Scheduled shows the full shift window; Actual shows only the hours you worked.';
+  if (r.took_over) {
+    out.push(`${day} — you took over this shift from another guard at ` +
+             `${fmtTime(r.clocked_in_at, tz)}.${tail}`);
+  }
+  if (r.handed_off && r.clocked_out_at) {
+    out.push(`${day} — this shift was handed over to another guard at ` +
+             `${fmtTime(r.clocked_out_at, tz)}.${tail}`);
+  }
+  return out;
 }
 
 /** Truncate to fit a column so a long site name cannot bleed into the next. */
@@ -223,16 +314,23 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   // misses the page by a few points. Observed directly — with ROW_H 18 a
   // 26-row report stranded the disclaimer; at ROW_H 17 the 26-row case fit
   // and a 30-row report stranded it instead. The fix has to be structural.
-  const noteText = `${FOOTNOTE_SCHEDULED_NOT_TOTALLED}\n${FOOTNOTE_BREAK_PAID}\n${FOOTNOTE_UNVERIFIED}`;
+  //
+  // V5.5 adds a variable-height block: the handover remarks. They are built
+  // in a PRE-PASS rather than accumulated during the row loop, because the
+  // reservation has to know their height before the first row is placed.
+  const remarks = data.rows.flatMap((r) => handoverRemarks(r, data.timeZone));
+  const remarkText = remarks.map((t) => `†  ${t}`).join('\n');
+  const noteText = `${FOOTNOTE_SCHEDULED_NOT_TOTALLED}\n${FOOTNOTE_BREAK_PAID}\n${FOOTNOTE_GEOFENCE_VIOLATION}`;
   doc.fontSize(7.5).font('Helvetica');
   const noteH = doc.heightOfString(noteText, { width: CW });
+  const remarkH = remarks.length ? doc.heightOfString(remarkText, { width: CW }) + 10 : 0;
   doc.fontSize(9).font('Helvetica-Bold');
   const dTitleH = doc.heightOfString(HOURS_DISCLAIMER.title, { width: CW - 24 });
   doc.fontSize(7.5).font('Helvetica');
   const dBodyH = doc.heightOfString(HOURS_DISCLAIMER.body, { width: CW - 24 });
   const dBoxH = dTitleH + dBodyH + 26;
   //  rule + totals band + gap        footnotes + gap      disclaimer
-  const tailH = (4 + ROW_H + 2 + 12) + (noteH + 16) + dBoxH;
+  const tailH = (4 + ROW_H + 2 + 12) + (noteH + 16) + remarkH + dBoxH;
 
   // ── Table ───────────────────────────────────────────────────────────────
   y = drawTableHeader(doc, y);
@@ -268,10 +366,14 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
     totalBreak   += num(r.break_hours);
     totalOffPost += offPost;
 
+    // V5.5 — a dagger on the date ties this row to its remark below. Marked
+    // whenever the shift changed hands in EITHER direction; the remark says
+    // which, the mark only says "there is something to read about this row".
+    const marked = r.took_over || r.handed_off;
     const cells = [
-      fmtDate(r.clocked_in_at, data.timeZone),
+      fmtDate(r.clocked_in_at, data.timeZone) + (marked ? '  †' : ''),
       r.site_name,
-      formatScheduledHours(r.scheduled_hours),
+      '',                                   // scheduled — drawn separately, two lines
       formatHoursHHMM(r.actual_hours),
       formatHoursHHMM(r.break_hours),
       formatOffPostHours(r.violation_hours),
@@ -279,14 +381,31 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
 
     doc.fontSize(8.5).font('Helvetica');
     cells.forEach((text, i) => {
-      // Off-post is the only column that carries a status colour: muted when
-      // "None" so a clean shift does not read as a defect, amber when real.
+      if (COLS[i].key === 'scheduled') return;
+      // Geofence violation is the only column that carries a status colour:
+      // muted when "None" so a clean shift does not read as a defect, amber
+      // when real.
       const isOffPost = COLS[i].key === 'offpost';
       doc.fillColor(isOffPost ? (offPost > 0 ? AMBER : MUTED) : TEXT);
       if (isOffPost && offPost > 0) doc.font('Helvetica-Bold'); else doc.font('Helvetica');
-      doc.text(fit(doc, text, COLS[i].w), colX(i) + 4, y + 5.5,
+      doc.text(fit(doc, text, COLS[i].w), colX(i) + 4, y + CELL_DY,
                { width: COLS[i].w - 8, align: COLS[i].align, lineBreak: false });
     });
+
+    // ── V5.1 Scheduled: the window, then the duration beneath it ──────────
+    // The duration is the same number the column carried before this change;
+    // it moves to a second, smaller, muted line rather than being dropped, so
+    // nothing a reader could previously total has gone away.
+    const sIdx = COLS.findIndex((c) => c.key === 'scheduled');
+    const sX = colX(sIdx) + 4, sW = COLS[sIdx].w - 8;
+    const window = `${fmtTime(r.scheduled_start, data.timeZone)} – ${fmtTime(r.scheduled_end, data.timeZone)}`;
+    doc.fontSize(8).font('Helvetica').fillColor(TEXT)
+       .text(fit(doc, window, COLS[sIdx].w), sX, y + SCHED_L1_DY,
+             { width: sW, align: 'right', lineBreak: false });
+    doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
+       .text(formatScheduledHours(r.scheduled_hours), sX, y + SCHED_L2_DY,
+             { width: sW, align: 'right', lineBreak: false });
+
     y += ROW_H;
   });
 
@@ -317,6 +436,15 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   if (y + noteH > CONTENT_BOTTOM) { doc.addPage(); y = CONTENT_TOP; }
   doc.text(noteText, ML, y, { width: CW });
   y += noteH + 16;
+
+  // ── V5.5 handover remarks ───────────────────────────────────────────────
+  // Height reserved above. Rendered after the general footnotes because they
+  // are specific to individual rows rather than to the document.
+  if (remarks.length) {
+    doc.fontSize(7.5).font('Helvetica').fillColor(TEXT);
+    doc.text(remarkText, ML, y, { width: CW });
+    y += remarkH;
+  }
 
   // ── Disclaimer — KEPT TOGETHER, never split across a page ───────────────
   // Measured in full (title + body + padding) before anything is drawn; if it

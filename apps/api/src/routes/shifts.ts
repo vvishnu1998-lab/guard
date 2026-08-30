@@ -2811,7 +2811,31 @@ router.get('/my-hours.pdf', requireAuth('guard'), async (req, res) => {
     const rows = await pool.query(
       `SELECT ss.id AS session_id,
               ss.clocked_in_at,
+              ss.clocked_out_at,
+              sh.scheduled_start,
+              sh.scheduled_end,
               si.name AS site_name,
+              -- V5.5 handover marks. The AUTHORITATIVE signal is
+              -- shift_swap_requests.from_session_id / to_session_id: they are
+              -- foreign keys to the two shift_sessions rows a completed
+              -- handoff produced, so direction is read off the schema rather
+              -- than inferred.
+              --
+              -- status='accepted' AND to_session_id IS NOT NULL is load
+              -- bearing on the FROM side. from_session_id is also stamped on
+              -- requests that were never taken up: production carries 3
+              -- 'expired' rows and 1 'cancelled' row that name a from_session,
+              -- and matching on from_session_id alone would mark those shifts
+              -- as handed over when the guard in fact worked them to the end.
+              -- Only 1 of 9 'accepted' rows has a to_session_id, i.e. only one
+              -- handoff has ever actually completed.
+              EXISTS (SELECT 1 FROM shift_swap_requests r
+                       WHERE r.from_session_id = ss.id
+                         AND r.status = 'accepted'
+                         AND r.to_session_id IS NOT NULL) AS handed_off,
+              EXISTS (SELECT 1 FROM shift_swap_requests r
+                       WHERE r.to_session_id = ss.id
+                         AND r.status = 'accepted') AS took_over,
               ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
          FROM shift_sessions ss
          JOIN shifts sh ON sh.id = ss.shift_id
