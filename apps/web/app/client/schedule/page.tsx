@@ -145,7 +145,7 @@ export default function SchedulePage() {
                   <span className="text-gray-300 tabular-nums">{formatHoursHHMM(h.break_hours)}</span>
                 </div>
                 <div className="flex justify-between text-xs">
-                  <span className="text-gray-500 tracking-widest">OFF-POST</span>
+                  <span className="text-gray-500 tracking-widest">UNVERIFIED</span>
                   <span className={`tabular-nums ${(h.violation_hours ?? 0) > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
                     {formatOffPostHours(h.violation_hours)}
                   </span>

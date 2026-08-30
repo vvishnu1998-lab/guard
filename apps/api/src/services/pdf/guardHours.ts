@@ -114,7 +114,7 @@ const COLS = [
   { key: 'scheduled', label: 'SCHEDULED', w:  64, align: 'right' as const },
   { key: 'actual',    label: 'ACTUAL',    w:  64, align: 'right' as const },
   { key: 'break',     label: 'BREAK',     w:  64, align: 'right' as const },
-  { key: 'offpost',   label: 'OFF-POST',  w:  74, align: 'right' as const },
+  { key: 'offpost',   label: 'UNVERIFIED', w: 74, align: 'right' as const },
 ];
 const ROW_H = 18;
 const HEADER_ROW_H = 20;

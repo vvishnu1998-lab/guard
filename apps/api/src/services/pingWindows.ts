@@ -26,6 +26,32 @@
 
 import { pool } from '../db/pool';
 
+/**
+ * The ping cadence, and the anchor unit for every window in the system.
+ *
+ * ── THIS ANCHOR RULE IS ALSO WRITTEN IN SQL ─────────────────────────────
+ *
+ * services/shiftHours.ts's VIOLATION_HOURS_ROW_SQL enumerates the same grid
+ * (scheduled_start + n * PING_WINDOW_MS) as a generate_series, because a SQL
+ * fragment cannot call a TypeScript function. Interpolating this constant
+ * shares the NUMBER but not the EXPRESSION, so the two can still drift on the
+ * anchor, the FLOOR direction, or the half-open boundary convention.
+ *
+ * scripts/check-window-anchor.ts executes both and asserts identical boundary
+ * lists. If you change the grid here, change it there — the check will fail
+ * the build if you forget. Do not rely on this comment alone; a
+ * keep-in-sync comment is precisely what failed for the break constants.
+ *
+ * ── TRAP: sites.ping_interval_minutes IS NOT THE CADENCE THE SERVER USES ─
+ *
+ * That column exists, is NOT NULL, is editable per site, and is sent to the
+ * mobile app (routes/shifts.ts:2596) — but NOTHING on the server reads it.
+ * pingReminder, missedPingCron, missedReportCron and the violation-hours SQL
+ * all use this constant. All 15 production sites read 30 today, so nothing
+ * diverges; set one site to 20 and the guard's countdown, the reminder cron,
+ * the missed-ping flags and the off-post number would all disagree at once.
+ * Deliberately not fixed here — noted so it is not discovered the hard way.
+ */
 export const PING_WINDOW_MS = 30 * 60 * 1000;
 
 /**

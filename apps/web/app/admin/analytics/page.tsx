@@ -149,7 +149,7 @@ export default function AnalyticsPage() {
       {'  ·  '}
       Break: <span className="text-gray-500">{formatHoursHHMM(monthTotals.break_hours)}</span>
       {'  ·  '}
-      Off-post: <span className="text-gray-500">{formatOffPostHours(monthTotals.violation_hours)}</span>
+      Unverified: <span className="text-gray-500">{formatOffPostHours(monthTotals.violation_hours)}</span>
     </>
   );
 

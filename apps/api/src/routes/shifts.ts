@@ -2470,6 +2470,7 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
          SELECT ss.shift_id,
                 ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
          FROM shift_sessions ss
+         JOIN shifts sh ON sh.id = ss.shift_id
          WHERE ss.guard_id = $1
          GROUP BY ss.shift_id
        ) ss_hrs ON ss_hrs.shift_id = s.id
@@ -2554,6 +2555,7 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
          SELECT ss.shift_id,
                 ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
          FROM shift_sessions ss
+         JOIN shifts sh ON sh.id = ss.shift_id
          GROUP BY ss.shift_id
        ) ss_hrs ON ss_hrs.shift_id = s.id
        WHERE ${cidPredicate}
@@ -2997,6 +2999,7 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
        ROUND(CAST(EXTRACT(EPOCH FROM ($1::timestamptz - $2::timestamptz))/3600.0 AS NUMERIC), 2) AS scheduled_hours,
        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
      FROM shift_sessions ss
+     JOIN shifts sh ON sh.id = ss.shift_id
      WHERE ss.shift_id = $3`,
     [shift.scheduled_end, shift.scheduled_start, shift.id],
   );

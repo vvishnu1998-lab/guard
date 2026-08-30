@@ -28,7 +28,15 @@
  *   scheduled_hours = shifts.scheduled_end − shifts.scheduled_start
  *   actual_hours    = COALESCE(clocked_out_at, NOW()) − clocked_in_at  (raw, no truncation)
  *   break_hours     = Σ max(0, min(break_end,   NOW(), clocked_out_at) − max(break_start,  clocked_in_at))
- *   violation_hours = Σ max(0, min(resolved_at, NOW(), clocked_out_at) − max(occurred_at,  clocked_in_at))
+ *   violation_hours = Σ over violations of Σ over the ping windows the
+ *                     violation spans that received NO ping (judged on
+ *                     lp.pinged_at, never window_label), each window
+ *                     clamped to the violation and to the session.
+ *                     CHANGED 2026-08-30 — it used to be
+ *                     min(resolved_at, clocked_out_at) − max(occurred_at, clocked_in_at),
+ *                     which measured time-until-the-next-accepted-ping
+ *                     rather than time presence went unconfirmed. See
+ *                     VIOLATION_HOURS_ROW_SQL for the full reasoning.
  *
  * All values are non-negative decimal hours rounded to 2 places.
  *
@@ -62,6 +70,7 @@
  */
 
 import { pool } from '../db/pool';
+import { PING_WINDOW_MS } from './pingWindows';
 
 export interface ShiftHours {
   scheduled_hours: number;
@@ -167,15 +176,88 @@ export function BREAK_HOURS_ROW_SQL(breakAlias: string, sessionAlias: string): s
 }
 
 /**
- * One geofence_violations row's contribution, bounded to its session and
- * clamped. Aliases must be trusted identifiers (never user input).
+ * One geofence_violations row's contribution: the summed duration of every
+ * ping window it spans that received NO accepted onsite ping.
+ *
+ * ── WHY THIS IS NOT occurred_at -> resolved_at ──────────────────────────
+ *
+ * It used to be, and that measured the wrong thing. A violation is closed by
+ * exactly two events: an accepted onsite ping (routes/locations.ts:586) or a
+ * back-stamp at session close (routes/shifts.ts:3775,
+ * jobs/autoCompleteShifts.ts:216). A guard who is standing on post but not
+ * pinging keeps the row open, so the old interval measured
+ * "time until the next accepted ping", not "time away".
+ *
+ * Measured on prod 2026-08-30: 21 of 31 violations were closed by the
+ * back-stamp, not by a guard returning. reddy's 2026-08-19 session showed
+ * 5.35h of "off-post" on a 7.40h shift, of which 4.78h was one row that
+ * simply stayed open until a ping finally arrived at 04:50.
+ *
+ * ── WHAT IT MEASURES NOW ────────────────────────────────────────────────
+ *
+ * Windows are the same PING_WINDOW_MS slots anchored at scheduled_start that
+ * services/pingWindows.ts uses. For each window the violation spans, the
+ * window counts if no ping LANDED inside it.
+ *
+ * PRESENCE IS JUDGED ON lp.pinged_at, NEVER lp.window_label. A guard can
+ * backfill six labels in ten minutes — reddy did exactly that on 2026-08-19,
+ * submitting labels 19:30 through 22:00 between 04:50 and 05:00. Backfill
+ * answers the REPORTING obligation; it cannot retroactively prove someone
+ * stood somewhere four hours earlier. Crediting labels would have credited
+ * six windows for ten minutes of presence (a 2.35h difference across prod).
+ *
+ * ── CALLERS MUST STILL SUM OVER VIOLATIONS ──────────────────────────────
+ *
+ * This returns ONE violation row's hours. A session can carry several — five
+ * sessions in prod carry two each, and reddy's 2026-08-19 total of 4.93h is
+ * 4.434 + 0.500 from two rows. Every call site therefore still wraps this in
+ * SUM(...) over geofence_violations. An earlier draft of this change claimed
+ * the outer SUM could be dropped; it cannot, and doing so would silently
+ * report only one violation per session.
+ *
+ * ── WINDOW ANCHOR IS DEFINED TWICE — SEE services/pingWindows.ts:119 ────
+ *
+ * The anchor rule (scheduled_start + n * PING_WINDOW_MS) lives in TypeScript
+ * there and in SQL here. The CONSTANT is shared by interpolation; the
+ * EXPRESSION is not, because a SQL fragment cannot call a TS function.
+ * scripts/check-window-anchor.ts asserts the two produce identical boundary
+ * lists and fails the build if either side moves. If you change the anchor
+ * here, change it there, and the test will tell you if you forgot.
+ *
+ * ── TRAP: sites.ping_interval_minutes IS NOT READ HERE ──────────────────
+ *
+ * That column exists, is NOT NULL, is editable, and is sent to the mobile app
+ * (routes/shifts.ts:2596) — but NO server-side window reads it. pingReminder,
+ * missedPingCron and this fragment all hardcode PING_WINDOW_MS (30 min). All
+ * 15 prod sites read 30 today so nothing diverges, but set one site to 20 and
+ * the guard's countdown, the reminder cron, the missed-ping flags and this
+ * number all disagree at once. Deliberately not fixed here.
+ *
+ * Aliases must be trusted identifiers (never user input).
  */
-export function VIOLATION_HOURS_ROW_SQL(violationAlias: string, sessionAlias: string): string {
-  return boundedIntervalHours(
-    `${violationAlias}.occurred_at`,
-    `COALESCE(${violationAlias}.resolved_at, NOW())`,
-    sessionAlias,
-  );
+export function VIOLATION_HOURS_ROW_SQL(
+  violationAlias: string, sessionAlias: string, shiftAlias: string,
+): string {
+  const gv = violationAlias, s = sessionAlias, sh = shiftAlias;
+  const WIN = `(INTERVAL '1 millisecond' * ${PING_WINDOW_MS})`;
+  // The instant the violation stops counting: its resolve, or session close.
+  const effEnd = `LEAST(COALESCE(${gv}.resolved_at, NOW()), COALESCE(${s}.clocked_out_at, NOW()))`;
+  // Snap an instant DOWN onto the window grid anchored at scheduled_start.
+  const grid = (t: string) =>
+    `${sh}.scheduled_start + (FLOOR(EXTRACT(EPOCH FROM (${t} - ${sh}.scheduled_start))
+       / (${PING_WINDOW_MS} / 1000.0)) * ${WIN})`;
+  return `(
+    SELECT COALESCE(SUM(
+      GREATEST(0, EXTRACT(EPOCH FROM (
+          LEAST(w.ws + ${WIN}, ${effEnd})
+        - GREATEST(w.ws, ${gv}.occurred_at, ${s}.clocked_in_at)
+      )))/3600.0), 0)
+      FROM generate_series(${grid(`${gv}.occurred_at`)}, ${grid(effEnd)}, ${WIN}) AS w(ws)
+     WHERE NOT EXISTS (
+       SELECT 1 FROM location_pings lp
+        WHERE lp.shift_session_id = ${s}.id
+          AND lp.pinged_at >= w.ws
+          AND lp.pinged_at <  w.ws + ${WIN}))`;
 }
 
 export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string): string {
@@ -190,7 +272,7 @@ export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string)
        WHERE bs.shift_session_id = ${s}.id
     ), 0) AS NUMERIC), 2) AS break_hours,
     ROUND(CAST(COALESCE((
-      SELECT SUM(${VIOLATION_HOURS_ROW_SQL('gv', s)})
+      SELECT SUM(${VIOLATION_HOURS_ROW_SQL('gv', s, sh)})
         FROM geofence_violations gv
        WHERE gv.shift_session_id = ${s}.id
     ), 0) AS NUMERIC), 2) AS violation_hours
@@ -221,8 +303,10 @@ export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string)
 export function SHIFT_HOURS_AGG_SQL_FIELDS(
   sessionAlias: string,
   naming: 'hours_suffix' | 'h_prefix' = 'hours_suffix',
+  shiftAlias = 'sh',
 ): string {
   const s = sessionAlias;
+  const sh = shiftAlias;
   const col = naming === 'h_prefix'
     ? { actual: 'h_actual',     brk: 'h_break',     viol: 'h_violation'     }
     : { actual: 'actual_hours', brk: 'break_hours', viol: 'violation_hours' };
@@ -234,7 +318,7 @@ export function SHIFT_HOURS_AGG_SQL_FIELDS(
        WHERE bs.shift_session_id = ${s}.id
     )), 0) AS NUMERIC), 2) AS ${col.brk},
     ROUND(CAST(COALESCE(SUM((
-      SELECT SUM(${VIOLATION_HOURS_ROW_SQL('gv', s)})
+      SELECT SUM(${VIOLATION_HOURS_ROW_SQL('gv', s, sh)})
         FROM geofence_violations gv
        WHERE gv.shift_session_id = ${s}.id
     )), 0) AS NUMERIC), 2) AS ${col.viol}

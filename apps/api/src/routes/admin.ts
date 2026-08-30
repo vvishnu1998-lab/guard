@@ -1138,9 +1138,10 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
             AND ss5.clocked_in_at >= DATE_TRUNC('week', NOW())
        ), 0) AS h_break,
        COALESCE((
-         SELECT ROUND(CAST(SUM(${VIOLATION_HOURS_ROW_SQL('gv', 'ss6')}) AS NUMERIC), 2)
+         SELECT ROUND(CAST(SUM(${VIOLATION_HOURS_ROW_SQL('gv', 'ss6', 'sh6')}) AS NUMERIC), 2)
            FROM geofence_violations gv
            JOIN shift_sessions ss6 ON ss6.id = gv.shift_session_id
+           JOIN shifts sh6 ON sh6.id = ss6.shift_id
           WHERE ss6.site_id = s.id
             AND ss6.clocked_in_at >= DATE_TRUNC('week', NOW())
        ), 0) AS h_violation
@@ -1413,6 +1414,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
         ), 0) AS h_scheduled,
         ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
       FROM shift_sessions ss
+      JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
         AND ss.clocked_in_at >= DATE_TRUNC('month', NOW())
@@ -1447,6 +1449,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
              COUNT(DISTINCT ss.id) AS shift_count,
              ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
       FROM shift_sessions ss
+      JOIN shifts sh ON sh.id = ss.shift_id
       JOIN guards g ON g.id = ss.guard_id
       JOIN sites s  ON s.id = ss.site_id
       WHERE s.company_id = $1
@@ -1465,6 +1468,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
         ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS hours,
         ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
       FROM shift_sessions ss
+      JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
         AND ss.clocked_in_at >= DATE_TRUNC('month', NOW()) - INTERVAL '5 months'

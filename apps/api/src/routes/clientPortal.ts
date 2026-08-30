@@ -564,7 +564,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
      .text(`${shifts.length} shifts  |  ${guardStats.length} guards deployed`, ML + 20, y + 36);
   // Phase 1 — 4-field breakdown so the PDF matches the canonical service.
   doc.fontSize(9).fillColor(MUTED).font('Helvetica')
-     .text(`Breaks: ${totalBreaks.toFixed(1)}h  |  Off-post (geofence violations): ${totalViolations.toFixed(1)}h`, ML + 20, y + 48);
+     .text(`Breaks: ${totalBreaks.toFixed(1)}h  |  Unverified (presence not confirmed): ${totalViolations.toFixed(1)}h`, ML + 20, y + 48);
   y += 76;
 
   if (guardStats.length > 0) {
@@ -839,7 +839,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // Scheduled / On duty / Break / Off-post. Column widths tuned so the
   // 6-column table fits within CW without wrapping at 9pt.
   const gColW      = [105, 40, 55, 55, 55, 55, 45, 45]; // sum=455 fits CW=495
-  const gColLabels = ['GUARD NAME', 'SHIFTS', 'SCHEDULED', 'ON DUTY', 'BREAK', 'OFF-POST', 'REPORTS', 'INCIDENTS'];
+  const gColLabels = ['GUARD NAME', 'SHIFTS', 'SCHEDULED', 'ON DUTY', 'BREAK', 'UNVERIFIED', 'REPORTS', 'INCIDENTS'];
   doc.rect(ML, y, CW, 24).fill(NAVY);
   let gx = ML;
   for (let i = 0; i < gColLabels.length; i++) {

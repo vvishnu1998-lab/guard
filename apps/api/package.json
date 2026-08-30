@@ -12,7 +12,8 @@
     "script:backfill-stale-shifts": "ts-node --require dotenv/config scripts/backfill-stale-shifts.ts dotenv_config_path=../../.env",
     "script:test-specific-dates": "ts-node --require dotenv/config scripts/test-specific-dates.ts dotenv_config_path=../../.env",
     "script:hours-snapshot": "ts-node --require dotenv/config scripts/hours-export-snapshot.ts dotenv_config_path=../../.env",
-    "script:test-guard-site-enforcement": "ts-node --require dotenv/config scripts/test-guard-site-enforcement.ts dotenv_config_path=../../.env"
+    "script:test-guard-site-enforcement": "ts-node --require dotenv/config scripts/test-guard-site-enforcement.ts dotenv_config_path=../../.env",
+    "check:window-anchor": "ts-node --require dotenv/config scripts/check-window-anchor.ts dotenv_config_path=../../.env"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
