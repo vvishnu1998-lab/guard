@@ -92,10 +92,20 @@ export const FOOTNOTE_GEOFENCE_VIOLATION =
   'location check-in was received. A guard who is at the post but does not check in accrues time ' +
   'in this column, so it is not a confirmed measure of time away from the post.';
 
-/** Why the Scheduled column has an em dash where a total would be. */
-export const FOOTNOTE_SCHEDULED_NOT_TOTALLED =
-  'Scheduled hours are not totalled. A shift handed off mid-shift appears as two rows sharing one ' +
-  'scheduled window, so the column would over-count.';
+/**
+ * V5.2c — shown ONLY when this guard holds two sessions of one shift inside
+ * the range, i.e. only when the Scheduled total does not equal the column
+ * added up. Without it that row is an unexplained arithmetic error to anyone
+ * who checks the document with a calculator, which is exactly the reader most
+ * likely to check.
+ *
+ * Suppressed otherwise: on the overwhelming majority of reports the total IS
+ * the plain sum, and a standing note about an absent case would invite the
+ * reader to look for a subtlety that is not there.
+ */
+export const FOOTNOTE_SCHEDULED_DEDUPED =
+  'Where the same shift appears on more than one row because it changed hands, its scheduled ' +
+  'window is counted once in the total, not once per row.';
 
 /** Hard ceiling on the requested range. Enforced by the route, restated here
  *  so the two cannot drift apart silently. */
@@ -104,6 +114,9 @@ export const MAX_RANGE_DAYS = 45;
 export interface GuardHoursRow {
   /** shift_sessions.id — not rendered, used for stable ordering and tests. */
   session_id: string;
+  /** shifts.id — the dedupe key for the Scheduled total (V5.2). Two sessions
+   *  of one shift share it, and the scheduled window is counted once. */
+  shift_id: string;
   clocked_in_at: Date | string;
   /** null while the session is still open. */
   clocked_out_at: Date | string | null;
@@ -319,11 +332,42 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   // in a PRE-PASS rather than accumulated during the row loop, because the
   // reservation has to know their height before the first row is placed.
   const remarks = data.rows.flatMap((r) => handoverRemarks(r, data.timeZone));
-  const remarkText = remarks.map((t) => `†  ${t}`).join('\n');
-  const noteText = `${FOOTNOTE_SCHEDULED_NOT_TOTALLED}\n${FOOTNOTE_BREAK_PAID}\n${FOOTNOTE_GEOFENCE_VIOLATION}`;
+
+  // ── V5.2 Scheduled total, over DISTINCT shifts ─────────────────────────
+  //
+  // scheduled_hours is a property of the SHIFT but is emitted per SESSION, so
+  // a guard who worked one shift twice — handed it off and later took it back
+  // — carries the full window on both rows. Summing rows double-counts: the
+  // A -> B -> A fixture returns 3 rows over 2 shifts and sums to 24h against a
+  // true 16h.
+  //
+  // Deduping here rather than constraining the schema is deliberate. A unique
+  // index on (guard_id, shift_id) would make the SECOND clock-in fail with a
+  // 23505 — breaking a legitimate return handoff at the post, in order to
+  // protect a totals row. The document does the arithmetic; the shift table
+  // stays able to describe what actually happened.
+  //
+  // First occurrence wins. Every session of a shift carries the same window
+  // (both read shifts.scheduled_start/_end through the same join), so which
+  // row contributes is immaterial.
+  const seenShifts = new Set<string>();
+  let totalScheduled = 0;
+  for (const r of data.rows) {
+    if (seenShifts.has(r.shift_id)) continue;
+    seenShifts.add(r.shift_id);
+    totalScheduled += num(r.scheduled_hours);
+  }
+  const scheduleDeduped = seenShifts.size !== data.rows.length;
+
+  const remarkLines = [
+    ...remarks.map((t) => `†  ${t}`),
+    ...(scheduleDeduped ? [FOOTNOTE_SCHEDULED_DEDUPED] : []),
+  ];
+  const remarkText = remarkLines.join('\n');
+  const noteText = `${FOOTNOTE_BREAK_PAID}\n${FOOTNOTE_GEOFENCE_VIOLATION}`;
   doc.fontSize(7.5).font('Helvetica');
   const noteH = doc.heightOfString(noteText, { width: CW });
-  const remarkH = remarks.length ? doc.heightOfString(remarkText, { width: CW }) + 10 : 0;
+  const remarkH = remarkLines.length ? doc.heightOfString(remarkText, { width: CW }) + 10 : 0;
   doc.fontSize(9).font('Helvetica-Bold');
   const dTitleH = doc.heightOfString(HOURS_DISCLAIMER.title, { width: CW - 24 });
   doc.fontSize(7.5).font('Helvetica');
@@ -417,7 +461,7 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   const totals = [
     `${data.rows.length} shift${data.rows.length === 1 ? '' : 's'}`,
     'TOTAL',
-    '—',                            // Scheduled deliberately suppressed
+    formatScheduledHours(totalScheduled),   // V5.2 — deduped by shift_id
     formatHoursHHMM(totalActual),
     formatHoursHHMM(totalBreak),
     formatOffPostHours(totalOffPost),
@@ -440,7 +484,7 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   // ── V5.5 handover remarks ───────────────────────────────────────────────
   // Height reserved above. Rendered after the general footnotes because they
   // are specific to individual rows rather than to the document.
-  if (remarks.length) {
+  if (remarkLines.length) {
     doc.fontSize(7.5).font('Helvetica').fillColor(TEXT);
     doc.text(remarkText, ML, y, { width: CW });
     y += remarkH;

@@ -2810,6 +2810,7 @@ router.get('/my-hours.pdf', requireAuth('guard'), async (req, res) => {
     // documents. `to` is inclusive, hence < to + 1 day.
     const rows = await pool.query(
       `SELECT ss.id AS session_id,
+              ss.shift_id,
               ss.clocked_in_at,
               ss.clocked_out_at,
               sh.scheduled_start,
