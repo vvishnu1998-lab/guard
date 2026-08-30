@@ -71,6 +71,19 @@ export const FOOTNOTE_BREAK_PAID =
   'Breaks are paid and are already included in Actual hours. The Break column is shown separately ' +
   'for transparency; it should not be subtracted.';
 
+/**
+ * What the Unverified column measures, and — as importantly — what it does
+ * not. The column was called "Off-post" until 2026-08-30, which asserted the
+ * guard had left the site. The data supports no such claim: it records only
+ * that presence went unconfirmed. A guard standing on post who does not
+ * check in accrues unverified time, and the footnote has to say so or the
+ * reader will draw the old conclusion from the new label.
+ */
+export const FOOTNOTE_UNVERIFIED =
+  'Unverified hours are ping windows spanned by an open boundary alert in which no location ' +
+  'check-in was received. This is not a measure of time away from the post — a guard who is ' +
+  'present but does not check in accrues unverified time.';
+
 /** Why the Scheduled column has an em dash where a total would be. */
 export const FOOTNOTE_SCHEDULED_NOT_TOTALLED =
   'Scheduled hours are not totalled. A shift handed off mid-shift appears as two rows sharing one ' +
@@ -197,6 +210,30 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(1).stroke();
   y += 14;
 
+  // ── Measure the tail BEFORE laying out any row ─────────────────────────
+  //
+  // Everything after the last row — the totals band, the footnotes and the
+  // disclaimer — is a single indivisible block whose height does not depend
+  // on the rows. Measuring it up front lets the row loop RESERVE space for
+  // it, which is what stops the disclaimer being stranded alone on an
+  // otherwise blank final page.
+  //
+  // Tightening row height or padding does NOT solve that. It only moves the
+  // threshold: whatever the numbers, some row count lands so that the tail
+  // misses the page by a few points. Observed directly — with ROW_H 18 a
+  // 26-row report stranded the disclaimer; at ROW_H 17 the 26-row case fit
+  // and a 30-row report stranded it instead. The fix has to be structural.
+  const noteText = `${FOOTNOTE_SCHEDULED_NOT_TOTALLED}\n${FOOTNOTE_BREAK_PAID}\n${FOOTNOTE_UNVERIFIED}`;
+  doc.fontSize(7.5).font('Helvetica');
+  const noteH = doc.heightOfString(noteText, { width: CW });
+  doc.fontSize(9).font('Helvetica-Bold');
+  const dTitleH = doc.heightOfString(HOURS_DISCLAIMER.title, { width: CW - 24 });
+  doc.fontSize(7.5).font('Helvetica');
+  const dBodyH = doc.heightOfString(HOURS_DISCLAIMER.body, { width: CW - 24 });
+  const dBoxH = dTitleH + dBodyH + 26;
+  //  rule + totals band + gap        footnotes + gap      disclaimer
+  const tailH = (4 + ROW_H + 2 + 12) + (noteH + 16) + dBoxH;
+
   // ── Table ───────────────────────────────────────────────────────────────
   y = drawTableHeader(doc, y);
 
@@ -212,7 +249,15 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   data.rows.forEach((r, idx) => {
     // Page break BEFORE drawing, so a row is never clipped, and repeat the
     // column header on the new page. The identity block is page 1 only.
-    if (y + ROW_H > CONTENT_BOTTOM) {
+    // The final row reserves the tail as well, so the totals/footnotes/
+    // disclaimer block is pulled onto this page with it rather than landing
+    // alone on the next one. Guarded: if a page could not hold one row plus
+    // the tail at all, fall back to breaking on the row alone rather than
+    // looping forever.
+    const isLast = idx === data.rows.length - 1;
+    const tailFitsOnAPage = CONTENT_TOP + HEADER_ROW_H + ROW_H + tailH <= CONTENT_BOTTOM;
+    const need = ROW_H + (isLast && tailFitsOnAPage ? tailH : 0);
+    if (y + need > CONTENT_BOTTOM) {
       doc.addPage();
       y = drawTableHeader(doc, CONTENT_TOP);
     }
@@ -267,12 +312,10 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   y += ROW_H + 12;
 
   // ── Footnotes ───────────────────────────────────────────────────────────
-  const noteW = CW;
-  const noteText = `${FOOTNOTE_SCHEDULED_NOT_TOTALLED}\n${FOOTNOTE_BREAK_PAID}`;
+  // Height already measured above; the row loop reserved room for it.
   doc.fontSize(7.5).font('Helvetica').fillColor(MUTED);
-  const noteH = doc.heightOfString(noteText, { width: noteW });
   if (y + noteH > CONTENT_BOTTOM) { doc.addPage(); y = CONTENT_TOP; }
-  doc.text(noteText, ML, y, { width: noteW });
+  doc.text(noteText, ML, y, { width: CW });
   y += noteH + 16;
 
   // ── Disclaimer — KEPT TOGETHER, never split across a page ───────────────
@@ -280,11 +323,10 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   // does not fit in what remains, the whole block moves to a fresh page. A
   // legal notice split mid-sentence across a page boundary is the failure
   // this avoids.
-  doc.fontSize(9).font('Helvetica-Bold');
-  const dTitleH = doc.heightOfString(HOURS_DISCLAIMER.title, { width: CW - 24 });
-  doc.fontSize(7.5).font('Helvetica');
-  const dBodyH = doc.heightOfString(HOURS_DISCLAIMER.body, { width: CW - 24 });
-  const dBoxH = dTitleH + dBodyH + 26;
+  // dTitleH / dBodyH / dBoxH measured above. The addPage here is now a
+  // backstop only — the row loop's reservation should already have made room
+  // — but it stays, because the never-split rule must hold even if the
+  // reservation is ever bypassed (e.g. a zero-row report).
   if (y + dBoxH > CONTENT_BOTTOM) { doc.addPage(); y = CONTENT_TOP; }
 
   doc.rect(ML, y, CW, dBoxH).fill(GRAY1);
