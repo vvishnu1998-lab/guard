@@ -55,6 +55,65 @@ export function drawFooter(
            ML, PAGE_H - 20, { width: CW, align: 'center' });
 }
 
+/**
+ * Footer for a GUARD-scoped document.
+ *
+ * drawFooter above is site-scoped — `siteName | period` — which is right for
+ * the site security report and the activity log, and wrong for a document
+ * that spans every site a guard worked. Added rather than parameterised so
+ * the two existing callers keep their exact output; per this module's own
+ * rule, extend, do not fork.
+ */
+export function drawGuardFooter(
+  doc: InstanceType<typeof PDFDocument>,
+  guardName: string,
+  badgeNumber: string | null,
+  period: string,
+) {
+  const who = badgeNumber ? `${guardName} (${badgeNumber})` : guardName;
+  doc.rect(0, PAGE_H - 30, PAGE_W, 30).fill('#F1F5F9');
+  doc.moveTo(ML, PAGE_H - 30).lineTo(MR, PAGE_H - 30).strokeColor(GRAY2).lineWidth(0.5).stroke();
+  doc.fontSize(7).fillColor(MUTED).font('Helvetica')
+     .text(`${who}  |  ${period}  |  Confidential — NetraOps`,
+           ML, PAGE_H - 20, { width: CW, align: 'center' });
+}
+
+/**
+ * Stamp the header and footer onto every buffered page, once the real page
+ * count is known.
+ *
+ * WHY THIS EXISTS. drawHeader takes `totalPages` as a literal, and the two
+ * existing generators pass a hardcoded number because their page count is
+ * fixed by design. A document whose length depends on how many rows the
+ * query returned cannot know its own total until layout has finished, so it
+ * must be built with `bufferPages: true` and have its chrome applied
+ * afterwards.
+ *
+ * Painting the chrome LAST is safe because the header occupies y 0..72 and
+ * the footer y PAGE_H-30..PAGE_H; callers must keep body content inside
+ * CONTENT_TOP..CONTENT_BOTTOM, and then nothing overlaps.
+ *
+ * The caller must still call doc.end(); this only flushes the buffered pages.
+ */
+export function stampPages(
+  doc: InstanceType<typeof PDFDocument>,
+  title: string,
+  footer: (doc: InstanceType<typeof PDFDocument>) => void,
+) {
+  const range = doc.bufferedPageRange();
+  for (let i = 0; i < range.count; i++) {
+    doc.switchToPage(range.start + i);
+    drawHeader(doc, title, i + 1, range.count);
+    footer(doc);
+  }
+  doc.flushPages();
+}
+
+/** First y a page's body may use — clear of the 72pt navy header band. */
+export const CONTENT_TOP = 90;
+/** Last y a page's body may use — clear of the 30pt footer band. */
+export const CONTENT_BOTTOM = PAGE_H - 46;
+
 export function badge(
   doc: InstanceType<typeof PDFDocument>,
   x: number,

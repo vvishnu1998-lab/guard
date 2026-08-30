@@ -18,6 +18,9 @@ import { logClientIdentity } from '../services/clientIdentity';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { BREAK_DURATION_MINUTES, normalizeWireBreakType } from '../constants/breakDurations';
 import { getBreakAllowance, breakBlockMessage } from '../services/breakAllowance';
+import {
+  renderGuardHoursPdf, guardHoursFilename, MAX_RANGE_DAYS,
+} from '../services/pdf/guardHours';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
   pushSwapRequestToRecipient,
@@ -2708,6 +2711,139 @@ router.get('/active-session', requireAuth('guard'), async (req, res) => {
     break_quotas: breakQuotas,
     hours,
   });
+});
+
+// GET /api/shifts/my-hours.pdf?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// A guard's own per-session hours over a date range, as a PDF.
+//
+// DECLARED BEFORE /:id DELIBERATELY. Express matches in declaration order, so
+// a /:id catch-all defined earlier swallows this literal path — the same trap
+// documented above /active-session. Do not move it below.
+//
+// TENANCY. The result set is scoped by `ss.guard_id = req.user!.sub` in the
+// SQL itself — the caller's own token subject, never a query parameter. There
+// is no guard_id input to tamper with, so a cross-guard fetch is not merely
+// rejected, it is unexpressible: the worst a caller can do is ask for a range
+// and receive their own rows in it.
+//
+// NUMBERS. Every figure comes from SHIFT_HOURS_SQL_FIELDS — the same 4-field
+// contract the admin surfaces and the billing workbook read.
+// shift_sessions.total_hours is deliberately NOT selected: its formula changed
+// at the 2026-08-29 paid-break cutover, and a 45-day window can straddle that,
+// which would put two different definitions in one document.
+router.get('/my-hours.pdf', requireAuth('guard'), async (req, res) => {
+  const fromQ = String(req.query.from ?? '').trim();
+  const toQ   = String(req.query.to   ?? '').trim();
+
+  // ── Range validation (H1.3) ───────────────────────────────────────────
+  // Every rejection is a 400 with a stable SCREAMING_SNAKE `code`, a human
+  // `message`, and the offending values echoed back. House convention, and
+  // it matters here specifically: the mobile client branches on .code, and a
+  // 4xx must never be a 5xx — the offline queue replays 5xx.
+  const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+  if (!ISO_DATE.test(fromQ) || !ISO_DATE.test(toQ)) {
+    return res.status(400).json({
+      code: 'RANGE_INVALID',
+      error: 'RANGE_INVALID',
+      message: 'from and to are required as YYYY-MM-DD dates.',
+      from: fromQ || null, to: toQ || null,
+    });
+  }
+  const fromD = new Date(`${fromQ}T00:00:00Z`);
+  const toD   = new Date(`${toQ}T00:00:00Z`);
+  // Shape-valid but not a real date. NaN alone is NOT enough: JS SILENTLY
+  // ROLLS OVER an out-of-range day — new Date('2026-02-31T00:00:00Z') is
+  // 2026-03-03, not Invalid Date. Without the round-trip check below, a
+  // request for 2026-02-31 would quietly return a different range than the
+  // one echoed in the filename. Caught by the H1 test matrix, which expected
+  // RANGE_INVALID and got RANGE_INVERTED.
+  const roundTrips = (d: Date, s: string) =>
+    !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+  if (!roundTrips(fromD, fromQ) || !roundTrips(toD, toQ)) {
+    return res.status(400).json({
+      code: 'RANGE_INVALID',
+      error: 'RANGE_INVALID',
+      message: 'from and to must be real calendar dates.',
+      from: fromQ, to: toQ,
+    });
+  }
+  if (toD.getTime() < fromD.getTime()) {
+    return res.status(400).json({
+      code: 'RANGE_INVERTED',
+      error: 'RANGE_INVERTED',
+      message: 'to must be on or after from.',
+      from: fromQ, to: toQ,
+    });
+  }
+  // Inclusive span: from 2026-08-01 to 2026-08-01 is one day, not zero.
+  const days = Math.floor((toD.getTime() - fromD.getTime()) / 86_400_000) + 1;
+  if (days > MAX_RANGE_DAYS) {
+    return res.status(400).json({
+      code: 'RANGE_TOO_WIDE',
+      error: 'RANGE_TOO_WIDE',
+      message: `The range must be ${MAX_RANGE_DAYS} days or fewer (asked for ${days}).`,
+      from: fromQ, to: toQ, days, max_days: MAX_RANGE_DAYS,
+    });
+  }
+
+  try {
+    // Identity. companies.name is reached via sites -> companies; the guard's
+    // own row carries name + badge. Scoped to the token subject.
+    const who = await pool.query<{
+      name: string; badge_number: string | null; employer: string | null;
+    }>(
+      `SELECT g.name, g.badge_number, co.name AS employer
+         FROM guards g
+         LEFT JOIN companies co ON co.id = g.company_id
+        WHERE g.id = $1`,
+      [req.user!.sub],
+    );
+    if (!who.rows[0]) return res.status(404).json({ error: 'Guard not found' });
+    const guard = who.rows[0];
+
+    // Per-session rows. Bounded by clock-in instant, site-local — the same
+    // site-local date convention routes/exports.ts and routes/billing.ts use,
+    // so the same session never files under two different days in two
+    // documents. `to` is inclusive, hence < to + 1 day.
+    const rows = await pool.query(
+      `SELECT ss.id AS session_id,
+              ss.clocked_in_at,
+              si.name AS site_name,
+              ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
+         FROM shift_sessions ss
+         JOIN shifts sh ON sh.id = ss.shift_id
+         JOIN sites  si ON si.id = ss.site_id
+        WHERE ss.guard_id = $1
+          AND ss.clocked_in_at >= (($2::date)::timestamp AT TIME ZONE si.timezone)
+          AND ss.clocked_in_at <  (($3::date + INTERVAL '1 day') AT TIME ZONE si.timezone)
+        ORDER BY ss.clocked_in_at ASC`,
+      [req.user!.sub, fromQ, toQ],
+    );
+
+    const filename = guardHoursFilename(guard.name, fromQ, toQ);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+
+    await renderGuardHoursPdf({
+      guardName:   guard.name,
+      badgeNumber: guard.badge_number,
+      employer:    guard.employer ?? '',
+      from:        fromQ,
+      to:          toQ,
+      timeZone:    'America/Los_Angeles',
+      rows:        rows.rows,
+      generatedAt: new Date(),
+    }, res);
+  } catch (err: any) {
+    console.error('[my-hours.pdf] generation failed:', err);
+    // Headers may already be out and the stream partially written; once that
+    // has happened a JSON body is not a legal continuation, so destroy rather
+    // than emit a broken hybrid.
+    if (res.headersSent) return res.destroy();
+    res.status(500).json({ error: 'Could not generate the hours summary.' });
+  }
 });
 
 // GET /api/shifts/:id — shift detail with joined site/guard + reassign/swap history.
