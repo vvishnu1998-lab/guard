@@ -113,10 +113,17 @@ export const useAuthStore = create<AuthState>((set) => ({
     // spend a rate-limited request on a dead bearer token.
     stopQueueSync();
     useShiftStore.getState().clearSession();
-    const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
-    try {
-      await _request('/auth/logout', { refresh_token: refresh });
-    } catch { /* best-effort JTI revoke; the nbf stamp already covers us */ }
+    // No /auth/logout call on this path — deliberately, and this is a change.
+    // It used to fire unauthenticated and 401 every time (that was the L1
+    // defect); authenticating it would not help, because the change-password
+    // UPDATE stamps tokens_not_before = NOW(), and BOTH middleware/auth.ts
+    // and POST /auth/refresh (routes/auth.ts:581-595, guard branch) reject
+    // every token minted before that stamp. So the access token is dead, the
+    // refresh token is dead, and the refresh-and-retry inside _authedRequest
+    // is dead too. An nbf stamp is strictly stronger than a jti revoke — it
+    // invalidates the whole session, not two specific tokens. Calling anyway
+    // would spend a rate-limited /api/auth request on a guaranteed 401 and
+    // now raise a Sentry warning for a session that is already fully revoked.
     await Promise.all(Object.values(KEYS).map((k) => SecureStore.deleteItemAsync(k)));
     set({ status: 'unauthenticated', guardId: null, companyId: null, mustChangePassword: false });
     setUserTags({ guardId: null, companyId: null });
@@ -152,42 +159,77 @@ export const useAuthStore = create<AuthState>((set) => ({
       stopQueueSync();
       useShiftStore.getState().clearSession();
 
-      const access  = await SecureStore.getItemAsync(KEYS.ACCESS);
-      const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
+      // Only a presence check — _authedRequest re-reads the token itself, and
+      // may rotate it. Nothing below may capture a token value in a local:
+      // after a rotation the captured copy is the one the server just revoked.
+      const access = await SecureStore.getItemAsync(KEYS.ACCESS);
 
       if (!tokenRevoked) {
         // Bug Y — null the guard's fcm_token BEFORE clearing local auth
         // state so this request is still authenticated. The server
         // relaxed /auth/guard/fcm-token to accept explicit null; without
         // this, a logged-out phone keeps receiving pushes because the DB
-        // still holds its Expo token. Best-effort — a network failure
-        // here shouldn't block logout, but we breadcrumb it so we can
-        // tell in Sentry whether the null-write landed.
+        // still holds its Expo token. Still best-effort — a network failure
+        // here must not block logout (L1.3) — but no longer silent.
         if (access) {
           try {
-            await fetch(`${process.env.EXPO_PUBLIC_API_URL}/api/auth/guard/fcm-token`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
-              body: JSON.stringify({ fcm_token: null }),
-            });
+            await _authedRequest('/auth/guard/fcm-token', async () => ({ fcm_token: null }));
             Sentry.addBreadcrumb({
               category: 'auth',
               message: 'fcm-token null-on-logout sent',
               level: 'info',
             });
           } catch (err) {
-            Sentry.addBreadcrumb({
-              category: 'auth',
-              message: 'fcm-token null-on-logout failed',
+            // Was a bare fetch whose try/catch only caught TRANSPORT errors —
+            // a 401/500 RESPONSE resolved normally and still breadcrumbed
+            // "sent", so a null-write that never landed looked identical to
+            // one that did. _authedRequest throws ApiError on non-2xx, so the
+            // two are now distinguishable. captureMessage, not just a
+            // breadcrumb: a token left on the row is the whole cross-account
+            // push defect, and it has to be visible without a paired crash.
+            Sentry.captureMessage('fcm-token null-on-logout failed', {
               level: 'warning',
-              data: { message: (err as Error)?.message },
+              tags: { flow: 'logout' },
+              extra: {
+                message: (err as Error)?.message,
+                status:  (err as { status?: number })?.status ?? null,
+              },
             });
           }
         }
 
         try {
-          await _request('/auth/logout', { refresh_token: refresh });
-        } catch { /* best-effort */ }
+          // refresh_token is re-read inside the factory, not captured from the
+          // outer scope: if the fcm-null call above hit a 401 and rotated the
+          // pair, the outer `refresh` is the jti the rotation already revoked.
+          // Sending it would 200 (the server treats a duplicate revoke as a
+          // valid end state) while leaving the LIVE refresh token unrevoked —
+          // the exact hole this phase exists to close.
+          await _authedRequest('/auth/logout', async () => ({
+            refresh_token: await SecureStore.getItemAsync(KEYS.REFRESH),
+          }));
+          Sentry.addBreadcrumb({
+            category: 'auth',
+            message: 'server logout accepted — access + refresh jti revoked',
+            level: 'info',
+          });
+        } catch (err) {
+          // L1.3: local state is torn down regardless — a guard must always be
+          // able to sign out of the handset, and blocking on a dead network
+          // would strand them on a session they have already left. But the
+          // failure is no longer silent: it means the refresh token is still
+          // live server-side until natural expiry, which is a real exposure
+          // and has to be visible in the issues feed rather than swallowed by
+          // `catch { /* best-effort */ }`.
+          Sentry.captureMessage('server logout failed — refresh token still live', {
+            level: 'warning',
+            tags: { flow: 'logout' },
+            extra: {
+              message: (err as Error)?.message,
+              status:  (err as { status?: number })?.status ?? null,
+            },
+          });
+        }
       }
       // tokenRevoked: skip both calls. The nbf stamp already invalidated
       // access + refresh server-side, and a dead bearer's fcm-null POST is
@@ -278,6 +320,76 @@ async function _request(path: string, body: unknown) {
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
     // ApiError carries status + code + the full body, so callers can branch
     // on the 423 lockout without pattern-matching the message prose.
+    throw new ApiError(res.status, err);
+  }
+  return res.json();
+}
+
+/**
+ * _request's authenticated sibling: same error taxonomy, plus a Bearer token
+ * and a single refresh-and-retry.
+ *
+ * Why not just add the header to _request: its other two callers are
+ * /auth/guard/login and /auth/forgot-password, which are unauthenticated by
+ * definition. Attaching a bearer there would send the PREVIOUS session's token
+ * to a login endpoint — harmless to the server, but exactly the reflex that
+ * produced the cross-account push incident, and not something to normalise.
+ *
+ * Why not route these through apiClient: its 401 retry replays the SAME body
+ * value it was handed — `return request(method, path, body, options, false)`
+ * at lib/apiClient.ts:124, after the refresh at :108. For /auth/logout the
+ * body carries the refresh token, and the refresh it just did ROTATED that
+ * token. apiClient would resend the pre-rotation jti; the server revokes an
+ * already-revoked jti, treats it as a valid end state, and answers 200 — while
+ * the live refresh token stays valid for its full 30 days. A silent no-op that
+ * looks exactly like success. That is the failure this phase exists to close,
+ * so the retry has to rebuild the body, and apiClient cannot.
+ *
+ * (Secondary: apiClient's definitive-rejection path fires
+ * logout({ tokenRevoked: true }) at :116, which routes to
+ * /(auth)/login?notice=session-expired — the wrong copy for a sign-out the
+ * guard just asked for. It is `void`-ed, so it would not deadlock the
+ * single-flight, but it would still hijack the screen.)
+ *
+ * Hence buildBody as a factory rather than a value: the retry re-runs it AFTER
+ * the rotation and picks up the live refresh token.
+ */
+async function _authedRequest(path: string, buildBody: () => Promise<unknown>) {
+  const API_URL = process.env.EXPO_PUBLIC_API_URL;
+
+  const send = async (token: string | null): Promise<Response> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      return await fetch(`${API_URL}/api${path}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(await buildBody()),
+      });
+    } catch (cause) {
+      throw new NetworkError(cause);
+    }
+  };
+
+  let res = await send(await SecureStore.getItemAsync(KEYS.ACCESS));
+
+  // A 401 here is usually just an expired access token on a handset that has
+  // been idle — the common case for "open the app after a shift, tap sign
+  // out". Rotate once and resend, so the logout actually revokes rather than
+  // leaving the refresh token live until natural expiry. If the refresh is
+  // itself rejected the session is already dead server-side, which is the
+  // outcome we wanted; fall through and let the caller tear down locally.
+  if (res.status === 401) {
+    try {
+      await refreshTokens();
+      res = await send(await SecureStore.getItemAsync(KEYS.ACCESS));
+    } catch {
+      /* leave `res` as the 401; the throw below reports it */
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Request failed' }));
     throw new ApiError(res.status, err);
   }
   return res.json();
