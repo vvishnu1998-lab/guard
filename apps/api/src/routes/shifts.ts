@@ -997,18 +997,12 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
           const dayLabel = new Intl.DateTimeFormat('en-US', {
             weekday: 'short', month: 'short', day: 'numeric', timeZone: tz,
           }).format(new Date(shift.scheduled_start));
-          const { staleToken } = await sendPushNotification({
+          await sendPushNotification({
             token,
             title: 'Shift cancelled',
             body:  `${dayLabel} at ${shift.site_name}`,
             data:  { type: 'shift_cancelled', shift_id: id },
           });
-          if (staleToken) {
-            await pool.query(
-              'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
-              [shift.guard_id, token],
-            );
-          }
         } catch (err) {
           console.error('[shifts.cancel] push failed:', err);
         }

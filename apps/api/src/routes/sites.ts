@@ -464,18 +464,12 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
           );
           const token = tokRow.rows[0]?.fcm_token;
           if (!token) continue;
-          const { staleToken } = await sendPushNotification({
+          await sendPushNotification({
             token,
             title: `Site closed — ${site.name}`,
             body:  `Your upcoming shifts at ${site.name} were cancelled because the site was deactivated. Check your schedule.`,
             data:  { type: 'site_deactivated', site_id: req.params.id },
           });
-          if (staleToken) {
-            await pool.query(
-              'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
-              [guardId, token],
-            );
-          }
         } catch (err) {
           console.error('[sites.deactivate] push failed for guard', guardId, err);
         }

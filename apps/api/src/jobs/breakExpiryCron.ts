@@ -189,7 +189,7 @@ async function pushWithAlertRow(params: {
   const token = tokRow.rows[0]?.fcm_token;
   if (!token) return; // Alerts row already written — feed stays truthful
 
-  const { staleToken } = await sendPushNotification({
+  await sendPushNotification({
     token,
     title: params.title,
     body: params.body,
@@ -197,12 +197,6 @@ async function pushWithAlertRow(params: {
       Object.entries(params.data).map(([k, v]) => [k, String(v)]),
     ) as Record<string, string>,
   });
-  if (staleToken) {
-    await pool.query(
-      'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
-      [params.guardId, token],
-    );
-  }
 }
 
 /**

@@ -2,6 +2,7 @@ import admin from 'firebase-admin';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { Sentry } from './sentry';
+import { revokeDeviceByToken } from './deviceRegistry';
 // Node 18+ has native fetch globally — no import needed
 
 /**
@@ -89,6 +90,13 @@ export async function sendPushNotification(params: {
       const json = await res.json() as any;
       if (json?.data?.status === 'error') {
         const staleToken = json.data?.details?.error === 'DeviceNotRegistered';
+        // Centralised staleness (P3.4). Revoking BY TOKEN is safe because
+        // schema_v63's uq_guard_devices_one_active_per_token guarantees at
+        // most one active row matches — no guard_id needed. Doing it here
+        // covers all 18 dispatch sites; previously 7 hand-rolled a
+        // compare-and-swap and the other 11 discarded this signal entirely,
+        // so a dead handset stayed registered on any path but those 7.
+        if (staleToken) await revokeDeviceByToken(params.token);
         console.error('[expo-push] Delivery error:', json.data.message, json.data.details);
         // Non-stale delivery failures are real errors worth surfacing. Stale
         // tokens (DeviceNotRegistered) are expected app-reinstall cleanup —
@@ -144,6 +152,8 @@ export async function sendPushNotification(params: {
     const staleToken =
       code === 'messaging/registration-token-not-registered' ||
       code === 'messaging/invalid-registration-token';
+    // Same centralised revoke as the Expo path above.
+    if (staleToken) await revokeDeviceByToken(params.token);
     console.error('[firebase] FCM push failed:', code ?? err);
     // Non-stale FCM failures are real delivery errors; stale tokens are
     // expected cleanup (handled by the caller's staleToken path).

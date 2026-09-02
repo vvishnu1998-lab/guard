@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db/pool';
+import { claimDevice, revokeGuardDevices, platformFromUserAgent } from '../services/deviceRegistry';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -173,42 +174,34 @@ router.post('/guard/login', async (req: Request, res: Response) => {
   // JWT issued to a prior device (same guard, different phone) is
   // rejected on next request. That half is unchanged.
   //
-  // fcm_token, however, is COALESCEd: it is written only when this login
-  // actually supplies one. ABSENCE OF A TOKEN IS NOT INTENT TO REVOKE.
-  // The client (apps/mobile login.tsx) asks for notification permission and
-  // an Expo token before calling this route; if permission is not granted or
-  // getExpoPushTokenAsync throws, the field is omitted and the body carries
-  // no token at all. Writing NULL there wiped a perfectly good token
-  // belonging to a phone that was working a moment earlier, and the guard
-  // then received nothing until the app was next launched with permission
-  // granted (the durable re-register lives in mobile _layout.tsx).
+  // fcm_token semantics are UNCHANGED and deliberately so: a login that
+  // supplies a token CLAIMS it; a login that supplies none leaves the guard's
+  // existing active device alone. Absence of a token is not intent to revoke —
+  // the client omits the field whenever notification permission is not
+  // granted, and writing NULL there used to wipe a working handset's
+  // registration.
   //
-  // ACCEPTED TRADEOFF, stated plainly because it reverses an earlier
-  // decision: if the guard signs in on phone B and phone B supplies no
-  // token, phone A keeps receiving push CONTENT in its tray — shift times,
-  // site names, ping prompts. That is a real if narrow information leak, and
-  // it is accepted, because:
-  //   * phone A cannot ACT on any of it. tokens_not_before above kills its
-  //     JWT, so it cannot open the app, cannot read the Alerts tab, and
-  //     cannot re-register its own token via /guard/fcm-token either.
-  //   * a handset that logs out or uninstalls stops being reachable and Expo
-  //     answers DeviceNotRegistered; the seven compare-and-swap cleanups
-  //     (services/shiftPush.ts, services/swapPush.ts, jobs/breakExpiryCron.ts,
-  //     jobs/clockOutReminder.ts, routes/locations.ts, routes/shifts.ts,
-  //     routes/sites.ts) then clear the token for real.
-  //   * the failure this replaces was SILENT push starvation — a guard who
-  //     never sees a ping prompt still lands as non-compliant in the client
-  //     portal numbers the customer reads. A leak to a handset the guard is
-  //     holding is the smaller harm.
+  // What changed is that the leak this used to accept is now closed by the
+  // schema. A 40-line comment here previously documented tolerating exactly
+  // the incident that then occurred on 2026-08-31: phone A kept receiving a
+  // guard's push CONTENT after phone B signed in without supplying a token,
+  // because a token was COPIED onto each guard row and never removed from the
+  // previous one. schema_v63's uq_guard_devices_one_active_per_token makes
+  // that state unrepresentable — claiming a token REPOINTS it off whichever
+  // guard held it, enforced by the index rather than by convention. The
+  // tolerance no longer applies, so the comment arguing for it is gone.
   //
-  // The deliberate revocation paths are untouched and remain the only ways
-  // to clear a token: change-password below, POST /admin/revoke-guard,
-  // explicit {fcm_token: null} on /guard/fcm-token (mobile logout), and the
-  // DeviceNotRegistered cleanups.
-  await pool.query(
-    'UPDATE guards SET tokens_not_before = NOW(), fcm_token = COALESCE($1, fcm_token) WHERE id = $2',
-    [fcm_token ?? null, guard.id]
-  );
+  // The write itself moved to services/deviceRegistry.claimDevice; this
+  // statement now only stamps the session-invalidation half.
+  await pool.query('UPDATE guards SET tokens_not_before = NOW() WHERE id = $1', [guard.id]);
+  if (fcm_token) {
+    await claimDevice({
+      guardId:  guard.id,
+      token:    fcm_token,
+      platform: platformFromUserAgent(req.get('user-agent')),
+      client:   req.get('X-NetraOps-Client') ?? null,
+    });
+  }
   // WHICH BUNDLE IS THIS HANDSET ON?
   //
   // Mobile has sent X-NetraOps-Client on every request since it was added
@@ -264,15 +257,18 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
   // stamp, so mobile must re-login after change-password (which the
   // existing "must_change_password=false → route back to home" flow
   // already does via the login handler once the guard re-auths).
-  // Phase C: also NULL fcm_token — matches admin/revoke-guard and the
-  // new /guard/login pattern. Defensive: closes the small window
-  // between change-password succeeding and re-login re-registering
-  // the token, so a push in that window fails safe rather than
-  // routing to whatever device last wrote fcm_token.
+  // Phase C intent is unchanged — the guard's device is deregistered so a
+  // push in the window between change-password and re-login fails safe
+  // rather than routing to whatever handset last registered. Only the
+  // mechanism moved: the device row is revoked with reason
+  // 'password_change', and the schema_v63 mirror trigger nulls
+  // guards.fcm_token as a consequence. This statement no longer touches
+  // that column directly.
   await pool.query(
-    'UPDATE guards SET password_hash = $1, must_change_password = false, tokens_not_before = NOW(), fcm_token = NULL WHERE id = $2',
+    'UPDATE guards SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
     [newHash, req.user!.sub]
   );
+  await revokeGuardDevices(req.user!.sub, 'password_change');
   Sentry.addBreadcrumb({
     category: 'auth',
     message: 'guard change-password: session invalidated + fcm cleared',
@@ -297,10 +293,21 @@ router.post('/guard/fcm-token', requireAuth('guard'), async (req: Request, res: 
   if (!clearing && (typeof fcm_token !== 'string' || !fcm_token.trim())) {
     return res.status(400).json({ error: 'fcm_token must be a non-empty string or explicit null' });
   }
-  await pool.query(
-    'UPDATE guards SET fcm_token = $1 WHERE id = $2',
-    [clearing ? null : fcm_token, req.user!.sub],
-  );
+  // Same wire contract as before — {fcm_token: "<string>"} claims,
+  // {fcm_token: null} clears — but both halves now go through
+  // guard_devices. Claiming REPOINTS the token off any other guard that
+  // holds it; clearing revokes this guard's active device with reason
+  // 'logout'. guards.fcm_token follows via the mirror trigger.
+  if (clearing) {
+    await revokeGuardDevices(req.user!.sub, 'logout');
+  } else {
+    await claimDevice({
+      guardId:  req.user!.sub,
+      token:    fcm_token,
+      platform: platformFromUserAgent(req.get('user-agent')),
+      client:   req.get('X-NetraOps-Client') ?? null,
+    });
+  }
   if (clearing) {
     // Not an error — expected on logout. Console.log so we can tail
     // Railway logs during a walk-test; a Sentry breadcrumb (info level,
@@ -787,9 +794,10 @@ router.post('/admin/revoke-guard/:guard_id', requireAuth('company_admin'), async
   if (!guardResult.rows[0]) return res.status(404).json({ error: 'Guard not found' });
 
   await pool.query(
-    'UPDATE guards SET tokens_not_before = NOW(), fcm_token = NULL WHERE id = $1',
+    'UPDATE guards SET tokens_not_before = NOW() WHERE id = $1',
     [req.params.guard_id]
   );
+  await revokeGuardDevices(req.params.guard_id, 'admin_revoke');
   await logEvent(req.params.guard_id, 'guard', 'session_revoked', req);
 
   res.json({

@@ -165,18 +165,12 @@ export async function runClockOutReminder(): Promise<number> {
 
       if (!row.fcm_token) continue;
       try {
-        const { staleToken } = await sendPushNotification({
+        await sendPushNotification({
           token: row.fcm_token,
           title: 'Time to clock out',
           body,
           data:  { type: 'clock_out_reminder', shift_id: row.shift_id },
         });
-        if (staleToken) {
-          await pool.query(
-            'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
-            [row.guard_id, row.fcm_token],
-          );
-        }
         pushed++;
       } catch (err) {
         // The claim is already spent — see the docblock. Log and move on.

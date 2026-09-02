@@ -166,7 +166,7 @@ export async function fireBreachAlerts(params: {
     );
     const token = guardTok.rows[0]?.fcm_token;
     if (token) {
-      const { staleToken } = await sendPushNotification({
+      await sendPushNotification({
         token,
         title: notif.title,
         body:  notif.body,
@@ -180,12 +180,6 @@ export async function fireBreachAlerts(params: {
           )),
         },
       });
-      if (staleToken) {
-        await pool.query(
-          'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
-          [params.guardId, token],
-        );
-      }
     }
   } catch (err) {
     console.error('[fcm] guard breach push failed:', err);

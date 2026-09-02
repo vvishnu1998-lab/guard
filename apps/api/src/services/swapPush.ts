@@ -93,13 +93,7 @@ async function fireOne(
       });
       return;
     }
-    const { staleToken } = await sendPushNotification({ token, title, body, data });
-    if (staleToken) {
-      await pool.query(
-        'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
-        [guardId, token],
-      );
-    }
+    await sendPushNotification({ token, title, body, data });
   })();
 
   const notifPromise = insertNotification({

@@ -176,7 +176,7 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
         continue;
       }
 
-      const { staleToken } = await sendPushNotification({
+      await sendPushNotification({
         token,
         title,
         body,
@@ -188,12 +188,6 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
           last_date:  lastDate,
         },
       });
-      if (staleToken) {
-        await pool.query(
-          'UPDATE guards SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2',
-          [guardId, token],
-        );
-      }
     } catch (err) {
       console.error('[shift-assignment-push] failed for guard', guardId, err);
     }
