@@ -21,6 +21,7 @@
  */
 import * as Sentry from '@sentry/react-native';
 import * as SecureStore from 'expo-secure-store';
+import { ApiError, NetworkError } from './errors';
 
 const BASE = process.env.EXPO_PUBLIC_API_URL;
 
@@ -36,6 +37,21 @@ const KEYS = {
 // (tasks/locationBackground.ts) can read them from a locked phone.
 const KEYCHAIN_OPTS = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
 
+/**
+ * Thrown when the server DEFINITIVELY rejected our session (401/403 on
+ * /auth/refresh — nbf revocation, expired/rotated refresh token), when we
+ * have no refresh token at all, or on a sub mismatch. Distinguishes "this
+ * session is dead, log out" from a transient network/5xx failure, which
+ * propagates as a plain error and must NOT trigger logout — offline guards
+ * keep their retry + banner behaviour (spec 2026-08-20, deepak lockout).
+ */
+export class RefreshRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RefreshRejectedError';
+  }
+}
+
 let pendingRefresh: Promise<void> | null = null;
 
 function decodeJwtSub(token: string): string | null {
@@ -49,16 +65,35 @@ function decodeJwtSub(token: string): string | null {
 
 async function doRefresh(): Promise<void> {
   const refresh = await SecureStore.getItemAsync(KEYS.REFRESH);
-  if (!refresh) throw new Error('No refresh token');
+  if (!refresh) throw new RefreshRejectedError('No refresh token');
 
   Sentry.addBreadcrumb({ category: 'auth', message: 'refresh start', level: 'info' });
 
-  const res = await fetch(`${BASE}/api/auth/refresh`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refresh_token: refresh }),
-  });
-  if (!res.ok) throw new Error('refresh failed');
+  // This fetch is not routed through apiClient (that would recurse), so it
+  // classifies its own failures. A transport rejection must surface as a
+  // NetworkError or callers downgrade it to "unknown error" and stop
+  // treating it as retryable.
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refresh }),
+    });
+  } catch (cause) {
+    throw new NetworkError(cause);
+  }
+  // 401/403 = the server rejected the refresh token itself (nbf bump,
+  // rotation, expiry) — the session is unrecoverable. Any other non-2xx
+  // (5xx, gateway timeout) is transient and must stay retryable rather
+  // than logging the guard out mid-shift. It is thrown as an ApiError
+  // carrying the real status, so isRetryableRestoreError's `status >= 500`
+  // test sees it; a plain Error would now read as a bug in our own code
+  // and stop being retried.
+  if (res.status === 401 || res.status === 403) {
+    throw new RefreshRejectedError('refresh rejected');
+  }
+  if (!res.ok) throw new ApiError(res.status, { error: 'REFRESH_FAILED' });
   const data: { access: string; refresh: string } = await res.json();
 
   const jwtSub = decodeJwtSub(data.access);
@@ -69,7 +104,7 @@ async function doRefresh(): Promise<void> {
       tags: { path: 'refresh_manager' },
       extra: { stored_sub: storedSub, jwt_sub: jwtSub },
     });
-    throw new Error('Session invalid');
+    throw new RefreshRejectedError('Session invalid');
   }
 
   await SecureStore.setItemAsync(KEYS.ACCESS, data.access, KEYCHAIN_OPTS);

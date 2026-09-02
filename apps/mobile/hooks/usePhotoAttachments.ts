@@ -4,8 +4,10 @@
  */
 import { useState } from 'react';
 import * as ImagePicker from 'expo-image-picker';
-import * as ImageManipulator from 'expo-image-manipulator';
+import { compressImage } from '../lib/compressImage';
+import { guardMessage } from '../lib/errorCopy';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../lib/locationSignals';
 import { uploadToS3, UploadResult } from '../lib/uploadToS3';
 import { Alert } from 'react-native';
 
@@ -17,6 +19,8 @@ export interface Attachment {
   error?:      string;
   latitude?:   number;
   longitude?:  number;
+  /** Shadow capture (Wave 1) — recorded and sent, never evaluated. */
+  signals?:    LocationSignals;
   captured_at?: string;
 }
 
@@ -54,11 +58,17 @@ export function usePhotoAttachments(maxPhotos = 3) {
       // GPS — cached first for speed, live with 3s timeout as fallback
       let latitude: number | undefined;
       let longitude: number | undefined;
+      // Shadow capture (Wave 1) — recorded and sent, never evaluated. The
+      // cached-first read below is the stale-coordinate defect and is
+      // deliberately unchanged in this wave; these signals are what make it
+      // measurable. See lib/locationSignals.ts.
+      let signals: LocationSignals = NO_LOCATION_SIGNALS;
       try {
         const cached = await Location.getLastKnownPositionAsync();
         if (cached) {
           latitude  = cached.coords.latitude;
           longitude = cached.coords.longitude;
+          signals   = locationSignals(cached);
         } else {
           const live = await Promise.race([
             Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
@@ -67,25 +77,26 @@ export function usePhotoAttachments(maxPhotos = 3) {
           if (live) {
             latitude  = (live as Location.LocationObject).coords.latitude;
             longitude = (live as Location.LocationObject).coords.longitude;
+            signals   = locationSignals(live as Location.LocationObject);
           }
         }
       } catch { /* GPS optional */ }
 
-      // Compress to max 1080px / 80% quality
-      let compressed: { uri: string } = { uri: asset.uri };
+      // Compress via the shared helper — the SINGLE implementation, also
+      // used by components/CameraCapture. It measures the result and throws
+      // rather than ever returning the raw capture.
+      //
+      // This catch used to be EMPTY, which meant a failed compression
+      // silently uploaded asset.uri at quality 0.9 with no record of why.
+      // Now the photo is simply not added, and the guard is told which one
+      // and how big it was. compressImage has already reported the reason
+      // to Sentry, so this only owns the guard-facing half.
+      let compressed: { uri: string };
       try {
-        // EXIF: stripped by ImageManipulator pipeline (iOS UIImage.jpegData,
-        // Android Bitmap.compress). Library-picked photos carry EXIF on disk;
-        // re-encoding here is what removes it. Do NOT bypass the manipulator
-        // for uploads.
-        const result = await ImageManipulator.manipulateAsync(
-          asset.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-        );
-        if (result?.uri) compressed = result;
-      } catch {
-        // Use original if compression fails (Expo Go native module mismatch)
+        compressed = await compressImage(asset.uri, 'report');
+      } catch (err: any) {
+        Alert.alert('Photo Not Added', guardMessage(err, 'That photo could not be processed. Retake it.', 'report.compress'));
+        return;
       }
 
       const placeholder: Attachment = {
@@ -95,6 +106,7 @@ export function usePhotoAttachments(maxPhotos = 3) {
         uploading:   true,
         latitude,
         longitude,
+        signals,
         captured_at,
       };
       setAttachments((prev) => [...prev, placeholder]);
@@ -143,6 +155,7 @@ export function usePhotoAttachments(maxPhotos = 3) {
         size_kb:     a.size_kb,
         latitude:    a.latitude,
         longitude:   a.longitude,
+        ...(a.signals ?? {}),
         captured_at: a.captured_at,
       }));
   }

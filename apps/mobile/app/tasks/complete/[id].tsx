@@ -9,6 +9,7 @@ import {
   ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../../lib/locationSignals';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../../store/shiftStore';
 import { apiClient }     from '../../../lib/apiClient';
@@ -16,6 +17,8 @@ import { isSessionClosed, handleSessionClosed } from '../../../lib/sessionClosed
 import { uploadToS3 }    from '../../../lib/uploadToS3';
 import CameraCapture, { CapturedPhoto } from '../../../components/CameraCapture';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
+import { GuardFacingError } from '../../../lib/errors';
+import { guardMessage } from '../../../lib/errorCopy';
 
 interface TaskDetail {
   id:                   string;
@@ -49,7 +52,7 @@ export default function TaskCompleteScreen() {
           `/tasks/instances?shift_id=${activeSession?.shift_id ?? ''}`
         );
         const found = list.find((t) => t.id === id);
-        if (!found) throw new Error('Task not found');
+        if (!found) throw new GuardFacingError('Task not found');
         if (found.status === 'completed') {
           Alert.alert('Already Completed', 'This task has already been completed.', [
             { text: 'OK', onPress: () => router.back() }
@@ -59,7 +62,7 @@ export default function TaskCompleteScreen() {
         setTask(found);
         setPhase('review');
       } catch (err: any) {
-        setErrorMsg(err?.message ?? 'Could not load task');
+        setErrorMsg(guardMessage(err, 'Could not load this task. Go back and open it again.', 'task.load'));
         setPhase('error');
       }
     })();
@@ -96,8 +99,11 @@ export default function TaskCompleteScreen() {
       let lat: number | null = null;
       let lng: number | null = null;
       let acc: number | null = null;
+      // Shadow capture (Wave 2) — sent, never evaluated on the client.
+      let signals: LocationSignals = NO_LOCATION_SIGNALS;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        signals = locationSignals(loc);
         lat = loc.coords.latitude;
         lng = loc.coords.longitude;
         acc = loc.coords.accuracy;
@@ -105,7 +111,7 @@ export default function TaskCompleteScreen() {
         console.warn('[task] GPS read threw:', err);
       }
       if (lat === null || lng === null) {
-        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+        throw new GuardFacingError('GPS lock failed. Move to an area with better signal and try again.');
       }
 
       setStatusMsg('Submitting…');
@@ -115,6 +121,8 @@ export default function TaskCompleteScreen() {
         completion_lng:   lng,
         accuracy:         acc ?? 30,
         photo_url:        uploadedUrl,
+        // Shadow capture (Wave 2) — sent, never evaluated on the client.
+        ...signals,
       });
 
       setPhase('done');
@@ -124,7 +132,7 @@ export default function TaskCompleteScreen() {
         await handleSessionClosed(err, 'tasks.complete');
         return;
       }
-      Alert.alert('Task Submission Failed', err?.message ?? 'Could not complete task');
+      Alert.alert('Task Submission Failed', guardMessage(err, 'Could not submit this task. Your photo and notes are still here — try again.', 'task.complete'));
       setPhase('review');
     }
   }

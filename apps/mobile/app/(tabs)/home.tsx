@@ -18,7 +18,8 @@ import { formatDurationMs, formatHoursHHMM, type ShiftHours } from '../../lib/fo
 import { shiftDayLabel, fmtTimeInTz, tzAbbreviation } from '../../lib/shiftTime';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
-import { BreakType } from '../../constants/breakDurations';
+import { guardMessage } from '../../lib/errorCopy';
+import UnsentWritesBanner from '../../components/UnsentWritesBanner';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -196,7 +197,7 @@ export default function HomeScreen() {
     } catch (err: any) {
       Sentry.captureException(err, { extra: { where: 'home.cancelOutboundHandoff' } });
       // eslint-disable-next-line no-alert
-      alert(err?.message ?? 'Could not cancel handoff.');
+      alert(guardMessage(err, 'Could not cancel the handoff. Try again.', 'home.handoff-cancel'));
     } finally {
       setCancellingHandoff(false);
     }
@@ -527,6 +528,20 @@ export default function HomeScreen() {
         <Text style={styles.timeDisplay}>{currentTime}</Text>
       </View>
 
+      {/* Unsent writes — PINNED, deliberately outside the ScrollView.
+          A loss can outlive the shift it happened on, and a guard who has
+          clocked out still needs to know their patrol scan never landed.
+
+          This sat INSIDE the ScrollView, above a full-bleed MapView, until
+          2026-08-23. During the on-device smoke run the banner was live
+          with deadCount 1 and was simply never seen on this screen — it
+          was below the fold every time. A warning a guard has to scroll
+          past a map to find is not a warning.
+
+          Renders null when the bucket is empty, and its own margins go
+          with it, so the layout is untouched in the normal case. */}
+      <View style={styles.unsentWrap}><UnsentWritesBanner /></View>
+
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* Map — MapView always mounts with a default initialRegion
             (SF Bay Area) so tiles render immediately. Once we have a real
@@ -823,11 +838,16 @@ export default function HomeScreen() {
   );
 }
 
-const BREAK_ICONS: Record<BreakType, string> = { meal: '🍱', rest: '☕', other: '⏸' };
-const BREAK_LABELS: Record<BreakType, string> = { meal: 'MEAL BREAK', rest: 'REST BREAK', other: 'BREAK' };
+// One break type from 2026-08-29. `breakType` is still a free string because
+// a row written before schema_v61 says 'meal' | 'rest' | 'other', and a build
+// from this branch can run against the pre-Phase-2 API which still sends
+// those for new rows. Unknown values fall back to the generic icon and label
+// rather than rendering blank.
+const BREAK_ICONS: Record<string, string> = { break: '⏸', meal: '🍱', rest: '☕', other: '⏸' };
+const BREAK_LABELS: Record<string, string> = { break: 'BREAK', meal: 'MEAL BREAK', rest: 'REST BREAK', other: 'BREAK' };
 
 function BreakBanner({ breakType, breakStartMs, durationMs }: {
-  breakType: BreakType; breakStartMs: number; durationMs: number;
+  breakType: string; breakStartMs: number; durationMs: number;
 }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -847,8 +867,8 @@ function BreakBanner({ breakType, breakStartMs, durationMs }: {
       onPress={() => router.push('/break')}
       activeOpacity={0.85}
     >
-      <Text style={styles.breakBannerIcon}>{BREAK_ICONS[breakType]}</Text>
-      <Text style={styles.breakBannerLabel}>{BREAK_LABELS[breakType]}</Text>
+      <Text style={styles.breakBannerIcon}>{BREAK_ICONS[breakType] ?? '⏸'}</Text>
+      <Text style={styles.breakBannerLabel}>{BREAK_LABELS[breakType] ?? 'BREAK'}</Text>
       <Text style={styles.breakBannerSpacer}>·</Text>
       <Text style={[styles.breakBannerRemaining, expired && styles.breakBannerRemainingExpired]}>
         {label}
@@ -893,6 +913,9 @@ function PingCountdownBanner({
 }
 
 const styles = StyleSheet.create({
+  // Horizontal only: vertical spacing belongs to the banner itself so an
+  // empty bucket costs zero height. See UnsentWritesBanner's card style.
+  unsentWrap: { paddingHorizontal: 16 },
   container: { flex: 1, backgroundColor: Colors.bg },
 
   header: {

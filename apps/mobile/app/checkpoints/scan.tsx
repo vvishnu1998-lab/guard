@@ -24,11 +24,14 @@ import { useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { useOfflineStore } from '../../store/offlineStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { GuardFacingError } from '../../lib/errors';
+import { guardMessage } from '../../lib/errorCopy';
 
 const GPS_LIVE_TIMEOUT_MS = 8000;
 
@@ -66,23 +69,23 @@ interface ScanResponse {
   total: number;
 }
 
-async function getScanPosition(): Promise<{ lat: number; lng: number; acc: number | null }> {
+async function getScanPosition(): Promise<{ lat: number; lng: number; acc: number | null; signals: LocationSignals }> {
   try {
     const live = await Promise.race([
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest }),
       new Promise<null>((r) => setTimeout(() => r(null), GPS_LIVE_TIMEOUT_MS)),
     ]);
     if (live) {
-      return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy };
+      return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy, signals: locationSignals(live) };
     }
   } catch (err) {
     console.warn('[checkpoint] live GPS threw:', err);
   }
   const last = await Location.getLastKnownPositionAsync().catch(() => null);
   if (last) {
-    return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy };
+    return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy, signals: locationSignals(last) };
   }
-  throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+  throw new GuardFacingError('GPS lock failed. Move to an area with better signal and try again.');
 }
 
 export default function CheckpointScanner() {
@@ -146,6 +149,9 @@ export default function CheckpointScanner() {
           latitude:      pos.lat,
           longitude:     pos.lng,
           accuracy:      pos.acc ?? 999, // null accuracy must not pass the 30m gate
+          // Shadow capture (Wave 2). /link is the highest-leverage gate:
+          // it DEFINES the anchor every future scan is measured against.
+          ...pos.signals,
         });
         setVerdict({ kind: 'linked', label: linkLabel });
         return;
@@ -158,6 +164,10 @@ export default function CheckpointScanner() {
         latitude:   pos.lat,
         longitude:  pos.lng,
         accuracy:   pos.acc ?? undefined,
+        // Shadow capture (Wave 2). Frozen into the queued payload at scan
+        // time alongside the coords, so a replay submits the SCAN-TIME
+        // verdict — it cannot become clean by replaying later.
+        ...pos.signals,
       });
       if (!outcome.synced) {
         setVerdict({ kind: 'queued' });
@@ -173,7 +183,38 @@ export default function CheckpointScanner() {
     } catch (err: any) {
       if (err instanceof ApiError) {
         const d = err.details as Record<string, any>;
-        if (err.status === 422 && !linkMode && typeof d.distance_m === 'number') {
+
+        // ── BRANCH ON err.code, NEVER ON err.status ALONE ────────────────
+        // Both checkpoint routes now return TWO different 422s: their own
+        // fence/GPS failure, and MOCK_LOCATION_REJECTED from the Wave 2
+        // gate. The link-mode branch below used to key on status alone, so
+        // a mock rejection rendered as "GPS signal too weak" — the guard
+        // was told to fix their signal when the real cause was a device
+        // setting. Found 2026-08-22; it never reached a guard only because
+        // the request failed at transport level first.
+        //
+        // Scan mode escaped the same fate by accident, not design: its
+        // branch happened to also test `typeof d.distance_m === 'number'`
+        // and the mock body carries no distance_m. Both are now guarded
+        // deliberately — by code where the server sends one, and by
+        // payload shape as a fallback so this screen is correct whether or
+        // not the API half has deployed.
+        if (err.code === 'MOCK_LOCATION_REJECTED') {
+          Sentry.addBreadcrumb({
+            category: 'checkpoint',
+            message: 'mock location rejected',
+            level: 'warning',
+            data: { link_mode: linkMode },
+          });
+          setVerdict({
+            kind: 'error', title: linkMode ? 'LINK FAILED' : 'SCAN FAILED',
+            message: err.message, canRescan: true,
+          });
+          return;
+        }
+
+        if (!linkMode && (err.code === 'CHECKPOINT_TOO_FAR'
+                          || (err.status === 422 && typeof d.distance_m === 'number'))) {
           // Anti-fraud rejection — NOT the PING_OFF_POST shape.
           Sentry.addBreadcrumb({
             category: 'checkpoint',
@@ -189,7 +230,8 @@ export default function CheckpointScanner() {
           });
           return;
         }
-        if (err.status === 422 && linkMode) {
+        if (linkMode && (err.code === 'CHECKPOINT_LINK_GPS_WEAK'
+                         || (err.status === 422 && typeof d.required_m === 'number'))) {
           setVerdict({
             kind: 'weak_gps',
             accuracyM: typeof d.accuracy_m === 'number' ? Math.round(d.accuracy_m) : null,
@@ -221,7 +263,13 @@ export default function CheckpointScanner() {
           setVerdict({ kind: 'error', title: 'CANNOT LINK', message: err.message, canRescan: false });
           return;
         }
-        setVerdict({ kind: 'error', title: 'SCAN FAILED', message: err.message, canRescan: true });
+        // Title followed the route, not the mode — a link failure read
+        // "SCAN FAILED". err.message is safe here: this branch is
+        // ApiError-only, so the text is server-authored copy.
+        setVerdict({
+          kind: 'error', title: linkMode ? 'LINK FAILED' : 'SCAN FAILED',
+          message: err.message, canRescan: true,
+        });
         return;
       }
       // Non-ApiError from link mode = network failure (scan mode queues
@@ -229,7 +277,7 @@ export default function CheckpointScanner() {
       Sentry.captureException(err, { extra: { where: 'checkpoint.scan', link_mode: linkMode } });
       setVerdict({
         kind: 'error', title: linkMode ? 'LINK FAILED' : 'SCAN FAILED',
-        message: err?.message ?? 'Something went wrong. Try again.',
+        message: guardMessage(err, 'Could not record this scan. Try scanning the tag again.', 'checkpoint.scan'),
         canRescan: true,
       });
     }
@@ -318,11 +366,23 @@ export default function CheckpointScanner() {
         </View>
       )}
 
+      {/* NOT a success state, and must not look like one. The old copy read
+          "SAVED OFFLINE — No connection — your scan and position were saved
+          and will sync automatically." Three problems: it asserted "no
+          connection" without ever checking; it said "saved", which a guard
+          reads as recorded; and it promised the sync as a certainty when a
+          queued item that the server will refuse is dead-lettered on its
+          first replay and discarded. That exact screen was shown for a scan
+          the server had already rejected (2026-08-22). */}
       {verdict.kind === 'queued' && (
-        <View style={styles.panel}>
-          <Text style={styles.panelNeutralTitle}>SAVED OFFLINE</Text>
+        <View style={[styles.panel, styles.panelWarning]}>
+          <Text style={styles.panelWarningTitle}>NOT SENT YET</Text>
           <Text style={styles.panelText}>
-            No connection — your scan and position were saved and will sync automatically.
+            We couldn't reach the server, so this scan is stored on your phone.
+            It has NOT been recorded yet.
+          </Text>
+          <Text style={styles.panelSub}>
+            It will keep retrying. If it doesn't clear, tell your supervisor.
           </Text>
           <PanelButtons primary="DONE" onPrimary={done} secondary="SCAN ANOTHER" onSecondary={rescan} />
         </View>

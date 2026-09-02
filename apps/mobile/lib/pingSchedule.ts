@@ -50,7 +50,7 @@
 
 /** Mirrors the `siteTz ?? 'America/Los_Angeles'` fallback in
  *  pingReminder.ts:91 and missedPingCron.ts:55. */
-const DEFAULT_SITE_TZ = 'America/Los_Angeles';
+export const DEFAULT_SITE_TZ = 'America/Los_Angeles';
 
 /** 30-minute cadence. Server: `const stepMs = 30 * 60 * 1000` (pingReminder.ts:115)
  *  and `const WINDOW_MS = 30 * 60 * 1000` (missedPingCron.ts:52). */

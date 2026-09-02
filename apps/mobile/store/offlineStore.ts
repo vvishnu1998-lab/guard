@@ -1,7 +1,7 @@
 /**
  * Offline-aware action store.
  *
- * Guards call submitReport / submitPing / completeTask from anywhere in the app.
+ * Guards call submitReport / completeTask from anywhere in the app.
  * Each method:
  *   1. Always tries to POST immediately (no NetInfo gate — NetInfo is unreliable on iOS simulator)
  *   2. Falls back to enqueue() only if the online POST throws
@@ -15,8 +15,11 @@
 import { create } from 'zustand';
 import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../lib/apiClient';
-import { enqueue, pendingCount, startQueueSync, stopQueueSync, syncQueue } from '../lib/offlineQueue';
-import type { SubmitReportRequest, LocationPingRequest, GeofenceViolationRequest } from '@guard/shared';
+import {
+  enqueue, pendingCount, startQueueSync, stopQueueSync, syncQueue,
+  deadLetterCounts, onQueueChange, quarantineCount,
+} from '../lib/offlineQueue';
+import type { SubmitReportRequest, GeofenceViolationRequest } from '@guard/shared';
 
 /**
  * Only network / DNS / 5xx failures should fall into the offline queue.
@@ -42,12 +45,29 @@ function shouldSurfaceInsteadOfQueue(err: unknown): boolean {
 
 interface OfflineState {
   pendingCount: number;
+  /** Losses the guard has not dismissed. Drives the banner. Read from
+   *  AsyncStorage, so it survives force-quit, cold start and logout — only
+   *  an uninstall clears it. */
+  deadCount: number;
+  /** Every dead-letter item, dismissed or not. The drawer row uses this so
+   *  it can stay reachable after a dismissal. */
+  deadTotal: number;
+  /** Items the server has not acknowledged. A dismissed one of these is a
+   *  loss nobody upstream knows about. */
+  deadUnreported: number;
+  /** True once this device has quarantined a corrupt bucket. Those writes
+   *  are preserved but unreadable, so they may never have been sent — the
+   *  guard has to be told rather than left to assume. */
+  storageDegraded: boolean;
   refreshPendingCount: () => Promise<void>;
+  refreshCounts: () => Promise<void>;
   startSync: () => void;
   stopSync:  () => void;
 
-  submitReport:   (payload: SubmitReportRequest)      => Promise<{ synced: true; data: any } | { synced: false; localId: string }>;
-  submitPing:     (payload: LocationPingRequest)       => Promise<string>;
+  /** `idempotencyKey` MUST be minted at screen mount, before the first
+   *  direct POST, and the SAME value reused for every retry of that logical
+   *  submission — see the note in submitReport. */
+  submitReport:   (payload: SubmitReportRequest, idempotencyKey?: string) => Promise<{ synced: true; data: any } | { synced: false; localId: string }>;
   completeTask:   (taskInstanceId: string, payload: Record<string, unknown>) => Promise<string>;
   postViolation:  (payload: GeofenceViolationRequest)  => Promise<string>;
   submitCheckpointScan: (payload: {
@@ -57,44 +77,57 @@ interface OfflineState {
 
 export const useOfflineStore = create<OfflineState>((set) => ({
   pendingCount: 0,
+  deadCount: 0,
+  deadTotal: 0,
+  deadUnreported: 0,
+  storageDegraded: false,
 
   refreshPendingCount: async () => {
     const count = await pendingCount();
     set({ pendingCount: count });
   },
 
+  refreshCounts: async () => {
+    const [pending, dead, quarantined] = await Promise.all([
+      pendingCount(), deadLetterCounts(), quarantineCount(),
+    ]);
+    set({
+      pendingCount:    pending,
+      deadCount:       dead.unacknowledged,
+      deadTotal:       dead.total,
+      deadUnreported:  dead.unreported,
+      storageDegraded: quarantined > 0,
+    });
+  },
+
   startSync: () => startQueueSync(),
   stopSync:  () => stopQueueSync(),
 
-  submitReport: async (payload) => {
+  submitReport: async (payload, idempotencyKey) => {
+    // The key goes on the DIRECT post and is then frozen into the queued
+    // item, so both attempts at the same logical submission carry the same
+    // value. It cannot be derived from localId: that is minted inside
+    // enqueue() below, i.e. only after this direct POST has already failed,
+    // so the two attempts would carry different keys and the server would
+    // create two reports. A network timeout on a POST that actually
+    // succeeded is precisely the case this covers.
     try {
-      const data = await apiClient.post<any>('/reports', payload);
+      const data = await apiClient.post<any>(
+        '/reports',
+        payload,
+        idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined,
+      );
       return { synced: true, data };
     } catch (err: any) {
       if (shouldSurfaceInsteadOfQueue(err)) throw err;
       console.error('[submitReport] Direct submit failed, queuing:', err?.message, JSON.stringify(payload).slice(0, 150));
     }
 
-    const localId = await enqueue('report_submit', payload as unknown as Record<string, unknown>);
+    const localId = await enqueue('report_submit', payload as unknown as Record<string, unknown>, idempotencyKey);
     const count = await pendingCount();
     set({ pendingCount: count });
     syncQueue().catch(console.error);
     return { synced: false, localId };
-  },
-
-  submitPing: async (payload) => {
-    try {
-      await apiClient.post('/locations/ping', payload);
-      return 'synced';
-    } catch (err) {
-      if (shouldSurfaceInsteadOfQueue(err)) throw err;
-    }
-
-    const localId = await enqueue('location_ping', payload as unknown as Record<string, unknown>);
-    const count = await pendingCount();
-    set({ pendingCount: count });
-    syncQueue().catch(console.error);
-    return localId;
   },
 
   completeTask: async (taskInstanceId, payload) => {
@@ -147,3 +180,10 @@ export const useOfflineStore = create<OfflineState>((set) => ({
     return localId;
   },
 }));
+
+// The queue mutates from a 60 s timer, a NetInfo listener and every submit
+// path. Subscribing here means the banner reacts wherever the guard is,
+// rather than only on screens that happen to remount.
+onQueueChange(() => {
+  void useOfflineStore.getState().refreshCounts();
+});

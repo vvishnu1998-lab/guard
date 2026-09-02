@@ -20,6 +20,7 @@ import {
   ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Modal,
 } from 'react-native';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import * as Sentry from '@sentry/react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useShiftStore } from '../../store/shiftStore';
@@ -27,16 +28,22 @@ import { useOfflineStore } from '../../store/offlineStore';
 import { usePhotoAttachments } from '../../hooks/usePhotoAttachments';
 import { PhotoStrip } from '../../components/reports/PhotoStrip';
 import { apiClient, ApiError } from '../../lib/apiClient';
+import { uuidv4 } from '../../lib/uuid';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { GuardFacingError } from '../../lib/errors';
+import { guardMessage } from '../../lib/errorCopy';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
 
-// P2 UX bundle 2026-07-10 — lowered from 75 → 25. Field feedback:
-// guards were getting stranded on the write-more-then-enhance loop for
-// short, valid observations (e.g. "vehicle parked in fire lane, plate
-// 8XY123, informed driver"). 25 gives the model enough substrate to
-// enhance without gatekeeping legitimate short reports.
-const MIN_ENHANCE_WORDS = 25;
+// Threshold history: 75 → 25 (P2 UX bundle 2026-07-10) → 10 (2026-08-26).
+// The 2026-07-10 drop came from field feedback: guards were stranded on the
+// write-more-then-enhance loop for short, valid observations (e.g. "vehicle
+// parked in fire lane, plate 8XY123, informed driver"). 25 still gatekept
+// most of those, so the floor now sits at 10 — enough substrate for the
+// model to work with, without turning a one-line observation into a chore.
+// The server's own floor is 10 CHARACTERS, not words (routes/ai.ts:82), so
+// it never binds at this threshold.
+const MIN_ENHANCE_WORDS = 10;
 function countWords(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
@@ -63,6 +70,23 @@ export default function CreateReport() {
   const [typePickerOpen, setTypePickerOpen] = useState(false);
   const [description,  setDescription]  = useState('');
   const [submitting,   setSubmitting]   = useState(false);
+  // Idempotency key for the report POST. Minted ONCE per mount via lazy
+  // useState — stable across re-renders and across every retry of this
+  // submission, including the offline-queue replay it is frozen into. Same
+  // pattern as clock-in (app/clock-in/step4.tsx:40); deliberately not a
+  // second idiom.
+  //
+  // It must be minted HERE, above the first direct POST. Deriving it from
+  // the queue's localId would not work: that is generated inside enqueue(),
+  // which only runs after the direct POST has already failed, so the two
+  // attempts would carry different keys and a timed-out-but-successful
+  // submit would still duplicate.
+  //
+  // The screen stays mounted after a 422 (REPORT_OFF_POST keeps the form so
+  // the guard can walk back on-post and resubmit), so this key is reused for
+  // that retry too. That is safe only because the server caches 2xx ONLY —
+  // see the docblock in apps/api/src/services/idempotency.ts.
+  const [reportIdempotencyKey] = useState(() => uuidv4());
   const [enhancing,    setEnhancing]    = useState(false);
   const [enhanced,     setEnhanced]     = useState<string | null>(null);
   const [originalDesc, setOriginalDesc] = useState<string | null>(null);
@@ -123,7 +147,7 @@ export default function CreateReport() {
         data: { error: err?.message ?? String(err) },
       });
       Sentry.captureException(err, { extra: { where: 'reports.new.handleEnhance' } });
-      Alert.alert('Enhancement Failed', err?.message ?? 'Could not enhance description. Try again.');
+      Alert.alert('Enhancement Failed', guardMessage(err, 'Could not enhance the description. Write it yourself and carry on.', 'report.enhance'));
     } finally {
       setEnhancing(false);
     }
@@ -182,11 +206,14 @@ export default function CreateReport() {
       // Capturing accuracy is required to actually trigger validation
       // server-side; without all three of {lat,lng,accuracy} the server
       // skips the fence check.
+      // Shadow capture (Wave 2) — sent, never evaluated on the client.
+      let reportSignals: LocationSignals = NO_LOCATION_SIGNALS;
       let latitude:  number | null = null;
       let longitude: number | null = null;
       let accuracy:  number | null = null;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        reportSignals = locationSignals(loc);
         latitude  = loc.coords.latitude;
         longitude = loc.coords.longitude;
         accuracy  = loc.coords.accuracy;
@@ -194,7 +221,7 @@ export default function CreateReport() {
         console.warn('[report] GPS read threw:', err);
       }
       if (latitude === null || longitude === null) {
-        throw new Error('GPS lock failed. Move to an area with better signal and try again.');
+        throw new GuardFacingError('GPS lock failed. Move to an area with better signal and try again.');
       }
 
       if (windowLabel) {
@@ -215,7 +242,9 @@ export default function CreateReport() {
         longitude,
         accuracy:         accuracy ?? undefined,
         window_label:     windowLabel ?? undefined,
-      });
+        // Shadow capture (Wave 2) — sent, never evaluated on the client.
+        ...reportSignals,
+      }, reportIdempotencyKey);
 
       Sentry.addBreadcrumb({
         category: 'reports_wizard',
@@ -233,7 +262,28 @@ export default function CreateReport() {
         reportType === 'incident' &&
         result.data?.is_within_geofence === false;
 
-      if (offPostIncident) {
+      // A QUEUED report has not been submitted and nobody has been notified.
+      // This case used to fall through to the branches below, so a queued
+      // incident told the guard "Report submitted. The client has been
+      // notified by email." — the exact opposite of what happened, on the
+      // one report type that exists to escalate something. A non-incident
+      // queued report navigated away silently, indistinguishable from
+      // success. Both are now stated plainly.
+      if (result.synced === false) {
+        Sentry.addBreadcrumb({
+          category: 'reports',
+          message: 'report queued — not submitted',
+          level: 'warning',
+          data: { local_id: result.localId, report_type: reportType },
+        });
+        Alert.alert(
+          'NOT SENT YET',
+          "We couldn't reach the server, so your report is stored on your phone. "
+          + 'It has NOT been submitted and nobody has been notified yet.\n\n'
+          + "It will keep retrying. If it doesn't clear, tell your supervisor.",
+          [{ text: 'OK', onPress: () => router.replace('/(tabs)/reports') }],
+        );
+      } else if (offPostIncident) {
         Sentry.addBreadcrumb({
           category: 'reports',
           message: 'off-post incident accepted',
@@ -283,7 +333,7 @@ export default function CreateReport() {
           data: { error: err?.message ?? String(err) },
         });
         Sentry.captureException(err, { extra: { where: 'reports.new.submit' } });
-        Alert.alert('Report Submission Failed', err?.message ?? 'Could not submit report.');
+        Alert.alert('Report Submission Failed', guardMessage(err, 'Could not submit your report. Your text and photos are still here — try again.', 'report.submit'));
       }
     } finally {
       setSubmitting(false);

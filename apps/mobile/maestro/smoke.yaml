@@ -95,7 +95,9 @@ appId: com.vishnu.vwing
 
 - takeScreenshot: 09-activity-typed
 
-# AI Enhance becomes visible when description >= 10 chars.
+# The "Enhance with AI" button always renders here; it is DISABLED until the
+# description reaches MIN_ENHANCE_WORDS (10) words. The input above is 16
+# words, so the tap below lands on an enabled button.
 - extendedWaitUntil:
     visible: "Enhance with AI"
     timeout: 5000

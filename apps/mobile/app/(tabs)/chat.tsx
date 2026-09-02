@@ -9,6 +9,7 @@ import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { apiClient } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 interface ChatRoom {
   id:              string;
@@ -42,7 +43,7 @@ export default function ChatListScreen() {
       setRooms(data);
       setError('');
     } catch (e: any) {
-      setError(e?.message ?? 'Failed to load chats');
+      setError(guardMessage(e, 'Could not load your chats. Pull down to refresh.', 'chat.list'));
     } finally {
       setLoading(false);
     }

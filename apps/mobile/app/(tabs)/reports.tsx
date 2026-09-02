@@ -10,6 +10,7 @@ import {
 import { router, useFocusEffect } from 'expo-router';
 import { apiClient }   from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 type ReportType = 'all' | 'activity' | 'incident' | 'maintenance';
 
@@ -56,7 +57,7 @@ export default function ReportsScreen() {
       setReports(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message ?? 'Could not load reports');
+      setError(guardMessage(err, 'Could not load your reports. Pull down to refresh.', 'reports.list'));
     }
   }
 

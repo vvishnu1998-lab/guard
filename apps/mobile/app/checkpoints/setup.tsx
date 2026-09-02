@@ -13,6 +13,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator
 import { router, useFocusEffect } from 'expo-router';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 interface MineCheckpoint {
   id: string;
@@ -49,7 +50,7 @@ export default function CheckpointSetup() {
           if (err instanceof ApiError && err.status === 403) {
             setError('Clock in to set up checkpoints.');
           } else {
-            setError(err?.message ?? 'Could not load checkpoints.');
+            setError(guardMessage(err, 'Could not load the checkpoint list. Go back and try again.', 'checkpoints.setup'));
           }
           setUnlinked([]);
         }

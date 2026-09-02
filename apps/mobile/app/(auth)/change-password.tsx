@@ -9,8 +9,10 @@ import {
   StyleSheet, Alert, KeyboardAvoidingView, Platform, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { router } from 'expo-router';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 export default function ChangePasswordScreen() {
   const [current, setCurrent]     = useState('');
@@ -32,9 +34,12 @@ export default function ChangePasswordScreen() {
     setLoading(true);
     try {
       await changePassword(current, next);
-      // Root layout will redirect to home once mustChangePassword = false
+      // changePassword tore down the (server-revoked) session; the root
+      // layout won't redirect while we're inside the (auth) group, so route
+      // to login ourselves with the same notice the web portals show.
+      router.replace('/(auth)/login?notice=password-changed');
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Could not change password');
+      Alert.alert('Error', guardMessage(err, 'Could not change your password. Try again.', 'change-password'));
     } finally {
       setLoading(false);
     }
@@ -118,7 +123,7 @@ export default function ChangePasswordScreen() {
           </TouchableOpacity>
         </View>
 
-        <TouchableOpacity onPress={logout} style={styles.logoutLink}>
+        <TouchableOpacity onPress={() => logout()} style={styles.logoutLink}>
           <Text style={styles.logoutText}>Not you? Log out</Text>
         </TouchableOpacity>
       </ScrollView>

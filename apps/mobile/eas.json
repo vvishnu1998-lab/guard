@@ -15,6 +15,18 @@
       },
       "channel": "development"
     },
+    "development-device": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_ENV": "development"
+      },
+      "channel": "development"
+    },
     "preview": {
       "distribution": "internal",
       "ios": {
@@ -28,6 +40,17 @@
         "EXPO_PUBLIC_SENTRY_ENV": "preview"
       },
       "channel": "preview"
+    },
+    "smoke": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://guard-production-6be4.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_ENV": "smoke"
+      },
+      "channel": "smoke"
     },
     "production": {
       "autoIncrement": true,

@@ -28,6 +28,7 @@ import { useAuthStore }  from '../../store/authStore';
 import { currentPingWindow, remainingMsUntilNextPing, type PingWindowState } from '../../lib/pingSchedule';
 import { checkpointsEnabled, inspectionRequired } from '../../lib/siteFlags';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import UnsentWritesBanner from '../../components/UnsentWritesBanner';
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
 
@@ -272,6 +273,18 @@ export default function ActiveShiftScreen() {
   }
 
   return (
+    <View style={styles.root}>
+      {/* ── Unsent writes — PINNED, outside the ScrollView ──────────
+          A write the guard believes landed and which did not is the most
+          consequential thing this screen can tell them, so it must not be
+          scrollable away. It also cannot live inside the ScrollView here
+          for a second reason: contentContainerStyle is alignItems:'center'
+          and every sibling card carries an explicit width (timerStrip
+          100%, inspectionCard 92%). The banner has none, so inside that
+          container it rendered shrink-to-content rather than full width.
+          Renders null when the bucket is empty, margins included. */}
+      <View style={styles.unsentPin}><UnsentWritesBanner /></View>
+
     <ScrollView style={styles.bg} contentContainerStyle={styles.scroll}>
 
       {/* ── Timer strip ────────────────────────────────────────────── */}
@@ -388,6 +401,7 @@ export default function ActiveShiftScreen() {
 
       <Text style={styles.footer}>GPS tracking active in background</Text>
     </ScrollView>
+    </View>
   );
 }
 
@@ -426,6 +440,11 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 // ── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
+  root:   { flex: 1, backgroundColor: Colors.structure },
+  // Horizontal only — the banner owns its vertical margins so an empty
+  // bucket costs no height. Width comes from the parent, unlike inside
+  // the centre-aligned ScrollView where it had to size itself.
+  unsentPin: { paddingHorizontal: Spacing.md },
   bg:     { flex: 1, backgroundColor: Colors.structure },
   scroll: { alignItems: 'center', paddingBottom: 48 },
   center: { flex: 1, backgroundColor: Colors.structure, alignItems: 'center', justifyContent: 'center', padding: Spacing.xl },

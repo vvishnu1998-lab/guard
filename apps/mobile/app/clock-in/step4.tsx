@@ -19,6 +19,7 @@ import { uploadToS3 }      from '../../lib/uploadToS3';
 import { uuidv4 }          from '../../lib/uuid';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 const STEPS = ['Uploading selfie…', 'Starting shift…', 'Saving verification…'];
 
@@ -51,6 +52,7 @@ export default function ClockInStep4() {
     verifiedLatitude,
     verifiedLongitude,
     verifiedAccuracy,
+    verifiedSignals,
     verifiedAt,
     selfie,
     sitePhoto,
@@ -151,6 +153,10 @@ export default function ClockInStep4() {
           lat,
           lng,
           accuracy,
+          // Shadow capture (Wave 1) — recorded server-side, never evaluated.
+          // Optional on the server: absent or malformed becomes NULL and the
+          // clock-in proceeds exactly as before.
+          ...verifiedSignals,
         },
         { headers: { 'Idempotency-Key': clockInIdempotencyKey } },
       );
@@ -174,6 +180,8 @@ export default function ClockInStep4() {
         verified_lng:       lng,
         accuracy,
         is_within_geofence: true,
+        // Shadow capture (Wave 1) — see above.
+        ...verifiedSignals,
       });
       Sentry.addBreadcrumb({
         category: 'clock_in_wizard',
@@ -258,7 +266,7 @@ export default function ClockInStep4() {
         );
         return;
       }
-      Alert.alert('Clock-In Failed', err?.message ?? 'Could not start shift. Please try again.');
+      Alert.alert('Clock-In Failed', guardMessage(err, 'Could not start your shift. Try again, or tell your supervisor.', 'clock-in'));
     } finally {
       setSubmitting(false);
     }

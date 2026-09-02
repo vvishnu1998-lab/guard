@@ -25,8 +25,21 @@ import { useShiftStore }   from '../../store/shiftStore';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
-import { pingState }       from '../../lib/pingState';
 import { currentPingWindow } from '../../lib/pingSchedule';
+import {
+  dismissWindowNotifications,
+  outstandingPingWindow,
+  confirmationMessage,
+} from '../../lib/pingFollowUp';
+import { guardMessage } from '../../lib/errorCopy';
+
+/** POST /locations/ping. `already_recorded` means the window already had a
+ *  ping and the server returned the incumbent instead of adding a second
+ *  (schema_v49 uq_location_pings_session_window). */
+interface PingSubmitResponse {
+  status: 'recorded' | 'already_recorded';
+  ping:   { id: string } | null;
+}
 
 export default function PhotoPing() {
   const { activeSession, activeShift, markWindowPinged } = useShiftStore();
@@ -60,8 +73,13 @@ export default function PhotoPing() {
       const { public_url } = await uploadToS3(photo.uri, 'ping');
       console.log('[ping] photo uploaded:', public_url);
 
-      // 2) Submit directly (not via useOfflineStore.submitPing) so a
-      //    failure throws to the catch below and the guard sees it.
+      // 2) Submit directly — pings are deliberately NOT offline-queued, so
+      //    a failure throws to the catch below and the guard sees it.
+      //    Queueing them would need a client-supplied capture timestamp
+      //    first: pinged_at is stamped server-side at INSERT, so a replay
+      //    twenty minutes after the fact would be graded twenty minutes
+      //    late against its window and fabricate a lateness that never
+      //    happened. schema_v49's idempotency does not fix that.
       setStatus('SUBMITTING…');
       console.log('[ping] submitting…');
       Sentry.addBreadcrumb({
@@ -74,7 +92,7 @@ export default function PhotoPing() {
           window_label: windowLabel ?? null,
         },
       });
-      await apiClient.post('/locations/ping', {
+      const result = await apiClient.post<PingSubmitResponse>('/locations/ping', {
         shift_session_id: activeSession.id,
         latitude:         photo.latitude,
         longitude:        photo.longitude,
@@ -82,8 +100,18 @@ export default function PhotoPing() {
         ping_type:        'gps_photo',
         photo_url:        public_url,
         window_label:     windowLabel ?? undefined,
+        // Shadow capture (Wave 1) — recorded server-side, never evaluated.
+        // Optional: absent or malformed becomes NULL and the ping proceeds.
+        ...photo.signals,
       });
-      console.log('[ping] submit complete');
+      // 200 already_recorded is SUCCESS, not an error: the window was
+      // already answered, so the server declined to add a second row and
+      // returned the incumbent. The guard did stand at the post and take
+      // the photo — treating that as a failure would push them to retry a
+      // submission that can never land. It is still not a fresh ping, and
+      // the confirmation says so rather than claiming one.
+      const recorded = result?.status !== 'already_recorded';
+      console.log(`[ping] submit complete (${result?.status ?? 'recorded'})`);
       Sentry.addBreadcrumb({ category: 'ping_wizard', message: 'submit succeeded', level: 'info' });
 
       // Record which window this satisfied so the active-shift PING NOW tile
@@ -106,12 +134,30 @@ export default function PhotoPing() {
           : null);
       if (satisfied) markWindowPinged(activeSession.id, satisfied);
 
-      pingState.suppressAlertUntil = Date.now() + 30 * 60 * 1000;
-      // Confirmation to the guard (was missing — submit used to silently
-      // navigate away which made guards unsure whether the ping landed).
+      // Clear the delivered OS notification(s) for the window just
+      // answered. Nothing in this app has ever called a dismissal API, so
+      // a banner for an answered window sat in Notification Center until
+      // the guard swiped it. Non-fatal by construction.
+      await dismissWindowNotifications(satisfied);
+
+      // Ask the SERVER what is still owed rather than guessing locally —
+      // the client cannot see which earlier windows are unresolved, and
+      // "you're all caught up" has to be true when we say it.
+      const outstanding = await outstandingPingWindow();
+
+      // Confirmation now names the window and what remains, instead of
+      // "Photo and location saved." A guard who backfills 17:00 at 17:39
+      // needs to be told that 17:30 is still open — the old copy left him
+      // to infer it, and the PING NOW tile stays live by design after a
+      // backfill (see markWindowPinged above).
       Alert.alert(
-        'Ping Submitted',
-        'Photo and location saved.',
+        recorded ? 'Ping Submitted' : 'Already Recorded',
+        confirmationMessage({
+          window:   satisfied ?? null,
+          wasLate:  Boolean(windowLabel),
+          recorded,
+          outstanding,
+        }),
         [{ text: 'OK', onPress: () => router.replace('/active-shift') }],
       );
       return; // stay on the freeze-frame behind the confirmation alert
@@ -143,6 +189,30 @@ export default function PhotoPing() {
         );
         return 'reset';
       }
+      // The window this screen was opened for is not one the server will
+      // accept — either it is not a window of this shift at all, or it
+      // has not started yet. Both mean the app is holding a stale or
+      // wrong label (a deep-link from an old notification, a shift that
+      // was rescheduled under the guard, a device clock well ahead).
+      // Retrying the camera cannot fix it, so route home for a fresh
+      // read of the schedule instead of leaving them on a dead screen.
+      if (err instanceof ApiError && err.code === 'PING_WINDOW_INVALID') {
+        const notYetOpen = err.details?.reason === 'not_yet_open';
+        Sentry.addBreadcrumb({
+          category: 'ping_wizard',
+          message:  'PING_WINDOW_INVALID surfaced',
+          level:    'warning',
+          data: { window_label: windowLabel, reason: err.details?.reason },
+        });
+        Alert.alert(
+          'Ping Window Unavailable',
+          notYetOpen
+            ? `The ${windowLabel ?? 'requested'} window hasn't started yet. It will open on schedule — nothing has been lost.`
+            : `The ${windowLabel ?? 'requested'} window isn't part of this shift. Open the app fresh and use PING NOW.`,
+          [{ text: 'OK', onPress: () => router.replace('/active-shift') }],
+        );
+        return;
+      }
       Sentry.addBreadcrumb({
         category: 'ping_wizard',
         message: 'submit / capture failed',
@@ -150,7 +220,7 @@ export default function PhotoPing() {
         data: { error: err?.message ?? String(err) },
       });
       Sentry.captureException(err, { extra: { where: 'ping.photo.capture' } });
-      Alert.alert('Ping Failed', err?.message ?? 'Could not submit ping. Try again.');
+      Alert.alert('Ping Failed', guardMessage(err, 'Could not submit your ping. Try again before the window closes.', 'ping.submit'));
       return 'reset';
     }
   }

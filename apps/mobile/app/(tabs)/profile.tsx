@@ -12,6 +12,9 @@ import { useAuthStore } from '../../store/authStore';
 import { apiClient } from '../../lib/apiClient';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { formatHoursHHMM, type ShiftHours } from '../../lib/formatHours';
+import {
+  RANGE_PRESETS, MAX_RANGE_DAYS, downloadHoursPdf,
+} from '../../lib/hoursReport';
 import Constants from 'expo-constants';
 
 interface GuardProfile {
@@ -41,6 +44,8 @@ export default function ProfileScreen() {
   const [profile,  setProfile]  = useState<GuardProfile | null>(null);
   const [loading,  setLoading]  = useState(true);
   const [shifts,   setShifts]   = useState<ShiftRecord[]>([]);
+  const [presetKey,   setPresetKey]   = useState<string>('30');
+  const [downloading, setDownloading] = useState(false);
   const logout = useAuthStore((s) => s.logout);
 
   useFocusEffect(
@@ -101,6 +106,33 @@ export default function ProfileScreen() {
     router.push('/(auth)/change-password');
   }
 
+  // Resolved once per render from the selected preset. `new Date()` is read
+  // here rather than captured in state so a session left open across midnight
+  // does not keep offering yesterday's window.
+  const selectedPreset = RANGE_PRESETS.find((p) => p.key === presetKey) ?? RANGE_PRESETS[2];
+  const selectedRange  = selectedPreset.range(new Date());
+  const rangeLabel = `${fmtShort(selectedRange.from)} — ${fmtShort(selectedRange.to)}`;
+
+  async function handleDownloadHours() {
+    setDownloading(true);
+    try {
+      const r = await downloadHoursPdf(selectedRange.from, selectedRange.to);
+      if (r.status === 'saved') return;      // share sheet already handled it
+      if (r.status === 'empty') {
+        // H2.6 — a period with no shifts is not an error and must not look
+        // like one. No file is produced; the guard is told plainly.
+        Alert.alert(
+          'No shifts in this period',
+          `You have no recorded shifts between ${rangeLabel}. Choose a different range.`,
+        );
+        return;
+      }
+      Alert.alert('Couldn\'t download hours', r.message);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   const appVersion = Constants.expoConfig?.version ?? '1.0.0';
 
   return (
@@ -151,6 +183,40 @@ export default function ProfileScreen() {
               </View>
             </View>
 
+            {/* Download hours summary — sits directly under the hours grid,
+                where a guard who has just looked at their totals is most
+                likely to want a copy. */}
+            <View style={styles.section}>
+              <View style={styles.historyHeader}>
+                <Text style={styles.historyTitle}>DOWNLOAD HOURS</Text>
+                <Text style={styles.historySub}>Up to {MAX_RANGE_DAYS} days</Text>
+              </View>
+              <View style={styles.presetWrap}>
+                {RANGE_PRESETS.map((p) => (
+                  <TouchableOpacity
+                    key={p.key}
+                    style={[styles.presetChip, presetKey === p.key && styles.presetChipOn]}
+                    onPress={() => setPresetKey(p.key)}
+                    disabled={downloading}
+                  >
+                    <Text style={[styles.presetText, presetKey === p.key && styles.presetTextOn]}>
+                      {p.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={styles.presetRange}>{rangeLabel}</Text>
+              <TouchableOpacity
+                style={[styles.downloadBtn, downloading && styles.downloadBtnDisabled]}
+                onPress={handleDownloadHours}
+                disabled={downloading}
+              >
+                {downloading
+                  ? <ActivityIndicator color={Colors.base} />
+                  : <Text style={styles.downloadText}>DOWNLOAD PDF</Text>}
+              </TouchableOpacity>
+            </View>
+
             {/* Shift history */}
             {recentShifts.length > 0 && (
               <View style={styles.section}>
@@ -190,6 +256,14 @@ export default function ProfileScreen() {
       </ScrollView>
     </View>
   );
+}
+
+/** "01 Jul" from a YYYY-MM-DD. Parsed as UTC so the label can never drift a
+ *  day on a device east or west of the date it was built from. */
+function fmtShort(ymd: string): string {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  return new Intl.DateTimeFormat('en-GB',
+    { day: '2-digit', month: 'short', timeZone: 'UTC' }).format(d);
 }
 
 function HoursStat({ label, value }: { label: string; value: number }) {
@@ -281,6 +355,21 @@ const styles = StyleSheet.create({
   hoursLabel:   { color: Colors.muted, fontSize: 10, letterSpacing: 2, marginTop: 2 },
   hoursDivider: { width: 1, backgroundColor: Colors.border, marginVertical: Spacing.sm },
 
+  presetWrap:   { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm, marginBottom: Spacing.md },
+  presetChip:   {
+    paddingHorizontal: Spacing.md, paddingVertical: 7,
+    borderRadius: Radius.sm, borderWidth: 1, borderColor: Colors.border,
+  },
+  presetChipOn: { backgroundColor: Colors.action, borderColor: Colors.action },
+  presetText:   { color: Colors.muted, fontSize: 12, letterSpacing: 1 },
+  presetTextOn: { color: Colors.base, fontWeight: '700' },
+  presetRange:  { color: Colors.muted, fontSize: 11, letterSpacing: 1, marginBottom: Spacing.md },
+  downloadBtn:  {
+    backgroundColor: Colors.action, borderRadius: Radius.sm,
+    paddingVertical: 13, alignItems: 'center', justifyContent: 'center', minHeight: 44,
+  },
+  downloadBtnDisabled: { opacity: 0.5 },
+  downloadText: { color: Colors.base, fontFamily: Fonts.heading, fontSize: 13, letterSpacing: 2 },
   historyHeader: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm,

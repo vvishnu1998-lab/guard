@@ -161,10 +161,22 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       break;
 
     // ── Swap family (batch/mobile-3) ─────────────────────────────────
-    // Unified-feed model (Build 34 option B): the swap invite row now
-    // lives in the notifications feed with a 🔄 icon; tap routes to
-    // shift detail where the guard's accept/decline card renders.
+    // An INVITE goes to the notifications tab, which renders the
+    // accept/decline card. Everything else in the family is an OUTCOME
+    // addressed to the requester, whose own shift detail is the right
+    // landing spot.
+    //
+    // The invite used to route here too, under a comment claiming shift
+    // detail rendered the accept card. It never did: merge bd7e4e2
+    // (2026-07-13) kept M3's deletion of the alerts tab — which owned the
+    // real accept/decline UI — while grafting this routing on top of it.
+    // GET /shifts/:id 404s for a recipient still in 'pending' (its
+    // tenancy exemption requires status='accepted'), and 'accepted' was
+    // only reachable through the deleted button. Dead loop, 43 days.
     case 'swap_request_received':
+      breadcrumb(type, '/(tabs)/notifications', data);
+      router.push('/(tabs)/notifications');
+      break;
     case 'swap_request_sent':
     case 'swap_accepted':
     case 'swap_declined':
@@ -173,11 +185,14 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       break;
 
     // ── Handoff family (batch/mobile-3 Phase 2b) ─────────────────────
-    // Same unified-feed model as swap. HandoffRequestModal is invoked
-    // by the guard INITIATING the handoff (from home.tsx or shift
-    // detail) — the RECEIVER guard tap here lands on shift detail
-    // which renders the pending-invite state with accept/decline.
+    // Same split as swap, and the same bd7e4e2 history. HandoffRequestModal
+    // is invoked by the guard INITIATING the handoff (from home.tsx or
+    // shift detail); the RECEIVER lands on the notifications tab, where
+    // accepting is one tap and the card then becomes the clock-in entry.
     case 'handoff_request_received':
+      breadcrumb(type, '/(tabs)/notifications', data);
+      router.push('/(tabs)/notifications');
+      break;
     case 'handoff_request_sent':
     case 'handoff_accepted':
     case 'handoff_declined':

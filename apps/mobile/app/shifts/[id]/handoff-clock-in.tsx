@@ -45,6 +45,7 @@ import { useAuthStore } from '../../../store/authStore';
 import { isInsideGeofence, hasUsablePolygon, haversineDistance } from '../../../utils/geofence';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 import SelfieCapture, { SelfieProof } from '../../../components/SelfieCapture';
+import { guardMessage } from '../../../lib/errorCopy';
 
 type Step = 'loading' | 'gps' | 'selfie' | 'submit' | 'error';
 
@@ -152,7 +153,7 @@ export default function HandoffClockInWizard() {
       } catch (err: any) {
         if (cancelled) return;
         Sentry.captureException(err, { extra: { where: 'handoff-clock-in.load' } });
-        setErrMsg(err?.message ?? 'Could not load shift.');
+        setErrMsg(guardMessage(err, 'Could not load this shift. Go back and try again.', 'handoff.load'));
         setStep('error');
       }
     })();
@@ -402,7 +403,7 @@ export default function HandoffClockInWizard() {
         );
         return;
       }
-      setSubmitError(err?.message ?? 'Could not complete handoff.');
+      setSubmitError(guardMessage(err, 'Could not complete the handoff. Try again, or tell your supervisor.', 'handoff.submit'));
     }
   }
 

@@ -20,12 +20,14 @@ import * as Sentry from '@sentry/react-native';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../../lib/apiClient';
+import { ApiError } from '../../../lib/errors';
 import { useAuthStore } from '../../../store/authStore';
 import { formatScheduledHours } from '../../../lib/formatHours';
 import { tzAbbreviation } from '../../../lib/shiftTime';
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 import RequestSwapModal from '../../../components/RequestSwapModal';
 import HandoffRequestModal from '../../../components/HandoffRequestModal';
+import { guardMessage } from '../../../lib/errorCopy';
 
 type ShiftStatus = 'scheduled' | 'active' | 'completed' | 'missed' | 'cancelled';
 
@@ -123,7 +125,17 @@ export default function ShiftDetailScreen() {
       setShift(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message ?? 'Could not load shift');
+      // 404 here is not a transport failure and RETRY will never fix it. The
+      // route 404s deliberately on cross-guard access so shift ids cannot be
+      // probed, which means it is also what a guard sees when they open a
+      // shift they were invited to but have not accepted yet. Telling them to
+      // "pull down to refresh" sends them at a button that cannot work; say
+      // what is actually true instead.
+      if (err instanceof ApiError && err.status === 404) {
+        setError("This shift isn't yours to view yet.");
+      } else {
+        setError(guardMessage(err, 'Could not load this shift. Pull down to refresh.', 'shift.detail'));
+      }
     }
   }, [id]);
 
@@ -263,7 +275,7 @@ export default function ShiftDetailScreen() {
               await load();
             } catch (err: any) {
               Sentry.captureException(err, { extra: { where: 'shift-detail.handoff-cancel' } });
-              Alert.alert('Could not cancel', err?.message ?? 'Please try again.');
+              Alert.alert('Could not cancel', guardMessage(err, 'Could not cancel this shift. Try again.', 'shift.cancel'));
             } finally {
               setCancelling(false);
             }

@@ -3,6 +3,7 @@
  * Cleared after a successful clock-in or on cancel/error.
  */
 import { create } from 'zustand';
+import { NO_LOCATION_SIGNALS, type LocationSignals } from '../lib/locationSignals';
 
 export interface PhotoProof {
   uri:       string;
@@ -20,6 +21,9 @@ interface ClockInState {
    *  budget. Item 3. */
   verifiedAccuracy:         number | null;
   verifiedAt:               string | null;
+  /** Shadow capture (Wave 1) — recorded and sent, never evaluated. No screen
+   *  reads these and no button is gated on them. See lib/locationSignals.ts. */
+  verifiedSignals:          LocationSignals;
 
   // Step 2 — Guard selfie
   selfie:                   PhotoProof | null;
@@ -34,7 +38,7 @@ interface ClockInState {
   pendingShiftId:           string | null;
 
   // Actions
-  setGpsVerified:           (lat: number, lng: number, accuracy: number) => void;
+  setGpsVerified:           (lat: number, lng: number, accuracy: number, signals?: LocationSignals) => void;
   setSelfie:                (proof: PhotoProof) => void;
   setSitePhoto:             (proof: PhotoProof) => void;
   setPendingShift:          (shiftId: string, instruction?: string) => void;
@@ -45,6 +49,7 @@ const initialState = {
   verifiedLatitude:        null,
   verifiedLongitude:       null,
   verifiedAccuracy:        null,
+  verifiedSignals:         NO_LOCATION_SIGNALS,
   verifiedAt:              null,
   selfie:                  null,
   sitePhoto:               null,
@@ -55,12 +60,13 @@ const initialState = {
 export const useClockInStore = create<ClockInState>((set) => ({
   ...initialState,
 
-  setGpsVerified: (lat, lng, accuracy) =>
+  setGpsVerified: (lat, lng, accuracy, signals) =>
     set({
       verifiedLatitude:  lat,
       verifiedLongitude: lng,
       verifiedAccuracy:  accuracy,
       verifiedAt:        new Date().toISOString(),
+      verifiedSignals:   signals ?? NO_LOCATION_SIGNALS,
     }),
 
   setSelfie: (proof) => set({ selfie: proof }),

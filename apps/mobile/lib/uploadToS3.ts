@@ -17,6 +17,7 @@
  *   4. Return { public_url, size_kb } for the report payload.
  */
 import { apiClient } from './apiClient';
+import { GuardFacingError } from './errors';
 
 export interface UploadResult {
   public_url: string;
@@ -34,11 +35,15 @@ interface PresignedPostResponse {
 /**
  * Upload a local file URI to S3 via pre-signed POST.
  * @param localUri  - expo file URI (e.g. file:///var/...)
- * @param context   - storage folder prefix: 'report' | 'ping' | 'clock_in' | 'inspection'
+ * @param context   - storage folder prefix: 'report' | 'ping' | 'clock_in' |
+ *                  'clock_out' | 'inspection'. MUST also be present in
+ *                  ALLOWED_CONTEXTS in apps/api/src/routes/uploads.ts — the
+ *                  presign endpoint 400s on anything else, so the two lists
+ *                  ship together or the upload dies at presign.
  */
 export async function uploadToS3(
   localUri: string,
-  context: 'report' | 'ping' | 'clock_in' | 'inspection' = 'report'
+  context: 'report' | 'ping' | 'clock_in' | 'clock_out' | 'inspection' = 'report'
 ): Promise<UploadResult> {
   // 1. Get presigned POST policy from API
   const presign = await apiClient.post<PresignedPostResponse>(
@@ -71,7 +76,7 @@ export async function uploadToS3(
   const size_kb = Math.round(blob.size / 1024);
 
   if (blob.size > presign.max_bytes) {
-    throw new Error(
+    throw new GuardFacingError(
       `File exceeds maximum upload size of ${Math.round(presign.max_bytes / 1024 / 1024)} MiB`
     );
   }

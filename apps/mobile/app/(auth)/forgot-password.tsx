@@ -11,6 +11,7 @@ import {
 import { router } from 'expo-router';
 import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
 
 export default function ForgotPasswordScreen() {
   const [email, setEmail]     = useState('');
@@ -25,7 +26,7 @@ export default function ForgotPasswordScreen() {
       await forgotPassword(email.trim());
       setSent(true);
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Could not send temporary password');
+      Alert.alert('Error', guardMessage(err, 'Could not send a temporary password. Try again.', 'forgot-password'));
     } finally {
       setLoading(false);
     }

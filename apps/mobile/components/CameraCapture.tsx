@@ -44,12 +44,15 @@ import {
   Animated, ActivityIndicator,
 } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import * as ImageManipulator from 'expo-image-manipulator';
+import { compressImage } from '../lib/compressImage';
 import * as Location from 'expo-location';
+import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../lib/locationSignals';
 import * as Haptics from 'expo-haptics';
 import * as Sentry from '@sentry/react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, Spacing, Radius, Fonts } from '../constants/theme';
+import { GuardFacingError } from '../lib/errors';
+import { guardMessage } from '../lib/errorCopy';
 
 export interface CapturedPhoto {
   uri:       string;         // compressed 1080px JPEG (EXIF-stripped)
@@ -57,6 +60,10 @@ export interface CapturedPhoto {
   longitude: number | null;
   accuracy:  number | null;
   takenAt:   string;         // ISO timestamp at capture
+  /** Shadow capture (Wave 1) — provenance/freshness of the fix above.
+   *  Recorded and sent; never evaluated, never gates the shutter or any
+   *  screen. See lib/locationSignals.ts. */
+  signals:   LocationSignals;
 }
 
 /** GPS tagging strategy.
@@ -119,21 +126,44 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   ]);
 }
 
-async function readGps(strategy: GpsStrategy): Promise<{ lat: number | null; lng: number | null; acc: number | null }> {
-  if (strategy === 'none') return { lat: null, lng: null, acc: null };
+async function readGps(
+  strategy: GpsStrategy,
+): Promise<{ lat: number | null; lng: number | null; acc: number | null; signals: LocationSignals }> {
+  if (strategy === 'none') return { lat: null, lng: null, acc: null, signals: NO_LOCATION_SIGNALS };
   // Cached last-known first (instant), bounded live read as fallback.
+  //
+  // NOTE (Wave 1): the cached branch is DELIBERATELY LEFT AS-IS. It is the
+  // source of the stale-coordinate defect — getLastKnownPositionAsync is
+  // called with no maxAge, so a fix hours old is returned as current. It is
+  // not fixed here because this wave must not change behaviour; the signals
+  // below are what make the staleness measurable first. Once shadow data
+  // shows the real fix-age distribution, bound this call.
   try {
     const last = await Location.getLastKnownPositionAsync();
-    if (last) return { lat: last.coords.latitude, lng: last.coords.longitude, acc: last.coords.accuracy };
+    if (last) {
+      return {
+        lat: last.coords.latitude,
+        lng: last.coords.longitude,
+        acc: last.coords.accuracy,
+        signals: locationSignals(last),
+      };
+    }
     const live = await Promise.race([
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
       new Promise<null>((r) => setTimeout(() => r(null), GPS_TIMEOUT_MS)),
     ]);
-    if (live) return { lat: live.coords.latitude, lng: live.coords.longitude, acc: live.coords.accuracy };
+    if (live) {
+      return {
+        lat: live.coords.latitude,
+        lng: live.coords.longitude,
+        acc: live.coords.accuracy,
+        signals: locationSignals(live),
+      };
+    }
   } catch (err) {
     console.warn('[camera] GPS read threw:', err);
   }
-  return { lat: null, lng: null, acc: null };
+  return { lat: null, lng: null, acc: null, signals: NO_LOCATION_SIGNALS };
 }
 
 type Stage =
@@ -203,7 +233,7 @@ export default function CameraCapture({
       // for anything that escapes so the screen never wedges locked.
       crumb('pipeline threw', 'error', { error: err?.message ?? String(err) });
       Sentry.captureException(err, { extra: { where: 'CameraCapture.pipeline', category: breadcrumbCategory } });
-      Alert.alert('Something went wrong', err?.message ?? 'Please try again.');
+      Alert.alert('Photo Not Saved', guardMessage(err, 'Could not process the photo. Try taking it again.', 'camera.pipeline'));
       busyRef.current = false;
       setStage({ kind: 'live' });
     }
@@ -228,13 +258,40 @@ export default function CameraCapture({
     Animated.timing(flashOpacity, { toValue: 0, duration: 180, useNativeDriver: true }).start();
 
     const t0 = Date.now();
+    let attempts = 0;
     try {
-      const photo = await withTimeout(
-        cameraRef.current.takePictureAsync({ quality: CAPTURE_QUALITY }),
-        TAKE_PICTURE_TIMEOUT_MS,
-        'takePictureAsync',
-      );
-      if (!photo?.uri) throw new Error('Camera did not return a photo. Try again.');
+      // Night-shift captures intermittently fail in the native layer
+      // ("Image could not be captured" — low-light AE; Nandu's Cristo Rey
+      // overnight, 2026-08-20, six missed windows). One silent retry after
+      // a short beat clears the transient cases with no UX change on
+      // success — the guard just sees the shutter take a moment longer.
+      // Sentry fires only after the FINAL failure (outer catch).
+      const MAX_ATTEMPTS = 2;
+      const RETRY_DELAY_MS = 500;
+      let photo: Awaited<ReturnType<NonNullable<typeof cameraRef.current>['takePictureAsync']>>;
+      for (;;) {
+        attempts += 1;
+        try {
+          const p = await withTimeout(
+            cameraRef.current.takePictureAsync({ quality: CAPTURE_QUALITY }),
+            TAKE_PICTURE_TIMEOUT_MS,
+            'takePictureAsync',
+          );
+          if (!p?.uri) throw new GuardFacingError('Camera did not return a photo. Try again.');
+          photo = p;
+          break;
+        } catch (attemptErr: any) {
+          crumb('capture attempt failed', 'warning', {
+            attempt: attempts,
+            max_attempts: MAX_ATTEMPTS,
+            error: attemptErr?.message ?? String(attemptErr),
+          });
+          if (attempts >= MAX_ATTEMPTS) throw attemptErr;
+          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        }
+      }
+      // capture_ms includes any retry delay — `attempts` on the crumb below
+      // lets the CAPTURE_QUALITY A/B read filter retried captures out.
       const tCapture = Date.now() - t0;
       const takenAt = new Date().toISOString();
 
@@ -242,26 +299,30 @@ export default function CameraCapture({
       // never sees the live viewfinder again until the pipeline resolves.
       setStage({ kind: 'frozen', uri: photo.uri, status: 'SAVING…' });
 
-      // Compress (best-effort). EXIF: stripped by ImageManipulator pipeline
-      // (iOS UIImage.jpegData, Android Bitmap.compress). Do NOT bypass the
-      // manipulator for uploads.
+      // Compress via the shared helper — the SINGLE implementation, also
+      // used by hooks/usePhotoAttachments. It measures the artifact and
+      // throws rather than ever handing back the raw capture; this used to
+      // console.warn and silently upload photo.uri at CAPTURE_QUALITY.
+      // A throw here lands in the catch below, which already surfaces a
+      // guard-facing alert and returns the viewfinder to live.
       const t1 = Date.now();
-      let compressedUri = photo.uri;
-      try {
-        const result = await ImageManipulator.manipulateAsync(
-          photo.uri,
-          [{ resize: { width: 1080 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
-        );
-        if (result?.uri) compressedUri = result.uri;
-      } catch (err) {
-        console.warn('[camera] compression skipped:', err);
-      }
+      const compressed = await compressImage(photo.uri, 'camera');
+      const compressedUri = compressed.uri;
       const tManipulate = Date.now() - t1;
       // Amendment A instrumentation — read these off a device run to A/B
       // CAPTURE_QUALITY. capture_ms is the shutter-freeze component.
-      console.log(`[camera] capture_ms=${tCapture} manipulate_ms=${tManipulate} quality=${CAPTURE_QUALITY}`);
-      crumb('captured', 'info', { capture_ms: tCapture, manipulate_ms: tManipulate, quality: CAPTURE_QUALITY });
+      // `attempts` is the takePictureAsync auto-retry count; `compress_attempts`
+      // is the quality-ladder count inside compressImage. Different counters,
+      // both kept — neither supersedes the other.
+      console.log(
+        `[camera] capture_ms=${tCapture} manipulate_ms=${tManipulate} quality=${CAPTURE_QUALITY} ` +
+        `attempts=${attempts} out_kb=${compressed.sizeKb} out_q=${compressed.quality} ` +
+        `compress_attempts=${compressed.attempts}`,
+      );
+      crumb('captured', 'info', {
+        capture_ms: tCapture, manipulate_ms: tManipulate, quality: CAPTURE_QUALITY, attempts,
+        out_kb: compressed.sizeKb, out_quality: compressed.quality, compress_attempts: compressed.attempts,
+      });
 
       const pos = await readGps(gps);
       if (gps === 'required' && (pos.lat === null || pos.lng === null)) {
@@ -277,6 +338,7 @@ export default function CameraCapture({
         longitude: pos.lng,
         accuracy:  pos.acc,
         takenAt,
+        signals:   pos.signals,
       };
 
       if (confirm) {
@@ -286,9 +348,9 @@ export default function CameraCapture({
       }
       await runPipeline(captured);
     } catch (err: any) {
-      crumb('capture failed', 'error', { error: err?.message ?? String(err) });
-      Sentry.captureException(err, { extra: { where: 'CameraCapture.capture', category: breadcrumbCategory } });
-      Alert.alert('Capture Failed', err?.message ?? 'Could not take photo. Try again.');
+      crumb('capture failed', 'error', { error: err?.message ?? String(err), attempts });
+      Sentry.captureException(err, { extra: { where: 'CameraCapture.capture', category: breadcrumbCategory, attempts } });
+      Alert.alert('Capture Failed', guardMessage(err, 'Could not take the photo. Try again.', 'camera.capture'));
       busyRef.current = false;
       setStage({ kind: 'live' });
     }

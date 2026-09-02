@@ -23,18 +23,40 @@
  * Tap still routes via navigateForNotification (shared with the OS push-tap
  * listener) and deliberately does NOT dismiss — acting on an alert and
  * clearing it are different intentions.
+ *
+ * ── PENDING REQUESTS (restored) ─────────────────────────────────────────
+ *
+ * Inbound swap/handoff invites render as an actionable block ABOVE the feed,
+ * fed by GET /shifts/inbound-swap-requests.
+ *
+ * This existed on (tabs)/alerts.tsx and was lost in merge bd7e4e2
+ * (2026-07-13): that merge kept M3's deletion of alerts.tsx while grafting
+ * batch/mobile-3's swap routing on top, re-pointing the two *_request_received
+ * cases at /shifts/{id} with a comment claiming shift detail rendered an
+ * accept card. It never did. GET /shifts/:id 404s for a recipient whose row is
+ * still 'pending' (its tenancy exemption requires status='accepted'), and the
+ * only way to reach 'accepted' was the button that had just been deleted — so
+ * every invite since has been unactionable on every surface.
+ *
+ * It is a HEADER, not a fourth section: groupNotifications is typed to
+ * DismissableRow{id, read_at, created_at} and these rows have none of those.
+ * Forcing them through would corrupt notificationSections.ts for no gain.
  */
 import { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, SectionList, TouchableOpacity,
   RefreshControl, ActivityIndicator, Alert,
 } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, router } from 'expo-router';
+import * as Sentry from '@sentry/react-native';
 import { apiClient } from '../../lib/apiClient';
+import { ApiError } from '../../lib/errors';
 import { navigateForNotification } from '../../lib/navigateForNotification';
 import { useUnreadStore } from '../../store/unreadStore';
 import { visibleNotifications, groupNotifications } from '../../lib/notificationSections';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
+import { guardMessage } from '../../lib/errorCopy';
+import { NOTIFY_SUPERVISOR } from '../../lib/copy';
 
 type NotificationType =
   | 'ping_reminder'
@@ -76,6 +98,38 @@ interface NotificationRow {
   data:       Record<string, any>;
   read_at:    string | null;
   created_at: string;
+}
+
+/**
+ * One row of GET /shifts/inbound-swap-requests. Server-scoped to
+ * to_guard_id = me, and it already returns BOTH states we render:
+ *   status='pending'                                   → accept/decline
+ *   status='accepted' + guard_handoff + to_session_id null → travel/clock-in
+ *
+ * The second case is why there is no local "I just accepted" Set here — the
+ * walk-test 2026-07-10 fix put that state on the server precisely so it
+ * survives an app kill. Rendering from server state instead of memory is the
+ * one deliberate divergence from the 5660d6c original.
+ *
+ * Every nullable field below is nullable in the query, not defensively typed:
+ * site_tz and from_guard_name come off LEFT JOINs, reason is user-optional.
+ * The card degrades on each of them rather than rendering "null".
+ */
+interface InboundRequest {
+  history_id:      string;
+  shift_id:        string;
+  requested_at:    string;
+  accepted_at:     string | null;
+  status:          'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled';
+  reason:          string | null;
+  initiated_by:    'admin' | 'guard_pre_shift' | 'guard_handoff';
+  to_session_id:   string | null;
+  from_guard_id:   string | null;
+  from_guard_name: string | null;
+  scheduled_start: string;
+  scheduled_end:   string;
+  site_name:       string;
+  site_tz:         string | null;
 }
 
 interface VisualSpec {
@@ -133,11 +187,64 @@ function timeAgo(iso: string) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+/** Shift times render in the SITE's timezone, not the device's — a guard
+ *  deciding whether to cover a shift is deciding about the site's clock.
+ *  Matches shifts/[id]/index.tsx:95. */
+function fmtInTz(iso: string, tz: string | null, opts: Intl.DateTimeFormatOptions): string {
+  return new Intl.DateTimeFormat('en-GB', { ...opts, timeZone: tz ?? undefined }).format(new Date(iso));
+}
+
+/**
+ * Guard-facing copy for a failed accept/decline, keyed on HTTP STATUS.
+ *
+ * WHY STATUS AND NOT `code`: errors.ts says branch on `.code`, and that is
+ * right for routes that emit an enum. swap-response and handoff-response do
+ * not — every failure is `{ error: '<English sentence>' }` with no `message`
+ * and no enum, so ApiError.code is set to that same prose (errors.ts:72).
+ * Branching on it would be branching on prose, which is what breaks the
+ * moment someone rewords a server string. Aligning those two routes onto
+ * real error codes is a separate API follow-up; until then status is the
+ * only stable signal, and for these two routes each status maps to exactly
+ * one situation class.
+ *
+ * 422 is deliberately passed through: it is the eligibility explanation
+ * (rest-hours, overlap, site assignment) and the server's sentence is the
+ * only place that detail exists.
+ */
+function respondErrorCopy(err: unknown, accept: boolean, isHandoff: boolean): string {
+  const kind = isHandoff ? 'handoff' : 'swap';
+  if (err instanceof ApiError) {
+    if (err.status === 409) {
+      return `This ${kind} was already responded to, or it expired. Pull down to refresh.`;
+    }
+    if (err.status === 403) {
+      return `This ${kind} request isn't addressed to you.`;
+    }
+    if (err.status === 404) {
+      return `This ${kind} request no longer exists. Pull down to refresh.`;
+    }
+  }
+  return guardMessage(
+    err,
+    `Could not ${accept ? 'accept' : 'decline'} this ${kind}. Try again, or tell your supervisor.`,
+    `notifications.${kind}-response`,
+  );
+}
+
 export default function NotificationsScreen() {
   const [rows,       setRows]       = useState<NotificationRow[]>([]);
+  const [inbound,    setInbound]    = useState<InboundRequest[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState<string | null>(null);
+  // history_id of the invite currently being answered, or null.
+  //
+  // The SPINNER is per-row — only the card being answered shows it, which is
+  // what 5660d6c:71 was after. The LOCK is global: respond() bails while any
+  // request is in flight. That is deliberate, not a leftover. Two invites can
+  // cover overlapping hours, and accepting both would race two transactions
+  // that each individually pass their overlap check.
+  const [busyId,     setBusyId]     = useState<string | null>(null);
 
   const { refresh } = useUnreadStore();
 
@@ -147,7 +254,24 @@ export default function NotificationsScreen() {
       setRows(data);
       setError(null);
     } catch (err: any) {
-      setError(err?.message ?? 'Could not load notifications');
+      setError(guardMessage(err, 'Could not load notifications. Pull down to refresh.', 'notifications.list'));
+    }
+  }, []);
+
+  /**
+   * Pending swap/handoff invites. Deliberately independent of the feed fetch:
+   * a failure here empties the actionable block but must never blank the
+   * notifications list, and vice versa. `?? []` because a stale API is
+   * survivable and an unguarded .map is not.
+   */
+  const fetchInbound = useCallback(async () => {
+    try {
+      const data = await apiClient.get<InboundRequest[]>('/shifts/inbound-swap-requests');
+      setInbound(data ?? []);
+    } catch (err: any) {
+      // No visible error surface for this block — the feed below is still
+      // useful and a red banner over it would misrepresent the failure.
+      Sentry.captureException(err, { extra: { where: 'notifications.fetchInbound' } });
     }
   }, []);
 
@@ -157,21 +281,116 @@ export default function NotificationsScreen() {
     useCallback(() => {
       setLoading(true);
       (async () => {
-        await fetchNotifications();
+        await Promise.all([fetchNotifications(), fetchInbound()]);
         setLoading(false);
       })();
-    }, [fetchNotifications]),
+    }, [fetchNotifications, fetchInbound]),
   );
 
   async function onRefresh() {
     setRefreshing(true);
-    await fetchNotifications();
+    await Promise.all([fetchNotifications(), fetchInbound()]);
     await refresh();
     setRefreshing(false);
   }
 
   function handleTap(row: NotificationRow) {
     navigateForNotification(row.type, row.data);
+  }
+
+  /**
+   * Accept/decline an invite.
+   *
+   * Handoff acceptance is gated behind a confirmation because it commits the
+   * guard to travelling to the site and clocking in — that dialog is carried
+   * over from 5660d6c:109 unchanged in intent.
+   */
+  function respond(req: InboundRequest, accept: boolean) {
+    if (busyId) return;
+    const isHandoff = req.initiated_by === 'guard_handoff';
+    if (accept && isHandoff) {
+      Alert.alert(
+        'Accept handoff?',
+        `You'll need to travel to ${req.site_name} and clock in when you arrive. ` +
+        `${req.from_guard_name ?? 'They'} will stay on shift until then.\n\n` +
+        NOTIFY_SUPERVISOR,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Accept', style: 'default', onPress: () => performRespond(req, true, isHandoff) },
+        ],
+        { cancelable: true },
+      );
+      return;
+    }
+    performRespond(req, accept, isHandoff);
+  }
+
+  async function performRespond(req: InboundRequest, accept: boolean, isHandoff: boolean) {
+    setBusyId(req.history_id);
+    Sentry.addBreadcrumb({
+      category: isHandoff ? 'handoff_wizard' : 'swap_wizard',
+      message: `notifications: ${accept ? 'accept' : 'decline'} ${isHandoff ? 'handoff' : 'swap'}`,
+      level: 'info',
+      data: { history_id: req.history_id, shift_id: req.shift_id },
+    });
+    try {
+      const endpoint = isHandoff ? 'handoff-response' : 'swap-response';
+      await apiClient.post(`/shifts/${req.shift_id}/${endpoint}`, {
+        history_id: req.history_id,
+        accept,
+      });
+
+      // Refetch rather than mutate locally: an accepted handoff has to come
+      // back as an arrival card, and only the server knows whether it did.
+      await fetchInbound();
+      refresh();
+
+      // Accepting is the moment the roster actually moves, and no admin is
+      // told: the FYI email fires on accept for the ADMIN's benefit, but
+      // nothing routes back to whoever is running the post. So the acceptor
+      // gets the same instruction the requester got when they sent it.
+      //
+      // Navigation diverges by kind and this is not cosmetic. A pre-shift
+      // accept rotates shifts.guard_id server-side (shifts.ts:1766), so the
+      // shift is genuinely the guard's and /shifts/{id} resolves. A handoff
+      // accept does NOT rotate guard_id — that happens later, inside the
+      // handoff clock-in txn — so pushing there would land on the exact 404
+      // this change exists to fix. Stay on the list; the row re-renders as
+      // the arrival card.
+      //
+      // The push is deferred into the OK handler so the confirmation is read
+      // before the screen changes underneath it. cancelable:false so a
+      // stray tap outside cannot skip both the copy and the navigation.
+      if (accept) {
+        Alert.alert(
+          "You've accepted",
+          NOTIFY_SUPERVISOR,
+          [{
+            text: 'OK',
+            onPress: () => { if (!isHandoff) router.push(`/shifts/${req.shift_id}`); },
+          }],
+          { cancelable: false },
+        );
+      }
+    } catch (err: any) {
+      Sentry.captureException(err, {
+        extra: { where: 'notifications.performRespond', is_handoff: isHandoff, accept },
+      });
+      // The list is refetched on failure too: 409 almost always means the row
+      // moved underneath us (expired by the 15-minute cron, or answered on
+      // another device), and leaving a dead card on screen invites a retry
+      // that cannot succeed.
+      await fetchInbound();
+      refresh();
+      Alert.alert(
+        accept
+          ? (isHandoff ? 'Could not accept handoff' : 'Could not accept swap')
+          : (isHandoff ? 'Could not decline handoff' : 'Could not decline swap'),
+        respondErrorCopy(err, accept, isHandoff),
+      );
+    } finally {
+      setBusyId(null);
+    }
   }
 
   /**
@@ -239,6 +458,121 @@ export default function NotificationsScreen() {
   const visibleRows = useMemo(() => visibleNotifications(rows), [rows]);
   const sections    = useMemo(() => groupNotifications(visibleRows, Date.now()), [visibleRows]);
 
+  // The server already restricts this endpoint to pending + accepted-not-
+  // arrived rows, but filter defensively: this list drives ACCEPT buttons and
+  // a declined/expired row must never render one.
+  const actionable = useMemo(
+    () => inbound.filter((r) => r.status === 'pending' || r.status === 'accepted'),
+    [inbound],
+  );
+
+  /**
+   * One inbound invite. Two shapes:
+   *   pending  → DECLINE / ACCEPT
+   *   accepted → GO TO HANDOFF CLOCK-IN (handoff only; the server only ever
+   *              returns accepted rows for guard_handoff)
+   */
+  function renderRequest(req: InboundRequest) {
+    const isHandoff = req.initiated_by === 'guard_handoff';
+    const isArrival = req.status === 'accepted';
+    const busy      = busyId === req.history_id;
+    const accent    = isHandoff ? Colors.warning : Colors.action;
+    const badge     = isArrival ? 'PENDING ARRIVAL' : isHandoff ? 'HANDOFF' : 'SWAP';
+    const who       = req.from_guard_name ?? 'A guard';
+
+    return (
+      <View key={req.history_id} style={[styles.reqCard, { borderColor: accent }]}>
+        <View style={styles.reqHeaderRow}>
+          <View style={[styles.reqBadge, { backgroundColor: accent }]}>
+            <Text style={styles.reqBadgeText}>{badge}</Text>
+          </View>
+          <Text style={styles.reqTs}>{timeAgo(req.requested_at)}</Text>
+        </View>
+
+        <Text style={styles.reqHeadline}>
+          <Text style={[styles.reqWho, { color: accent }]}>{who}</Text>
+          {isHandoff ? ' needs coverage — mid-shift handoff' : ' wants you to cover this shift'}
+        </Text>
+
+        <View style={styles.reqShiftBox}>
+          <Text style={styles.reqSiteName}>{req.site_name.toUpperCase()}</Text>
+          <Text style={styles.reqShiftTime}>
+            {fmtInTz(req.scheduled_start, req.site_tz, {
+              weekday: 'short', day: 'numeric', month: 'short',
+              hour: '2-digit', minute: '2-digit',
+            })}
+            {' — '}
+            {fmtInTz(req.scheduled_end, req.site_tz, { hour: '2-digit', minute: '2-digit' })}
+          </Text>
+          {isHandoff && (
+            <Text style={styles.reqTravelHint}>
+              Travel to {req.site_name} and clock in when you arrive.
+            </Text>
+          )}
+        </View>
+
+        {req.reason ? (
+          <Text style={styles.reqReason} numberOfLines={3}>“{req.reason}”</Text>
+        ) : null}
+
+        {isArrival ? (
+          <TouchableOpacity
+            style={[styles.reqBtn, styles.reqBtnArrival]}
+            onPress={() => {
+              Sentry.addBreadcrumb({
+                category: 'handoff_clock_in',
+                message: 'entry: notifications → handoff-clock-in',
+                level: 'info',
+                data: { shift_id: req.shift_id },
+              });
+              // Straight to the wizard. Routing via /shifts/{id} would work
+              // for an accepted row (the tenancy exemption passes) but adds a
+              // hop the guard does not need.
+              router.push(`/shifts/${req.shift_id}/handoff-clock-in`);
+            }}
+            accessibilityRole="button"
+          >
+            <Text style={styles.reqBtnArrivalText}>GO TO HANDOFF CLOCK-IN</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.reqActions}>
+            <TouchableOpacity
+              style={[styles.reqBtn, styles.reqBtnDecline, busy && styles.reqBtnDisabled]}
+              onPress={() => respond(req, false)}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel={`Decline ${isHandoff ? 'handoff' : 'swap'} from ${who}`}
+            >
+              {busy
+                ? <ActivityIndicator color={Colors.danger} />
+                : <Text style={styles.reqBtnDeclineText}>DECLINE</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.reqBtn, styles.reqBtnAccept, busy && styles.reqBtnDisabled]}
+              onPress={() => respond(req, true)}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel={`Accept ${isHandoff ? 'handoff' : 'swap'} from ${who}`}
+            >
+              {busy
+                ? <ActivityIndicator color={Colors.structure} />
+                : <Text style={styles.reqBtnAcceptText}>ACCEPT</Text>}
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  const listHeader = actionable.length > 0 ? (
+    <View style={styles.reqBlock}>
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionLabel}>PENDING REQUESTS</Text>
+      </View>
+      {actionable.map(renderRequest)}
+    </View>
+  ) : null;
+
   function renderItem({ item }: { item: NotificationRow }) {
     const spec = VISUAL_BY_TYPE[item.type] ?? VISUAL_BY_TYPE.chat;
     const isUnread = !item.read_at;
@@ -303,11 +637,15 @@ export default function NotificationsScreen() {
             <Text style={styles.retryText}>RETRY</Text>
           </TouchableOpacity>
         </View>
-      ) : sections.length === 0 ? (
+      ) : sections.length === 0 && actionable.length === 0 ? (
         <View style={styles.center}>
           {/* One empty state for both "nothing has arrived yet" and "you
               cleared everything" — the guard cannot tell them apart and does
-              not need to. Reads as settled, not broken. */}
+              not need to. Reads as settled, not broken.
+
+              Gated on actionable.length too: a guard with a pending swap
+              invite and an empty feed must NOT be told they are all caught
+              up while an invite quietly expires behind the message. */}
           <Text style={styles.emptyIcon}>🔔</Text>
           <Text style={styles.emptyText}>You're all caught up</Text>
           <Text style={styles.emptySub}>Reminders and alerts will appear here</Text>
@@ -317,6 +655,7 @@ export default function NotificationsScreen() {
           sections={sections}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
+          ListHeaderComponent={listHeader}
           renderSectionHeader={({ section }) => (
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionLabel}>{section.title}</Text>
@@ -376,6 +715,100 @@ const styles = StyleSheet.create({
     color: Colors.muted,
     fontSize: 11,
     letterSpacing: 3,
+  },
+
+  // ── Pending requests block ────────────────────────────────────────────
+  // Full 1px border in the accent colour rather than the feed's 3px left
+  // stripe: these are the only cards on this screen that carry actions, and
+  // the heavier outline is what separates "do something" from "be told
+  // something" at a glance.
+  reqBlock: { marginBottom: Spacing.sm },
+  reqCard: {
+    backgroundColor: Colors.surface2,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  reqHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.sm,
+  },
+  reqBadge: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 3,
+    borderRadius: Radius.xs,
+  },
+  reqBadgeText: {
+    fontFamily: Fonts.heading,
+    color: Colors.structure,
+    fontSize: 11,
+    letterSpacing: 1.5,
+  },
+  reqTs: { color: Colors.muted, fontSize: 12 },
+  reqHeadline: {
+    color: Colors.textPrimary,
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: Spacing.sm,
+  },
+  reqWho: { fontFamily: Fonts.heading },
+  reqShiftBox: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  reqSiteName: {
+    fontFamily: Fonts.heading,
+    color: Colors.textPrimary,
+    fontSize: 14,
+    letterSpacing: 1.5,
+    marginBottom: 2,
+  },
+  reqShiftTime: { color: Colors.textPrimary, fontSize: 13, opacity: 0.85 },
+  reqTravelHint: { color: Colors.warning, fontSize: 12, marginTop: 6, lineHeight: 17 },
+  reqReason: {
+    color: Colors.muted,
+    fontSize: 13,
+    fontStyle: 'italic',
+    lineHeight: 18,
+    marginBottom: Spacing.sm,
+  },
+  reqActions: { flexDirection: 'row', gap: Spacing.sm },
+  reqBtn: {
+    flex: 1,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.sm + 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+  },
+  reqBtnDisabled: { opacity: 0.5 },
+  reqBtnDecline: { borderWidth: 1, borderColor: Colors.danger },
+  reqBtnDeclineText: {
+    fontFamily: Fonts.heading,
+    color: Colors.danger,
+    fontSize: 13,
+    letterSpacing: 2,
+  },
+  reqBtnAccept: { backgroundColor: Colors.success },
+  reqBtnAcceptText: {
+    fontFamily: Fonts.heading,
+    color: Colors.structure,
+    fontSize: 13,
+    letterSpacing: 2,
+  },
+  reqBtnArrival: { backgroundColor: Colors.warning },
+  reqBtnArrivalText: {
+    fontFamily: Fonts.heading,
+    color: Colors.structure,
+    fontSize: 13,
+    letterSpacing: 2,
   },
 
   card: {
