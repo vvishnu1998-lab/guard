@@ -485,7 +485,12 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   doc.pipe(res);
 
-  const periodStr = `${from ? new Date(from).toLocaleDateString('en-GB') : 'All time'} \u2192 ${to ? new Date(to).toLocaleDateString('en-GB') : 'Today'}`;
+  // \u2013 (en dash), not \u2192: PDFKit's built-in Helvetica is WinAnsi-encoded
+  // and has no arrow glyph, so \u2192 rendered as "!'" on every page of the
+  // client's PDF. Verified by rasterising, not by pdftotext \u2014 a wrong glyph
+  // and a right one both extract as text. An en dash is also the correct mark
+  // for a date range and matches the guard PDF's time ranges.
+  const periodStr = `${from ? new Date(from).toLocaleDateString('en-GB') : 'All time'} \u2013 ${to ? new Date(to).toLocaleDateString('en-GB') : 'Today'}`;
 
   const TYPE_DOT_COLOR: Record<string, string> = { activity: BLUE, incident: RED, maintenance: AMBER };
   const TYPE_LABEL: Record<string, string>     = { activity: 'ACTIVITY', incident: 'INCIDENT', maintenance: 'MAINTENANCE' };
@@ -870,7 +875,14 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     if (isTop) doc.rect(ML, y, 4, rowH).fill(AMBER);
 
     const cells = [
-      isTop ? `\u2605 ${g.name}` : g.name,
+      // No glyph. \u2605 (BLACK STAR) is outside WinAnsi and rendered as "&" on
+      // the client's PDF; every WinAnsi-safe substitute is either already in
+      // use for something else on this page (\u2022 marks the top-three list
+      // above) or is an unexplained mark a client has no legend for. The row
+      // is ALREADY called out three ways \u2014 bold text, amber fill, amber left
+      // rule \u2014 so the glyph was redundant reinforcement of the "that one" and
+      // never carried the "why". The caption under the table now carries it.
+      g.name,
       String(g.shifts),
       // scheduled_hours not tracked per-guard on the aggregator; leave blank.
       // Phase 2.5 (if wanted) could push scheduled_hours per guard down.
@@ -910,7 +922,16 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
        .text(totalCells[i], tx + 4, y + 7, { width: gColW[i] - 6, lineBreak: false });
     tx += gColW[i];
   }
-  y += 36;
+  y += 6;
+  // The amber row has never been explained to the reader. guardStats is sorted
+  // by reports descending (see the sort above), so say that rather than
+  // leaving a client to infer it from a mark.
+  if (guardStats.length > 0) {
+    doc.fontSize(7.5).fillColor(MUTED).font('Helvetica')
+       .text(`Highlighted row: ${topGuardName} filed the most reports this period.`,
+             ML, y, { width: CW, lineBreak: false });
+  }
+  y += 30;
 
   drawFooter(doc, siteName, periodStr);
   doc.end();

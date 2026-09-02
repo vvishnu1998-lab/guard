@@ -1669,7 +1669,9 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
   const fromDate  = fromIso.slice(0, 10);
   const toDate    = toIso.slice(0, 10);
   const filename  = `activity-logs-${fromDate}_${toDate}.pdf`;
-  const periodStr = `${new Date(fromIso).toLocaleDateString('en-GB')} → ${new Date(toIso).toLocaleDateString('en-GB')}`;
+  // En dash, not an arrow: WinAnsi has no → and PDFKit's built-in Helvetica
+  // rendered it as "!'" on every page of this PDF.
+  const periodStr = `${new Date(fromIso).toLocaleDateString('en-GB')} – ${new Date(toIso).toLocaleDateString('en-GB')}`;
 
   // Group by Pacific-time day for the on-page sections.
   const DAY_KEY = new Intl.DateTimeFormat('en-CA', {
