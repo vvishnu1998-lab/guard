@@ -2831,6 +2831,26 @@ router.get('/my-hours.pdf', requireAuth('guard'), async (req, res) => {
               EXISTS (SELECT 1 FROM shift_swap_requests r
                        WHERE r.to_session_id = ss.id
                          AND r.status = 'accepted') AS took_over,
+              -- S6.3 — does this session carry a break from BEFORE the break
+              -- redesign? The document states every break is 30 minutes, so a
+              -- 1h 52m row reads as a contradiction unless it is marked.
+              --
+              -- duration_minutes > planned_duration_minutes is the sharpest
+              -- available signal, and nothing under the current design can
+              -- produce that shape: breakExpiryCron closes a break AT its
+              -- plan, and the clock-out path caps with LEAST. break_type is
+              -- useless as a marker because schema_v61 relabelled every
+              -- historical row to 'break'. Verified against prod 2026-09-02:
+              -- 4 rows of 28 carry it, none with a NULL on either side.
+              --
+              -- Deliberately NOT filtered out of break_hours. The time was
+              -- really taken; the totals stay honest and the mark explains
+              -- the shape instead of hiding it.
+              EXISTS (SELECT 1 FROM break_sessions bs
+                       WHERE bs.shift_session_id = ss.id
+                         AND bs.duration_minutes IS NOT NULL
+                         AND bs.planned_duration_minutes IS NOT NULL
+                         AND bs.duration_minutes > bs.planned_duration_minutes) AS legacy_break,
               ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
          FROM shift_sessions ss
          JOIN shifts sh ON sh.id = ss.shift_id

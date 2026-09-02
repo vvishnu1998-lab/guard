@@ -198,7 +198,7 @@ router.get('/analytics/csv', requireAuth('company_admin', 'vishnu'), async (req:
       // Phase 2 D3 — Off-post header for label consistency with UI/XLSX.
       [
         'Site','Guard','Badge','Shift Date',
-        'Total Hours (legacy)','Scheduled Hours','Actual Hours','Break Hours','Unverified Hours',
+        'Total Hours (legacy)','Scheduled Hours','Actual Hours','Break Hours','Geofence Violation Hours',
         'Clocked In','Clocked Out',
       ],
     ));

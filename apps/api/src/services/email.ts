@@ -636,7 +636,7 @@ export function renderDailyShiftReport(data: {
           <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">SCHEDULED</th>
           <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">ON DUTY</th>
           <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">BREAK</th>
-          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">UNVERIFIED</th>
+          <th style="text-align:left;padding:8px 12px;color:#6B7280;font-weight:600;font-size:11px;letter-spacing:0.5px">GEOFENCE VIOLATION</th>
         </tr>
         <tr>
           <td style="padding:8px 12px">${formatScheduledHours(data.hours.scheduled_hours)}</td>

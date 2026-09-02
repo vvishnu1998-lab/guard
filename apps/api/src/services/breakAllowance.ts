@@ -34,6 +34,7 @@ import {
   BREAK_MISTAP_SECONDS,
   BREAK_FIRST_AFTER_MINUTES,
   BREAK_MIN_GAP_MINUTES,
+  BREAK_DURATION_MINUTES,
   breakAllowanceForShift,
 } from '../constants/breakDurations';
 
@@ -44,7 +45,15 @@ import {
 export type BreakBlockReason =
   | 'BREAK_QUOTA_EXCEEDED'
   | 'BREAK_TOO_EARLY'
-  | 'BREAK_TOO_SOON';
+  | 'BREAK_TOO_SOON'
+  /** S6.2 — eligibility lands so late that a break started then could not
+   *  finish before scheduled_end. The four-hour rule is UNCHANGED and still
+   *  anchors on actual clock-in; this only stops the screen quoting a time
+   *  the guard can never use. Walk-test 2026-09-01: reddy clocked in 6:53 PM
+   *  on a 3:30 PM – 11:00 PM shift, so eligibility fell at 10:53 PM and the
+   *  screen read "AVAILABLE AT 10:53 PM" — seven minutes before the shift
+   *  ended. Terminal, like BREAK_QUOTA_EXCEEDED: eligible_at is null. */
+  | 'BREAK_SHIFT_ENDS_FIRST';
 
 export interface BreakAllowance {
   /** Breaks already consumed on this SHIFT, mis-taps excluded. */
@@ -54,8 +63,9 @@ export interface BreakAllowance {
   /** True when a break may start right now. */
   can_start: boolean;
   /** ISO timestamp at which a break next becomes startable, or null when it
-   *  is startable now OR will never be (allowance exhausted). Pair it with
-   *  `reason` — null + can_start:false means exhausted, not "any moment". */
+   *  is startable now OR will never be on this shift. Pair it with `reason` —
+   *  null + can_start:false is terminal (BREAK_QUOTA_EXCEEDED, or
+   *  BREAK_SHIFT_ENDS_FIRST), never "any moment". */
   eligible_at: string | null;
   /** Null when can_start is true. */
   reason: BreakBlockReason | null;
@@ -139,6 +149,24 @@ export async function getBreakAllowance(
     reason,
   });
 
+  // The last instant a break could START and still finish inside the shift.
+  //
+  // This does NOT gate anything: a break may still run past scheduled_end and
+  // that rule is unchanged. It only decides whether a computed eligibility is
+  // worth quoting. An eligible_at after this point is a real answer to the
+  // wrong question — the guard cannot act on it before the shift ends, so
+  // reporting it as "AVAILABLE AT 10:53 PM" reads as an offer rather than as
+  // the refusal it actually is.
+  //
+  // Deliberately compares the ELIGIBILITY, not `now`. A guard who is already
+  // eligible with ten minutes left still gets can_start:true and may start —
+  // see the note above about breaks running past scheduled_end.
+  const lastUsefulStart = new Date(
+    new Date(input.scheduledEnd).getTime() - BREAK_DURATION_MINUTES * 60_000,
+  );
+  const blockAt = (reason: BreakBlockReason, at: Date): BreakAllowance =>
+    (at > lastUsefulStart ? block('BREAK_SHIFT_ENDS_FIRST', null) : block(reason, at));
+
   // Order is deliberate and is the order the guard should hear it in.
   //
   // 1. Exhausted first. It is the only terminal state, and telling a guard
@@ -154,7 +182,7 @@ export async function getBreakAllowance(
   const firstEligibleAt = new Date(
     firstClockIn.getTime() + BREAK_FIRST_AFTER_MINUTES * 60_000,
   );
-  if (now < firstEligibleAt) return block('BREAK_TOO_EARLY', firstEligibleAt);
+  if (now < firstEligibleAt) return blockAt('BREAK_TOO_EARLY', firstEligibleAt);
 
   // 3. Two hours from the previous break's end. Only reachable for a second
   //    or later break, since `used` is 0 when there is no previous break.
@@ -162,7 +190,7 @@ export async function getBreakAllowance(
     const gapEligibleAt = new Date(
       lastBreakEnd.getTime() + BREAK_MIN_GAP_MINUTES * 60_000,
     );
-    if (now < gapEligibleAt) return block('BREAK_TOO_SOON', gapEligibleAt);
+    if (now < gapEligibleAt) return blockAt('BREAK_TOO_SOON', gapEligibleAt);
   }
 
   return allow();
@@ -180,6 +208,9 @@ export function breakBlockMessage(a: BreakAllowance): string {
       return 'Your first break becomes available four hours after you clock in.';
     case 'BREAK_TOO_SOON':
       return 'There must be two hours between breaks.';
+    case 'BREAK_SHIFT_ENDS_FIRST':
+      return `This shift ends before a ${BREAK_DURATION_MINUTES}-minute break could finish, `
+           + 'so there is no break on it.';
     default:
       return '';
   }

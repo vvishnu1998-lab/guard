@@ -114,12 +114,11 @@ const LEGACY_WIRE_BREAK_TYPES: readonly string[] = ['meal', 'rest', 'other'];
  * This is NOT part of the one-break-type design; it is a deploy-safety shim,
  * and it should be deleted once no shipped bundle sends a legacy label.
  *
- * Every mobile binary and OTA in the field today sends 'meal' | 'rest' |
- * 'other'. Verified 2026-08-29: Build 46 is the newest binary, the newest
- * production OTA group is 20e07590 (from 451abc0), and the break screen on
- * BOTH sends one of the three legacy labels. The mobile fix is a separate
- * phase that explicitly does not build or publish, so there is a window —
- * possibly a long one — in which the new API serves old clients.
+ * Some bundles in the field still send 'meal' | 'rest' | 'other', so the new
+ * API serves old clients for as long as those installs exist. schema_v62
+ * (applied 2026-09-02) contracted the CHECK to break_type = 'break', which
+ * raises the cost of removing this shim from a 400 to a 23514 and a 500 on
+ * every break-start from those handsets.
  *
  * Without this shim, a strict isBreakType() check would 400 every
  * break-start from every guard in the field the moment the API deploys.
@@ -144,18 +143,30 @@ const LEGACY_WIRE_BREAK_TYPES: readonly string[] = ['meal', 'rest', 'other'];
  * so preview and smoke can sit on an older bundle indefinitely while
  * production looks current.
  *
- * Blockers as of 2026-08-29, by id:
+ * Blockers as of 2026-09-02 — EXACTLY TWO, both runtime 1.0.16:
  *
  *   * iOS Build 46 — commit be2c9015 ("feat(mobile): vehicle inspection flow
- *     + site-flag gating"). Newest binary; its EMBEDDED bundle sends legacy
- *     labels, and at least one real device is running exactly that with no
- *     OTA applied (STARNET guard 802a842f, is_embedded_launch = true).
+ *     + site-flag gating"). Its EMBEDDED bundle sends legacy labels, and at
+ *     least one real device runs exactly that with no OTA applied (STARNET
+ *     guard 802a842f, is_embedded_launch = true).
  *   * production OTA group 20e07590-b77b-46f2-903b-2cc2cd1cd0f0 — commit
- *     451abc0, published 2026-08-26. Newest published bundle; also sends
- *     legacy labels.
+ *     451abc0, published 2026-08-26.
  *
- * Both were read directly, not inferred: break/index.tsx on main and on
- * origin/batch/mobile-14 both post one of 'meal' | 'rest' | 'other'.
+ * CORRECTION (2026-09-02). This block previously also named
+ * origin/batch/mobile-14 as a blocker, asserting that break/index.tsx there
+ * posted a legacy label. That was FALSE by the time it was written: 6627897
+ * ("feat(mobile): one paid break, server-gated allowance") changed that
+ * branch to post break_type: BREAK_TYPE, i.e. 'break'. Re-read across refs
+ * on 2026-09-02 — 451abc0 and be2c9015 post `break_type: option.type` over
+ * the legacy union; batch/mobile-14 posts `break_type: BREAK_TYPE`.
+ *
+ * NOT blockers: the OTA groups published 2026-09-02 — production
+ * 6536a189-52c6-4816-bda9-bcb7ba44116d, preview
+ * ff99ee6f-f732-449c-9eae-38a0fe3f224c, smoke
+ * 2e20d40d-ffb3-4689-a7a2-af5183b2995b — all runtime 1.0.17, all from
+ * 8f4ad5f, all carrying 'break'. They cannot reach a 1.0.16 install, which is
+ * why the two above survive: a runtime-1.0.16 handset can be reached by no
+ * 1.0.17 update at all and needs a store install.
  *
  * Do not delete this on the grounds that a NEWER build exists — the test is
  * that no OLDER one is still in use. Check active installs, not the newest

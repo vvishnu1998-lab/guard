@@ -564,7 +564,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
      .text(`${shifts.length} shifts  |  ${guardStats.length} guards deployed`, ML + 20, y + 36);
   // Phase 1 — 4-field breakdown so the PDF matches the canonical service.
   doc.fontSize(9).fillColor(MUTED).font('Helvetica')
-     .text(`Breaks: ${totalBreaks.toFixed(1)}h  |  Unverified (presence not confirmed): ${totalViolations.toFixed(1)}h`, ML + 20, y + 48);
+     .text(`Breaks: ${totalBreaks.toFixed(1)}h  |  Geofence violation (presence not confirmed): ${totalViolations.toFixed(1)}h`, ML + 20, y + 48);
   y += 76;
 
   if (guardStats.length > 0) {
@@ -838,8 +838,13 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // Phase 2 D3/D5 \u2014 per-guard 4-field breakdown. Client-facing labels:
   // Scheduled / On duty / Break / Off-post. Column widths tuned so the
   // 6-column table fits within CW without wrapping at 9pt.
-  const gColW      = [105, 40, 55, 55, 55, 55, 45, 45]; // sum=455 fits CW=495
-  const gColLabels = ['GUARD NAME', 'SHIFTS', 'SCHEDULED', 'ON DUTY', 'BREAK', 'UNVERIFIED', 'REPORTS', 'INCIDENTS'];
+  // 'GEOFENCE VIOLATION' measures 78.2pt at 7pt Helvetica-Bold (measured with
+  // pdfkit widthOfString, not estimated) and the header draws with
+  // lineBreak:false, so the old 55-wide column clipped it at 51pt of usable
+  // space. Widened to 95 (91pt usable) out of the 40pt of slack the row
+  // already carried; the widths now sum to CW exactly.
+  const gColW      = [105, 40, 55, 55, 55, 95, 45, 45]; // sum=495 = CW
+  const gColLabels = ['GUARD NAME', 'SHIFTS', 'SCHEDULED', 'ON DUTY', 'BREAK', 'GEOFENCE VIOLATION', 'REPORTS', 'INCIDENTS'];
   doc.rect(ML, y, CW, 24).fill(NAVY);
   let gx = ML;
   for (let i = 0; i < gColLabels.length; i++) {

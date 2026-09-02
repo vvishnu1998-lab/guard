@@ -107,6 +107,21 @@ export const FOOTNOTE_SCHEDULED_DEDUPED =
   'Where the same shift appears on more than one row because it changed hands, its scheduled ' +
   'window is counted once in the total, not once per row.';
 
+/**
+ * S6.3 — shown ONLY when a row in range carries a break recorded before the
+ * break redesign, i.e. only when the document would otherwise contradict
+ * itself. FOOTNOTE_BREAK_PAID states every break is 30 minutes; a 1h 52m
+ * break on 17 Aug is an unexplained contradiction to exactly the reader who
+ * checks the document against the rule.
+ *
+ * Suppressed otherwise, for the same reason FOOTNOTE_SCHEDULED_DEDUPED is: a
+ * standing note about an absent case invites the reader to hunt for a
+ * subtlety that is not there.
+ */
+export const FOOTNOTE_LEGACY_BREAK =
+  'Breaks marked ‡ were recorded before the single 30-minute break replaced the earlier break ' +
+  'types, so their length reflects the rule in force at the time rather than the rule stated above.';
+
 /** Hard ceiling on the requested range. Enforced by the route, restated here
  *  so the two cannot drift apart silently. */
 export const MAX_RANGE_DAYS = 45;
@@ -128,6 +143,10 @@ export interface GuardHoursRow {
   handed_off: boolean;
   /** V5.5 — this guard took the shift over from someone else mid-shift. */
   took_over: boolean;
+  /** S6.3 — a break on this session predates the redesign (its recorded
+   *  duration exceeds its plan, which nothing in the current design can
+   *  produce). Marks the Break cell and turns on FOOTNOTE_LEGACY_BREAK. */
+  legacy_break?: boolean;
   site_name: string;
   scheduled_hours: number | string;
   actual_hours: number | string;
@@ -332,6 +351,8 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   // in a PRE-PASS rather than accumulated during the row loop, because the
   // reservation has to know their height before the first row is placed.
   const remarks = data.rows.flatMap((r) => handoverRemarks(r, data.timeZone));
+  // S6.3 — the footnote appears only when a marked row is actually in range.
+  const hasLegacyBreak = data.rows.some((r) => r.legacy_break === true);
 
   // ── V5.2 Scheduled total, over DISTINCT shifts ─────────────────────────
   //
@@ -362,6 +383,7 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
   const remarkLines = [
     ...remarks.map((t) => `†  ${t}`),
     ...(scheduleDeduped ? [FOOTNOTE_SCHEDULED_DEDUPED] : []),
+    ...(hasLegacyBreak ? [FOOTNOTE_LEGACY_BREAK] : []),
   ];
   const remarkText = remarkLines.join('\n');
   const noteText = `${FOOTNOTE_BREAK_PAID}\n${FOOTNOTE_GEOFENCE_VIOLATION}`;
@@ -419,7 +441,7 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
       r.site_name,
       '',                                   // scheduled — drawn separately, two lines
       formatHoursHHMM(r.actual_hours),
-      formatHoursHHMM(r.break_hours),
+      formatHoursHHMM(r.break_hours) + (r.legacy_break ? ' ‡' : ''),
       formatOffPostHours(r.violation_hours),
     ];
 

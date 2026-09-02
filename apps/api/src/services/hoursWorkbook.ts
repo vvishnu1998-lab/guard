@@ -146,9 +146,9 @@ function coverageCell(cell: ExcelJS.Cell, pct: number | null): void {
 type AggShape = 'guard_site' | 'guard' | 'site';
 
 const AGG_HEADERS: Record<AggShape, string[]> = {
-  guard_site: ['Guard', 'Site', 'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Unverified', 'Flagged'],
-  guard:      ['Guard',         'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Unverified', 'Flagged'],
-  site:       ['Site',          'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Unverified', 'Flagged'],
+  guard_site: ['Guard', 'Site', 'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
+  guard:      ['Guard',         'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
+  site:       ['Site',          'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
 };
 
 /** Flagged is a COUNT of flagged shifts; zero is blank, not '0'. */
@@ -200,13 +200,17 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
 
   // ══ Sheet 1 — SUMMARY ═══════════════════════════════════════════════════
   const s = wb.addWorksheet('SUMMARY');
+  // Indices 5 / 7 / 8 widened for the 'Geofence violation' rename: the three
+  // AGG_HEADERS shapes land that column at 8 (guard_site) or 7 (guard, site),
+  // and the KPI header row lands 'Geofence violation h' at 5. An 18-character
+  // label in an 11-wide column clips in Excel.
   s.columns = [{ width: 26 }, { width: 26 }, { width: 10 }, { width: 12 }, { width: 12 },
-               { width: 11 }, { width: 12 }, { width: 10 }, { width: 11 }, { width: 22 }];
+               { width: 21 }, { width: 12 }, { width: 20 }, { width: 20 }, { width: 22 }];
   s.addRow(['NetraOps — Hours Report']).font = { bold: true, size: 16, color: { argb: NAVY } };
   s.addRow([`${data.company_name}   ·   Period ${period}`]).font = { italic: true, size: 11 };
   s.addRow([]);
 
-  headerRow(s, ['Shifts', 'Scheduled h', 'Actual h', 'Coverage %', 'Break h', 'Unverified h', 'Flagged', '', '', '']);
+  headerRow(s, ['Shifts', 'Scheduled h', 'Actual h', 'Coverage %', 'Break h', 'Geofence violation h', 'Flagged', '', '', '']);
   const kpi = s.addRow([
     data.overall.shifts, data.overall.scheduled_hours, data.overall.actual_hours,
     null, data.overall.break_hours, data.overall.offpost_hours,
@@ -241,10 +245,11 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
 
   // ══ Sheet 2 — HOURS DETAIL ══════════════════════════════════════════════
   const DETAIL = ['Guard', 'Site', 'Date', 'Day', 'Clock In', 'Clock Out', 'Scheduled',
-                  'Actual', 'Break', 'Unverified', 'Variance', 'Coverage %', 'Flag'];
+                  'Actual', 'Break', 'Geofence violation', 'Variance', 'Coverage %', 'Flag'];
   const d = wb.addWorksheet('HOURS DETAIL');
+  // Index 9 is 'Geofence violation' (was 'Unverified') — widened to fit.
   d.columns = [{ width: 22 }, { width: 26 }, { width: 11 }, { width: 6 }, { width: 21 },
-               { width: 21 }, { width: 11 }, { width: 10 }, { width: 9 }, { width: 10 },
+               { width: 21 }, { width: 11 }, { width: 10 }, { width: 9 }, { width: 20 },
                { width: 10 }, { width: 12 }, { width: 24 }];
   headerRow(d, DETAIL);
 
@@ -280,7 +285,7 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   // ══ Sheet 3 — EXCEPTIONS ════════════════════════════════════════════════
   const e = wb.addWorksheet('EXCEPTIONS');
   e.columns = d.columns;
-  e.addRow(['Most recent first.  Rules — SHORT: coverage < 80%  ·  OVER: coverage > 110%  ·  NO_SCHEDULE: shift has no scheduled window  ·  AUTO_CLOSED: guard never clocked out, closed by the cron  ·  OFFPOST_ANOMALY: unverified exceeds actual'])
+  e.addRow(['Most recent first.  Rules — SHORT: coverage < 80%  ·  OVER: coverage > 110%  ·  NO_SCHEDULE: shift has no scheduled window  ·  AUTO_CLOSED: guard never clocked out, closed by the cron  ·  OFFPOST_ANOMALY: geofence violation exceeds actual'])
     .font = { italic: true, size: 10 };
   e.addRow([]);
   headerRow(e, DETAIL);
@@ -315,7 +320,7 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   note('Scheduled', 'The shift’s scheduled window. On a DETAIL row this is the whole shift. In aggregates a handoff shift is split across its sessions in proportion to actual hours, so aggregate scheduled totals do not equal the sum of the detail column.');
   note('Actual', 'Clock-out minus clock-in, raw, no truncation.');
   note('Break', 'Total break time bounded to the session window.');
-  note('Unverified', 'Time the guard’s presence at the post could not be confirmed: ping windows spanned by an open boundary alert in which no location check-in was received. It is not a measurement of time away from the post — a guard who is present but does not check in accrues unverified time. Bounded to the session window.');
+  note('Geofence violation', 'Time the guard’s presence at the post could not be confirmed: ping windows spanned by an open boundary alert in which no location check-in was received. A guard who is at the post but does not check in accrues time in this column, so it is not a confirmed measure of time away from the post. Bounded to the session window.');
   note('Variance', 'Actual minus scheduled.');
   note('Coverage %', 'Actual as a percentage of scheduled, stored as a real percentage so it sorts and filters as a number. Blank where there is no schedule.');
   note('Clock In / Out', 'Site-local time, 24-hour. Clock Out carries a date prefix (e.g. 26-Aug 07:00) only when the shift ended on a later local day than it started.');
@@ -326,7 +331,7 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   note('OVER', 'Coverage above 110%.');
   note('NO_SCHEDULE', 'The shift carries no scheduled window.');
   note('AUTO_CLOSED', 'The guard never clocked out; the session was closed by the auto-complete cron.');
-  note('OFFPOST_ANOMALY', 'Unverified time exceeds actual hours — impossible, and a sign of bad data rather than guard behaviour. Retained under its original name so historical exports remain comparable; the flag key is not a display label.');
+  note('OFFPOST_ANOMALY', 'Geofence violation time exceeds actual hours — impossible, and a sign of bad data rather than guard behaviour. Retained under its original name so historical exports remain comparable; the flag key is not a display label.');
   note('', '');
   note('Removed columns', 'Total Hours (legacy), Break (mins) and Status were dropped. The first contradicted Actual by design, the second duplicated Break in different units, the third described the shift rather than its hours.');
   note('Times', 'All dates and times are rendered in each site’s own timezone, not UTC and not the server’s.');
