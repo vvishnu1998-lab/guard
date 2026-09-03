@@ -928,6 +928,13 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        lp.longitude AS last_lng,
        lp.pinged_at  AS last_ping_at,
        lp.ping_type  AS last_ping_type,
+       -- Live-map panel: accuracy_meters sizes the pin's confidence ring and
+       -- location_mocked drives its MOCKED badge. Both are written on every
+       -- ping (Wave 1 shadow signals) and were simply never selected here.
+       -- Both are nullable — NULL on rows predating the columns, and
+       -- location_mocked is NULL on iOS, where the OS exposes no mock flag.
+       lp.accuracy_meters AS last_accuracy_m,
+       lp.location_mocked AS last_location_mocked,
        lr.reported_at AS last_report_at,
        EXISTS (
          SELECT 1 FROM geofence_violations gv
@@ -938,7 +945,8 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
      JOIN sites  s ON s.id = ss.site_id
      JOIN shifts sh ON sh.id = ss.shift_id
      LEFT JOIN LATERAL (
-       SELECT latitude, longitude, lp_inner.pinged_at, ping_type
+       SELECT latitude, longitude, lp_inner.pinged_at, ping_type,
+              accuracy_meters, location_mocked
        FROM location_pings lp_inner
        WHERE lp_inner.shift_session_id = ss.id
        ORDER BY lp_inner.pinged_at DESC LIMIT 1

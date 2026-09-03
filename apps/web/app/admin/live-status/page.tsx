@@ -9,9 +9,22 @@
  * permanent 301 so breach-alert emails already in inboxes still resolve.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { useSearchParams } from 'next/navigation';
 import { adminDownload, adminGet } from '../../../lib/adminApi';
-import { computeLateness } from '../../../lib/lateness';
+import { computeLateness, isPingStale } from '../../../lib/lateness';
+
+// Leaflet touches `window` on import, so the map panel must never be part
+// of the server bundle. Same contract GeofenceMapEditor is loaded under
+// (app/admin/sites/page.tsx:25).
+const LiveMap = dynamic(() => import('../../../components/admin/LiveMap'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-[300px] md:h-[420px] w-full rounded-xl border border-[#1A3050] bg-[#0B1526] flex items-center justify-center text-gray-500 text-sm">
+      Loading map…
+    </div>
+  ),
+});
 
 interface LiveGuard {
   id:              string;
@@ -26,6 +39,12 @@ interface LiveGuard {
   last_ping_type:  'gps_only' | 'gps_photo' | 'clock_in' | null;
   last_report_at:  string | null;
   has_violation:   boolean;
+  /** Added to /api/admin/live-guards for the map panel. Optional so the web
+   *  can deploy ahead of the API — Vercel and Railway are never simultaneous.
+   *  Also null on a session whose guard has not pinged yet, and
+   *  last_location_mocked is null on iOS, which exposes no mock flag. */
+  last_accuracy_m?:      number | null;
+  last_location_mocked?: boolean | null;
 }
 
 interface Breach {
@@ -49,10 +68,26 @@ interface Breach {
 type SinceFilter  = '24h' | '7d' | '30d';
 type StatusFilter = 'all' | 'open' | 'resolved';
 
-interface SiteOpt  { id: string; name: string }
+/** Filter-dropdown option AND map fence source. GET /api/sites already
+ *  LEFT JOINs site_geofence and returns all four fields (routes/sites.ts:66)
+ *  — this page used to select only id + name and throw the rest away. Every
+ *  geofence field is optional: null on a site with no fence row, absent
+ *  entirely on an older API. */
+interface SiteOpt {
+  id:                   string;
+  name:                 string;
+  center_lat?:          number | null;
+  center_lng?:          number | null;
+  radius_meters?:       number | null;
+  polygon_coordinates?: Array<{ lat: number; lng: number }> | null;
+}
 interface GuardOpt { id: string; name: string }
 
-const API = process.env.NEXT_PUBLIC_API_URL;
+// Poll cadence, in one place. Previously three unrelated literals — the
+// setInterval, the countdown seed, and the post-fetch reset — which could
+// drift apart silently.
+const POLL_MS      = 30_000;
+const POLL_SECONDS = POLL_MS / 1000;
 
 // Chip window → hours, for computing date_from when the CSV export needs
 // an absolute lower bound (its endpoint accepts date_from/date_to only,
@@ -111,7 +146,7 @@ export default function LiveMapPage() {
   const [breachesLoading, setBreachesLoading] = useState(true);
   const [error,       setError]       = useState('');
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
-  const [countdown,   setCountdown]   = useState(30);
+  const [countdown,   setCountdown]   = useState(POLL_SECONDS);
   const [sinceFilter,  setSinceFilter]  = useState<SinceFilter>('24h');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [siteFilter,   setSiteFilter]   = useState('');       // '' = all
@@ -121,6 +156,14 @@ export default function LiveMapPage() {
   const [sitesList,    setSitesList]    = useState<SiteOpt[]>([]);
   const [guardsList,   setGuardsList]   = useState<GuardOpt[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Map ↔ table cross-navigation. mapFocus is written with a FRESH object
+  // literal per click: LiveMap's FlyTo keys on reference identity, so
+  // clicking the same row twice has to produce a new object to move the
+  // viewport again.
+  const guardRowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
+  const [highlightedGuardId, setHighlightedGuardId] = useState<string | null>(null);
+  const [mapFocus, setMapFocus] = useState<{ lat: number; lng: number } | null>(null);
 
   // Breach-alert email deep-link: /admin/live-status?breach=<violation_id>
   // Scrolls the matching breach row into view + flashes a highlight ring
@@ -162,9 +205,19 @@ export default function LiveMapPage() {
   // the caller's company by the underlying endpoints. Silent on error —
   // the breaches table still works with empty dropdowns.
   useEffect(() => {
-    adminGet<Array<{ id: string; name: string }>>('/api/sites')
-      .then((rows) => setSitesList(rows.map((r) => ({ id: r.id, name: r.name }))))
-      .catch(() => { /* keep empty */ });
+    // Kept whole rather than narrowed to id+name: the same rows are the
+    // map's fence source. `?? null` on each geofence field so an older API
+    // that omits them lands on the same shape as a site with no fence.
+    adminGet<SiteOpt[]>('/api/sites')
+      .then((rows) => setSitesList(rows.map((r) => ({
+        id:                  r.id,
+        name:                r.name,
+        center_lat:          r.center_lat          ?? null,
+        center_lng:          r.center_lng          ?? null,
+        radius_meters:       r.radius_meters       ?? null,
+        polygon_coordinates: r.polygon_coordinates ?? null,
+      }))))
+      .catch(() => { /* keep empty — the table and dropdowns still work */ });
     adminGet<Array<{ id: string; name: string }>>('/api/guards')
       .then((rows) => setGuardsList(rows.map((r) => ({ id: r.id, name: r.name }))))
       .catch(() => { /* keep empty */ });
@@ -236,7 +289,7 @@ export default function LiveMapPage() {
     finally {
       setLoading(false);
       setLastRefresh(new Date());
-      setCountdown(30);
+      setCountdown(POLL_SECONDS);
     }
   }, [loadBreaches, sinceFilter, statusFilter, siteFilter, guardFilter, dateFrom, dateTo]);
 
@@ -247,7 +300,7 @@ export default function LiveMapPage() {
   useEffect(() => {
     setBreachesLoading(true);
     load();
-    timerRef.current = setInterval(load, 30_000);
+    timerRef.current = setInterval(load, POLL_MS);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [load]);
 
@@ -258,6 +311,42 @@ export default function LiveMapPage() {
   }, [lastRefresh]);
 
   const violations = guards.filter((g) => g.has_violation);
+
+  // Pin click → bring the guard's table row into view and flash it. The
+  // 2 s ring is deliberately shorter than the breach deep-link's 4 s: this
+  // one confirms a click the admin just made, that one has to survive a
+  // page load arriving from an email.
+  const focusGuardRow = useCallback((guardId: string) => {
+    const row = guardRowRefs.current.get(guardId);
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedGuardId(guardId);
+  }, []);
+
+  useEffect(() => {
+    if (!highlightedGuardId) return;
+    const t = setTimeout(() => setHighlightedGuardId(null), 2_000);
+    return () => clearTimeout(t);
+  }, [highlightedGuardId]);
+
+  // Breach banner → scroll to the first OPEN breach row, reusing the same
+  // breachRowRefs map and highlight state the ?breach=<id> deep-link uses.
+  // Its own timer rather than the deep-link effect's, so the two paths
+  // cannot cancel each other's flash.
+  const breachFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollToBreaches = useCallback(() => {
+    const target = breaches.find((b) => !b.is_resolved) ?? breaches[0];
+    if (!target) return;
+    const row = breachRowRefs.current.get(target.id);
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedBreachId(target.id);
+    if (breachFlashTimer.current) clearTimeout(breachFlashTimer.current);
+    breachFlashTimer.current = setTimeout(() => setHighlightedBreachId(null), 4_000);
+  }, [breaches]);
+  useEffect(() => () => {
+    if (breachFlashTimer.current) clearTimeout(breachFlashTimer.current);
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -292,6 +381,35 @@ export default function LiveMapPage() {
       </div>
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
+
+      {/* Active-breach banner — clickable, scrolls to RECENT BREACHES. */}
+      {violations.length > 0 && (
+        <button
+          type="button"
+          onClick={scrollToBreaches}
+          className="w-full flex items-center gap-3 bg-red-900/30 border border-red-700 rounded-xl px-4 py-3 text-left hover:bg-red-900/50 transition-colors"
+        >
+          <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse shrink-0" />
+          <span className="text-red-300 text-xs tracking-widest font-bold">
+            {violations.length} ACTIVE BREACH{violations.length > 1 ? 'ES' : ''}
+          </span>
+          <span className="ml-auto text-red-400/70 text-[10px] tracking-widest whitespace-nowrap">
+            VIEW BREACHES ↓
+          </span>
+        </button>
+      )}
+
+      {/* Map panel. Fences come from /api/sites (already fetched for the
+          breach filters), pins from the same live-guards poll that feeds
+          the table below, breach rings from the breaches state. */}
+      <LiveMap
+        guards={guards}
+        sites={sitesList}
+        breaches={breaches}
+        focus={mapFocus}
+        onGuardSelect={focusGuardRow}
+        loading={loading}
+      />
 
       {/* Violation banner */}
       {violations.length > 0 && (
@@ -331,13 +449,24 @@ export default function LiveMapPage() {
               // colors the LAST PING cell red when the last ping is older
               // than 35 min from wall-clock (independent of the lateness
               // display text, which measures against the schedule boundary).
-              const pingStale = g.last_ping_at != null &&
-                (Date.now() - new Date(g.last_ping_at).getTime()) / 60_000 >= 35;
+              // Now lib/lateness.ts so the map pin reads the same rule.
+              const pingStale = isPingStale(g.last_ping_at);
+              const locatable = Number.isFinite(g.last_lat) && Number.isFinite(g.last_lng);
               return (
                 <tr
                   key={g.id}
+                  ref={(el) => {
+                    if (el) guardRowRefs.current.set(g.id, el);
+                    else    guardRowRefs.current.delete(g.id);
+                  }}
+                  onClick={() => {
+                    if (locatable) setMapFocus({ lat: g.last_lat as number, lng: g.last_lng as number });
+                  }}
+                  title={locatable ? 'Show on map' : 'No location for this guard yet'}
                   className={`border-b border-[#1A3050] transition-colors ${
                     g.has_violation ? 'bg-red-950/30 hover:bg-red-950/50' : 'hover:bg-[#0B1526]'
+                  } ${locatable ? 'cursor-pointer' : ''} ${
+                    highlightedGuardId === g.id ? 'ring-2 ring-amber-400 ring-inset' : ''
                   }`}
                 >
                   <td className="p-4">

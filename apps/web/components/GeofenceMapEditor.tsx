@@ -126,19 +126,16 @@ export default function GeofenceMapEditor({ initialPolygon, initialCentre, centr
         style={{ height: '100%', width: '100%' }}
       >
         {/*
-          CartoDB Positron (light_all) basemap — minimalist light-grey
-          ground with soft roads + labels. The neutral palette keeps the
-          admin's attention on the polygon they're drawing rather than
-          fighting decorative basemap detail. Same ToS coverage + no-API-
-          key upside as the earlier CARTO styles (swap history: OSM
-          public → Voyager → Dark Matter → Positron, all 2026-07-08).
-          `{r}` retina modifier, subdomains a–d for request sharding,
-          attribution names OSM (data) + CARTO (rendering).
+          OpenStreetMap standard basemap. Swap history: OSM public →
+          Voyager → Dark Matter → Positron, all 2026-07-08; 2026-09-03 →
+          OSM standard, CARTO free tier began watermarking without key.
+          No {s} subdomain sharding and no {r} retina modifier — OSM
+          standard serves neither; attribution is OSM only now that CARTO
+          renders nothing here.
         */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png"
-          subdomains="abcd"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
           maxZoom={19}
         />
 
