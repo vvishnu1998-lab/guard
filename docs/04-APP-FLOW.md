@@ -356,23 +356,106 @@ File-path citations point at the load-bearing code so anyone debugging a flow ca
 
 ## 11. Admin — Live Status Monitoring
 
-**Trigger**: Admin opens `/admin/live-map`.
+**Trigger**: Admin opens `/admin/live-status` ([apps/web/app/admin/live-status/page.tsx](apps/web/app/admin/live-status/page.tsx)).
 
-**Actor**: Company admin.
+The route was renamed from `/admin/live-map` on 2026-07-08 (task #5).
+[apps/web/next.config.js](apps/web/next.config.js) keeps a permanent 301 so
+breach-alert emails already sitting in admin inboxes still resolve, and Next
+preserves the query string across it — `/admin/live-map?breach=<id>` lands on
+`/admin/live-status?breach=<id>`.
+
+**Actor**: Company admin. (`requireAuth('company_admin')` on live-guards;
+`requireAuth('company_admin', 'vishnu')` on violations, where Vishnu sees
+every company's breaches.)
 
 **Steps**:
 
-1. Leaflet map mounts with the company's sites as polygons.
-2. Page polls the API every N seconds (interval defined in [apps/web/components/admin/AdminNav.tsx](apps/web/components/admin/AdminNav.tsx) as `CHAT_POLL_MS = 15_000` for chat; live-map likely uses a similar interval — confirm in the live-map page source for the exact value).
-3. Each poll: `GET /api/admin/active-shifts` (or similar) returns currently-active sessions with the latest `location_pings.latitude/longitude` per session.
-4. Map renders one guard pin per active session, colored by `is_within_geofence` (green inside, red outside).
-5. Admin can tap a pin → drawer with guard name, site, shift duration, link to recent reports.
+1. Once on mount, the page fetches its two reference lists:
+   `GET /api/sites` and `GET /api/guards`. Both populate the breach filter
+   dropdowns, and **the sites rows are also the map's fence source** — that
+   endpoint LEFT JOINs `site_geofence` and already returns `center_lat`,
+   `center_lng`, `radius_meters`, `polygon_coordinates` and `has_geofence`
+   ([apps/api/src/routes/sites.ts](apps/api/src/routes/sites.ts)). No
+   geofence-specific endpoint exists or is needed.
+2. Every `POLL_MS` (30 s, one constant in the page — it drives the
+   `setInterval`, the countdown seed and the post-fetch reset) the page
+   fetches, in parallel:
+   - `GET /api/admin/live-guards` — one row per open `shift_sessions` row in
+     the admin's company, each carrying **the single most recent
+     `location_pings` row for that session** via a `LEFT JOIN LATERAL … ORDER
+     BY pinged_at DESC LIMIT 1`: `last_lat`, `last_lng`, `last_ping_at`,
+     `last_ping_type`, `last_accuracy_m`, `last_location_mocked`. Plus
+     `last_report_at` and a `has_violation` EXISTS over unresolved
+     `geofence_violations`.
+   - `GET /api/admin/violations?since=&status=&limit=100` (+ optional
+     `site_id`, `guard_id`, `date_from`, `date_to`) — breach history for the
+     RECENT BREACHES table below the map.
+3. The map panel ([apps/web/components/admin/LiveMap.tsx](apps/web/components/admin/LiveMap.tsx))
+   is loaded through `next/dynamic({ ssr: false })` — Leaflet touches `window`
+   on import, so an SSR import breaks the build. Basemap is CartoDB Positron
+   (`light_all`), the same tiles the geofence editor uses.
+4. Fences, per site, cyan `#00C8FF`: the polygon from `polygon_coordinates`
+   (2 px stroke, 15% fill) **and** a dashed circle from `center_lat/lng` +
+   `radius_meters`. Both are drawn when both exist. A site with no usable
+   polygon and no usable circle is skipped entirely.
+5. One pin per live-guards row that has coordinates. Colour is a strict
+   precedence, **not** `is_within_geofence` (which is hardcoded `true` at
+   insert — offsite pings are rejected 422 and never stored, so the column
+   cannot discriminate):
+   - **red** — `has_violation`, i.e. an unresolved `geofence_violations` row
+   - **gold** — last ping is `>= 35` minutes old by wall clock
+     (`isPingStale` / `PING_STALE_MINUTES` in
+     [apps/web/lib/lateness.ts](apps/web/lib/lateness.ts), the same function
+     the table's LAST PING cell uses so the two cannot drift)
+   - **green** — otherwise
+   Rows with null coordinates get no pin and are named in a "NO LOCATION YET"
+   line under the map.
+6. Open breaches (`resolved_at IS NULL`) additionally draw a red ring at
+   `violation_lat/lng`.
+7. Clicking a pin opens a popup — name, badge, site, clock-in time, last ping
+   (the same `computeLateness` string the table shows, plus a relative age),
+   accuracy in metres, a red **MOCKED** badge when `last_location_mocked` is
+   true, last report, and status.
+8. Map ↔ table are linked both ways: clicking a table row flies the map to
+   that guard's pin; clicking a pin scrolls its table row into view and
+   flashes a 2 s amber ring.
+9. When any guard has `has_violation`, a red **"N ACTIVE BREACH(ES)"** banner
+   renders above the map. Clicking it scrolls to the first open row in RECENT
+   BREACHES, reusing the same `breachRowRefs` map and highlight state as the
+   `?breach=<id>` email deep-link.
 
-**Success criteria**: Pins update every poll cycle; out-of-bounds guards visually distinct.
+**Success criteria**: Pins and table rows update every poll cycle from the
+same fetch; breached and stale guards are distinguishable at a glance without
+opening a popup; the map frames every fence and pin on first load and then
+stays where the admin put it.
 
 **Error / edge cases**:
-- **No active shifts**: empty state — map renders with sites only.
-- **Browser tab inactive**: polling continues but at degraded frequency (modern browsers throttle background timers).
+- **No active shifts**: `live-guards` returns `[]`. Fences still render, with
+  a "No guards currently on duty" pill over the map and the same message in
+  the table body.
+- **`GET /api/sites` fails**: caught and swallowed — the map renders with no
+  fences and the filter dropdowns stay empty. The table and breach list are
+  unaffected.
+- **Guard on shift who has never pinged**: every `lp.*` column is null (LEFT
+  JOIN LATERAL with no matching row). No pin; the guard is listed under
+  "NO LOCATION YET" and still appears in the table.
+- **Web deployed ahead of the API**: Vercel and Railway never deploy
+  simultaneously. `last_accuracy_m` / `last_location_mocked` and every
+  geofence field are optional client-side, so an older API renders "—" and
+  hides the MOCKED badge instead of throwing.
+- **Browser tab inactive**: polling continues but at degraded frequency
+  (modern browsers throttle background timers).
+- **First fit vs. wide fences**: bounds are fitted once, over every fence and
+  pin, and never re-fitted on a poll. A company whose sites are far apart, or
+  which has a deliberately large `radius_meters`, therefore opens zoomed out.
+  Panning and zooming from there is not disturbed by subsequent polls.
+
+**Not implemented**: there is no location trail, breadcrumb or path. The map
+shows the **latest** ping per session and nothing historical — no
+trail/track/breadcrumb table exists in the schema, and `live-guards` returns
+exactly one ping row per session by construction. Historical ping sequences
+are reachable only through `GET /api/activity-log`, which renders them as a
+merged event log rather than a path.
 
 ---
 
