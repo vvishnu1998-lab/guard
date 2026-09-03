@@ -55,6 +55,19 @@ export type OffPostSource =
    *  raising a violation or waking an admin. */
   | 'incident_break';
 
+/**
+ * Provenance of lat/lng, matching off_post_events.position_source
+ * (schema_v65). Only two of the three column values are reachable from
+ * here: 'background' is for a headless task's own fix, and every caller of
+ * this function is an HTTP request handler.
+ *   'foreground' the coordinates are the guard's device fix (ping_reject,
+ *                incident_break — both copy a body the app just measured)
+ *   'site'       the coordinates are the fence centre, not a position
+ *                (break_exit — the /violation body is region.latitude/
+ *                longitude echoed back by the OS region monitor)
+ */
+export type OffPostPositionSource = 'site' | 'foreground';
+
 export interface OffPostEventInput {
   shiftSessionId: string;
   guardId: string;
@@ -69,6 +82,14 @@ export interface OffPostEventInput {
   accuracyM?: number | null;
   distanceM?: number | null;
   reason: string | null;
+  /**
+   * REQUIRED, and deliberately not optional or defaulted. The column has no
+   * DEFAULT in the database precisely so a forgotten writer fails loudly
+   * rather than stamping a device fix as 'site'; making it required here
+   * moves that failure from a production 23502 to a compile error. tsc is
+   * the gate, schema_v66's NOT NULL is the backstop.
+   */
+  positionSource: OffPostPositionSource;
   /** The break open at the time, when there was one. Requires schema_v61. */
   breakSessionId?: string | null;
   expiresAt: Date | string | null;
@@ -76,6 +97,7 @@ export interface OffPostEventInput {
 
 interface TableCapability {
   hasBreakSessionId: boolean;
+  hasPositionSource: boolean;
   reasonMaxLen: number;
   coordsNullable: boolean;
 }
@@ -88,25 +110,30 @@ let cachedAt = 0;
  *  which is the pre-v61 schema — that shape writes successfully on BOTH
  *  schemas, so a failed probe degrades to "works, minus the link". */
 async function capability(db: Pool | PoolClient): Promise<TableCapability> {
-  const fresh = cached && (cached.hasBreakSessionId || Date.now() - cachedAt < PROBE_TTL_MS);
+  // Cache a fully-positive probe for the life of the process; re-probe a
+  // partial one on the TTL so applying the missing migration heals a running
+  // API within a minute instead of needing a restart.
+  const allPresent = cached?.hasBreakSessionId && cached?.hasPositionSource;
+  const fresh = cached && (allPresent || Date.now() - cachedAt < PROBE_TTL_MS);
   if (cached && fresh) return cached;
   try {
     const { rows } = await db.query<{ column_name: string; is_nullable: string; character_maximum_length: number | null }>(
       `SELECT column_name, is_nullable, character_maximum_length
          FROM information_schema.columns
         WHERE table_name = 'off_post_events'
-          AND column_name IN ('break_session_id', 'reason', 'lat')`,
+          AND column_name IN ('break_session_id', 'reason', 'lat', 'position_source')`,
     );
     const reason = rows.find((r) => r.column_name === 'reason');
     const lat    = rows.find((r) => r.column_name === 'lat');
     cached = {
       hasBreakSessionId: rows.some((r) => r.column_name === 'break_session_id'),
+      hasPositionSource: rows.some((r) => r.column_name === 'position_source'),
       reasonMaxLen:      reason?.character_maximum_length ?? 16,
       coordsNullable:    lat?.is_nullable === 'YES',
     };
     cachedAt = Date.now();
   } catch {
-    cached = { hasBreakSessionId: false, reasonMaxLen: 16, coordsNullable: false };
+    cached = { hasBreakSessionId: false, hasPositionSource: false, reasonMaxLen: 16, coordsNullable: false };
     cachedAt = Date.now();
   }
   return cached;
@@ -158,6 +185,22 @@ export async function recordOffPostEvent(
       input.lat, input.lng, input.accuracyM ?? null, input.distanceM ?? null,
       reason, input.expiresAt,
     ];
+
+    // Probed, not assumed — for the same reason break_session_id is. An
+    // unconditional column reference raises 42703 on a pre-v65 database and,
+    // because this function swallows everything, would SILENTLY stop
+    // recording every off-post row. That is the exact regression this
+    // module's header warns about.
+    if (cap.hasPositionSource) {
+      cols.push('position_source');
+      vals.push(input.positionSource);
+    } else {
+      console.warn(
+        `[off_post_events.position_source_dropped] source=${input.source} ` +
+        `session=${input.shiftSessionId} value=${input.positionSource} — column absent ` +
+        `(schema_v65 not applied); row still written without provenance`,
+      );
+    }
 
     if (cap.hasBreakSessionId) {
       cols.push('break_session_id');

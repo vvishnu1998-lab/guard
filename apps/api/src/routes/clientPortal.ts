@@ -130,8 +130,15 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
        -- UI; kept as a scalar here so existing consumers keep rendering.
        ROUND(CAST(EXTRACT(EPOCH FROM (NOW() - ss.clocked_in_at))/3600.0 AS NUMERIC), 2) AS hours_on_duty,
        ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
-       lp.latitude  AS last_lat,
-       lp.longitude AS last_lng,
+       -- Same clock-in fallback as GET /api/admin/live-guards. Kept
+       -- identical on purpose: the client portal and the admin live map
+       -- showing a guard in different places, or one of them showing no
+       -- position at all, is worse than either being imperfect.
+       COALESCE(lp.latitude,  civ.verified_lat) AS last_lat,
+       COALESCE(lp.longitude, civ.verified_lng) AS last_lng,
+       COALESCE(lp.pinged_at, civ.verified_at)  AS last_position_at,
+       CASE WHEN lp.pinged_at IS NOT NULL THEN 'ping' ELSE 'clock_in' END AS last_position_source,
+       -- Ping-only, deliberately un-COALESCEd — see the live-guards note.
        lp.pinged_at AS last_ping_at
      FROM shift_sessions ss
      JOIN shifts sh ON sh.id = ss.shift_id
@@ -142,6 +149,12 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
        WHERE shift_session_id = ss.id
        ORDER BY pinged_at DESC LIMIT 1
      ) lp ON true
+     LEFT JOIN LATERAL (
+       SELECT verified_lat, verified_lng, verified_at
+       FROM clock_in_verifications civ_inner
+       WHERE civ_inner.shift_session_id = ss.id
+       ORDER BY civ_inner.verified_at DESC LIMIT 1
+     ) civ ON true
      WHERE ss.site_id = $1 AND ss.clocked_out_at IS NULL
      ORDER BY ss.clocked_in_at ASC`,
     [req.user!.site_id]

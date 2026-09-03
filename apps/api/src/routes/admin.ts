@@ -924,17 +924,32 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        ss.clocked_in_at,
        sh.scheduled_start,
        sh.scheduled_end,
-       lp.latitude  AS last_lat,
-       lp.longitude AS last_lng,
+       -- POSITION, with a clock-in fallback.
+       --
+       -- A guard who has not pinged this session used to have no coordinates
+       -- at all, so the live map drew no pin and a row click did nothing.
+       -- That is not an edge case: 14 of 27 Bethel AME sessions have ZERO
+       -- pings, and 14 of 47 STARNET sessions in the last 30 days, because
+       -- pings are guard-initiated and a 30-minute window is easy to miss.
+       -- Every session has a clock-in fix by construction, so fall back to it.
+       --
+       -- clock_in_verifications, not shift_sessions.clock_in_coords: the
+       -- latter is a VARCHAR holding '(lat,lng)' and would need parsing in
+       -- SQL, while civ carries typed NOT NULL doubles plus accuracy and the
+       -- mock flag. Measured 2026-09-03: every one of the 138 sessions has
+       -- exactly one civ row, none missing, none duplicated.
+       COALESCE(lp.latitude,  civ.verified_lat)    AS last_lat,
+       COALESCE(lp.longitude, civ.verified_lng)    AS last_lng,
+       COALESCE(lp.accuracy_meters, civ.accuracy_meters) AS last_accuracy_m,
+       COALESCE(lp.location_mocked, civ.location_mocked) AS last_location_mocked,
+       COALESCE(lp.pinged_at, civ.verified_at)     AS last_position_at,
+       CASE WHEN lp.pinged_at IS NOT NULL THEN 'ping' ELSE 'clock_in' END AS last_position_source,
+       -- last_ping_at stays PING-ONLY and must not be COALESCEd. The table's
+       -- LAST PING column has to keep reading "—" for a guard who has not
+       -- pinged; a clock-in is a position, not a check-in, and conflating
+       -- them would report an unmet obligation as met.
        lp.pinged_at  AS last_ping_at,
        lp.ping_type  AS last_ping_type,
-       -- Live-map panel: accuracy_meters sizes the pin's confidence ring and
-       -- location_mocked drives its MOCKED badge. Both are written on every
-       -- ping (Wave 1 shadow signals) and were simply never selected here.
-       -- Both are nullable — NULL on rows predating the columns, and
-       -- location_mocked is NULL on iOS, where the OS exposes no mock flag.
-       lp.accuracy_meters AS last_accuracy_m,
-       lp.location_mocked AS last_location_mocked,
        lr.reported_at AS last_report_at,
        EXISTS (
          SELECT 1 FROM geofence_violations gv
@@ -957,6 +972,12 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        WHERE r.shift_session_id = ss.id
        ORDER BY reported_at DESC LIMIT 1
      ) lr ON true
+     LEFT JOIN LATERAL (
+       SELECT verified_lat, verified_lng, accuracy_meters, location_mocked, verified_at
+       FROM clock_in_verifications civ_inner
+       WHERE civ_inner.shift_session_id = ss.id
+       ORDER BY civ_inner.verified_at DESC LIMIT 1
+     ) civ ON true
      -- e2fec53 status filter removed in Week-1 C2 (see /kpis comment above)
      WHERE s.company_id = $1 AND ss.clocked_out_at IS NULL
      ORDER BY s.name, g.name`,
@@ -1073,6 +1094,10 @@ router.get('/violations', requireAuth('company_admin', 'vishnu'), async (req, re
             gv.duration_minutes,
             gv.violation_lat,
             gv.violation_lng,
+            -- 'site' means violation_lat/lng IS the fence centre and locates
+            -- the post, not the guard. The map must not draw it as a
+            -- position. Nullable until schema_v66 contracts.
+            gv.position_source,
             gv.photo_url,
             (gv.resolved_at IS NOT NULL) AS is_resolved,
             g.name         AS guard_name,
