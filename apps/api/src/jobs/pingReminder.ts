@@ -120,6 +120,52 @@ async function sendReminder(
  * expressing R3/R4 in this statement would recreate exactly the second
  * implementation the previous commit deleted.
  */
+/**
+ * Did the guard already answer this window?
+ *
+ * A deliberate, line-for-line copy of missedPingCron's anyPingInWindow.
+ * Without it this job nagged for windows that HAD been answered: reddy
+ * (Star Guard, session fd3ee9ac) pinged the 15:00 window at 15:01:03 with
+ * submitted_late=false, missed_pings correctly held no row for it, and at
+ * 15:30 the reminder still fired "Submit your 15:00 ping now." Nothing
+ * between windowJustClosed and claimWindow had ever looked at
+ * location_pings — claimWindow only dedupes repeat reminders for the SAME
+ * window, it says nothing about whether the window was satisfied.
+ *
+ * THE MATCH IS A HALF-OPEN TIME RANGE ON pinged_at, NOT window_label, and
+ * that is not interchangeable:
+ *   * window_label is an optional client-supplied body param on
+ *     POST /locations/ping — a ping without one is still a real ping and
+ *     would be invisible to a label match;
+ *   * a late ping deliberately backfills a PAST window's label while its
+ *     pinged_at sits in a later window, so the two rules disagree exactly
+ *     when it matters (submitted_late);
+ *   * the label is derived through the site's IANA zone and is ambiguous
+ *     on its own — which is why window_start was added beside it in this
+ *     job's own push payload.
+ *
+ * Copied rather than shared on purpose. Hoisting it into
+ * services/pingWindows.ts would make completedTrackableWindows's module
+ * aware of pings, and that function is consumed by the daily client report
+ * where it must stay break-blind AND ping-blind — it counts windows that
+ * WERE trackable, not windows that were answered.
+ */
+async function anyPingInWindow(
+  shiftSessionId: string,
+  windowStart: Date,
+  windowEnd: Date,
+): Promise<boolean> {
+  const { rows } = await pool.query<{ hit: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM location_pings
+       WHERE shift_session_id = $1
+         AND pinged_at >= $2 AND pinged_at < $3
+     ) AS hit`,
+    [shiftSessionId, windowStart, windowEnd],
+  );
+  return rows[0]?.hit === true;
+}
+
 async function claimWindow(shiftSessionId: string, windowStart: Date): Promise<boolean> {
   const { rowCount } = await pool.query(
     `UPDATE shift_sessions
@@ -213,6 +259,20 @@ cron.schedule('* * * * *', async () => {
       if (await breakOverlapsWindow(row.shift_session_id, closed.windowStart, closed.windowEnd)) {
         console.log(
           `[pingReminder.skipped.break] session=${row.shift_session_id} ` +
+          `window=${closed.windowStart.toISOString()}`,
+        );
+        continue;
+      }
+
+      // Already answered? Then there is nothing to nag for. Ordered here
+      // for the same reason the break waiver is: BEFORE the claim, so a
+      // satisfied window never burns one and stays eligible if the ping is
+      // somehow rolled back. Same two Dates the break check just used, so
+      // the reminder and missedPingCron can never disagree about which
+      // window is in question.
+      if (await anyPingInWindow(row.shift_session_id, closed.windowStart, closed.windowEnd)) {
+        console.log(
+          `[pingReminder.skipped.answered] session=${row.shift_session_id} ` +
           `window=${closed.windowStart.toISOString()}`,
         );
         continue;
