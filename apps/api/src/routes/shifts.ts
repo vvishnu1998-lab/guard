@@ -3686,8 +3686,13 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
     //      reject made the evidence strictly worse, not better.
     //
     // The verdict is not discarded: within_geofence = false is persisted on
-    // the row and [clock-out.reject] still fires. Those are the admin
+    // the row and [clock-out.offpost] still fires. Those are the admin
     // signals. What changed is that they inform rather than block.
+    //
+    // The tag was [clock-out.reject] until this rename. Nothing was being
+    // rejected — enforced=false has been in the payload since 5dd8077 —
+    // and a forensic grep for "reject" therefore returned the one line
+    // guaranteed to mislead about whether clock-outs are being refused.
     //
     // The SAVEPOINT exists so a failure INSIDE the fence query cannot poison
     // the transaction and strand the guard through the back door — the one
@@ -3705,7 +3710,7 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
         fenceAllowed = fence.allowed;
         if (!fence.allowed) {
           console.log(
-            `[clock-out.reject] session=${session.id} guard=${req.user!.sub} ` +
+            `[clock-out.offpost] session=${session.id} guard=${req.user!.sub} ` +
             `distance=${fence.distance_m?.toFixed(1) ?? 'null'}m accuracy=${accuracy}m reason=${fence.reason} ` +
             `enforced=false mocked=${clockOutSignals.locationMocked ?? 'unknown'}`,
           );
