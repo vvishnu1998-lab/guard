@@ -245,13 +245,12 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
           scrollWheelZoom
           style={{ height: '100%', width: '100%' }}
         >
-          {/* CartoDB Positron, identical to GeofenceMapEditor — same ToS
-              coverage, no API key, and the neutral ground keeps the cyan
-              fences and the pin colours legible. */}
+          {/* OpenStreetMap standard, identical to GeofenceMapEditor — see
+              the swap history there. CARTO's free tier started stamping
+              "API KEY REQUIRED" across every tile (2026-09-03). */}
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}{r}.png"
-            subdomains="abcd"
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
             maxZoom={19}
           />
 

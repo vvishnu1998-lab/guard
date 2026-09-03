@@ -392,8 +392,10 @@ every company's breaches.)
      RECENT BREACHES table below the map.
 3. The map panel ([apps/web/components/admin/LiveMap.tsx](apps/web/components/admin/LiveMap.tsx))
    is loaded through `next/dynamic({ ssr: false })` — Leaflet touches `window`
-   on import, so an SSR import breaks the build. Basemap is CartoDB Positron
-   (`light_all`), the same tiles the geofence editor uses.
+   on import, so an SSR import breaks the build. Basemap is OpenStreetMap
+   standard (`tile.openstreetmap.org`), the same tiles the geofence editor
+   uses — both swapped off CARTO on 2026-09-03 when its free tier began
+   watermarking every tile "API KEY REQUIRED".
 4. Fences, per site, cyan `#00C8FF`: the polygon from `polygon_coordinates`
    (2 px stroke, 15% fill) **and** a dashed circle from `center_lat/lng` +
    `radius_meters`. Both are drawn when both exist. A site with no usable
