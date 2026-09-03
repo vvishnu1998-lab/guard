@@ -37,14 +37,29 @@
 -- which v65 already handled and which are gated IS NULL anyway.
 --
 -- The rules, restated so this file stands alone:
---   geofence_violations  every gap row came from routes/locations.ts (the
+--   geofence_violations  a gap row came from routes/locations.ts (the
 --                        background task, which posts the fence centre) or
---                        routes/reports.ts (off-post incident, device fix).
---                        They are indistinguishable after the fact, so the
---                        catch-all is 'site' — the conservative reading:
---                        'site' means "do not render this as a position",
---                        and mislabelling a real fix as unrenderable loses
---                        detail, whereas the reverse invents a location.
+--                        routes/reports.ts:739 (off-post incident, a real
+--                        device fix). They ARE separable: the reports path
+--                        binds the report's own latitude/longitude into the
+--                        violation in the same transaction, so the pair is
+--                        exactly equal on both columns. That is precisely
+--                        how bea80874-0c44-47d5-8482-e92736f7c9fa was
+--                        identified in the first place — its coordinates
+--                        match incident report d57b1119 to the bit, filed
+--                        15 ms earlier.
+--                        So: an incident report on the same session with
+--                        equal coordinates -> 'foreground'; otherwise the
+--                        catch-all 'site'. The catch-all stays the
+--                        conservative direction — 'site' means "do not
+--                        render this as a position", and mislabelling a real
+--                        fix as unrenderable loses detail, whereas the
+--                        reverse invents a location.
+--                        Exact float equality is correct here, not a
+--                        tolerance: both columns are copies of the same
+--                        double, not two measurements of one place. A
+--                        tolerance would start matching a background row
+--                        that merely happens to sit near a report.
 --   off_post_events      source is authoritative and survives the gap:
 --                        ping_reject / incident_break -> device -> foreground
 --                        break_exit                   -> centre -> site
@@ -70,6 +85,18 @@ UPDATE off_post_events SET position_source = 'foreground'
 
 UPDATE off_post_events SET position_source = 'site'
  WHERE source = 'break_exit' AND position_source IS NULL;
+
+-- Incident-report provenance first; the catch-all below must not claim rows
+-- this rule can identify.
+UPDATE geofence_violations gv SET position_source = 'foreground'
+ WHERE gv.position_source IS NULL
+   AND EXISTS (
+     SELECT 1 FROM reports r
+      WHERE r.shift_session_id = gv.shift_session_id
+        AND r.report_type      = 'incident'
+        AND r.latitude         = gv.violation_lat
+        AND r.longitude        = gv.violation_lng
+   );
 
 UPDATE geofence_violations SET position_source = 'site'
  WHERE position_source IS NULL;
