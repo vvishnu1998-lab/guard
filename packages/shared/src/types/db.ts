@@ -59,7 +59,6 @@ export interface Guard {
   phone_number: string | null;  // v2: SMS unlock fallback
   is_active: boolean;
   must_change_password: boolean;
-  fcm_token: string | null;
   created_at: string;
 }
 
