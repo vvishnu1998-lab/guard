@@ -39,6 +39,7 @@ import cron from 'node-cron';
 import * as Sentry from '@sentry/node';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 
 interface DueRow {
@@ -63,7 +64,7 @@ cron.schedule('*/5 * * * *', async () => {
               ti.due_at,
               ti.shift_id,
               s.guard_id,
-              g.fcm_token,
+              ${ACTIVE_PUSH_TOKEN_SQL('g')},
               ss.id      AS session_id
        FROM task_instances ti
        JOIN shifts s          ON s.id  = ti.shift_id

@@ -34,6 +34,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { expiresAtFor } from '../services/retention';
 // Window rule lives in services/pingWindows.ts so the daily client report
@@ -88,7 +89,7 @@ cron.schedule('*/5 * * * *', async () => {
               ss.shift_id,
               ss.site_id,
               ss.guard_id,
-              g.fcm_token,
+              ${ACTIVE_PUSH_TOKEN_SQL('g')},
               ss.clocked_in_at,
               s.scheduled_start,
               s.scheduled_end,

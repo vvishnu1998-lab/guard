@@ -14,6 +14,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { getActivePushToken } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { Sentry } from '../services/sentry';
 
@@ -177,14 +178,16 @@ router.post('/rooms/:roomId/messages', requireAuth('company_admin', 'guard'), as
   if (senderRole === 'admin') {
     // Push + log to guard
     try {
-      const guardRow = await pool.query('SELECT name, fcm_token FROM guards WHERE id = $1', [r.guard_id]);
+      const guardRow = await pool.query('SELECT name FROM guards WHERE id = $1', [r.guard_id]);
       const g = guardRow.rows[0];
+      // Own SELECT kept for `name`; the token comes from guard_devices.
+      const guardToken = await getActivePushToken(r.guard_id);
       const adminRow = await pool.query('SELECT name FROM company_admins WHERE id = $1', [user!.sub]);
       const senderName = adminRow.rows[0]?.name ?? 'Admin';
       const title = `New message from ${senderName}`;
-      if (g?.fcm_token) {
+      if (guardToken) {
         await sendPushNotification({
-          token: g.fcm_token,
+          token: guardToken,
           title,
           body: preview,
           data: { type: 'chat', roomId },

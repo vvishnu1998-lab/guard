@@ -44,6 +44,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification, NotificationType } from '../services/notifications';
 import { breakOverlapsWindow, siteLocalLabel, windowJustClosed } from '../services/pingWindows';
 import { Sentry } from '../services/sentry';
@@ -155,7 +156,7 @@ cron.schedule('* * * * *', async () => {
       `SELECT ss.id AS shift_session_id,
               g.id  AS guard_id,
               g.name AS guard_name,
-              g.fcm_token,
+              ${ACTIVE_PUSH_TOKEN_SQL('g')},
               s.scheduled_start,
               s.scheduled_end,
               ss.clocked_in_at,

@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { uploadBufferToS3, urlOrPresign } from '../services/s3';
 import { sendPushNotification } from '../services/firebase';
+import { getActivePushToken } from '../services/deviceRegistry';
 
 /**
  * Common gate: 409 if the target site has been deactivated. Used on every
@@ -458,11 +459,7 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
     (async () => {
       for (const guardId of affectedGuardIds) {
         try {
-          const tokRow = await pool.query<{ fcm_token: string | null }>(
-            'SELECT fcm_token FROM guards WHERE id = $1',
-            [guardId],
-          );
-          const token = tokRow.rows[0]?.fcm_token;
+          const token = await getActivePushToken(guardId);
           if (!token) continue;
           await sendPushNotification({
             token,

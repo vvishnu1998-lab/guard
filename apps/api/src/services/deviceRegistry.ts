@@ -1,10 +1,11 @@
 /**
- * guard_devices — the single writer for a guard's push token.
+ * guard_devices — the single READER and WRITER for a guard's push token.
  *
- * Every path that used to UPDATE guards.fcm_token directly now goes through
- * this module. guards.fcm_token is a mirror maintained by the schema_v63
- * trigger trg_guard_devices_sync_mirror, so the 18 dispatcher READ sites keep
- * working unchanged and are deliberately untouched.
+ * Every path that used to UPDATE guards.fcm_token directly goes through the
+ * write API below (P3), and as of R1 every path that used to SELECT it goes
+ * through the read API at the bottom of this file. guards.fcm_token is now a
+ * mirror with NO consumers: nothing in apps/api reads it and only the
+ * schema_v63 trigger writes it, which is what makes v64's DROP COLUMN safe.
  *
  * WHY THIS EXISTS
  *
@@ -215,5 +216,91 @@ export async function revokeDeviceByToken(token: string): Promise<number> {
   } catch (err) {
     console.error('[deviceRegistry] stale revoke failed for token', token.slice(0, 12), err);
     return 0;
+  }
+}
+
+// ── READ SIDE ──────────────────────────────────────────────────────────────
+//
+// The 18 dispatch sites used to read guards.fcm_token, the schema_v63 mirror.
+// They now read guard_devices directly, so the mirror has no consumers and
+// v64 can drop it. Two mechanisms, deliberately not one:
+//
+//   * batch/joined cron queries take the SQL FRAGMENT below, because their
+//     whole point is one round trip. Calling a helper per row would turn one
+//     query into N+1 across the busiest jobs in the system.
+//   * point lookups and fan-outs take the helpers, because they are already
+//     one query per call and a helper is the smaller diff.
+
+/**
+ * Scalar subquery for a guard's active push token, ALIASED `fcm_token`.
+ *
+ * The alias is load-bearing and must not be "tidied". Every consumer of these
+ * queries reads `row.fcm_token` — roughly thirty references across the eight
+ * cron jobs — and keeping the output name identical means the conversion is
+ * one line per query with zero downstream edits.
+ *
+ * Total by construction: uq_guard_devices_one_active_per_guard permits at
+ * most one active row per guard, so this yields exactly one value or NULL,
+ * never "which one?". NULL where the mirror was NULL, so every existing
+ * `if (row.fcm_token)` branch behaves identically.
+ *
+ *   SELECT g.id, ${ACTIVE_PUSH_TOKEN_SQL('g')} FROM guards g ...
+ */
+export function ACTIVE_PUSH_TOKEN_SQL(guardAlias: string): string {
+  return `(SELECT d.push_token FROM guard_devices d
+            WHERE d.guard_id = ${guardAlias}.id AND d.revoked_at IS NULL) AS fcm_token`;
+}
+
+/**
+ * The guard's active push token, or null.
+ *
+ * CONTRACT — NEVER THROWS ON A MISSING GUARD. A guard id with no row, or a
+ * guard with no active device, both return null rather than raising. This is
+ * not defensive habit: routes/shifts.ts:991 calls its push block
+ * fire-and-forget inside an unawaited async IIFE, so a rejection there is an
+ * unhandled promise rejection rather than a handled error. The previous
+ * `tokRow.rows[0]?.fcm_token` yielded undefined for a missing guard, and this
+ * must stay falsy in exactly the same cases.
+ */
+export async function getActivePushToken(guardId: string): Promise<string | null> {
+  try {
+    const res = await pool.query<{ push_token: string }>(
+      `SELECT push_token FROM guard_devices
+        WHERE guard_id = $1 AND revoked_at IS NULL`,
+      [guardId],
+    );
+    return res.rows[0]?.push_token ?? null;
+  } catch (err) {
+    // A read failure must not become the caller's failure — the caller's job
+    // is to send a best-effort push, and its notifications row is already
+    // written by this point at every one of the call sites.
+    console.error('[deviceRegistry] token lookup failed for guard', guardId, err);
+    return null;
+  }
+}
+
+/**
+ * Active push tokens for several guards, as guard_id -> token.
+ *
+ * A guard with no active device is simply ABSENT from the map, which is the
+ * same shape the old `AND fcm_token IS NOT NULL` queries produced. Same
+ * no-throw contract as getActivePushToken.
+ */
+export async function getActivePushTokens(
+  guardIds: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (guardIds.length === 0) return out;
+  try {
+    const res = await pool.query<{ guard_id: string; push_token: string }>(
+      `SELECT guard_id, push_token FROM guard_devices
+        WHERE guard_id = ANY($1::uuid[]) AND revoked_at IS NULL`,
+      [guardIds],
+    );
+    for (const r of res.rows) out.set(r.guard_id, r.push_token);
+    return out;
+  } catch (err) {
+    console.error('[deviceRegistry] bulk token lookup failed', err);
+    return out;
   }
 }

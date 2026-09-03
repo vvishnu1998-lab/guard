@@ -41,6 +41,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { breakOverlapsWindow } from '../services/pingWindows';
 import { expiresAtFor } from '../services/retention';
@@ -133,7 +134,7 @@ cron.schedule('*/5 * * * *', async () => {
               ss.site_id,
               si.name AS site_name,
               ss.guard_id,
-              g.fcm_token,
+              ${ACTIVE_PUSH_TOKEN_SQL('g')},
               ss.clocked_in_at,
               s.scheduled_start,
               s.scheduled_end,

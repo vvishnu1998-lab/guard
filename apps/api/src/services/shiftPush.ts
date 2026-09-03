@@ -17,6 +17,7 @@
  */
 import { pool } from '../db/pool';
 import { sendPushNotification } from './firebase';
+import { getActivePushToken } from './deviceRegistry';
 import { insertNotification } from './notifications';
 import { Sentry } from './sentry';
 
@@ -162,11 +163,7 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
         shiftSessionId: null,
       });
 
-      const tokRow = await pool.query<{ fcm_token: string | null }>(
-        'SELECT fcm_token FROM guards WHERE id = $1',
-        [guardId],
-      );
-      const token = tokRow.rows[0]?.fcm_token;
+      const token = await getActivePushToken(guardId);
       if (!token) {
         Sentry.captureMessage('push_skip_null_token', {
           level: 'warning',

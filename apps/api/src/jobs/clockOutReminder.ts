@@ -77,6 +77,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { Sentry } from '../services/sentry';
 
@@ -133,7 +134,7 @@ export async function runClockOutReminder(): Promise<number> {
         RETURNING ss.id                AS session_id,
                   ss.guard_id          AS guard_id,
                   g.name               AS guard_name,
-                  g.fcm_token          AS fcm_token,
+                  ${ACTIVE_PUSH_TOKEN_SQL('g')},
                   si.name              AS site_name,
                   sh.id                AS shift_id,
                   sh.scheduled_end     AS scheduled_end,

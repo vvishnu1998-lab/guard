@@ -38,6 +38,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { sendMissedShiftAlert } from '../services/email';
 import { Sentry } from '../services/sentry';
@@ -124,7 +125,7 @@ cron.schedule('*/5 * * * *', async () => {
       `SELECT s.id AS shift_id,
               s.scheduled_start,
               st.name AS site_name,
-              g.id AS guard_id, g.name AS guard_name, g.fcm_token,
+              g.id AS guard_id, g.name AS guard_name, ${ACTIVE_PUSH_TOKEN_SQL('g')},
               GREATEST(0, EXTRACT(EPOCH FROM (NOW() - s.scheduled_start)) / 60)::INT AS minutes_late,
               s.late_10_reminder_sent_at,
               s.late_15_reminder_sent_at,

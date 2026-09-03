@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { getActivePushTokens } from '../services/deviceRegistry';
 import { validateAtSite } from '../services/geofence';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
@@ -232,18 +233,24 @@ router.post('/templates', requireAuth('company_admin'), async (req, res) => {
   res.status(201).json(result.rows[0]);
 
   // F5: push to guards currently on shift at this site — non-blocking
-  pool.query<{ fcm_token: string }>(
-    `SELECT g.fcm_token
+  // The guard list comes FROM this query, so the token filter cannot be a
+  // subquery predicate without duplicating it. It moves client-side instead:
+  // guards with no active device drop out of the map and are filtered below.
+  // Still ONE query for the guard list plus ONE for the tokens — not N+1.
+  pool.query<{ guard_id: string }>(
+    `SELECT ss.guard_id
      FROM shift_sessions ss
-     JOIN guards g ON g.id = ss.guard_id
-     WHERE ss.site_id = $1 AND ss.clocked_out_at IS NULL AND g.fcm_token IS NOT NULL`,
+     WHERE ss.site_id = $1 AND ss.clocked_out_at IS NULL`,
     [site_id]
-  ).then(({ rows }) => {
+  ).then(async ({ rows }) => {
     if (!rows.length) return;
+    const tokens = await getActivePushTokens(rows.map((r) => r.guard_id));
+    const targets = [...tokens.values()];
+    if (!targets.length) return;
     return Promise.allSettled(
-      rows.map((r) =>
+      targets.map((tok) =>
         sendPushNotification({
-          token: r.fcm_token,
+          token: tok,
           title: 'New task',
           body:  title ?? 'A new task has been assigned to your site.',
           data:  { type: 'task_assigned', site_id },

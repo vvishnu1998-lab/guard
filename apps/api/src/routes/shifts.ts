@@ -9,6 +9,7 @@ import { streamS3Object, extractS3Key, headS3Object } from '../services/s3';
 import { idempotent } from '../services/idempotency';
 import { validatePhotoOrQuarantine } from '../services/photoValidation';
 import { sendPushNotification } from '../services/firebase';
+import { getActivePushTokens, getActivePushToken } from '../services/deviceRegistry';
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { clearScheduleDerivedLatches } from '../services/shiftLatches';
@@ -767,12 +768,12 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     // ── Best-effort FCM pushes (Imp 1a will verify e2e on devices) ───────
     // Both wrapped in try/catch so a push failure does NOT undo the
     // committed reassignment. Pulled OUT of the transaction by design.
-    const tokensRes = await pool.query(
-      `SELECT id, fcm_token FROM guards WHERE id IN ($1, $2) AND fcm_token IS NOT NULL`,
-      [new_guard_id, shift.old_guard_id ?? new_guard_id],
-    );
-    const tokenByGuardId: Record<string, string> = {};
-    for (const row of tokensRes.rows) tokenByGuardId[row.id] = row.fcm_token;
+    // getActivePushTokens returns the same guard_id -> token map this block
+    // used to build by hand, and omits a guard with no active device exactly
+    // as the old `AND fcm_token IS NOT NULL` did.
+    const tokenByGuardId = await getActivePushTokens([
+      new_guard_id, shift.old_guard_id ?? new_guard_id,
+    ]);
 
     const startIso = new Date(shift.scheduled_start).toISOString();
     const dateLabel = new Date(shift.scheduled_start).toLocaleDateString('en-US', {
@@ -780,7 +781,7 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
       timeZone: (shift.site_tz as string | null) ?? 'America/Los_Angeles',
     });
 
-    const newToken = tokenByGuardId[new_guard_id];
+    const newToken = tokenByGuardId.get(new_guard_id);
     if (newToken) {
       sendPushNotification({
         token: newToken,
@@ -987,11 +988,7 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
     if (shift.guard_id) {
       (async () => {
         try {
-          const tokRow = await pool.query<{ fcm_token: string | null }>(
-            'SELECT fcm_token FROM guards WHERE id = $1',
-            [shift.guard_id],
-          );
-          const token = tokRow.rows[0]?.fcm_token;
+          const token = await getActivePushToken(shift.guard_id);
           if (!token) return;
           const tz = (shift.site_tz as string | null) ?? 'America/Los_Angeles';
           const dayLabel = new Intl.DateTimeFormat('en-US', {
@@ -1287,12 +1284,11 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
         hour: 'numeric', minute: '2-digit', timeZone: tz,
       }).format(newEnd);
 
-      pool.query(
-        'SELECT fcm_token FROM guards WHERE id = $1 AND fcm_token IS NOT NULL',
-        [shift.guard_id],
-      )
-        .then(({ rows }) => {
-          const token = rows[0]?.fcm_token;
+      // The old query carried `AND fcm_token IS NOT NULL`. That filter is
+      // redundant now: getActivePushToken returns null when the guard has no
+      // active device, which is precisely what the guard below branches on.
+      getActivePushToken(shift.guard_id)
+        .then((token) => {
           if (!token) return;
           return sendPushNotification({
             token,

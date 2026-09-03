@@ -21,6 +21,7 @@
 import cron from 'node-cron';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
+import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { Sentry } from '../services/sentry';
 
@@ -42,7 +43,7 @@ cron.schedule('*/5 * * * *', async () => {
     const { rows } = await pool.query<CandidateRow>(
       `SELECT s.id AS shift_id, s.scheduled_start,
               st.name AS site_name,
-              g.id AS guard_id, g.name AS guard_name, g.fcm_token
+              g.id AS guard_id, g.name AS guard_name, ${ACTIVE_PUSH_TOKEN_SQL('g')}
        FROM shifts s
        JOIN sites  st ON st.id = s.site_id
        LEFT JOIN guards g ON g.id = s.guard_id

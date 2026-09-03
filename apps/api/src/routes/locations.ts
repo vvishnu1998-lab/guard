@@ -7,6 +7,7 @@ import { isAllowedContentType, magicMatches, describeMagic } from '../services/i
 import { insertNotification } from '../services/notifications';
 import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
 import { sendPushNotification } from '../services/firebase';
+import { getActivePushToken } from '../services/deviceRegistry';
 import { expiresAtFor } from '../services/retention';
 import { scheduleWindows } from '../services/pingWindows';
 import { readShadowSignals } from '../services/shadowSignals';
@@ -160,11 +161,7 @@ export async function fireBreachAlerts(params: {
   // On a permanently-stale token (unregistered device), null the column so
   // we stop retrying on every future breach.
   try {
-    const guardTok = await pool.query<{ fcm_token: string | null }>(
-      'SELECT fcm_token FROM guards WHERE id = $1',
-      [params.guardId],
-    );
-    const token = guardTok.rows[0]?.fcm_token;
+    const token = await getActivePushToken(params.guardId);
     if (token) {
       await sendPushNotification({
         token,

@@ -41,6 +41,7 @@ import { pool } from '../db/pool';
 import { Sentry } from '../services/sentry';
 import { insertNotification } from '../services/notifications';
 import { sendPushNotification } from '../services/firebase';
+import { getActivePushToken } from '../services/deviceRegistry';
 import { validateAtSite } from '../services/geofence';
 
 export interface ExpiredBreak {
@@ -182,11 +183,7 @@ async function pushWithAlertRow(params: {
     shiftSessionId: params.shiftSessionId,
   });
 
-  const tokRow = await pool.query<{ fcm_token: string | null }>(
-    'SELECT fcm_token FROM guards WHERE id = $1',
-    [params.guardId],
-  );
-  const token = tokRow.rows[0]?.fcm_token;
+  const token = await getActivePushToken(params.guardId);
   if (!token) return; // Alerts row already written — feed stays truthful
 
   await sendPushNotification({
