@@ -24,13 +24,14 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
-  MapContainer, TileLayer, Polygon as LPolygon, Circle, CircleMarker, Popup, useMap,
+  MapContainer, TileLayer, Polygon as LPolygon, Circle, CircleMarker, Marker, Popup, useMap,
 } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { computeLateness, isPingStale, PING_STALE_MINUTES } from '../../lib/lateness';
+import { hasUsablePolygon, hasUsableCircle, type LatLng } from '../../lib/siteFence';
 
-export interface LatLng { lat: number; lng: number }
+export type { LatLng };
 
 /** Structural subset of the page's LiveGuard — anything wider is assignable. */
 export interface LiveMapGuard {
@@ -46,6 +47,11 @@ export interface LiveMapGuard {
   has_violation:         boolean;
   last_accuracy_m?:      number | null;
   last_location_mocked?: boolean | null;
+  /** Whichever of ping / clock-in supplied last_lat/last_lng. Optional so an
+   *  API predating the fallback still renders — there, a pin can only have
+   *  come from a ping, so the undefined case reads as 'ping'. */
+  last_position_at?:     string | null;
+  last_position_source?: 'ping' | 'clock_in' | null;
 }
 
 /** Structural subset of GET /api/sites. Geofence fields are LEFT JOINed
@@ -70,6 +76,16 @@ export interface LiveMapBreach {
   site_name:      string;
   occurred_at:    string;
   is_resolved:    boolean;
+  /** IANA zone of the site, for the EXITED time on a site-anchored badge. */
+  site_timezone?: string;
+  /**
+   * Provenance of violation_lat/lng (schema_v65). 'site' means those
+   * coordinates ARE the fence centre and locate the post, not the guard.
+   * Optional, and undefined is treated as 'site' — during a web-ahead-of-API
+   * window the source is unknown, and an unknown source must never be drawn
+   * as a position.
+   */
+  position_source?: 'site' | 'background' | 'foreground' | null;
 }
 
 interface Props {
@@ -97,31 +113,66 @@ const NAVY          = '#0B1526';
 
 const SF_FALLBACK: LatLng = { lat: 37.7749, lng: -122.4194 };
 
-/**
- * A polygon is only usable with three or more finite vertices. Mirrors the
- * mobile guard in apps/mobile/utils/geofence.ts — polygon_coordinates is a
- * jsonb column with no shape constraint, so a malformed value has to be
- * survivable rather than fatal.
- */
-function hasUsablePolygon(p: LatLng[] | null | undefined): p is LatLng[] {
-  return Array.isArray(p) && p.length >= 3 &&
-    p.every((v) => Number.isFinite(v?.lat) && Number.isFinite(v?.lng));
-}
-
-function hasUsableCircle(s: LiveMapSite): boolean {
-  return Number.isFinite(s.center_lat) && Number.isFinite(s.center_lng) &&
-    Number.isFinite(s.radius_meters) && (s.radius_meters as number) > 0;
-}
-
-function pinColour(g: LiveMapGuard): string {
-  if (g.has_violation) return PIN_VIOLATION;
-  if (isPingStale(g.last_ping_at)) return PIN_STALE;
-  return PIN_OK;
-}
-
 function hasCoords(g: LiveMapGuard): boolean {
   return Number.isFinite(g.last_lat) && Number.isFinite(g.last_lng);
 }
+
+/** The instant last_lat/last_lng was measured, whichever source gave it.
+ *  Falls back to the ping timestamp for an API predating the field. */
+function positionAt(g: LiveMapGuard): string | null {
+  return g.last_position_at ?? g.last_ping_at;
+}
+
+/** A clock-in point is a position, but it is not a check-in — it is where
+ *  the guard was when the shift started and says nothing about now. Drawn
+ *  hollow so it is never mistaken for a live fix. */
+function isClockInPin(g: LiveMapGuard): boolean {
+  return g.last_position_source === 'clock_in';
+}
+
+/** Staleness now measures the POSITION, not the ping: a clock-in-only guard
+ *  goes gold 35 minutes in, which is the honest reading — nothing has
+ *  confirmed their whereabouts since. */
+function pinColour(g: LiveMapGuard): string {
+  if (g.has_violation) return PIN_VIOLATION;
+  if (isPingStale(positionAt(g))) return PIN_STALE;
+  return PIN_OK;
+}
+
+/** HH:MM as read AT THE SITE. Without an explicit zone this would render in
+ *  whatever zone the admin's browser is in, so a 22:35 exit in California
+ *  reads 11:05 the next morning in India — the same bug fmtBreachTime on the
+ *  page was written to fix. */
+function fmtSiteTime(iso: string, timeZone?: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '--:--';
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone, hour: '2-digit', minute: '2-digit',
+  }).format(new Date(t));
+}
+
+/**
+ * "EXITED HH:MM" as a Leaflet divIcon. A divIcon carries our own markup and
+ * never touches Leaflet's default marker PNGs, so this stays clear of the
+ * webpack icon-path problem GeofenceMapEditor has to patch around.
+ * iconAnchor puts the tip of the badge on the coordinate.
+ */
+function exitBadgeIcon(hhmm: string): L.DivIcon {
+  return L.divIcon({
+    className: 'livemap-exit-badge',
+    html: `<span>EXITED ${hhmm}</span>`,
+    iconSize:   [96, 20],
+    iconAnchor: [48, 22],
+  });
+}
+
+/** Undefined source is treated as 'site'. A ring asserts "the guard was
+ *  HERE"; on an unknown provenance that assertion is unsupported, and the
+ *  whole point of this column is that the map stopped making it. */
+function isSiteAnchored(b: LiveMapBreach): boolean {
+  return (b.position_source ?? 'site') === 'site';
+}
+
 
 /** "2h 05m ago". Safe in render: this component never server-renders
  *  (ssr: false), so a wall-clock read cannot cause a hydration mismatch. */
@@ -190,6 +241,13 @@ const POPUP_CSS = `
   background: rgba(11,21,38,0.75); color: #6B7280; font-size: 10px;
 }
 .livemap .leaflet-control-attribution a { color: #9CA3AF; }
+.livemap .livemap-exit-badge { background: none; border: 0; }
+.livemap .livemap-exit-badge span {
+  display: inline-block; white-space: nowrap;
+  background: rgba(127,29,29,0.95); border: 1px solid #EF4444; border-radius: 4px;
+  color: #FECACA; font-size: 10px; letter-spacing: 0.12em; font-weight: 700;
+  padding: 2px 6px; transform: translateX(-50%); margin-left: 48px;
+}
 `;
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -276,30 +334,74 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
             </Fragment>
           ))}
 
-          {openBreach.map((b) => (
-            <CircleMarker
-              key={`breach-${b.id}`}
-              center={[b.violation_lat, b.violation_lng]}
-              radius={13}
-              pathOptions={{ color: PIN_VIOLATION, weight: 3, fill: false }}
-            >
+          {openBreach.map((b) => {
+            const siteAnchored = isSiteAnchored(b);
+            const popup = (
               <Popup>
-                <div className="min-w-[180px]">
+                <div className="min-w-[190px]">
                   <p className="text-red-400 text-[10px] tracking-widest font-bold mb-1">OPEN BREACH</p>
                   <p className="text-gray-100 text-sm font-semibold">{b.guard_name}</p>
-                  <p className="text-gray-500 font-mono text-[11px] mb-2">{b.badge_number} · {b.site_name}</p>
+                  <p className="text-gray-500 font-mono text-[11px] pb-1">{b.badge_number} · {b.site_name}</p>
                   <Field label="OCCURRED">{clockTime(b.occurred_at)} · {ago(b.occurred_at)}</Field>
+                  <Field label="MARKER">
+                    {siteAnchored
+                      ? 'post boundary — the guard\u2019s position at exit was not reported'
+                      : b.position_source === 'background'
+                        ? 'device fix, background task'
+                        : 'device fix, app in use'}
+                  </Field>
                 </div>
               </Popup>
-            </CircleMarker>
-          ))}
+            );
+
+            // SITE-ANCHORED. violation_lat/lng here IS the fence centre the
+            // app registered — the OS region monitor hands the Exit handler
+            // region.latitude/longitude, not a device fix. Anchoring the
+            // badge at those coordinates is therefore exact AND shows the
+            // fence as the app knew it, which is better than looking up the
+            // current fence: an admin who moved the boundary mid-shift has
+            // not moved the boundary the handset is still watching.
+            //
+            // Rendered as a labelled badge, never a ring: a ring says "the
+            // guard was here", and that is the claim this coordinate cannot
+            // support. The label says what is actually known — that they
+            // left, and when.
+            if (siteAnchored) {
+              return (
+                <Marker
+                  key={`breach-${b.id}`}
+                  position={[b.violation_lat, b.violation_lng]}
+                  icon={exitBadgeIcon(fmtSiteTime(b.occurred_at, b.site_timezone))}
+                >
+                  {popup}
+                </Marker>
+              );
+            }
+
+            // A real device fix — draw it as a position, which is what it is.
+            return (
+              <CircleMarker
+                key={`breach-${b.id}`}
+                center={[b.violation_lat, b.violation_lng]}
+                radius={13}
+                pathOptions={{ color: PIN_VIOLATION, weight: 3, fill: false }}
+              >
+                {popup}
+              </CircleMarker>
+            );
+          })}
 
           {pinned.map((g) => (
             <CircleMarker
               key={g.id}
               center={[g.last_lat as number, g.last_lng as number]}
               radius={8}
-              pathOptions={{ color: NAVY, weight: 2, fillColor: pinColour(g), fillOpacity: 0.95 }}
+              // Hollow = clock-in point (a stale start-of-shift fix), filled
+              // = a ping the guard actually submitted. Colour carries urgency
+              // in both cases; fill carries confidence.
+              pathOptions={isClockInPin(g)
+                ? { color: pinColour(g), weight: 3, fill: true, fillColor: NAVY, fillOpacity: 0.85 }
+                : { color: NAVY, weight: 2, fillColor: pinColour(g), fillOpacity: 0.95 }}
               eventHandlers={{ click: handlePinClick(g.id) }}
             >
               <Popup>
@@ -307,11 +409,16 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
                   <p className="text-gray-100 text-sm font-semibold">{g.name}</p>
                   <p className="text-gray-500 font-mono text-[11px] pb-1">{g.badge_number} · {g.site_name}</p>
                   <Field label="CLOCKED IN">{clockTime(g.clocked_in_at)}</Field>
+                  <Field label="POSITION">
+                    <span className={isClockInPin(g) ? 'text-amber-300' : 'text-gray-300'}>
+                      {isClockInPin(g) ? 'clock-in' : 'ping'} {clockTime(positionAt(g))}
+                    </span>
+                    <span className={isPingStale(positionAt(g)) ? 'text-amber-400' : 'text-gray-500'}>
+                      {' · '}{ago(positionAt(g))}
+                    </span>
+                  </Field>
                   <Field label="LAST PING">
                     {computeLateness(g.last_ping_at, [0, 30]).display}
-                    <span className={isPingStale(g.last_ping_at) ? 'text-amber-400' : 'text-gray-500'}>
-                      {' · '}{ago(g.last_ping_at)}
-                    </span>
                   </Field>
                   <Field label="ACCURACY">
                     {Number.isFinite(g.last_accuracy_m)
@@ -360,6 +467,12 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full" style={{ background: PIN_VIOLATION }} />BREACH
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="w-2 h-2 rounded-full border-2"
+              style={{ borderColor: PIN_STALE, background: NAVY }}
+            />CLOCK-IN POINT
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-3 h-0 border-t-2 border-dashed" style={{ borderColor: FENCE_CYAN }} />GEOFENCE

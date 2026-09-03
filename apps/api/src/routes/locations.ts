@@ -440,6 +440,8 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       guardId:        req.user!.sub,
       siteId:         site_id,
       source:         'ping_reject',
+      // The rejected ping's own coordinates — a device fix the app measured.
+      positionSource: 'foreground',
       lat:            latitude,
       lng:            longitude,
       accuracyM:      accuracyM,
@@ -623,8 +625,23 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
 //     and decides whether to actually push+email. insertNotification
 //     always runs so the Alerts feed reflects every event even when we
 //     suppress the noisy channels.
+// Accepted values for POST /violation's optional position_source. Build 48
+// and earlier send nothing at all and take the 'site' default, which is the
+// truth for them: their Exit handler posts region.latitude/longitude, i.e.
+// the fence centre the app registered. Build 49 starts sending a real device
+// fix and will say so explicitly.
+const POSITION_SOURCES = new Set(['site', 'background', 'foreground']);
+
 router.post('/violation', requireAuth('guard'), async (req, res) => {
-  const { shift_session_id, latitude, longitude, photo_url } = req.body;
+  const { shift_session_id, latitude, longitude, photo_url, position_source } = req.body;
+
+  // Absent -> 'site'. Present but unknown -> 400 rather than a silent
+  // coercion: a client that thinks it is reporting provenance and is being
+  // ignored is worse than one that is told it is wrong.
+  const positionSource: string = position_source ?? 'site';
+  if (!POSITION_SOURCES.has(positionSource)) {
+    return res.status(400).json({ error: 'Invalid position_source.' });
+  }
 
   const sessionResult = await pool.query<{ site_id: string; clocked_out_at: Date | null }>(
     'SELECT site_id, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
@@ -707,6 +724,12 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
       guardId,
       siteId,
       source:         'break_exit',
+      // These coordinates arrive in the /violation body, which the native
+      // region monitor fills with region.latitude/longitude — the fence
+      // centre, not the guard. Recorded as 'site' regardless of what the
+      // handler was told, because a break-exit row is written from the same
+      // body whatever position_source claims about it.
+      positionSource: 'site',
       lat:            haveCoords ? latitude  : null,
       lng:            haveCoords ? longitude : null,
       accuracyM:      null,
@@ -729,12 +752,13 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
 
   const insertResult = await pool.query(
     `INSERT INTO geofence_violations
-       (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at,
+        position_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
      RETURNING *`,
     [shift_session_id, guardId, siteId, latitude, longitude, photo_url || null,
-     expiresAtFor('geofence_violation')]
+     expiresAtFor('geofence_violation'), positionSource]
   );
 
   // Resolve the row we'll return + the violationId we'll pass to the

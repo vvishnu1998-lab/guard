@@ -736,12 +736,18 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
       await client.query('SAVEPOINT violation_insert');
       try {
         const violationInsert = await client.query(
+          // 'foreground': these are the REPORT's coordinates, a fix the app
+          // measured with the guard holding it — not the fence centre the
+          // background task posts. This is the writer that made a blanket
+          // 'site' default wrong (schema_v65 header).
           `INSERT INTO geofence_violations
-             (shift_session_id, guard_id, site_id, violation_lat, violation_lng, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6)
+             (shift_session_id, guard_id, site_id, violation_lat, violation_lng, expires_at,
+              position_source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
            RETURNING id`,
-          [shift_session_id, req.user!.sub, site_id, latitude, longitude, expiresAtFor('geofence_violation')],
+          [shift_session_id, req.user!.sub, site_id, latitude, longitude,
+           expiresAtFor('geofence_violation'), 'foreground'],
         );
         if (violationInsert.rows[0]) {
           violationId = violationInsert.rows[0].id;
@@ -799,6 +805,8 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
         guardId:        req.user!.sub,
         siteId:         site_id,
         source:         'incident_break',
+        // The report's own coordinates — a device fix, same as ping_reject.
+        positionSource: 'foreground',
         lat:            haveCoords ? latitude  : null,
         lng:            haveCoords ? longitude : null,
         accuracyM:      haveCoords ? accuracy  : null,
