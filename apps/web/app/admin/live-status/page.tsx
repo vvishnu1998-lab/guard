@@ -17,6 +17,10 @@ import { computeLateness, isPingStale } from '../../../lib/lateness';
 // Leaflet touches `window` on import, so the map panel must never be part
 // of the server bundle. Same contract GeofenceMapEditor is loaded under
 // (app/admin/sites/page.tsx:25).
+// From lib/, NOT from the map component: importing it there would pull
+// Leaflet into the server bundle and break the prerender.
+import { siteFenceCentre } from '../../../lib/siteFence';
+
 const LiveMap = dynamic(() => import('../../../components/admin/LiveMap'), {
   ssr: false,
   loading: () => (
@@ -45,6 +49,10 @@ interface LiveGuard {
    *  last_location_mocked is null on iOS, which exposes no mock flag. */
   last_accuracy_m?:      number | null;
   last_location_mocked?: boolean | null;
+  /** Added with the clock-in fallback. Optional per the stale-API rule —
+   *  an older API returns neither and the map reads the pin as a ping. */
+  last_position_at?:     string | null;
+  last_position_source?: 'ping' | 'clock_in' | null;
 }
 
 interface Breach {
@@ -63,6 +71,9 @@ interface Breach {
    *  ahead of the API: Intl reads an undefined timeZone as "the browser's",
    *  which is exactly what this page did before the field existed. */
   site_timezone?:   string;
+  /** schema_v65. 'site' (and undefined, during a web-ahead-of-API window)
+   *  means violation_lat/lng is the fence centre, not a position. */
+  position_source?: 'site' | 'background' | 'foreground' | null;
 }
 
 type SinceFilter  = '24h' | '7d' | '30d';
@@ -460,9 +471,17 @@ export default function LiveMapPage() {
                     else    guardRowRefs.current.delete(g.id);
                   }}
                   onClick={() => {
-                    if (locatable) setMapFocus({ lat: g.last_lat as number, lng: g.last_lng as number });
+                    if (locatable) {
+                      setMapFocus({ lat: g.last_lat as number, lng: g.last_lng as number });
+                      return;
+                    }
+                    // No fix at all — not even a clock-in. Send the viewport
+                    // to their post rather than doing nothing: the admin
+                    // still learns where this guard is supposed to be.
+                    const fence = siteFenceCentre(sitesList, g.site_name);
+                    if (fence) setMapFocus({ lat: fence.lat, lng: fence.lng });
                   }}
-                  title={locatable ? 'Show on map' : 'No location for this guard yet'}
+                  title={locatable ? 'Show on map' : 'No fix yet — show this guard\u2019s post'}
                   className={`border-b border-[#1A3050] transition-colors ${
                     g.has_violation ? 'bg-red-950/30 hover:bg-red-950/50' : 'hover:bg-[#0B1526]'
                   } ${locatable ? 'cursor-pointer' : ''} ${
