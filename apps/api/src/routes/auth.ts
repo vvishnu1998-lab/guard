@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { AuthPayload, requireAuth, secretForRole } from '../middleware/auth';
 import { sendTempPasswordEmail } from '../services/email';
 import { Sentry } from '../services/sentry';
+import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 
 const router = Router();
 
@@ -78,14 +79,16 @@ router.post('/guard/login', async (req: Request, res: Response) => {
               WHERE gsa_all.guard_id = g.id) AS total_assignments,
             (SELECT COUNT(*)::int FROM guard_site_assignments gsa_cur
               WHERE gsa_cur.guard_id = g.id
-                AND gsa_cur.assigned_from <= CURRENT_DATE
-                AND (gsa_cur.assigned_until IS NULL OR gsa_cur.assigned_until >= CURRENT_DATE)
+                AND gsa_cur.assigned_from <= (NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})::date
+                AND (gsa_cur.assigned_until IS NULL
+                     OR gsa_cur.assigned_until >= (NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})::date)
             ) AS current_assignments,
             (SELECT bool_or(s2.is_active) FROM guard_site_assignments gsa_act
                JOIN sites s2 ON s2.id = gsa_act.site_id
               WHERE gsa_act.guard_id = g.id
-                AND gsa_act.assigned_from <= CURRENT_DATE
-                AND (gsa_act.assigned_until IS NULL OR gsa_act.assigned_until >= CURRENT_DATE)
+                AND gsa_act.assigned_from <= (NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})::date
+                AND (gsa_act.assigned_until IS NULL
+                     OR gsa_act.assigned_until >= (NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})::date)
             ) AS any_current_site_active
      FROM guards g
      JOIN companies c ON c.id = g.company_id
