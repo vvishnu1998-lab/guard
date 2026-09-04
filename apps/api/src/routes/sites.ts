@@ -5,6 +5,7 @@ import { pool } from '../db/pool';
 import { uploadBufferToS3, urlOrPresign } from '../services/s3';
 import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
+import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 
 /**
  * Common gate: 409 if the target site has been deactivated. Used on every
@@ -348,7 +349,8 @@ router.get('/:id/deactivate-preview', requireAuth('company_admin'), async (req, 
             AND clocked_out_at IS NULL) AS active_sessions,
        (SELECT COUNT(*) FROM guard_site_assignments
           WHERE site_id = $1
-            AND (assigned_until IS NULL OR assigned_until >= CURRENT_DATE)) AS open_assignments`,
+            AND (assigned_until IS NULL
+                 OR assigned_until >= (NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})::date)) AS open_assignments`,
     [req.params.id],
   );
   const row = preview.rows[0];
