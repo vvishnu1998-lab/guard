@@ -894,9 +894,19 @@ router.get('/kpis', requireAuth('company_admin'), async (req, res) => {
       [cid]
     ),
     pool.query(
+      // "Today" is the site's local day, not UTC's. Railway runs the pg
+      // session at TimeZone=Etc/UTC, so `>= CURRENT_DATE` began today at
+      // 17:00 PT and every report filed before 5pm dropped out of the card.
+      // Measured 2026-09-03: Bethel AME filed 11 reports, this read 2.
+      // The bound is computed from NOW() rather than wrapping the column, so
+      // reported_at stays bare and any index on it stays usable. Company-
+      // scoped scalar, so a Pacific literal — there is no single s.timezone
+      // to anchor on across a company's sites.
       `SELECT COUNT(*) FROM reports r
        JOIN sites s ON s.id = r.site_id
-       WHERE s.company_id = $1 AND r.reported_at >= CURRENT_DATE`,
+       WHERE s.company_id = $1
+         AND r.reported_at >= (DATE_TRUNC('day', NOW() AT TIME ZONE 'America/Los_Angeles')
+                               AT TIME ZONE 'America/Los_Angeles')`,
       [cid]
     ),
     pool.query(
@@ -1134,7 +1144,13 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
          SELECT COUNT(DISTINCT ss2.guard_id) FROM shift_sessions ss2
           WHERE ss2.site_id = s.id AND ss2.clocked_out_at IS NULL
        ), 0) AS guard_count,
-       COUNT(DISTINCT r.id) FILTER (WHERE r.reported_at >= CURRENT_DATE) AS reports_today,
+       -- Same UTC-midnight defect as GET /api/admin/kpis, fixed the same way.
+       -- This query already joins sites s, so it anchors on the site's own
+       -- timezone rather than a Pacific literal.
+       COUNT(DISTINCT r.id) FILTER (
+         WHERE r.reported_at >= (DATE_TRUNC('day', NOW() AT TIME ZONE s.timezone)
+                                 AT TIME ZONE s.timezone)
+       ) AS reports_today,
        -- Legacy scalar: sum of stored total_hours this week. Kept for
        -- back-compat until the web dashboard consumes hours_this_week
        -- from the new 4-field object below.
