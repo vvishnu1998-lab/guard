@@ -373,7 +373,7 @@ router.get('/:id/deactivate-preview', requireAuth('company_admin'), async (req, 
 //     shifts.status = 'cancelled' + cancellation_reason = 'site_deactivated'
 //       for FUTURE scheduled shifts only (scheduled_start > NOW()
 //       AND status = 'scheduled'). NEVER touches active/completed/missed.
-//     guard_site_assignments.assigned_until = CURRENT_DATE
+//     guard_site_assignments.assigned_until = today's PACIFIC date
 //       for currently-open assignments only.
 //   After commit: best-effort FCM push to each affected guard.
 //   Historical rows (shift_sessions, reports, task_completions,
@@ -440,10 +440,15 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
       [req.params.id],
     );
     const closed = await client.query<{ id: string; guard_id: string | null }>(
+      // Pacific, not CURRENT_DATE: the session runs Etc/UTC, so from 17:00
+      // PT this stamped TOMORROW's date and the predicate below skipped an
+      // assignment that had already been closed out today -- the assignment
+      // stayed live an extra Pacific day past the site's deactivation.
       `UPDATE guard_site_assignments
-          SET assigned_until = CURRENT_DATE
+          SET assigned_until = (NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})::date
         WHERE site_id = $1
-          AND (assigned_until IS NULL OR assigned_until > CURRENT_DATE)
+          AND (assigned_until IS NULL
+               OR assigned_until > (NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})::date)
         RETURNING id, guard_id`,
       [req.params.id],
     );
