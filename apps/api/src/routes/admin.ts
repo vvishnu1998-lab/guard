@@ -4,6 +4,7 @@ import PDFDocument from 'pdfkit';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { siteLocalDayRange } from '../services/dateRange';
+import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 import bcrypt from 'bcrypt';
 import { validatePassword, logEvent } from './auth';
 import { generateTempPassword } from '../utils/tempPassword';
@@ -1157,7 +1158,8 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
        COALESCE((
          SELECT SUM(ss2.total_hours) FROM shift_sessions ss2
           WHERE ss2.site_id = s.id
-            AND ss2.clocked_in_at >= DATE_TRUNC('week', NOW())
+            AND ss2.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
+                                       AT TIME ZONE s.timezone)
        ), 0) AS hours_this_week,
        -- Phase 1 — 4-field canonical hours, summed this week per site.
        -- scheduled_hours here sums each shift's window (deduped by shift_id
@@ -1170,21 +1172,24 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
                FROM shifts sh
                JOIN shift_sessions ss3 ON ss3.shift_id = sh.id
               WHERE ss3.site_id = s.id
-                AND ss3.clocked_in_at >= DATE_TRUNC('week', NOW())
+                AND ss3.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
+                                           AT TIME ZONE s.timezone)
            ) sched
        ), 0) AS h_scheduled,
        COALESCE((
          SELECT ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss4.clocked_out_at, NOW()) - ss4.clocked_in_at))/3600.0)) AS NUMERIC), 2)
            FROM shift_sessions ss4
           WHERE ss4.site_id = s.id
-            AND ss4.clocked_in_at >= DATE_TRUNC('week', NOW())
+            AND ss4.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
+                                       AT TIME ZONE s.timezone)
        ), 0) AS h_actual,
        COALESCE((
          SELECT ROUND(CAST(SUM(${BREAK_HOURS_ROW_SQL('bs', 'ss5')}) AS NUMERIC), 2)
            FROM break_sessions bs
            JOIN shift_sessions ss5 ON ss5.id = bs.shift_session_id
           WHERE ss5.site_id = s.id
-            AND ss5.clocked_in_at >= DATE_TRUNC('week', NOW())
+            AND ss5.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
+                                       AT TIME ZONE s.timezone)
        ), 0) AS h_break,
        COALESCE((
          SELECT ROUND(CAST(SUM(${VIOLATION_HOURS_ROW_SQL('gv', 'ss6', 'sh6')}) AS NUMERIC), 2)
@@ -1192,7 +1197,8 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
            JOIN shift_sessions ss6 ON ss6.id = gv.shift_session_id
            JOIN shifts sh6 ON sh6.id = ss6.shift_id
           WHERE ss6.site_id = s.id
-            AND ss6.clocked_in_at >= DATE_TRUNC('week', NOW())
+            AND ss6.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
+                                       AT TIME ZONE s.timezone)
        ), 0) AS h_violation
      FROM sites s
      LEFT JOIN reports r ON r.site_id = s.id
@@ -1458,7 +1464,8 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
                 JOIN shift_sessions ss2 ON ss2.shift_id = sh.id
                 JOIN sites s2 ON s2.id = ss2.site_id
                WHERE s2.company_id = $1
-                 AND ss2.clocked_in_at >= DATE_TRUNC('month', NOW())
+                 AND ss2.clocked_in_at >= (DATE_TRUNC('month', NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})
+                                             AT TIME ZONE ${PACIFIC_TZ_SQL})
             ) sched
         ), 0) AS h_scheduled,
         ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
@@ -1466,7 +1473,8 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
-        AND ss.clocked_in_at >= DATE_TRUNC('month', NOW())
+        AND ss.clocked_in_at >= (DATE_TRUNC('month', NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})
+                                   AT TIME ZONE ${PACIFIC_TZ_SQL})
     `, [cid]),
 
     // Reports by type (last 30 days)
@@ -1512,7 +1520,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
     // + Phase 1 4-field breakdown per (month, site).
     pool.query(`
       SELECT
-        TO_CHAR(DATE_TRUNC('month', ss.clocked_in_at), 'Mon YYYY') AS month,
+        TO_CHAR(DATE_TRUNC('month', ss.clocked_in_at AT TIME ZONE ${PACIFIC_TZ_SQL}), 'Mon YYYY') AS month,
         s.name AS site_name,
         ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS hours,
         ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
@@ -1520,9 +1528,10 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
       WHERE s.company_id = $1
-        AND ss.clocked_in_at >= DATE_TRUNC('month', NOW()) - INTERVAL '5 months'
-      GROUP BY DATE_TRUNC('month', ss.clocked_in_at), s.name
-      ORDER BY DATE_TRUNC('month', ss.clocked_in_at) ASC, s.name
+        AND ss.clocked_in_at >= (DATE_TRUNC('month', NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})
+                                   AT TIME ZONE ${PACIFIC_TZ_SQL}) - INTERVAL '5 months'
+      GROUP BY DATE_TRUNC('month', ss.clocked_in_at AT TIME ZONE ${PACIFIC_TZ_SQL}), s.name
+      ORDER BY DATE_TRUNC('month', ss.clocked_in_at AT TIME ZONE ${PACIFIC_TZ_SQL}) ASC, s.name
     `, [cid]),
   ]);
 

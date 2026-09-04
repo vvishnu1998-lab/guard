@@ -42,3 +42,25 @@ export function pacificTodayStr(now: Date = new Date()): string {
 export function isPastPacificDateString(yyyymmdd: string, now: Date = new Date()): boolean {
   return yyyymmdd < pacificTodayStr(now);
 }
+
+/**
+ * The Pacific zone as a ready-to-interpolate SQL literal, quotes included.
+ *
+ * Postgres has no notion of "the app's timezone": a bare CURRENT_DATE or
+ * DATE_TRUNC(..., NOW()) resolves against the SESSION TimeZone, which on
+ * Railway is Etc/UTC. Every calendar boundary therefore has to name the zone
+ * explicitly, and the string was being retyped at each call site.
+ *
+ * Two shapes use it, both of which keep the compared column BARE so an index
+ * on it stays usable -- the bound is computed from NOW(), not by wrapping the
+ * column:
+ *
+ *   period start:  col >= (DATE_TRUNC('week', NOW() AT TIME ZONE ${PACIFIC_TZ_SQL})
+ *                            AT TIME ZONE ${PACIFIC_TZ_SQL})
+ *   bucketing:     DATE_TRUNC('month', col AT TIME ZONE ${PACIFIC_TZ_SQL})
+ *
+ * Use this ONLY where the query is company- or app-scoped. Where the query
+ * already joins sites, prefer that site's own s.timezone -- see
+ * routes/admin.ts dashboard-sites, which anchors per-site.
+ */
+export const PACIFIC_TZ_SQL = "'America/Los_Angeles'";
