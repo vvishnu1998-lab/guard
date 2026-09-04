@@ -18,6 +18,7 @@ import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { siteLocalDayRange } from '../services/dateRange';
+import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
@@ -437,14 +438,14 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // ── 4. Monthly incident counts (last 3 months) ────────────────────────────────
   const monthlyIncidents = (await pool.query(`
     SELECT
-      TO_CHAR(DATE_TRUNC('month', r.reported_at), 'Mon YYYY') AS month,
-      DATE_TRUNC('month', r.reported_at) AS month_date,
+      TO_CHAR(DATE_TRUNC('month', r.reported_at AT TIME ZONE ${PACIFIC_TZ_SQL}), 'Mon YYYY') AS month,
+      DATE_TRUNC('month', r.reported_at AT TIME ZONE ${PACIFIC_TZ_SQL}) AS month_date,
       r.severity,
       COUNT(*) AS count
     FROM reports r
     WHERE r.site_id = $1 AND r.report_type = 'incident'
       AND r.reported_at >= NOW() - INTERVAL '3 months'
-    GROUP BY DATE_TRUNC('month', r.reported_at), r.severity
+    GROUP BY DATE_TRUNC('month', r.reported_at AT TIME ZONE ${PACIFIC_TZ_SQL}), r.severity
     ORDER BY month_date ASC
   `, [payload.site_id])).rows;
 
