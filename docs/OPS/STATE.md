@@ -189,7 +189,7 @@ See `FREEZES.md` — an unresolved review is a freeze condition.
 | `GET /health/crons` | **404 in production** — the route ships in the Phase 4 branch and is not deployed yet |
 | readonly column revoke | **APPLIED.** `has_column_privilege('claude_readonly','guards','password_hash','SELECT')` → **false** |
 | Sentry cron monitors | **11 exist and are all active**, auto-created by the Phase 2/3 check-ins. Slugs are lowercased by Sentry (`orphanedsessioncheck`, not `orphanedSessionCheck`). Phase 4 turns check-ins off; these 11 must be deleted by hand. |
-| Sentry uptime monitor | id `8024493`, still pointing at `https://www.netraops.com` (the **web** app). **To be repointed at `https://api.netraops.com/health/crons` after merge — but only once that route returns 200.** See `RUNBOOK-phase4-apply.md` step (c)/(d). |
+| Sentry uptime monitor | id `8024493`, still pointing at `https://www.netraops.com` (the **web** app). **To be repointed at `https://api.netraops.com/health/crons` after merge.** With the Phase 4.1 first-tick grace the route answers 200 immediately on a healthy deploy, so no waiting period applies. See `RUNBOOK-phase4-apply.md` step (d). |
 | local `.env` | **now points at local Postgres** `127.0.0.1:5432/guard_dev`. The production URL moved to `~/guard/.env.prod` (gitignored, mode 600). |
 
 ### Production table count

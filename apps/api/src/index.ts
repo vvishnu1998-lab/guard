@@ -141,23 +141,23 @@ app.get('/health', async (_req, res) => {
 // nothing else, so a wedged job leaves it returning {"status":"ok"}. This
 // route is the thing an external uptime monitor should watch.
 //
-// A job is STALE when it has no cron_heartbeats row at all, or its row is
-// older than TWICE its own interval. 2x absorbs one skipped tick without
-// alarming; anything beyond that is a real gap.
+// A job that HAS a heartbeat row is STALE when the row is older than TWICE its
+// own interval. 2x absorbs one skipped tick without alarming; beyond that is a
+// real gap.
 //
-// ACCEPTED v1 LIMIT -- detection lag scales with the interval. The */5 and
-// per-minute jobs are flagged within 10 minutes and 2 minutes. But the daily
-// jobs (dailyShiftEmail, locationIntegrityCron, nightlyPurge) take up to 48
-// HOURS to be flagged, and monthlyHoursReport takes about 62 DAYS. A better
-// scheme would compare against the next expected fire time rather than a
-// multiple of the interval; that needs a real cron parser and is out of scope
-// for v1.
+// A job that has NEVER ticked is stale only once it has been REGISTERED for
+// longer than that same 2x window (Phase 4.1). Before that, "no row" means
+// "not due yet" -- the normal state of a daily job seconds after a deploy.
+// Without the grace, this route returned 503 from deploy until all 19 jobs had
+// fired, which from a fresh database is up to a month.
 //
-// NOTE ON FIRST DEPLOY -- a job that has never ticked has no row and counts as
-// stale, so this route returns 503 until every job has fired at least once.
-// The four daily/monthly jobs mean that takes up to a month from a fresh
-// database. Repoint the uptime monitor only once this returns 200, or it will
-// alarm continuously. See docs/OPS/RUNBOOK-phase4-apply.md step (c).
+// ACCEPTED v1 LIMIT -- detection lag scales with the interval, under both
+// halves of the rule. The */5 and per-minute jobs are flagged within 10 and 2
+// minutes. The daily jobs (dailyShiftEmail, locationIntegrityCron,
+// nightlyPurge) take up to 48 HOURS, and monthlyHoursReport about 62 DAYS. A
+// better scheme would compare against the next expected fire time rather than
+// a multiple of the interval; that needs a real cron parser and is out of
+// scope for v1.
 //
 // Job names and timings only. No guard, site or tenant data passes through
 // here, per the data rule in docs/OPS/POLICY.md.

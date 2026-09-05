@@ -62,6 +62,22 @@ export interface RegisteredJob {
   name: string;
   expr: string;
   intervalSec: number;
+  /**
+   * Epoch ms at which this job was registered, i.e. process boot.
+   *
+   * Exists to give a never-ticked job a grace period. Without it, a job with
+   * no heartbeat row counted as stale immediately, so /health/crons returned
+   * 503 from the moment of deploy until every job had fired once -- up to a
+   * month, gated by monthlyHoursReport. That is a probe that alarms
+   * continuously and then gets muted right before it would start meaning
+   * something.
+   *
+   * Resets on every restart, which is correct: a fresh process legitimately
+   * has no row yet for a job that is not due. A job that HAS a row is
+   * unaffected, because the row survives restarts and its age is measured
+   * from the last real tick.
+   */
+  registeredAt: number;
 }
 
 const registry: RegisteredJob[] = [];
@@ -134,10 +150,23 @@ export interface StaleJob {
 
 /**
  * Pure staleness computation, extracted so it is testable without standing up
- * express or a database.
+ * express or a database. `now` is a parameter rather than a Date.now() call so
+ * the grace-period branch can be tested at an arbitrary point in time.
  *
- * A job is stale when it has no heartbeat row at all, or its row is older than
- * TWICE its own interval. 2x absorbs one skipped tick; beyond that is a gap.
+ * Two rules, depending on whether the job has ever ticked:
+ *
+ *   HAS a heartbeat row  -> stale when the row is older than TWICE its own
+ *                           interval. 2x absorbs one skipped tick; beyond that
+ *                           is a real gap.
+ *   NO heartbeat row     -> stale only once it has been REGISTERED for longer
+ *                           than that same 2x window (Phase 4.1). Before that,
+ *                           "no row" means "not due yet".
+ *
+ * The grace period exists because the first rule alone made every never-ticked
+ * job stale the instant the process booted, so the probe returned 503 from
+ * deploy until all 19 jobs had fired -- up to a month, gated by
+ * monthlyHoursReport. It changes nothing about how fast a genuinely dead job
+ * is caught: still 48h for a daily job, ~62 days for the monthly one.
  *
  * A row present in the table but NOT in the registry is ignored -- that is a
  * job that was renamed or removed, and its stale row is a leftover, not an
@@ -146,17 +175,35 @@ export interface StaleJob {
 export function computeStaleJobs(
   jobs: readonly RegisteredJob[],
   rows: readonly HeartbeatRow[],
+  now: number = Date.now(),
 ): StaleJob[] {
   const byName = new Map(rows.map((r) => [r.job_name, r]));
   const stale: StaleJob[] = [];
   for (const j of jobs) {
+    const thresholdSec = 2 * j.intervalSec;
     const row = byName.get(j.name);
+
     if (!row) {
-      stale.push({ job: j.name, age_s: null, interval_s: j.intervalSec, last_result: null });
+      // NEVER TICKED. Stale only once the job has been registered for longer
+      // than it should have taken to fire twice. Before that, "no row" means
+      // "not due yet", which is the normal state of a daily job seconds after
+      // a deploy -- not an outage.
+      //
+      // The threshold is the same 2x used below, so a job that is genuinely
+      // dead is still caught on the same schedule: a daily job within 48h, a
+      // monthly one within about 62 days. The grace shifts nothing except the
+      // false positive at t=0.
+      const sinceRegisteredMs = now - j.registeredAt;
+      if (sinceRegisteredMs > thresholdSec * 1000) {
+        stale.push({ job: j.name, age_s: null, interval_s: j.intervalSec, last_result: null });
+      }
       continue;
     }
+
+    // HAS TICKED. Unchanged: measured from the last real tick, and the row
+    // outlives restarts, so this needs no grace.
     const ageS = Number(row.age_s);
-    if (ageS > 2 * j.intervalSec) {
+    if (ageS > thresholdSec) {
       stale.push({ job: j.name, age_s: ageS, interval_s: j.intervalSec, last_result: row.last_result });
     }
   }
@@ -328,7 +375,7 @@ export function runJob(
   );
 
   attachTaskFailedListener(task, name);
-  registry.push({ name, expr, intervalSec });
+  registry.push({ name, expr, intervalSec, registeredAt: Date.now() });
   registeredCount += 1;
   return task;
 }

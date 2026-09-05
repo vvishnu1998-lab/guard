@@ -311,10 +311,15 @@ Route: `apps/api/src/index.ts`, immediately after `/health`, under the same
 
 ## The 2x rule
 
-A job is **stale** when it has no `cron_heartbeats` row at all, or its row is
-older than **twice** its own interval. 2x absorbs one skipped tick without
-alarming; beyond that is a real gap. Exactly 2x is not stale — one second past
-it is (asserted in `_healthCrons.test.ts`).
+Two rules, depending on whether the job has ever ticked:
+
+- **Has a row** — stale when the row is older than **twice** its own interval.
+  2x absorbs one skipped tick without alarming; beyond that is a real gap.
+- **No row** — stale only once it has been *registered* for longer than that
+  same 2x window. Before then, "no row" means "not due yet".
+
+Exactly 2x is not stale on either branch; one tick past it is (both boundaries
+asserted in `_healthCrons.test.ts`).
 
 Intervals are derived at registration by `cronIntervalSeconds`, a deliberately
 narrow helper covering the five shapes actually in use. Anything else **throws
@@ -363,18 +368,31 @@ A `monthlyHoursReport` that dies is not detected for two months. Accepted for
 v1. The fix is to compare against the next expected fire time rather than a
 multiple of the interval, which needs a real cron parser.
 
-## First-deploy behaviour — read before repointing the uptime monitor
+## First-tick grace (Phase 4.1)
 
-A job that has never ticked has no row and counts as stale, so **this route
-returns 503 until every one of the 19 jobs has fired at least once.** From a
-fresh database that takes up to a month, gated by `monthlyHoursReport`.
+A job that has never ticked is **not** immediately stale. `RegisteredJob`
+records `registeredAt` at boot, and the no-row branch waits the same 2x window
+before reporting.
 
-Measured in production 2026-09-05 11:00Z, after Phase 2/3 shipped: **15 of 19
-rows present, all `last_result='ok'`.** The four absent are exactly the daily
-and monthly jobs — `dailyShiftEmail`, `locationIntegrityCron`,
-`monthlyHoursReport`, `nightlyPurge` — none of which had been due since the
-deploy.
+Without it, every never-ticked job was stale the instant the process booted, so
+this route returned **503 from deploy until all 19 jobs had fired** — up to a
+month from a fresh database, gated by `monthlyHoursReport`. That is a probe
+that alarms continuously and then gets muted, right before it would start
+meaning something.
 
-So on merge day this route will return **503 listing those four**, correctly by
-its own rules and misleadingly as an alert. Repoint the Sentry uptime monitor
-only once it returns 200. See `RUNBOOK-phase4-apply.md` step (c).
+**It costs no detection speed.** The grace uses the same 2x threshold as the
+row-age branch, so a genuinely dead job is caught on exactly the same schedule:
+a daily job within 48 hours, the monthly one within about 62 days. The only
+thing removed is the false positive at t=0.
+
+`registeredAt` resets on every restart, which is correct — a fresh process
+legitimately has no row yet for a job that is not due. A job that **has** a row
+is unaffected: the row outlives restarts and its age is measured from the last
+real tick, so a just-restarted process still reports a long-dead job
+(asserted).
+
+Measured in production 2026-09-05 11:00Z, before this change shipped: 15 of 19
+rows present, all `last_result='ok'`; the four absent were exactly the daily and
+monthly jobs — `dailyShiftEmail`, `locationIntegrityCron`, `monthlyHoursReport`,
+`nightlyPurge` — none of which had been due since the deploy. Under the grace
+rule that state is **200 `stale:[]`**, which is the honest answer.

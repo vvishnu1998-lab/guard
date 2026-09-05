@@ -76,22 +76,28 @@ gh pr merge <n> --merge --delete-branch
 curl -s https://api.netraops.com/health/crons
 ```
 
-**Do not expect 200 on merge day.** A job that has never ticked has no
-heartbeat row and counts as stale, so this returns **503** listing the
-daily/monthly jobs that have not been due yet. Measured 2026-09-05: 15 of 19
-rows present, all `ok`; the four absent were `dailyShiftEmail`,
-`locationIntegrityCron`, `monthlyHoursReport`, `nightlyPurge`.
+**Expect HTTP 200 and `{"status":"ok","jobs":19,"stale":[]}`.**
 
-What to check instead:
+A job that has not ticked yet is covered by the first-tick grace (Phase 4.1):
+it is only reported once it has been registered for twice its own interval, so
+the daily and monthly jobs do not show up seconds after a deploy. See
+`CRONS.md`.
 
-- the response parses, and `jobs` is **19**
-- every entry in `stale` is one of those four daily/monthly jobs
-- **no `*/5` or per-minute job appears in `stale`** — one that does is a real
-  finding
+What to check:
 
-`monthlyHoursReport` fires on the 1st, so full green takes up to a month.
+- `jobs` is **19**
+- `stale` is **empty**
+- HTTP is **200**
 
-## d. Repoint the Sentry uptime monitor — ONLY once step (c) returns 200
+If any job appears in `stale` immediately after merge, that is a real finding,
+not a startup artefact — the grace exists precisely so this list is meaningful
+on day one. A `*/5` or per-minute job appearing there is the most urgent case.
+
+Detection speed is unchanged by the grace: a dead daily job is flagged within
+**48 hours**, and `monthlyHoursReport` within **about 62 days**. That lag is
+the accepted v1 limit, not a startup effect.
+
+## d. Repoint the Sentry uptime monitor
 
 Sentry → Alerts → Uptime Monitoring → the existing monitor (id `8024493`,
 currently `https://www.netraops.com`) → edit URL to:
@@ -100,13 +106,14 @@ currently `https://www.netraops.com`) → edit URL to:
 https://api.netraops.com/health/crons
 ```
 
-**Do not do this while step (c) still returns 503.** The monitor treats
-non-2xx as down, so repointing early gives you a monitor that alarms
-continuously for up to a month and gets muted or ignored — exactly when it
-would start being meaningful.
+Do this once step (c) returns 200, which it should immediately. The monitor
+treats non-2xx as down, and with the first-tick grace in place a healthy
+deployment answers 200 straight away.
 
-If you want API uptime covered in the meantime, add a **second** monitor on
-`https://api.netraops.com/health` and leave the crons one until it is green.
+If the web app also needs uptime cover, add a **second** monitor on
+`https://www.netraops.com` rather than giving up this one — the crons probe is
+the only thing watching for a wedged job, and `/health` cannot substitute for
+it (it runs `SELECT 1` and nothing else).
 
 ## e. Trigger the triage runner
 
@@ -164,8 +171,8 @@ misreads.
 ## Rollback
 
 - **Code** — revert the merge commit; Railway redeploys. `/health/crons`
-  disappears with it. If the uptime monitor was already repointed, point it
-  back at `https://www.netraops.com` first, or it will alarm on a 404.
+  disappears with it, so point the uptime monitor back at
+  `https://www.netraops.com` first or it will alarm on a 404.
 - **The runner** — disable the `ops-triage` workflow in the Actions tab. It
   holds only read credentials, so a bad run costs API budget and a noisy Slack
   post, nothing else.
