@@ -309,8 +309,13 @@ report — no preface, no acknowledgement, no explanation of tools or permission
 
 ### Incident 2026-09-05 — push_skip_null_token
 
-`docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md`. **P3, no customer
-impact, no STARNET exposure.** Sentry `netraops-api` issue `7633312535`.
+`docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md`. **RESOLVED 2026-09-05**,
+merge `3b3c9a1`, deployment `9775a777-9523-4b58-91c0-9e49edd6b21e` (16:12:04Z).
+**P3, no customer impact, no STARNET exposure.** Sentry `netraops-api` issue
+`7633312535`: 6 `flow: ping_reminder` events in the 30 min before deploy, **0**
+in the 30 min after, across a window boundary that previously fired — while the
+three affected sessions kept receiving their in-app reminders at the same
+cadence (1 per 30-min window, before and after).
 
 `pingReminder` emitted a `warning`-level Sentry event per reminder for any guard
 with no push token. Three **test-tenant** guards with open sessions and zero
