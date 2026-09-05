@@ -217,25 +217,68 @@ c_railway_logs() {
   fi
 }
 
+# Cap on per-issue stat lookups. Each recent issue costs one extra API call;
+# this bounds a bad day rather than letting the collector run unbounded. If it
+# binds, the collector says so rather than silently truncating.
+SENTRY_ISSUE_CAP=15
+
 c_sentry() {
   local project="$1"
   local cutoff
   cutoff="$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
             || date -u -v-6H +%Y-%m-%dT%H:%M:%SZ)"
-  # statsPeriod accepts only '', 24h and 14d -- 6h returns HTTP 400. Fetch 24h
-  # and filter on lastSeen here, so the model never has to know that.
-  curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
-    "https://sentry.io/api/0/projects/netraopscom/$project/issues/?statsPeriod=24h" \
-  | jq -r --arg cutoff "$cutoff" '
-      if type == "array" then
-        (map(select(.lastSeen >= $cutoff))) as $recent
-        | "issues_24h: \(length)   issues_last_6h: \($recent | length)",
-          "",
-          "id|shortId|level|count|lastSeen|title",
-          ($recent[] | "\(.id)|\(.shortId)|\(.level)|\(.count)|\(.lastSeen)|\(.title)")
-      else
-        "SENTRY API ERROR: \(. | tostring | .[0:200])"
-      end'
+
+  # TWO COUNTS, NAMED HONESTLY.
+  #
+  # `count` on the issues endpoint is the LIFETIME total since firstSeen; it is
+  # NOT scoped by statsPeriod. Emitting it under a heading that said "issues
+  # from the last 24h" is how the 2026-09-05 triage reported "count 303 in 24h"
+  # for an issue whose real 24h volume was 54 and whose lifetime spanned six
+  # weeks. See docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md.
+  #
+  # count_24h is summed from the PER-ISSUE endpoint's hourly buckets, one call
+  # per recent issue. The listing's own embedded stats are NOT trustworthy:
+  # measured 2026-09-05, the listing returned 24 buckets summing to 0 for issue
+  # 7713575234 while /issues/7713575234/?statsPeriod=24h returned 25 buckets
+  # summing to 4, with the events plainly inside the window. Same field name,
+  # different answer -- so the accurate source is the one worth the extra call.
+  #
+  # statsPeriod accepts only '', 24h and 14d; 6h returns HTTP 400. Fetch 24h and
+  # filter on lastSeen here, so the model never has to know that.
+  local listing recent total shown
+  listing="$(curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+    "https://sentry.io/api/0/projects/netraopscom/$project/issues/?statsPeriod=24h")"
+
+  if ! printf '%s' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf 'SENTRY API ERROR: %s\n' "$(printf '%s' "$listing" | head -c 200)"
+    return 1
+  fi
+
+  total="$(printf '%s' "$listing" | jq 'length')"
+  recent="$(printf '%s' "$listing" | jq -c --arg cutoff "$cutoff" \
+    '[ .[] | select(.lastSeen >= $cutoff) ]')"
+  shown="$(printf '%s' "$recent" | jq 'length')"
+
+  printf 'issues_24h: %s   issues_last_6h: %s\n' "$total" "$shown"
+  if [ "$shown" -gt "$SENTRY_ISSUE_CAP" ]; then
+    printf 'NOTE: %s issues in the last 6h; showing the %s most recent.\n' \
+      "$shown" "$SENTRY_ISSUE_CAP"
+  fi
+  printf '\n'
+  printf 'id|shortId|level|count_24h|lifetime|firstSeen|lastSeen|title\n'
+
+  printf '%s' "$recent" \
+  | jq -r --argjson cap "$SENTRY_ISSUE_CAP" \
+      '.[:$cap][] | "\(.id)\t\(.shortId)\t\(.level)\t\(.count)\t\(.firstSeen)\t\(.lastSeen)\t\(.title)"' \
+  | while IFS=$'\t' read -r id shortid level lifetime firstseen lastseen title; do
+      local c24
+      c24="$(curl -s --max-time 20 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+              "https://sentry.io/api/0/issues/$id/?statsPeriod=24h" \
+            | jq -r '(.stats["24h"] // []) | map(.[1]) | add // "?"' 2>/dev/null)"
+      [ -z "$c24" ] && c24='?'
+      printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$id" "$shortid" "$level" "$c24" "$lifetime" "$firstseen" "$lastseen" "$title"
+    done
 }
 
 c_sentry_api()    { c_sentry netraops-api; }

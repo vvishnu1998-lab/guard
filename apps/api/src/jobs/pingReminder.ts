@@ -47,7 +47,6 @@ import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification, NotificationType } from '../services/notifications';
 import { breakOverlapsWindow, siteLocalLabel, windowJustClosed } from '../services/pingWindows';
-import { Sentry } from '../services/sentry';
 
 // The hourly slot the activity-report + task legs nudge for. Matches
 // jobs/missedReportCron.ts's WINDOW_MS (60 min) so the reminder and the
@@ -68,24 +67,46 @@ interface ActiveGuardRow {
   last_ping_reminder_window: Date | null;
 }
 
-async function sendReminder(
+/**
+ * Tick-scoped tally of reminders that had no push token to send to.
+ *
+ * Created fresh per tick and threaded into sendReminder rather than kept at
+ * module scope: node-cron does not serialise ticks, so a tick that overruns
+ * its minute would share a module-level counter with the next one.
+ */
+export interface SkipCounter {
+  skippedNoDevice: number;
+}
+
+export function newSkipCounter(): SkipCounter {
+  return { skippedNoDevice: 0 };
+}
+
+export async function sendReminder(
   row: Pick<ActiveGuardRow, 'guard_id' | 'fcm_token' | 'shift_session_id'>,
   type: NotificationType,
   title: string,
   body: string,
   data: Record<string, unknown> = {},
+  skipped?: SkipCounter,
 ): Promise<void> {
   const payload = { type, ...data };
   if (!row.fcm_token) {
-    Sentry.captureMessage('push_skip_null_token', {
-      level: 'warning',
-      tags: { flow: 'ping_reminder' },
-      extra: {
-        guard_id:         row.guard_id,
-        shift_session_id: row.shift_session_id,
-        type,
-      },
-    });
+    // COUNTED, NOT REPORTED PER OCCURRENCE.
+    //
+    // This used to be Sentry.captureMessage('push_skip_null_token', {level:
+    // 'warning', ...}) on every call. A guard with no guard_devices row is an
+    // ordinary, recurring state -- three test-tenant guards with open sessions
+    // produced 9 warning events an hour, indefinitely -- so reporting each
+    // occurrence as an individual warning trains the reader to ignore the
+    // issue rather than telling them anything.
+    //
+    // Nothing is lost by counting instead: the condition is fully derivable
+    // from guard_devices (no non-revoked row) joined to the notifications rows
+    // this function still writes.
+    //
+    // See docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md.
+    if (skipped) skipped.skippedNoDevice += 1;
   }
   await Promise.allSettled([
     row.fcm_token
@@ -193,6 +214,8 @@ runJob('pingReminder', '* * * * *', async () => {
   // A close within this age is "just now"; older is a catch-up, and the copy
   // must say so rather than claim a freshness it does not have.
   const FRESH_MS = 90 * 1000;
+  // Tick-scoped; reported in the summary lines below rather than per call.
+  const skipped = newSkipCounter();
 
   try {
     // Every active session with the fields we need to compute per-session
@@ -307,11 +330,15 @@ runJob('pingReminder', '* * * * *', async () => {
           window_boundary: closed.windowEnd.toISOString(),
           window_start:    closed.windowStart.toISOString(),
         },
+        skipped,
       );
       pingsFired += 1;
     }
     if (pingsFired > 0) {
-      console.log(`[pingReminder] schedule-anchored: fired ${pingsFired} ping reminder(s)`);
+      console.log(
+        `[pingReminder] schedule-anchored: fired ${pingsFired} ping reminder(s) `
+        + `skipped_no_device=${skipped.skippedNoDevice}`,
+      );
     }
 
     // ── Activity-report + task reminders — wall-clock hourly (R5) ─────
@@ -350,13 +377,21 @@ runJob('pingReminder', '* * * * *', async () => {
           'activity_report_reminder',
           'Activity report',
           'Time to submit your hourly activity report.',
+          {},
+          skipped,
         );
       }),
     );
     // Count is now what actually went out, not rows.length — a log line
     // that overstates delivery is how a suppressed leg stays invisible.
+    // skipped_no_device is the TICK RUNNING TOTAL at this point, so it
+    // includes the ping leg above. The task leg below is the one gap: it runs
+    // after this line, so a task reminder skipped for a missing device is
+    // counted but not printed. Accepted -- that leg only fires for a session
+    // with pending tasks, and the condition stays queryable either way.
     console.log(
-      `[pingReminder] Sent activity-report reminder to ${reportsFired} of ${rows.length} active guards`,
+      `[pingReminder] Sent activity-report reminder to ${reportsFired} of ${rows.length} active guards `
+      + `skipped_no_device=${skipped.skippedNoDevice}`,
     );
 
     for (const row of rows) {
@@ -402,6 +437,7 @@ runJob('pingReminder', '* * * * *', async () => {
         'Task reminder',
         `You have ${n} pending ${plural}.`,
         { count: n },
+        skipped,
       );
     }
   } catch (err) {

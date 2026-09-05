@@ -1,6 +1,6 @@
 # 2026-09-05 — push_skip_null_token
 
-**Status:** investigated, unfixed. Awaiting a decision.
+**Status:** fix committed, **not yet merged**. Awaiting push, gate and merge.
 **Severity:** P3. No customer impact; no STARNET exposure.
 **Issue:** Sentry `netraops-api` **`7633312535`** (`NETRAOPS-API-6`), level `warning`.
 
@@ -267,6 +267,131 @@ and "paying customer, act" is currently only discoverable by querying the DB.
 six-call-site tagging raised as its own item rather than bundled.
 
 ---
+
+---
+
+## Fix
+
+Approved 2026-09-05: **1-a** (code fix, pingReminder only), **2-b** (other five
+call sites deferred), **3-a** (collector count fix in the same branch).
+
+Branch `ops/phase-5-null-token`. Commit sha recorded on merge.
+
+### `apps/api/src/jobs/pingReminder.ts` — the incident fix
+
+The per-call `Sentry.captureMessage('push_skip_null_token', { level: 'warning' })`
+is replaced by a tick-scoped counter:
+
+```ts
+export interface SkipCounter { skippedNoDevice: number }
+export function newSkipCounter(): SkipCounter { return { skippedNoDevice: 0 }; }
+```
+
+`sendReminder` takes an optional `skipped?: SkipCounter` and increments it
+instead of emitting. The counter is created per tick and threaded into all
+three legs — **not** kept at module scope, because node-cron does not serialise
+ticks and a tick overrunning its minute would share a module-level counter with
+the next one.
+
+It is reported in the two **existing** summary lines:
+
+```
+[pingReminder] schedule-anchored: fired N ping reminder(s) skipped_no_device=X
+[pingReminder] Sent activity-report reminder to N of M active guards skipped_no_device=X
+```
+
+`skipped_no_device` is the tick running total at each point. One documented
+gap: the task leg runs after both lines, so a task reminder skipped for a
+missing device is counted but not printed. Accepted — that leg only fires for a
+session with pending tasks, and the condition stays queryable either way.
+
+**Unchanged, deliberately:** the push skip, the `insertNotification` write, the
+`runJob` wrapper, the heartbeat, and the job's `WHERE` clause. No guard-facing
+behaviour moves. No new tags.
+
+The `Sentry` import became dead and was removed — it was used only by the
+deleted `captureMessage`. Tick errors still reach Sentry through `runJob`,
+tagged `job=pingReminder`.
+
+### `scripts/ops/triage.sh` — the collector fix (item 3-a)
+
+`c_sentry` now emits `count_24h` **and** `lifetime` as separate columns, plus
+`firstSeen`. `count_24h` is summed from per-issue hourly buckets.
+
+**A second bug surfaced while implementing this.** The first attempt summed the
+buckets embedded in the issues *listing*. Those are not trustworthy: measured
+2026-09-05, the listing returned 24 buckets summing to **0** for issue
+`7713575234`, while `/issues/7713575234/?statsPeriod=24h` returned 25 buckets
+summing to **4** — with the events plainly inside the window at 11:42–11:57Z.
+Same field name, different answer. `c_sentry` therefore makes one extra call per
+recent issue against the per-issue endpoint, capped at `SENTRY_ISSUE_CAP=15`
+with the cap announced in the output rather than silently truncating.
+
+Verified after the change:
+
+```
+id|shortId|level|count_24h|lifetime|firstSeen|lastSeen|title
+7633312535|NETRAOPS-API-6|warning|60|311|2026-07-25T23:30:00.771000Z|...|push_skip_null_token
+7713575234|NETRAOPS-API-T|error|4|4|2026-09-05T11:42:00Z|...|Cron failure: shiftstartreminder
+```
+
+`60` vs `311` is exactly the distinction the original finding collapsed.
+`NETRAOPS-API-T` reads `4`, not `0`.
+
+### `.github/ops/triage-prompt.md`
+
+- New second line: *"Copy every id (issue ids, shas, uuids, deployment ids)
+  verbatim from the pack. Never retype or abbreviate an id."* — the transposed
+  digit in the original finding cost the first minutes of this investigation.
+- The section table now names both columns and warns against quoting `lifetime`
+  as a 24h figure.
+- Reading guidance added: check `firstSeen` before calling anything new, and do
+  not describe an issue as "continuous" without evidence for it.
+
+### Tests
+
+`apps/api/src/jobs/_pingReminder.test.ts`, 5 assertions, ts-node + `node:assert`
+like its siblings. Sentry is stubbed with a Proxy so that **any** Sentry call —
+not just `captureMessage` — fails the test.
+
+| test | asserts |
+|---|---|
+| no device row | counter increments, no push, **zero Sentry calls** |
+| no device row | the in-app notification is **still written** (Tier-2 boundary) |
+| with a device | push sent, counter untouched, no Sentry call |
+| accumulation | 3 skips on one counter; a second counter starts at 0 and does not disturb the first |
+| optional arg | omitting the counter does not throw and still emits nothing |
+
+Full suite: `tsc --noEmit` clean; `_run` 10 passed, `_healthCrons` 36 passed,
+`_pingReminder` 5 passed. **51 passed, 0 failed.**
+
+---
+
+## Verification plan
+
+Observe after merge and deploy:
+
+1. **Event rate goes to zero.** Issue `7633312535`, `flow: ping_reminder`.
+   Current baseline is 9/hour (6 at `:00`, 3 at `:30`), so the first `:30`
+   boundary after deploy is the earliest proof and the first `:00` is the
+   confirmation. Compare the 30 minutes after deploy against the 30 before.
+   **Expect 0 new `flow: ping_reminder` events.** Events from the other five
+   call sites may still appear — that is N20, not a failed fix.
+2. **The job still runs.** `cron_heartbeats` row for `pingReminder`:
+   `last_result = 'ok'`, age under 120s (2× its 60s interval).
+3. **The route stays healthy.** `GET /health/crons` → 200, `jobs: 19`,
+   `stale: []`.
+4. **Reminders still land.** `notifications` rows of type `ping_reminder` keep
+   accruing for the three sessions at the same cadence. If these stop, the fix
+   suppressed a guard-facing notification and must be reverted — that is the
+   one outcome that would make this worse than the noise.
+5. **The counter appears.** Railway logs show
+   `[pingReminder] schedule-anchored: fired N ping reminder(s) skipped_no_device=3`
+   while the three test sessions remain open.
+
+Item 4 is the one that matters. Items 1–3 confirm the noise is gone; item 4
+confirms nothing was lost with it.
+
 
 ## Loop notes
 

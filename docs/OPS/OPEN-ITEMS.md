@@ -143,6 +143,29 @@ thing; keep this number and retire N13's framing. **Size M, Tier 1.**
 verified: NO — carried from the dispatch, not independently checked. No Vercel-to-Slack integration
 was searched for or found in this pass. Deferred to v2 by scope, not by evidence. Supersedes N14.
 
+
+**N20. `push_skip_null_token` at five other call sites, plus a latent missing `LIMIT 1`.**
+verified: YES — `grep -rn "push_skip_null_token" apps/api/src` returns six sites. The 2026-09-05 fix
+touched **only** `pingReminder.ts`; the other five still emit a `warning`-level Sentry event per call:
+`preShiftReminder.ts:99`, `lateClockInReminder.ts:100`, `shiftStartReminder.ts:100`,
+`services/swapPush.ts:81`, `services/shiftPush.ts:168`. Historical events in issue `7633312535` carry
+`flow: late_clock_in`, `shift_start_reminder`, `pre_shift_reminder`, `swap_push` and
+`shift_assignment`, so all of them do fire.
+
+None tags `company_id` consistently, which is the part that actually matters: the difference between
+"test tenant, ignore" and "paying customer, act" is currently discoverable only by querying the DB.
+Two of the historical events DID carry `company_id 27c4d404-8769-49ca-bfd6-93cb9b890067` under
+`flow: swap_push` (2026-08-30, 2026-09-01), so STARNET has reached this path before.
+
+Bundle with: **`ACTIVE_PUSH_TOKEN_SQL` (`services/deviceRegistry.ts:249`) has no `LIMIT 1`.** It is a
+scalar subquery, so two non-revoked `guard_devices` rows for one guard would raise
+`21000 more than one row returned by a subquery used as an expression` and fail the entire tick, not
+one push. **Latent, not live** — verified 2026-09-05: `guards_with_multiple_active_devices = 0` across
+all 37 guards. Every one of the six call sites depends on that function, which is why the two belong
+in one PR.
+
+**Size M, Tier 1.** Incident context: `docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md`.
+
 ---
 
 ## Carried items

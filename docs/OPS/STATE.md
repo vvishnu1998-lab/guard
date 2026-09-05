@@ -306,3 +306,33 @@ required context `Scan for hard-coded secrets` still matches.
 
 **Prompt preface.** The prompt now opens with an instruction to emit only the
 report — no preface, no acknowledgement, no explanation of tools or permissions.
+
+### Incident 2026-09-05 — push_skip_null_token
+
+`docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md`. **P3, no customer
+impact, no STARNET exposure.** Sentry `netraops-api` issue `7633312535`.
+
+`pingReminder` emitted a `warning`-level Sentry event per reminder for any guard
+with no push token. Three **test-tenant** guards with open sessions and zero
+`guard_devices` rows produced 9 events/hour. The job was behaving correctly —
+it skips the push and still writes the in-app notification — so this was noise,
+not a fault. Fixed by counting the skips per tick and reporting them in the
+existing summary lines instead of emitting per occurrence.
+
+**Three claims in the original triage finding were wrong**, and two of them
+traced to the collector rather than the model:
+
+- the Sentry issue id had a transposed digit and returned HTTP 403;
+- "count 303 in 24 h" was the **lifetime** total since 2026-07-25; the real 24h
+  figure was 54;
+- "firing continuously" described 19 hours of zero followed by a flat 9/hour.
+
+`c_sentry` now emits `count_24h` and `lifetime` as separate columns with
+`firstSeen`, summed per issue from Sentry's hourly buckets — the issues
+*listing* embeds bucket data that disagrees with the per-issue endpoint
+(measured: 0 vs 4 for the same issue in the same window), so the collector pays
+one extra call per recent issue for a number that is actually right. The prompt
+now requires ids to be copied verbatim.
+
+Five other call sites still emit per occurrence and `ACTIVE_PUSH_TOKEN_SQL`
+still lacks `LIMIT 1` — both deferred to **N20** as one PR.
