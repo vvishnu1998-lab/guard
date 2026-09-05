@@ -272,4 +272,4 @@ runJob('missedReportCron', '*/5 * * * *', async () => {
       console.log(`[missedReportCron] considered=${considered} created=${created}`);
     }
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

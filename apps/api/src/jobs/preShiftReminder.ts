@@ -125,4 +125,4 @@ runJob('preShiftReminder', '*/5 * * * *', async () => {
   } finally {
     console.log(`[preShiftReminder] candidates=${candidates} success=${successes} failure=${failures}`);
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

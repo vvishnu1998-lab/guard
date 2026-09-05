@@ -122,4 +122,4 @@ runJob('shiftStartReminder', '*/5 * * * *', async () => {
   } finally {
     console.log(`[shiftStartReminder] candidates=${candidates} success=${successes} failure=${failures}`);
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

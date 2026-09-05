@@ -201,4 +201,4 @@ runJob('lateClockInReminder', '*/5 * * * *', async () => {
       );
     }
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

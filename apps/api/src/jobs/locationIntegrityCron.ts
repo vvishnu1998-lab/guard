@@ -37,4 +37,4 @@ export async function runLocationIntegrityJob(): Promise<void> {
 }
 
 // 00:20 America/Los_Angeles.
-runJob('locationIntegrityCron', '20 0 * * *', runLocationIntegrityJob, { timezone: 'America/Los_Angeles', sentryMonitor: true });
+runJob('locationIntegrityCron', '20 0 * * *', runLocationIntegrityJob, { timezone: 'America/Los_Angeles', sentryMonitor: false });

@@ -86,4 +86,4 @@ runJob('monthlyHoursReport', '0 12 1 * *', async () => {
   }
 
   console.log('[monthly-hours] Done at', new Date().toISOString());
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

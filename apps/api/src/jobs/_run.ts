@@ -57,6 +57,112 @@ export interface RunJobOptions {
   sentryMonitor?: boolean;
 }
 
+/** One entry per registered job. Feeds GET /health/crons. */
+export interface RegisteredJob {
+  name: string;
+  expr: string;
+  intervalSec: number;
+}
+
+const registry: RegisteredJob[] = [];
+
+/** Registered jobs, in registration order. Read-only view for the route. */
+export function registeredJobs(): readonly RegisteredJob[] {
+  return registry;
+}
+
+/**
+ * Expected seconds between ticks, derived from a crontab expression.
+ *
+ * Deliberately NOT a general cron parser. It covers exactly the five shapes
+ * the 19 jobs actually use and throws on anything else, at registration time,
+ * so an unsupported expression fails loudly at boot rather than silently
+ * producing a wrong staleness threshold. cron-parser is not a dependency of
+ * this repo and is not being added for five patterns.
+ *
+ *   * * * * *      -> 60        every minute
+ *   NUM/N * * * *  -> N * 60    every N minutes
+ *   M * * * *      -> 3600      hourly at minute M
+ *   M H * * *      -> 86400     daily at H:M
+ *   M H D * *      -> 2678400   monthly on day D (31d; the longest month, so
+ *                               the threshold never fires early on a short one)
+ */
+export function cronIntervalSeconds(expr: string): number {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    throw new Error(`[jobs] unsupported cron expression ${JSON.stringify(expr)}: expected 5 fields, got ${fields.length}`);
+  }
+  const [minute, hour, dom, month, dow] = fields;
+  const isNum = (s: string) => /^\d+$/.test(s);
+
+  if (month !== '*' || dow !== '*') {
+    throw new Error(`[jobs] unsupported cron expression ${JSON.stringify(expr)}: month and day-of-week must both be '*'`);
+  }
+
+  if (minute === '*' && hour === '*' && dom === '*') return 60;
+
+  const step = /^\*\/(\d+)$/.exec(minute);
+  if (step && hour === '*' && dom === '*') {
+    const n = Number(step[1]);
+    if (!Number.isInteger(n) || n < 1 || n > 59) {
+      throw new Error(`[jobs] unsupported cron expression ${JSON.stringify(expr)}: step ${step[1]} out of range`);
+    }
+    return n * 60;
+  }
+
+  if (isNum(minute) && hour === '*' && dom === '*') return 3600;
+  if (isNum(minute) && isNum(hour) && dom === '*') return 86400;
+  if (isNum(minute) && isNum(hour) && isNum(dom)) return 2678400;
+
+  throw new Error(`[jobs] unsupported cron expression ${JSON.stringify(expr)}: no supported pattern matched`);
+}
+
+/** One row of cron_heartbeats, as the /health/crons query returns it. */
+export interface HeartbeatRow {
+  job_name: string;
+  age_s: string | number;
+  last_result: string;
+}
+
+/** A job the probe considers dead. age_s/last_result are null if it never ran. */
+export interface StaleJob {
+  job: string;
+  age_s: number | null;
+  interval_s: number;
+  last_result: string | null;
+}
+
+/**
+ * Pure staleness computation, extracted so it is testable without standing up
+ * express or a database.
+ *
+ * A job is stale when it has no heartbeat row at all, or its row is older than
+ * TWICE its own interval. 2x absorbs one skipped tick; beyond that is a gap.
+ *
+ * A row present in the table but NOT in the registry is ignored -- that is a
+ * job that was renamed or removed, and its stale row is a leftover, not an
+ * outage. Deleting it is a manual cleanup, not this function's job.
+ */
+export function computeStaleJobs(
+  jobs: readonly RegisteredJob[],
+  rows: readonly HeartbeatRow[],
+): StaleJob[] {
+  const byName = new Map(rows.map((r) => [r.job_name, r]));
+  const stale: StaleJob[] = [];
+  for (const j of jobs) {
+    const row = byName.get(j.name);
+    if (!row) {
+      stale.push({ job: j.name, age_s: null, interval_s: j.intervalSec, last_result: null });
+      continue;
+    }
+    const ageS = Number(row.age_s);
+    if (ageS > 2 * j.intervalSec) {
+      stale.push({ job: j.name, age_s: ageS, interval_s: j.intervalSec, last_result: row.last_result });
+    }
+  }
+  return stale;
+}
+
 const HEARTBEAT_SQL = `
   INSERT INTO cron_heartbeats (job_name, last_tick_at, last_run_ms, last_result, last_error)
   VALUES ($1, NOW(), $2, $3, $4)
@@ -158,6 +264,11 @@ export function runJob(
 ): ScheduledTask {
   const { timezone, sentryMonitor = false } = opts;
 
+  // Derived BEFORE the schedule call so an unsupported expression throws at
+  // boot, not at the first tick. A wrong staleness threshold is worse than a
+  // crash on deploy: it makes /health/crons quietly lie.
+  const intervalSec = cronIntervalSeconds(expr);
+
   const monitorConfig = {
     schedule: { type: 'crontab' as const, value: expr },
     checkinMargin: 2,
@@ -217,6 +328,7 @@ export function runJob(
   );
 
   attachTaskFailedListener(task, name);
+  registry.push({ name, expr, intervalSec });
   registeredCount += 1;
   return task;
 }
@@ -224,6 +336,12 @@ export function runJob(
 /** Count of jobs registered so far. Exported for tests. */
 export function registeredJobCount(): number {
   return registeredCount;
+}
+
+/** Reset the registry. Test-only; never called by application code. */
+export function __resetRegistryForTests(): void {
+  registry.length = 0;
+  registeredCount = 0;
 }
 
 /**

@@ -50,7 +50,7 @@ interface StepResult {
   error?:    string;
 }
 
-runJob('nightlyPurge', '0 0 * * *', runNightlyPurge, { sentryMonitor: true });
+runJob('nightlyPurge', '0 0 * * *', runNightlyPurge, { sentryMonitor: false });
 
 /**
  * One purge run. Exported so a local harness can invoke it directly
