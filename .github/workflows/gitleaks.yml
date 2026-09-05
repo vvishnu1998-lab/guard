@@ -14,15 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Required so gitleaks can scan the entire commit history, not just
           # the diff — past leaks (e.g. the rotated Google Maps key) stay
           # surfaced until the history is rewritten.
           fetch-depth: 0
 
+      # v2 runs on Node 20, which GitHub removes from hosted runners on
+      # 2026-09-16 -- after which v2 stops working regardless of any opt-out
+      # flag, and this REQUIRED check would block every merge. v3.0.0's release
+      # notes state the migration is runtime-only: "No changes to inputs,
+      # outputs, or behavior." The job name is unchanged, so the required
+      # status check context "Scan for hard-coded secrets" still matches.
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Pin to the same version used by the local pre-commit hook so

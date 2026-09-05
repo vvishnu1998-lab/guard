@@ -10,12 +10,12 @@ Freeze-window changes are Tier 2 (`POLICY.md`) — live, Vishnu present.
 
 ## Active freezes
 
-### F1 — `venkat` `e8274964` (Star Guard)
+### F1 — guard `e8274964` GRD0002 (Star Guard)
 
-**Surface:** the guard account `venkat`, badge `GRD0002`, tenant `Star Guard`.
+**Surface:** guard account `e8274964-c274-4fde-ad4d-82bb1e128bc2`, badge `GRD0002`, tenant `Star Guard` (`b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee`).
 
 **Verified 2026-09-05:** guard id `e8274964-c274-4fde-ad4d-82bb1e128bc2`, name
-`venkat`, badge `GRD0002`, company `Star Guard`
+badge `GRD0002`, company `Star Guard`
 (`b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee`). No `guard_devices` row (no push token).
 
 **Reason:** UNVERIFIED — carried from chat memory. The account identity is
