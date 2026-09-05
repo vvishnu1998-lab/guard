@@ -18,7 +18,7 @@
  * Null fcm_token no longer skips the row: notification is still
  * written, push is skipped, stamp still advances.
  */
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
@@ -34,7 +34,7 @@ interface CandidateRow {
   fcm_token: string | null;
 }
 
-cron.schedule('*/5 * * * *', async () => {
+runJob('preShiftReminder', '*/5 * * * *', async () => {
   let candidates = 0;
   let successes = 0;
   let failures = 0;
@@ -125,4 +125,4 @@ cron.schedule('*/5 * * * *', async () => {
   } finally {
     console.log(`[preShiftReminder] candidates=${candidates} success=${successes} failure=${failures}`);
   }
-});
+}, { sentryMonitor: true });

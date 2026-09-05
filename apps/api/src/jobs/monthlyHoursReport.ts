@@ -4,7 +4,7 @@
  * uploads to S3, and stores the URL in monthly_hours_reports.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { uploadBufferToS3 } from '../services/s3';
 import { buildHoursExport } from '../services/hoursExport';
@@ -32,7 +32,7 @@ import { buildHoursWorkbook, workbookToBuffer } from '../services/hoursWorkbook'
 // general answer, consistent with the per-site decision, is a per-site close
 // check — emit a company's file only once month-end has passed at all of its
 // sites — which this does not do. Revisit if sites ever span wide longitudes.
-cron.schedule('0 12 1 * *', async () => {
+runJob('monthlyHoursReport', '0 12 1 * *', async () => {
   console.log('[monthly-hours] Starting at', new Date().toISOString());
 
   const now   = new Date();
@@ -86,4 +86,4 @@ cron.schedule('0 12 1 * *', async () => {
   }
 
   console.log('[monthly-hours] Done at', new Date().toISOString());
-});
+}, { sentryMonitor: true });

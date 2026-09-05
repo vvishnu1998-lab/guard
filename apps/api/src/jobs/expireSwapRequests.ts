@@ -61,7 +61,7 @@
  * Exports `runExpireSwapRequestsOnce()` for smoke-test / manual
  * invocation — the cron just calls it on the schedule.
  */
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import {
   pushSwapExpiredToRequester,
@@ -240,7 +240,7 @@ export async function runSwapRemindersOnce(): Promise<number> {
   return result.rowCount;
 }
 
-cron.schedule('* * * * *', async () => {
+runJob('expireSwapRequests', '* * * * *', async () => {
   // Expiry first — see runSwapRemindersOnce's ORDERING note. Each is
   // guarded separately so a failure in one does not skip the other; a
   // reminder outage must not also stop requests expiring.
@@ -254,4 +254,4 @@ cron.schedule('* * * * *', async () => {
   } catch (err) {
     console.error('[expire-swap] reminder tick failed:', err);
   }
-});
+}, { sentryMonitor: false });

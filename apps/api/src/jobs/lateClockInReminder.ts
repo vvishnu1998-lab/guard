@@ -35,7 +35,7 @@
  * back the shifts.late_*_reminder_sent_at column update.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
@@ -111,7 +111,7 @@ async function fireGuardPush(row: LateCandidateRow, rung: 10 | 15): Promise<bool
   return true;
 }
 
-cron.schedule('*/5 * * * *', async () => {
+runJob('lateClockInReminder', '*/5 * * * *', async () => {
   const startedAt = Date.now();
   let t10 = 0, t15 = 0, t30 = 0, skipped = 0;
 
@@ -201,4 +201,4 @@ cron.schedule('*/5 * * * *', async () => {
       );
     }
   }
-});
+}, { sentryMonitor: true });

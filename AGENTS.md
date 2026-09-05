@@ -7,10 +7,10 @@ Multi-tenant SaaS for security guard management. Three parties: super admin (Vis
 - Mobile: React Native / Expo (account: vvishnu1998, project ID: 5fd28125-2461-4165-b9df-7f34ced8b194)
 - Web portals: Next.js, deployed on Vercel → app.netraops.com
 - API: Node/Express on Railway → guard-production-6be4.up.railway.app (project: adorable-courage)
-- DB: PostgreSQL on Railway (22 tables, multi-tenant by company_id)
+- DB: PostgreSQL on Railway (48 tables, multi-tenant by company_id)
 - Storage: AWS S3 bucket `guard-media-prod` (us-east-1)
 - Push: Firebase/FCM (Sender ID: 872564523776)
-- Email: SendGrid (sender: alerts@netraops.com, domain verified)
+- Email: SendGrid (sender: alerts@em6648.netraops.com, domain verified)
 - Maps: Google Maps
 - Domain: netraops.com (purchased May 2026)
 

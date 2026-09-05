@@ -132,3 +132,155 @@ That comment is false: locationIntegrity at 00:20 PT is 07:20/08:20 UTC, roughly
 
 `monthlyHoursReport` (`0 12 1 * *`, no TZ → 12:00 UTC) is deliberate and documented
 in its own header — 12:00 UTC clears local midnight for every US zone with margin.
+
+---
+
+# The runJob wrapper (Phase 2, 2026-09-05)
+
+All 19 jobs now register through `runJob` in `apps/api/src/jobs/_run.ts`.
+`grep -rn "cron.schedule" apps/api/src/jobs` returns hits in `_run.ts` only;
+`grep -rn "runJob(" apps/api/src/jobs` returns 19 call sites.
+
+**No job's inner logic changed.** Existing try/catch blocks, existing log lines
+and the six pre-existing heartbeat lines are all untouched. The wrapper is
+strictly additive.
+
+## What each tick now does
+
+1. If `sentryMonitor` is set, send a Sentry check-in `in_progress`.
+2. Run the job body.
+3. On a throw: log `[<name>] tick failed`, report to Sentry tagged
+   `job=<name>`, mark the tick `error`. **The throw never escapes** — which is
+   what makes the failure visible instead of vanishing into node-cron's
+   unlistened `task-failed` emit.
+4. In `finally`: send the closing check-in (`ok` / `error`) if enabled, then
+   upsert one row into `cron_heartbeats`.
+
+The heartbeat write is inside its own try/catch and can never throw. Between
+merging this code and applying v67 the table does not exist, and in that window
+every job runs normally and only logs `[<name>] heartbeat write failed`.
+Verified against a throwaway local database on 2026-09-05 by dropping the table
+and re-running all 19: every job still executed, only the heartbeat line
+errored.
+
+## Why captureCheckIn and not `Sentry.withMonitor`
+
+`withMonitor` exists in `@sentry/node` 8.55.2 (`@sentry/core`
+`exports.d.ts:95`) and is the documented ergonomic wrapper. **It is not safe
+for an async callback that can reject.** From
+`node_modules/@sentry/core/build/cjs/exports.js:170-179`:
+
+```js
+if (is.isThenable(maybePromiseResult)) {
+  Promise.resolve(maybePromiseResult).then(
+    () => { finishCheckIn('ok'); },
+    e => { finishCheckIn('error'); throw e; },
+  );
+}
+```
+
+The promise that `.then()` returns is discarded — not returned, not awaited,
+not caught. When the callback rejects, the handler re-throws into that orphaned
+promise, producing a genuine unhandled rejection separate from the one the
+caller awaits. Node 20+ defaults to `--unhandled-rejections=throw` and
+`package.json` pins `engines >=20.0.0`, so the process would terminate and
+Railway would restart it (`ON_FAILURE`, max 3 retries).
+
+Using it would have converted today's silent-failure mode into a crash loop.
+`captureCheckIn` (`exports.js:128-140`) is synchronous, returns a string, and
+creates no promise at all.
+
+## Why `task-failed` attaches to a private field
+
+node-cron 3.0.3 emits `task-failed` on the **inner `Task`**, not on the
+`ScheduledTask` that `schedule()` returns (`src/scheduled-task.js` constructs
+`this._task = new Task(func)`; `src/task.js:25` emits on that). Attaching to
+the returned object alone would be a listener that can never fire, so
+`attachTaskFailedListener` reads `_task` defensively and falls back to the
+public object if the internal shape changes.
+
+It is belt-and-braces regardless: the tick callback no longer rejects, so this
+path is unreachable in normal operation.
+
+## The 19 registrations
+
+`sentryMonitor: false` for the three per-minute jobs. At one tick per minute
+each they would alone produce roughly 1.3M check-ins a month, and the org's
+cron-monitor quota could not be read from the Sentry API (see UNVERIFIED
+below). They are covered by `cron_heartbeats`, which detects the same condition
+at no cost.
+
+| job name (= `cron_heartbeats.job_name` = Sentry monitor slug) | expr | timezone | `sentryMonitor` |
+|---|---|---|---|
+| `autoCompleteShifts` | `*/5 * * * *` | container (UTC) | true |
+| `breakExpiryCron` | `* * * * *` | container (UTC) | **false** |
+| `chatRetention` | `0 * * * *` | container (UTC) | true |
+| `clockOutReminder` | `*/5 * * * *` | container (UTC) | true |
+| `dailyShiftEmail` | `0 9 * * *` | **America/Los_Angeles** | true |
+| `expireSwapRequests` | `* * * * *` | container (UTC) | **false** |
+| `handoffNudge` | `*/5 * * * *` | container (UTC) | true |
+| `lateClockInReminder` | `*/5 * * * *` | container (UTC) | true |
+| `locationIntegrityCron` | `20 0 * * *` | **America/Los_Angeles** | true |
+| `missedPingCron` | `*/5 * * * *` | container (UTC) | true |
+| `missedReportCron` | `*/5 * * * *` | container (UTC) | true |
+| `missedShiftAlert` | `*/5 * * * *` | container (UTC) | true |
+| `monthlyHoursReport` | `0 12 1 * *` | container (UTC) | true |
+| `nightlyPurge` | `0 0 * * *` | container (UTC) | true |
+| `orphanedSessionCheck` | `10 * * * *` | container (UTC) | true |
+| `pingReminder` | `* * * * *` | container (UTC) | **false** |
+| `preShiftReminder` | `*/5 * * * *` | container (UTC) | true |
+| `shiftStartReminder` | `*/5 * * * *` | container (UTC) | true |
+| `taskDueCron` | `*/5 * * * *` | container (UTC) | true |
+
+16 with Sentry check-ins, 3 without. Both timezone options are preserved
+exactly as they were; the other 17 jobs pass no options object at all, which is
+byte-identical to the two-argument `cron.schedule` calls they replaced.
+
+Boot log: `[jobs] registered 19 jobs with heartbeats`, emitted from
+`index.ts` after the job imports (registration is an import side-effect, so
+calling it earlier would report 0).
+
+## Reading the heartbeats
+
+```sql
+SELECT job_name, last_result, NOW() - last_tick_at AS age
+FROM cron_heartbeats ORDER BY age;
+```
+
+A row whose `age` exceeds its job's interval is the alarm. There is no history
+in this table — `job_name` is the primary key and each tick overwrites the row,
+so it never grows and needs no retention step. The history lives in Sentry.
+
+`last_error` is truncated to 500 characters by the writer. It is a triage hint;
+the full error is in Sentry and in the Railway log.
+
+## REVOKE caveat — affects this table's neighbours, not this table
+
+`scripts/ops/readonly-column-revoke.sql` narrows `claude_readonly` from
+table-level SELECT to column-level SELECT on eight tables (`guards`,
+`company_admins`, `clients`, `guard_devices`, `password_reset_tokens`,
+`revoked_tokens`, `login_attempts`, `vishnu_state`).
+
+**Column-level grants do not extend to columns added later.** After that script
+runs, any `ALTER TABLE ADD COLUMN` on those eight tables produces a column
+`claude_readonly` cannot read, and the failure is a runtime 42501 on a query
+that used to work — typically a `SELECT *`. Any future migration touching those
+tables must carry its own `GRANT SELECT (new_column)`, or deliberately withhold
+it. Tracked as N10 in `OPEN-ITEMS.md`.
+
+`cron_heartbeats` itself keeps a plain table-level grant and is unaffected.
+
+## UNVERIFIED
+
+- **Sentry cron-monitor quota.** `GET /api/0/organizations/netraopscom/`
+  returns HTTP 200 with `status: active` but no `planTier` field, an empty
+  `quota` object, and no cron-related entries in `features`. The plan name
+  could not be determined from the API. The conservative rule above (no
+  check-ins for per-minute jobs) stands until Vishnu confirms the quota.
+- **Production runtime behaviour.** Everything above was verified against a
+  throwaway local Postgres 14.22 database, not production. Confirmed there: the
+  full migration chain applies from empty including v67, v67 is idempotent on
+  re-run, `[jobs] registered 19 jobs with heartbeats` prints,
+  `cron.getTasks()` returns 19, all 19 write `last_result='ok'`, and dropping
+  the table degrades to log-only without stopping any job. Production
+  verification happens at `RUNBOOK-phase2-apply.md` step (h).

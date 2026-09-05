@@ -41,7 +41,7 @@
  * scheduled_start" requirement — a wall-clock hourly cadence is fine
  * for the "hey, submit your hourly activity report" nudge.
  */
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
@@ -178,7 +178,7 @@ async function claimWindow(shiftSessionId: string, windowStart: Date): Promise<b
   return (rowCount ?? 0) > 0;
 }
 
-cron.schedule('* * * * *', async () => {
+runJob('pingReminder', '* * * * *', async () => {
   const now = new Date();
   // ELIGIBILITY RANGE, not a firing instant. The old ±60s tolerance meant a
   // single skipped cron minute lost the reminder outright and never retried
@@ -407,4 +407,4 @@ cron.schedule('* * * * *', async () => {
   } catch (err) {
     console.error('[pingReminder] Cron error:', err);
   }
-});
+}, { sentryMonitor: false });

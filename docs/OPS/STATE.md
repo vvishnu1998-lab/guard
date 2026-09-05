@@ -12,9 +12,9 @@ Re-verify before acting. This file goes stale the moment something deploys.
 
 | thing | value |
 |---|---|
-| `main` sha | `40d2297fd33a62812daf347bec84a7466b37d08c` (`40d2297`) |
-| `main` subject | `Merge fix/date-anchor: Pacific-anchor guard login gate and site deactivation stamp` |
-| last known good `main` sha | `40d2297` — same as tip; no known-bad state as of this write |
+| `main` sha | `f480fc2a519ee419245287734dc72bacc9e99a60` (`f480fc2`) — will be updated again post-merge of the Phase 2 branch |
+| `main` subject | `Merge pull request #1 from vvishnu1998-lab/ops/phase-1-repo-memory` |
+| last known good `main` sha | `f480fc2` — same as tip; no known-bad state as of this write |
 | working tree | clean (untracked only: `.playwright-mcp/`, `.vscode/`, `load test/`, `marketing/`, 4 loose PNGs) |
 | branch protection on `main` | **NONE** — `gh api repos/vvishnu1998-lab/guard/branches/main/protection` → 404 `"Branch not protected"` |
 | CI | one workflow, `.github/workflows/gitleaks.yml`, active (id 266080625). Last 5 runs SUCCESS. Advisory only — main is unprotected, so a failing scan blocks nothing. |
@@ -48,14 +48,14 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
-## Schema — verified 2026-09-05 08:34 UTC
+## Schema — verified 2026-09-05 08:34 UTC (v67 row updated 2026-09-05, Phase 2)
 
 | thing | value |
 |---|---|
 | tip in `migrate.ts` (file) | **v66** — `files` array ends `'schema_v65.sql', 'schema_v66.sql'` (`apps/api/src/db/migrate.ts:10`) |
 | tip on disk | **v66** — `ls schema_v*.sql \| sort -V \| tail -1` → `schema_v66.sql` |
 | tip applied in prod DB | **v66** — `pg_attribute` probe: `geofence_violations.position_source` and `off_post_events.position_source` both `attnotnull = true`, which is v66's entire contract |
-| **v67** | **FREE** — no `schema_v67.sql` on disk; `grep -c schema_v67 migrate.ts` → `0` |
+| **v67** | **WRITTEN, NOT YET APPLIED** — `apps/api/src/db/schema_v67.sql` exists on branch `ops/phase-2-heartbeats` and is appended to the `migrate.ts` chain. It creates `cron_heartbeats`. Applied to a throwaway local database 2026-09-05 (clean from empty, and idempotent on re-run); **not applied to production.** Vishnu applies it per `RUNBOOK-phase2-apply.md` step (b). |
 
 **There is no migrations ledger table.** A `pg_class` sweep for `%migration%` /
 `%schema_version%` / `%migrate%` in `public` returns zero rows. `migrate.ts`

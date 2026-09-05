@@ -35,7 +35,7 @@
  *     the Alerts tab even if the push failed.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import * as Sentry from '@sentry/node';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
@@ -52,7 +52,7 @@ interface DueRow {
   session_id: string;
 }
 
-cron.schedule('*/5 * * * *', async () => {
+runJob('taskDueCron', '*/5 * * * *', async () => {
   let considered = 0;
   let notified = 0;
   let deferred = 0;
@@ -193,4 +193,4 @@ cron.schedule('*/5 * * * *', async () => {
       );
     }
   }
-});
+}, { sentryMonitor: true });

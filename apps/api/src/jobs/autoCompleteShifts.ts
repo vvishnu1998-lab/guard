@@ -95,7 +95,7 @@
  * apps/api/scripts/test-auto-complete-shifts.ts.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 import { Sentry } from '../services/sentry';
@@ -278,7 +278,7 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
   }
 }
 
-cron.schedule('*/5 * * * *', async () => {
+runJob('autoCompleteShifts', '*/5 * * * *', async () => {
   const tickStart = Date.now();
   const client = await pool.connect();
   try {
@@ -312,4 +312,4 @@ cron.schedule('*/5 * * * *', async () => {
   } finally {
     client.release();
   }
-});
+}, { sentryMonitor: true });

@@ -57,7 +57,7 @@
  * health. Sentry stays silent unless the count is non-zero, so a healthy
  * system produces no events at all.
  */
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { Sentry } from '../services/sentry';
 
@@ -148,4 +148,4 @@ export async function runOrphanedSessionCheck(): Promise<number> {
 // :10 past the hour — chatRetention already holds '0 * * * *', and
 // locationIntegrityCron set the precedent of offsetting so two jobs never
 // contend. :10 is also clear of nightlyPurge (00:00) and its 00:20 scan.
-cron.schedule('10 * * * *', runOrphanedSessionCheck);
+runJob('orphanedSessionCheck', '10 * * * *', runOrphanedSessionCheck, { sentryMonitor: true });
