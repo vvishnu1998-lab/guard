@@ -87,7 +87,7 @@ jobs:
           TRIAGE_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           # Scheduled runs are routine -> cheaper model. A manual run carries a
           # focus, which means a human is chasing something -> stronger model.
-          MODEL: ${{ inputs.focus != '' && 'claude-opus-4-1' || 'claude-sonnet-4-6' }}
+          MODEL: ${{ inputs.focus != '' && 'claude-opus-5' || 'claude-sonnet-5' }}
         run: |
           chmod +x scripts/ops/triage.sh
           bash scripts/ops/triage.sh

@@ -271,16 +271,21 @@ returns non-zero, so a repeat is loud.
 
 **Model pinned.** Run `33964954767` passed no `--model`, and its workflow log
 names no model, so what served that report is **unverifiable after the fact**.
-`triage.sh` now takes `MODEL`, defaulting to `claude-sonnet-4-6`. The workflow
-sets it: scheduled runs get `claude-sonnet-4-6`; a manual run with a non-empty
-`focus` gets `claude-opus-4-1`, on the reasoning that a human supplying a focus
+`triage.sh` now takes `MODEL`, defaulting to `claude-sonnet-5`. The workflow
+sets it: scheduled runs get `claude-sonnet-5`; a manual run with a non-empty
+`focus` gets `claude-opus-5`, on the reasoning that a human supplying a focus
 is chasing something and that is an alarm.
 
-**Model ids are UNVERIFIED.** Neither id has been exercised — `claude -p` cannot
-authenticate on this workstation — and both are Claude 4-generation ids while
-the current family is Claude 5. Confirm against the Console model list before
-relying on either; a rejected id surfaces as a startup error, which `triage.sh`
-now flags separately from a triage failure.
+**Corrected to Claude 5 ids (Phase 4.3b, 2026-09-05).** The Phase 4.3 dispatch
+specified `claude-sonnet-4-6` and `claude-opus-4-1`; those are Claude
+4-generation ids and were flagged as such at the time. They are now
+`claude-sonnet-5` and `claude-opus-5`.
+
+**Still UNVERIFIED: neither id has been exercised.** `claude -p` cannot
+authenticate on this workstation, so the first proof either id is accepted will
+be a CI run. Confirm against the Console model list. A rejected id surfaces as a
+startup error, which `triage.sh` flags separately from a triage failure — so a
+wrong id shows up as a wrong id, not as a bad report.
 
 **Actions on Node 24.** GitHub removes Node 20 from hosted runners on
 2026-09-16. Verified from each action's own `action.yml` at each tag rather than

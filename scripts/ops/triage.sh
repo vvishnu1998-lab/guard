@@ -340,7 +340,7 @@ Read that file first. Do not attempt to collect anything yourself."
 # `focus`, which means a human is chasing something -- that is an alarm, and it
 # gets the stronger model. MODEL is set by the workflow; this default keeps a
 # local run working.
-MODEL="${MODEL:-claude-sonnet-4-6}"
+MODEL="${MODEL:-claude-sonnet-5}"
 
 printf 'starting claude -p (model=%s, max-turns 40)\n' "$MODEL"
 
