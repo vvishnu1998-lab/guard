@@ -46,13 +46,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The triage prompt reads git log -20 for recent-change context.
           fetch-depth: 50
 
       - name: Set up Node 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
 
@@ -85,6 +85,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRIAGE_FOCUS: ${{ inputs.focus }}
           TRIAGE_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          # Scheduled runs are routine -> cheaper model. A manual run carries a
+          # focus, which means a human is chasing something -> stronger model.
+          MODEL: ${{ inputs.focus != '' && 'claude-opus-5' || 'claude-sonnet-5' }}
         run: |
           chmod +x scripts/ops/triage.sh
           bash scripts/ops/triage.sh
@@ -94,7 +97,7 @@ jobs:
       # the signals it was written from.
       - name: Upload context pack
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: triage-context-${{ github.run_id }}
           path: /tmp/triage-context.md
@@ -103,7 +106,7 @@ jobs:
 
       - name: Upload report
         if: always() && !inputs.dry_run
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: triage-report-${{ github.run_id }}
           path: report.md

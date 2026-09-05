@@ -190,11 +190,31 @@ c_stuck_sessions() {
 }
 
 c_railway_logs() {
-  # A read-scoped RAILWAY_TOKEN may refuse this. That is recorded as a failed
-  # collector rather than aborting the run -- the logs are one signal of seven.
-  local out
-  out="$(railway logs --lines 300 2>&1)"
+  # --service and --environment are REQUIRED here. A GitHub runner has no
+  # ~/.railway link, and RAILWAY_TOKEN alone does not imply a service, so a
+  # bare `railway logs` returns:
+  #     No service linked
+  #     Run `railway service` to link a service
+  # Verified from run 33964954767's uploaded context pack (railway 5.49.2).
+  #
+  # If CI still reports "No project linked" after this, the fix is one line --
+  # add a repo VARIABLE (not a secret) RAILWAY_PROJECT_ID and run
+  #   railway link --project "$RAILWAY_PROJECT_ID" --service guard --environment production
+  # before this call. Not added now because the observed error names the
+  # SERVICE, not the project, and an unused link step is a thing that rots.
+  local out rc
+  out="$(railway logs --service guard --environment production --lines 300 2>&1)" && rc=0 || rc=$?
   printf '%s\n' "$out"
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  # Railway EXITS 0 while printing a link error, so the wrapper's exit-status
+  # check alone recorded that failure as a successful 3-line collection in run
+  # 33964954767. That is the exact silent-failure class this loop exists to
+  # remove, so match the error text explicitly and fail loudly.
+  if printf '%s' "$out" | grep -qiE 'No (service|project|environment) linked|Run .railway (service|link|environment).'; then
+    return 1
+  fi
 }
 
 c_sentry() {
@@ -312,17 +332,35 @@ PROMPT_BODY="$PROMPT_BODY
 Every live signal has already been collected for you at ${CONTEXT}.
 Read that file first. Do not attempt to collect anything yourself."
 
-printf 'starting claude -p (max-turns 40)\n'
+# Model is pinned so a runner default change cannot silently alter cost or
+# quality. Run 33964954767 passed no --model at all and its log names no model,
+# so what actually served that report is UNVERIFIABLE after the fact.
+#
+# Scheduled runs are routine and get the cheaper model. A manual run carries a
+# `focus`, which means a human is chasing something -- that is an alarm, and it
+# gets the stronger model. MODEL is set by the workflow; this default keeps a
+# local run working.
+MODEL="${MODEL:-claude-sonnet-5}"
+
+printf 'starting claude -p (model=%s, max-turns 40)\n' "$MODEL"
 
 set +e
 claude -p "$PROMPT_BODY" \
   --output-format text \
   --max-turns 40 \
+  --model "$MODEL" \
   --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
   > "$OUT"
 CLAUDE_EXIT=$?
 set -e
+
+# A rejected model id is a startup error, not a triage result. Surface it as
+# itself rather than letting the generic banner call it a runner failure.
+if [ "$CLAUDE_EXIT" -ne 0 ] && grep -qiE 'model|unknown|invalid' "$OUT" 2>/dev/null; then
+  printf 'NOTE: claude exited %s; check whether --model %s was rejected.\n' \
+    "$CLAUDE_EXIT" "$MODEL" >&2
+fi
 
 # A non-zero exit is a failure EVEN IF the file is non-empty. claude writes some
 # fatal errors to stdout, so a failed run leaves a one-line file like "Failed to

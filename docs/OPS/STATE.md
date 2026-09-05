@@ -118,24 +118,7 @@ guards in that position.
 
 ---
 
-## STARNET device inventory — verified 2026-09-05 08:36 UTC
-
-Tenant resolved by id → name first: `27c4d404-8769-49ca-bfd6-93cb9b890067` = `STARNET SECURITY`.
-IDs and badges only; no push-token values.
-
-| badge | guard | `client` identity string | last seen | reachable by current OTA? |
-|---|---|---|---|---|
-| GRD0004 | deepak naik | `platform/ios; version/1.0.17; build/41; runtime/1.0.17; update/01a05fb1-…` | 2026-09-04T22:55Z | **yes** (runtime 1.0.17) |
-| GRD0005 | Nikith Reddy | `platform/android; version/1.0.16; build/17; runtime/1.0.16; update/01a04071-…` | 2026-09-05T00:57Z | **NO** — runtime 1.0.16 |
-| GRD0007 | Anil | `platform/ios; version/1.0.16; build/41; runtime/1.0.16; update/01a02a71-…` | 2026-09-04T00:17Z | **NO** — runtime 1.0.16 |
-| GRD0002 | Nandu | `NULL` | 2026-09-01T02:03Z | **UNKNOWN** — never sent a client header |
-| GRD0001, GRD0006, GRD0008, GRD0009 | Bhanu, vamshi krishna, Svineah, Naveen Yatakari | `NULL` | = claimed_at (never used since) | **UNKNOWN** |
-
-`client` is written only on `clock-in`, `handoff-clock-in`, `ping`, and
-`clock-in-verification`. A `NULL` means the device row was claimed at login but no
-qualifying write has happened since — not that the app is broken.
-
----
+Device inventory: see DEVICES.md (not included in the triage context pack — contains guard names).
 
 ## STARNET sites — verified 2026-09-05 08:36 UTC
 
@@ -255,10 +238,71 @@ First local run: **1147 lines, 0 collector failures.** Section line counts —
 `railway-logs` 204, `sentry-netraops-api` 15, `sentry-netraops-mobile` 4,
 `git-log` 20.
 
-**Note on repo memory in the pack.** The pack also embeds `STATE.md`,
-`OPEN-ITEMS.md`, `FREEZES.md`, `DECISIONS.md`, `POLICY.md` and
-`REPORT-TEMPLATE.md`. `STATE.md`'s device-inventory table contains guard names,
-so names do reach the model's context by that route even though no collector
-emits one. The data rule governs the **report**, and the prompt forbids names
-there. Narrowing what repo memory the pack carries is a follow-up, not a
-regression introduced here.
+**Repo memory in the pack is now name-free (Phase 4.3, N16).** The pack embeds
+`STATE.md`, `OPEN-ITEMS.md`, `FREEZES.md`, `DECISIONS.md`, `POLICY.md` and
+`REPORT-TEMPLATE.md` — and **not** `DEVICES.md`. The device-inventory table,
+the only place carrying guard NAMES, moved verbatim to `DEVICES.md`; nine
+further name occurrences in `OPEN-ITEMS.md` and `FREEZES.md` were replaced in
+place with `guard_id` + `badge_number` + `company_id`. Post-fix scan of all six
+embedded files: **0 names**. Structural, not prompt-dependent: the model is no
+longer shown what it is told not to repeat.
+
+### Runner follow-ups — verified 2026-09-05 (Phase 4.3)
+
+**Railway logs collector fixed.** Run `33964954767` recorded `railway-logs` as a
+successful 3-line collection. The three lines were:
+
+```
+No service linked
+Run `railway service` to link a service
+  → Run `railway service` to link a service.
+```
+
+A GitHub runner has no `~/.railway` link and `RAILWAY_TOKEN` alone does not
+imply a service. The call is now
+`railway logs --service guard --environment production --lines 300`.
+
+**Two bugs, not one.** The missing flag was the visible half. The other half was
+in the harness: `railway` **exits 0** while printing that error, so the
+collector wrapper — which only tested exit status — logged it as a success. That
+is the same silent-failure class this whole loop exists to remove, built into
+the detector. The collector now also matches the error text explicitly and
+returns non-zero, so a repeat is loud.
+
+**Model pinned.** Run `33964954767` passed no `--model`, and its workflow log
+names no model, so what served that report is **unverifiable after the fact**.
+`triage.sh` now takes `MODEL`, defaulting to `claude-sonnet-5`. The workflow
+sets it: scheduled runs get `claude-sonnet-5`; a manual run with a non-empty
+`focus` gets `claude-opus-5`, on the reasoning that a human supplying a focus
+is chasing something and that is an alarm.
+
+**Corrected to Claude 5 ids (Phase 4.3b, 2026-09-05).** The Phase 4.3 dispatch
+specified `claude-sonnet-4-6` and `claude-opus-4-1`; those are Claude
+4-generation ids and were flagged as such at the time. They are now
+`claude-sonnet-5` and `claude-opus-5`.
+
+**Still UNVERIFIED: neither id has been exercised.** `claude -p` cannot
+authenticate on this workstation, so the first proof either id is accepted will
+be a CI run. Confirm against the Console model list. A rejected id surfaces as a
+startup error, which `triage.sh` flags separately from a triage failure — so a
+wrong id shows up as a wrong id, not as a bad report.
+
+**Actions on Node 24.** GitHub removes Node 20 from hosted runners on
+2026-09-16. Verified from each action's own `action.yml` at each tag rather than
+from a README: `actions/checkout` v4=node20 / v5,v6,v7=node24;
+`actions/setup-node` v4=node20 / v5,v6,v7=node24; `actions/upload-artifact`
+v4=node20, **v5=node20**, v6,v7=node24; `gitleaks/gitleaks-action` v2=node20,
+v3=node24. All bumped to the current major (v7 / v7 / v7 / v3).
+
+`upload-artifact@v5` is the trap: it was released as "supports Node v24" but its
+`action.yml` still declares `node20`, so a v4→v5 bump would have looked like a
+fix and changed nothing.
+
+**gitleaks was the urgent one.** It is the required status check for branch
+protection, and v2 stops working entirely on 2026-09-16 — after which `main`
+would be unmergeable. v3.0.0's notes state the migration is runtime-only: "No
+changes to inputs, outputs, or behavior." The job's `name:` is unchanged, so the
+required context `Scan for hard-coded secrets` still matches.
+
+**Prompt preface.** The prompt now opens with an instruction to emit only the
+report — no preface, no acknowledgement, no explanation of tools or permissions.
