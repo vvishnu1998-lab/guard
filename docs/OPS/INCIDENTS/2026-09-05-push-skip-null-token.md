@@ -1,6 +1,7 @@
 # 2026-09-05 — push_skip_null_token
 
-**Status:** fix committed, **not yet merged**. Awaiting push, gate and merge.
+**Status:** **RESOLVED** 2026-09-05.
+**Merged:** `3b3c9a1` (PR #6). **Deployment:** `9775a777-9523-4b58-91c0-9e49edd6b21e`, SUCCESS, 2026-09-05 09:12:04 PT / **16:12:04Z**.
 **Severity:** P3. No customer impact; no STARNET exposure.
 **Issue:** Sentry `netraops-api` **`7633312535`** (`NETRAOPS-API-6`), level `warning`.
 
@@ -35,7 +36,10 @@ below with evidence: the issue id, the event volume, and "continuously".
 | 2026-09-05 **09:22:54** | GRD0016 `0716914b` clocks in — no device row |
 | 2026-09-05 **10:00:01** | Sentry begins recording; **9/hour** from here |
 | 2026-09-05 15:01 | triage run 33973502815 reports it |
-| 2026-09-05 15:30:01 | last event at time of writing |
+| 2026-09-05 16:00:04 | **last `flow: ping_reminder` event ever recorded on this issue** |
+| 2026-09-05 **16:12:04** | deploy `9775a777-9523-4b58-91c0-9e49edd6b21e` SUCCESS — fix live |
+| 2026-09-05 16:30:01 | window boundary passes: reminders still written, **0 Sentry events** |
+| 2026-09-05 16:45:34 | verification complete; **RESOLVED** |
 
 ---
 
@@ -393,6 +397,107 @@ Item 4 is the one that matters. Items 1–3 confirm the noise is gone; item 4
 confirms nothing was lost with it.
 
 
+---
+
+## Verification
+
+Measured 2026-09-05 16:45:34Z, **2010 seconds (33.5 min) after deploy**, so the
+30-minute post-window is fully elapsed — confirmed by query rather than assumed
+(`after_window_complete = true`). It also spans the **16:30 window boundary**,
+which under the old code would have produced 3 events.
+
+### 1. Sentry event rate — 6 to 0
+
+Issue `7633312535`, filtered on `flow = ping_reminder`:
+
+| window | events |
+|---|---|
+| `[15:42:04Z, 16:12:04Z)` — before | **6** |
+| `[16:12:04Z, 16:42:04Z)` — after | **0** |
+
+The 6 before all landed at the `16:00` boundary — `16:00:02` x3 and `16:00:04`
+x3 — exactly the documented shape (3 ping leg + 3 hourly leg). After the deploy:
+nothing, through a boundary that previously fired. The newest event on the issue
+from any flow is `16:00:04Z`, i.e. before the deploy.
+
+### 2. The job still runs
+
+`cron_heartbeats` row for `pingReminder`: `last_result = 'ok'`,
+`last_run_ms = 60`, `age_s = 34` — well inside its 120 s threshold (2 x 60 s).
+
+### 3. The route is healthy
+
+`GET https://api.netraops.com/health/crons` → **HTTP 200**,
+`{"status":"ok","jobs":19,"stale":[]}`.
+
+### 4. Reminders still land — the check that mattered
+
+The three sessions are **still open and still have no active device**, so the
+emitting condition is unchanged. `notifications` of type `ping_reminder`:
+
+| session_id | before 30 min | after 30 min | latest |
+|---|---|---|---|
+| `53d85e33` | 1 | **1** | 2026-09-05T16:30:01.048Z |
+| `ae6e29e5` | 1 | **1** | 2026-09-05T16:30:01.077Z |
+| `65c15a57` | 1 | **1** | 2026-09-05T16:30:01.281Z |
+
+One per 30-minute window per session, before and after, unchanged. Guard-facing
+behaviour is identical; only the Sentry emission stopped. This is the pairing
+that makes the result meaningful: **the condition still holds and the
+notification still fires, while the noise went to zero.** A drop here would have
+meant the fix suppressed a reminder and had to be reverted.
+
+### 5. The counter appears in the logs
+
+`railway logs --service guard --environment production --lines 200`:
+
+```
+total lines returned:              200
+grep -c 'skipped_no_device='         1
+grep -c 'push_skip_null_token'       0
+```
+
+The single match:
+
+```
+[pingReminder] schedule-anchored: fired 11 ping reminder(s) skipped_no_device=3
+```
+
+`skipped_no_device=3` — exactly the three no-device guards. One match rather
+than several is correct, not a shortfall: that line prints only at a window
+boundary, and the 200-line window contains exactly **1** `schedule-anchored`
+line and **0** `activity-report reminder` lines, so it spans one `:30` boundary
+and no top-of-hour. One boundary, one summary line, one match.
+
+`push_skip_null_token` no longer appears in the logs at all.
+
+**All five verification items pass.**
+
+---
+
+## Learning
+
+The finding that opened this incident was wrong in three ways — a transposed
+digit in the issue id, a lifetime count quoted as a 24-hour volume, and
+"continuously" describing 19 hours of silence followed by a flat 9/hour — and
+none of those were the model's fault. Two came directly from a collector I had
+written three phases earlier, which emitted Sentry's `count` field under a
+heading that said "last 24h" when that field is the lifetime total since
+`firstSeen`. The lesson is not "check the numbers" but something narrower and
+more useful: **a collector that mislabels a field is worse than one that omits
+it**, because the omission is visible and the mislabel is not — every
+downstream report inherits the error with full confidence, and the reader has
+no way to detect it from the report alone. The same shape appeared twice more
+inside this one incident: `railway logs` exiting 0 while printing an error, and
+Sentry's issues *listing* returning bucket data that disagrees with its own
+per-issue endpoint (0 versus 4 for the same issue in the same window). All three
+are the identical failure — a source that answers confidently and wrongly — and
+the only defence that worked in each case was checking one number against an
+independent source before believing it. That is now the habit worth keeping:
+when a signal is going to drive a decision, measure it twice from two places,
+and if the two disagree, fix the collector before writing the report.
+
+
 ## Loop notes
 
 **What the triage report got right.** It surfaced a real, ongoing emitter and
@@ -442,3 +547,36 @@ the dispatch template should stop asking for a column it deliberately revoked.
 **Loop friction worth fixing.** Nothing else. The read-only path was sufficient
 to reach a falsifiable root cause, a bounded blast radius and a sized fix
 without a single write.
+
+### Finalised after close (2026-09-05)
+
+**What the loop got right.** The 5A/5B/5C split held. Investigation produced a
+falsifiable claim; the fix was scoped to exactly what was approved; verification
+had a pre-registered plan written *before* the fix shipped, which is what made
+item 4 (reminders still landing) a real test rather than a post-hoc
+rationalisation. Every one of the five verification items was checkable
+read-only.
+
+**Three collector defects were found and fixed inside this incident**, all the
+same class — a source that answers confidently and wrongly:
+
+1. `c_sentry` emitted `count` (lifetime) labelled as 24h. **Fixed** — separate
+   `count_24h` and `lifetime` columns plus `firstSeen`.
+2. The Sentry issues *listing* embeds bucket data that disagrees with the
+   per-issue endpoint (0 vs 4, same issue, same window). **Fixed** — one extra
+   call per recent issue against the authoritative endpoint, capped at 15 with
+   the cap announced.
+3. `railway logs` exits 0 while printing "No service linked", so the collector
+   wrapper recorded a failure as a 3-line success. **Fixed in Phase 4.3** —
+   explicit error-text matching on top of the exit-status check.
+
+**Still open from this incident.** N20: five other call sites still emit per
+occurrence, none tags `company_id` consistently, and
+`ACTIVE_PUSH_TOKEN_SQL` still lacks `LIMIT 1`. Deliberately deferred, not
+forgotten.
+
+**One process note.** The Phase 5A dispatch asked for
+`(push_token IS NULL) AS token_null`, which the Phase 2/3 column revoke makes
+impossible (`permission denied for table guard_devices`). The control worked
+exactly as designed; the dispatch template is what needs updating, so future
+phases stop asking for a column the loop deliberately revoked.
