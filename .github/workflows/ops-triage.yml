@@ -7,6 +7,11 @@ name: ops-triage
 # It fixes nothing. Every credential below is read-only and the tool allowlist
 # in scripts/ops/triage.sh is the enforcement.
 #
+# Phase 4.2: the shell collects every live signal into /tmp/triage-context.md
+# BEFORE the model runs. The model's allowlist is read-only file tools plus
+# git log/diff -- it no longer touches psql, curl or railway. See
+# scripts/ops/triage.sh for why.
+#
 # NO webhook trigger in v1 -- deliberate. A push- or alert-triggered run would
 # fire during incidents, which is exactly when a read-only agent burning API
 # budget and posting to Slack is least useful. Schedule plus manual dispatch.
@@ -20,6 +25,11 @@ on:
         description: 'Optional free text -- something specific to look at this run'
         required: false
         type: string
+      dry_run:
+        description: 'Collect signals and upload the context pack WITHOUT calling the model. Cheap way to verify collection.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -52,10 +62,10 @@ jobs:
       - name: Install Railway CLI
         run: npm i -g @railway/cli
 
-      - name: Install psql client
+      - name: Install psql client and jq
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
+          sudo apt-get install -y -qq postgresql-client jq
 
       - name: Verify toolchain
         run: |
@@ -63,6 +73,7 @@ jobs:
           claude --version
           railway --version
           psql --version
+          jq --version
 
       - name: Run triage
         env:
@@ -73,14 +84,28 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRIAGE_FOCUS: ${{ inputs.focus }}
+          TRIAGE_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: |
           chmod +x scripts/ops/triage.sh
           bash scripts/ops/triage.sh
 
-      - name: Upload report
+      # Always uploaded, including on a dry run and on failure. The pack is the
+      # evidence: a report that claims all-green is only trustworthy alongside
+      # the signals it was written from.
+      - name: Upload context pack
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-context-${{ github.run_id }}
+          path: /tmp/triage-context.md
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload report
+        if: always() && !inputs.dry_run
         uses: actions/upload-artifact@v4
         with:
           name: triage-report-${{ github.run_id }}
           path: report.md
           retention-days: 30
+          if-no-files-found: warn

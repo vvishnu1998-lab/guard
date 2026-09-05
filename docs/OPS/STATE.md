@@ -186,9 +186,9 @@ See `FREEZES.md` — an unresolved review is a freeze condition.
 |---|---|
 | `api.netraops.com` | **LIVE.** `curl https://api.netraops.com/health` → HTTP 200 `{"status":"ok","db":"connected"}` |
 | `guard-production-6be4.up.railway.app` | still serving; same body. Both hosts front the same service. |
-| `GET /health/crons` | **404 in production** — the route ships in the Phase 4 branch and is not deployed yet |
+| `GET /health/crons` | **LIVE.** Returns 200 `{"status":"ok","jobs":19,"stale":[]}` (2026-09-05 12:00Z). The Phase 4.1 first-tick grace is working: the four daily/monthly jobs have still never ticked and are correctly not reported. |
 | readonly column revoke | **APPLIED.** `has_column_privilege('claude_readonly','guards','password_hash','SELECT')` → **false** |
-| Sentry cron monitors | **11 exist and are all active**, auto-created by the Phase 2/3 check-ins. Slugs are lowercased by Sentry (`orphanedsessioncheck`, not `orphanedSessionCheck`). Phase 4 turns check-ins off; these 11 must be deleted by hand. |
+| Sentry cron monitors | **11 exist, all active, and are NOW ALARMING FALSELY.** Phase 4 (deployment `1da8d450`, 2026-09-05 11:35:57Z) stopped sending check-ins, so the still-armed monitors began reporting missed ones: **9 `Cron failure:` issues at 2026-09-05T11:52:00Z** (`shiftstartreminder`, `clockoutreminder`, `handoffnudge`, `missedshiftalert`, `autocompleteshifts`, `missedpingcron`, `preshiftreminder`, `lateclockinreminder`, `missedreportcron`), plus `chatretention` at 11:10. **All are false**: every job is running — heartbeat ages 35-36s, all `last_result='ok'`, and `/health/crons` returns 200 `stale:[]`. `RUNBOOK-phase4-apply.md` step (g) — delete all 11 — is now urgent, not housekeeping. Slugs are lowercased by Sentry. |
 | Sentry uptime monitor | id `8024493`, still pointing at `https://www.netraops.com` (the **web** app). **To be repointed at `https://api.netraops.com/health/crons` after merge.** With the Phase 4.1 first-tick grace the route answers 200 immediately on a healthy deploy, so no waiting period applies. See `RUNBOOK-phase4-apply.md` step (d). |
 | local `.env` | **now points at local Postgres** `127.0.0.1:5432/guard_dev`. The production URL moved to `~/guard/.env.prod` (gitignored, mode 600). |
 
@@ -207,3 +207,58 @@ authority.
 
 **UNVERIFIED** — not recorded anywhere in the repo. The Monday weekly section
 of the triage report asks for it. **Vishnu fills.**
+
+---
+
+## Triage runner — verified 2026-09-05 12:00 UTC (Phase 4.2)
+
+**Signals are collected in shell; the model reads only.**
+
+`scripts/ops/triage.sh` gathers every live signal into `/tmp/triage-context.md`
+*before* `claude` is invoked. The model's allowlist is
+`Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(cat /tmp/triage-context.md)`
+— no psql, no curl, no railway, no WebFetch — and the run passes
+`--permission-mode dontAsk`.
+
+**Why.** Run `33964038694` reported **SUCCESS** while collecting nothing: every
+Bash and WebFetch call came back `requires approval`, and the report was
+authored from `STATE.md` alone. `claude -p` starts in **Manual** permission mode
+on every plan, so with nobody to answer, anything outside the allow rules is
+denied — and the old rules were too specific to match what the model actually
+typed (one interpolated a quoted database URL into a prefix rule; `WebFetch` was
+never listed at all).
+
+A triage pass that silently reports on nothing is worse than none, because its
+output is indistinguishable from a clean run.
+
+**The eleven collectors**, each wrapped so a failure writes
+`COLLECTOR FAILED: <name>: <error>` into the pack and the run continues:
+`health`, `health-crons`, `cron-heartbeats`, `starnet-open-sessions` (with a
+per-`company_id` control count), `customer-signal`, `open-geofence-violations`
+(>6h, excluding Bethel AME per D11), `stuck-sessions` (>3h past
+`scheduled_end`), `railway-logs`, `sentry-netraops-api`,
+`sentry-netraops-mobile`, `git-log`.
+
+Every query selects **ID and count columns only**. Verified on the 2026-09-05
+local run: the live-signals half of the pack contained **0 email addresses, 0
+coordinate pairs, 0 phone numbers and 0 guard names**.
+
+**Dry run.** `workflow_dispatch` takes `dry_run: true`, which collects and
+uploads the pack without calling the model — a cheap way to prove collection
+works. The context pack is uploaded as an artifact on **every** run, dry or not,
+including failures: a report claiming all-green is only trustworthy alongside
+the signals it was written from.
+
+First local run: **1147 lines, 0 collector failures.** Section line counts —
+`health` 2, `health-crons` 4, `cron-heartbeats` 16, `starnet-open-sessions` 8,
+`customer-signal` 4, `open-geofence-violations` 1, `stuck-sessions` 1,
+`railway-logs` 204, `sentry-netraops-api` 15, `sentry-netraops-mobile` 4,
+`git-log` 20.
+
+**Note on repo memory in the pack.** The pack also embeds `STATE.md`,
+`OPEN-ITEMS.md`, `FREEZES.md`, `DECISIONS.md`, `POLICY.md` and
+`REPORT-TEMPLATE.md`. `STATE.md`'s device-inventory table contains guard names,
+so names do reach the model's context by that route even though no collector
+emits one. The data rule governs the **report**, and the prompt forbids names
+there. Narrowing what repo memory the pack carries is a follow-up, not a
+regression introduced here.
