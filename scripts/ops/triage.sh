@@ -1,15 +1,40 @@
 #!/usr/bin/env bash
 #
 # NetraOps triage runner. Invoked by .github/workflows/ops-triage.yml on a
-# 6-hour schedule and by manual dispatch. Runs read-only: it collects context,
-# hands it to Claude with a restricted tool allowlist, and writes report.md.
+# 6-hour schedule and by manual dispatch. Read-only throughout.
 #
-# It changes nothing. Every credential it touches is read-only, and the tool
-# allowlist below is the enforcement — not a suggestion to the model.
+# WHY THE SHELL COLLECTS THE SIGNALS (Phase 4.2)
+# ----------------------------------------------
+# Run 33964038694 reported SUCCESS and posted a report that was authored from
+# docs/OPS/STATE.md alone. Every Bash and WebFetch call the model attempted came
+# back "requires approval", so it collected nothing live and said so only
+# obliquely. Two causes, both now removed:
+#
+#   1. `claude -p` starts in Manual permission mode on every plan. With nobody
+#      to answer, anything not matching an allow rule is denied outright.
+#   2. The old --allowedTools rules were too specific to match what the model
+#      actually typed -- e.g. Bash(psql "$DATABASE_READONLY_URL"*) interpolated
+#      a URL, with quotes, into a prefix rule -- and WebFetch was never listed
+#      at all.
+#
+# A triage pass that silently reports on nothing is worse than no triage pass,
+# because the output looks identical to a clean run. So the shell now collects
+# every live signal BEFORE claude is invoked, and the model's job is reduced to
+# reading one file and writing the report. Its tool allowlist no longer includes
+# psql, curl or railway, because it no longer needs them.
+#
+# Each collector is wrapped: a failure writes
+#   COLLECTOR FAILED: <name>: <one-line error>
+# into the pack and the run continues. A partial pack with named gaps is useful;
+# an aborted run is not.
+#
+# DATA RULE: every query selects ID and count columns only. Never name, email,
+# phone, lat or lng. See docs/OPS/POLICY.md.
 #
 # Local dry run:
-#   TRIAGE_LOCAL=1 SLACK_SINK=/tmp/slack.json zsh scripts/ops/triage.sh
-# In local mode the Slack POST is written to SLACK_SINK instead of being sent.
+#   TRIAGE_LOCAL=1 SLACK_SINK=/tmp/slack.json bash scripts/ops/triage.sh
+# Collection only, no model call (also the workflow's dry_run input):
+#   TRIAGE_DRY_RUN=1 TRIAGE_LOCAL=1 bash scripts/ops/triage.sh
 
 set -euo pipefail
 
@@ -19,11 +44,14 @@ cd "$REPO_ROOT"
 OUT="${TRIAGE_OUT:-report.md}"
 CONTEXT="${TRIAGE_CONTEXT:-/tmp/triage-context.md}"
 LOCAL="${TRIAGE_LOCAL:-0}"
+DRY_RUN="${TRIAGE_DRY_RUN:-0}"
+
+STARNET='27c4d404-8769-49ca-bfd6-93cb9b890067'
+BETHEL='53c71c64-1973-4f82-be9c-98e4800beece'
+API='https://api.netraops.com'
 
 # ---------------------------------------------------------------------------
-# Secrets. Fail fast and by NAME -- a run that starts with a missing secret and
-# discovers it thirty turns in wastes a full API budget and reports nothing.
-# Values are never printed, only presence.
+# Secrets. Fail fast and by NAME.
 # ---------------------------------------------------------------------------
 require_secret() {
   local name="$1"
@@ -36,20 +64,21 @@ require_secret() {
 }
 
 MISSING=0
-
 if [ "$LOCAL" = "1" ]; then
-  # Local dry run. Only the database URL has no ambient equivalent on a
-  # workstation: claude uses the interactive login, railway uses ~/.railway,
-  # sentry uses ~/.sentryclirc, and Slack is redirected to a file sink. Faking
-  # the other four just to satisfy a presence check would prove nothing and
-  # would hand claude an invalid API key.
   require_secret DATABASE_READONLY_URL || MISSING=1
   printf 'local mode: using ambient claude/railway/sentry auth, slack sink=%s\n' \
     "${SLACK_SINK:-/tmp/slack.json}"
 else
-  for s in ANTHROPIC_API_KEY SENTRY_AUTH_TOKEN RAILWAY_TOKEN DATABASE_READONLY_URL SLACK_WEBHOOK_URL; do
+  for s in SENTRY_AUTH_TOKEN RAILWAY_TOKEN DATABASE_READONLY_URL; do
     require_secret "$s" || MISSING=1
   done
+  if [ "$DRY_RUN" = "1" ]; then
+    printf 'dry run: ANTHROPIC_API_KEY and SLACK_WEBHOOK_URL not required\n'
+  else
+    for s in ANTHROPIC_API_KEY SLACK_WEBHOOK_URL; do
+      require_secret "$s" || MISSING=1
+    done
+  fi
 fi
 
 if [ "$MISSING" -ne 0 ]; then
@@ -58,56 +87,211 @@ if [ "$MISSING" -ne 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Context pack. Assembled here rather than left to the model so every run reads
-# the same source of truth and a run is reproducible from the report alone.
+# Collector harness.
+#
+# collect <section name> <command...>
+#
+# Writes a "## <name>" header, then either a fenced block with the output and
+# its line count, or a single COLLECTOR FAILED line. Never aborts the run --
+# `set -e` is sidestepped by testing the exit status explicitly.
+# ---------------------------------------------------------------------------
+COLLECTOR_FAILURES=0
+
+collect() {
+  local name="$1"; shift
+  local out rc
+  out="$("$@" 2>&1)" && rc=0 || rc=$?
+
+  printf '\n## %s\n\n' "$name"
+  if [ "$rc" -ne 0 ]; then
+    COLLECTOR_FAILURES=$((COLLECTOR_FAILURES + 1))
+    printf 'COLLECTOR FAILED: %s: %s\n' \
+      "$name" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+  else
+    printf 'lines: %s\n\n' "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+    printf '```\n%s\n```\n' "$out"
+  fi
+}
+
+psql_at() {
+  psql "$DATABASE_READONLY_URL" -At -v ON_ERROR_STOP=1 -c "$1"
+}
+
+# ── individual collectors ───────────────────────────────────────────────────
+
+c_health() {
+  local body code
+  body="$(curl -s --max-time 20 "$API/health")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$API/health")"
+  printf 'HTTP %s\n%s\n' "$code" "$body"
+}
+
+c_health_crons() {
+  local body code
+  body="$(curl -s --max-time 20 "$API/health/crons")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$API/health/crons")"
+  printf 'HTTP %s\n%s\n' "$code" "$body"
+  printf '\nNOTE: 503 with a stale list is the dead-cron alarm. 200 with stale:[] is healthy.\n'
+}
+
+c_heartbeats() {
+  printf 'job_name|last_result|age_seconds\n'
+  psql_at "SELECT job_name, last_result, EXTRACT(EPOCH FROM (NOW()-last_tick_at))::int
+             FROM cron_heartbeats ORDER BY 3 DESC"
+}
+
+c_starnet_sessions() {
+  printf 'open_starnet_sessions: '
+  psql_at "SELECT COUNT(*) FROM shift_sessions ss
+             JOIN guards g ON g.id = ss.guard_id
+            WHERE ss.clocked_out_at IS NULL AND g.company_id = '$STARNET'"
+  printf '\ncontrol -- open sessions per company_id (all tenants):\n'
+  printf 'company_id|open_sessions\n'
+  psql_at "SELECT g.company_id, COUNT(*) FROM shift_sessions ss
+             JOIN guards g ON g.id = ss.guard_id
+            WHERE ss.clocked_out_at IS NULL GROUP BY g.company_id ORDER BY 2 DESC"
+  printf '\nNOTE: if open_starnet_sessions is 0, the control list proves the join works.\n'
+  printf 'An empty result from a broken join is indistinguishable from a true zero.\n'
+}
+
+c_customer_signal() {
+  printf 'active_guards_last_7d|active_guards_prior_7d|sessions_last_7d\n'
+  psql_at "SELECT
+      (SELECT COUNT(DISTINCT ss.guard_id) FROM shift_sessions ss
+         JOIN guards g ON g.id = ss.guard_id
+        WHERE g.company_id = '$STARNET'
+          AND ss.clocked_in_at >= NOW() - INTERVAL '7 days'),
+      (SELECT COUNT(DISTINCT ss.guard_id) FROM shift_sessions ss
+         JOIN guards g ON g.id = ss.guard_id
+        WHERE g.company_id = '$STARNET'
+          AND ss.clocked_in_at >= NOW() - INTERVAL '14 days'
+          AND ss.clocked_in_at <  NOW() - INTERVAL '7 days'),
+      (SELECT COUNT(*) FROM shift_sessions ss
+         JOIN guards g ON g.id = ss.guard_id
+        WHERE g.company_id = '$STARNET'
+          AND ss.clocked_in_at >= NOW() - INTERVAL '7 days')"
+  printf '\nNOTE: counts only, no identities. A sustained drop is the customer leaving.\n'
+}
+
+c_open_violations() {
+  printf 'open_geofence_violations_over_6h (excluding Bethel AME %s): ' "$BETHEL"
+  psql_at "SELECT COUNT(*) FROM geofence_violations
+            WHERE resolved_at IS NULL
+              AND occurred_at < NOW() - INTERVAL '6 hours'
+              AND site_id <> '$BETHEL'"
+}
+
+c_stuck_sessions() {
+  printf 'sessions_open_past_scheduled_end_plus_3h: '
+  psql_at "SELECT COUNT(*) FROM shift_sessions ss
+             JOIN shifts s ON s.id = ss.shift_id
+            WHERE ss.clocked_out_at IS NULL
+              AND NOW() > s.scheduled_end + INTERVAL '3 hours'"
+}
+
+c_railway_logs() {
+  # A read-scoped RAILWAY_TOKEN may refuse this. That is recorded as a failed
+  # collector rather than aborting the run -- the logs are one signal of seven.
+  local out
+  out="$(railway logs --lines 300 2>&1)"
+  printf '%s\n' "$out"
+}
+
+c_sentry() {
+  local project="$1"
+  local cutoff
+  cutoff="$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-6H +%Y-%m-%dT%H:%M:%SZ)"
+  # statsPeriod accepts only '', 24h and 14d -- 6h returns HTTP 400. Fetch 24h
+  # and filter on lastSeen here, so the model never has to know that.
+  curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+    "https://sentry.io/api/0/projects/netraopscom/$project/issues/?statsPeriod=24h" \
+  | jq -r --arg cutoff "$cutoff" '
+      if type == "array" then
+        (map(select(.lastSeen >= $cutoff))) as $recent
+        | "issues_24h: \(length)   issues_last_6h: \($recent | length)",
+          "",
+          "id|shortId|level|count|lastSeen|title",
+          ($recent[] | "\(.id)|\(.shortId)|\(.level)|\(.count)|\(.lastSeen)|\(.title)")
+      else
+        "SENTRY API ERROR: \(. | tostring | .[0:200])"
+      end'
+}
+
+c_sentry_api()    { c_sentry netraops-api; }
+c_sentry_mobile() { c_sentry netraops-mobile; }
+
+c_git_log() { git log -20 --oneline; }
+
+# ---------------------------------------------------------------------------
+# Build the pack.
 # ---------------------------------------------------------------------------
 {
-  printf '# Triage context\n\n'
+  printf '# Triage context pack\n\n'
+  printf 'EVERY LIVE SIGNAL IS ALREADY BELOW. Report from this file.\n'
+  printf 'Any section reading COLLECTOR FAILED means that signal is UNVERIFIED --\n'
+  printf 'say so in the report and do NOT try to fetch it yourself.\n\n'
   printf 'Collected: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'Pacific:   %s\n' "$(TZ=America/Los_Angeles date +'%Y-%m-%d %H:%M %Z')"
   printf 'Weekday:   %s\n' "$(TZ=America/Los_Angeles date +%A)"
   printf 'Run id:    %s\n' "${GITHUB_RUN_ID:-local}"
   printf 'Trigger:   %s\n' "${GITHUB_EVENT_NAME:-manual}"
-  printf 'Focus:     %s\n\n' "${TRIAGE_FOCUS:-none}"
+  printf 'Focus:     %s\n' "${TRIAGE_FOCUS:-none}"
+  printf 'HEAD:      %s\n' "$(git rev-parse --short HEAD)"
 
-  printf '## git log -20 --oneline\n\n```\n'
-  git log -20 --oneline
-  printf '```\n\n'
+  printf '\n---\n\n# LIVE SIGNALS\n'
 
-  printf '## HEAD\n\n```\n'
-  git rev-parse HEAD
-  printf '```\n\n'
+  collect 'health'                      c_health
+  collect 'health-crons'                c_health_crons
+  collect 'cron-heartbeats'             c_heartbeats
+  collect 'starnet-open-sessions'       c_starnet_sessions
+  collect 'customer-signal'             c_customer_signal
+  collect 'open-geofence-violations'    c_open_violations
+  collect 'stuck-sessions'              c_stuck_sessions
+  collect 'railway-logs'                c_railway_logs
+  collect 'sentry-netraops-api'         c_sentry_api
+  collect 'sentry-netraops-mobile'      c_sentry_mobile
+  collect 'git-log'                     c_git_log
 
+  printf '\n---\n\n# REPO MEMORY\n'
   for f in docs/OPS/STATE.md docs/OPS/OPEN-ITEMS.md docs/OPS/FREEZES.md \
-           docs/OPS/DECISIONS.md docs/OPS/POLICY.md; do
-    printf -- '---\n\n# FILE: %s\n\n' "$f"
+           docs/OPS/DECISIONS.md docs/OPS/POLICY.md docs/OPS/REPORT-TEMPLATE.md; do
+    printf -- '\n---\n\n# FILE: %s\n\n' "$f"
     cat "$f"
     printf '\n'
   done
 } > "$CONTEXT"
 
-printf 'context pack: %s (%s lines)\n' "$CONTEXT" "$(wc -l < "$CONTEXT" | tr -d ' ')"
+printf 'context pack: %s (%s lines, %s collector failure(s))\n' \
+  "$CONTEXT" "$(wc -l < "$CONTEXT" | tr -d ' ')" "$COLLECTOR_FAILURES"
+
+if [ "$DRY_RUN" = "1" ]; then
+  printf 'dry run: collection only, not calling claude\n'
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
-# The run.
+# The model run.
 #
-# --allowedTools is the security boundary. Every entry is read-only:
-#   psql        bound to DATABASE_READONLY_URL, which cannot read credential
-#               columns and holds SELECT only
-#   railway     logs and status only -- never up, redeploy, or variable
-#   curl        Sentry API and the public health endpoints only
-#   git         log and diff only
-# There is no Write, no Edit, and no unrestricted Bash. Adding one turns this
-# from a triage pass into an agent with production write access.
+# The allowlist is now three read-only entries plus the file tools. The model
+# reads the pack; it does not gather anything.
+#
+# Syntax verified against code.claude.com/docs/en/permissions 2026-09-05:
+# "The `:*` suffix is an equivalent way to write a trailing wildcard, so
+# Bash(ls:*) matches the same commands as Bash(ls *)", and it is recognised
+# only at the end of a pattern. The space matters in the other form --
+# Bash(git log*) would also match `git logfoo`.
+#
+# --permission-mode dontAsk: `claude -p` starts in Manual mode on every plan,
+# and the docs name dontAsk as the mode for "locked-down CI runs" -- it denies
+# anything outside the allow rules and the built-in read-only command set
+# instead of waiting on a prompt nobody will answer. That is the flag the
+# previous run needed. --permission-prompts none would also suit but requires
+# v2.1.259+, and with no permission host in a plain -p run the docs say such
+# requests are denied either way, so it buys nothing here and would break on
+# older CLIs.
 # ---------------------------------------------------------------------------
-ALLOWED_TOOLS="Read,Grep,Glob"
-ALLOWED_TOOLS="$ALLOWED_TOOLS,Bash(psql \"$DATABASE_READONLY_URL\"*)"
-ALLOWED_TOOLS="$ALLOWED_TOOLS,Bash(railway logs*)"
-ALLOWED_TOOLS="$ALLOWED_TOOLS,Bash(railway status*)"
-ALLOWED_TOOLS="$ALLOWED_TOOLS,Bash(curl -s https://sentry.io/api/*)"
-ALLOWED_TOOLS="$ALLOWED_TOOLS,Bash(curl -s https://api.netraops.com/health*)"
-ALLOWED_TOOLS="$ALLOWED_TOOLS,Bash(git log*)"
-ALLOWED_TOOLS="$ALLOWED_TOOLS,Bash(git diff*)"
+ALLOWED_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(cat ${CONTEXT})"
 
 PROMPT_BODY="$(cat .github/ops/triage-prompt.md)"
 if [ -n "${TRIAGE_FOCUS:-}" ]; then
@@ -116,7 +300,7 @@ if [ -n "${TRIAGE_FOCUS:-}" ]; then
 ## Focus for this run
 
 The operator asked you to pay particular attention to the following. It does
-NOT replace the standard collection above; do both.
+NOT replace the standard reporting above; do both.
 
 ${TRIAGE_FOCUS}"
 fi
@@ -125,8 +309,8 @@ PROMPT_BODY="$PROMPT_BODY
 
 ## Context pack
 
-Already collected for you at ${CONTEXT}. Read it first with the Read tool
-before running any command."
+Every live signal has already been collected for you at ${CONTEXT}.
+Read that file first. Do not attempt to collect anything yourself."
 
 printf 'starting claude -p (max-turns 40)\n'
 
@@ -134,24 +318,25 @@ set +e
 claude -p "$PROMPT_BODY" \
   --output-format text \
   --max-turns 40 \
+  --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
   > "$OUT"
 CLAUDE_EXIT=$?
 set -e
 
-# A non-zero exit is a failure EVEN IF the file is non-empty. claude writes
-# some fatal errors to stdout, so a failed run leaves a one-line file like
-# "Failed to authenticate: OAuth session expired" -- which is non-empty, passes
-# a naive -s check, and gets posted to Slack looking like a report. Caught in
-# the 2026-09-05 local dry run. Banner first, original output kept below it.
+# A non-zero exit is a failure EVEN IF the file is non-empty. claude writes some
+# fatal errors to stdout, so a failed run leaves a one-line file like "Failed to
+# authenticate: OAuth session expired" -- non-empty, passes a naive -s check,
+# and gets posted to Slack looking like a report. Caught in the 2026-09-05 dry
+# run. Banner first, original output kept below it.
 if [ "$CLAUDE_EXIT" -ne 0 ] || [ ! -s "$OUT" ]; then
   printf 'claude exited %s\n' "$CLAUDE_EXIT" >&2
   ORIGINAL="$(cat "$OUT" 2>/dev/null || true)"
   {
     printf '# Triage FAILED\n\n'
     printf 'claude exited %s and produced %s bytes.\n\n' "$CLAUDE_EXIT" "${#ORIGINAL}"
-    printf 'This is a RUNNER FAILURE, not an all-green result. Nothing was collected.\n'
-    printf 'Do not read the absence of findings below as the absence of problems.\n\n'
+    printf 'This is a RUNNER FAILURE, not an all-green result. The report was not written.\n'
+    printf 'The context pack was still collected -- see the uploaded artifact.\n\n'
     if [ -n "$ORIGINAL" ]; then
       printf '## Output captured before failure\n\n```\n%s\n```\n' "$ORIGINAL"
     fi
@@ -161,17 +346,20 @@ fi
 printf 'report: %s (%s lines)\n' "$OUT" "$(wc -l < "$OUT" | tr -d ' ')"
 
 # ---------------------------------------------------------------------------
-# Slack. 3500 chars is well inside Slack's 40k block limit and keeps the post
-# skimmable; the artifact holds the full report.
+# Slack.
 # ---------------------------------------------------------------------------
 RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-vvishnu1998-lab/guard}/actions/runs/${GITHUB_RUN_ID:-0}"
 BODY="$(head -c 3500 "$OUT")"
 
-PAYLOAD="$(BODY="$BODY" RUN_URL="$RUN_URL" python3 -c '
+PAYLOAD="$(BODY="$BODY" RUN_URL="$RUN_URL" FAILS="$COLLECTOR_FAILURES" python3 -c '
 import json, os
 body = os.environ["BODY"]
 url = os.environ["RUN_URL"]
-print(json.dumps({"text": body + "\n\nFull report: " + url}))
+fails = os.environ.get("FAILS", "0")
+suffix = "\n\nFull report: " + url
+if fails != "0":
+    suffix = "\n\n:warning: " + fails + " collector(s) failed -- some signals are UNVERIFIED." + suffix
+print(json.dumps({"text": body + suffix}))
 ')"
 
 if [ "$LOCAL" = "1" ]; then
