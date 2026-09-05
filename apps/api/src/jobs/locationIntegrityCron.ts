@@ -13,7 +13,7 @@
  * conclusion from what this produces: a mock set to a never-before-recorded
  * coordinate with plausible accuracy defeats every check it runs.
  */
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { runLocationIntegrityScan } from '../services/locationIntegrity';
 
 /** Lookback window. Wider than one day on purpose: the checks compare a
@@ -37,4 +37,4 @@ export async function runLocationIntegrityJob(): Promise<void> {
 }
 
 // 00:20 America/Los_Angeles.
-cron.schedule('20 0 * * *', runLocationIntegrityJob, { timezone: 'America/Los_Angeles' });
+runJob('locationIntegrityCron', '20 0 * * *', runLocationIntegrityJob, { timezone: 'America/Los_Angeles', sentryMonitor: true });

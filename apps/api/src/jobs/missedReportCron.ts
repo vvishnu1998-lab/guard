@@ -38,7 +38,7 @@
  * carrying the matching window_label body param).
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
@@ -115,7 +115,7 @@ async function anyReportInWindow(
   return rows[0]?.hit === true;
 }
 
-cron.schedule('*/5 * * * *', async () => {
+runJob('missedReportCron', '*/5 * * * *', async () => {
   const now = new Date();
   let created = 0;
   let considered = 0;
@@ -272,4 +272,4 @@ cron.schedule('*/5 * * * *', async () => {
       console.log(`[missedReportCron] considered=${considered} created=${created}`);
     }
   }
-});
+}, { sentryMonitor: true });

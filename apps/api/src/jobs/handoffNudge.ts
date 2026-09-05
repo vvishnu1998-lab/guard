@@ -21,7 +21,7 @@
  *
  * Exports `runHandoffNudgeOnce()` for tests / manual invocation.
  */
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { pushHandoffNudge } from '../services/swapPush';
 import { sendHandoffNudgeFyi } from '../services/email';
@@ -110,10 +110,10 @@ export async function runHandoffNudgeOnce(): Promise<number> {
   return result.rowCount;
 }
 
-cron.schedule('*/5 * * * *', async () => {
+runJob('handoffNudge', '*/5 * * * *', async () => {
   try {
     await runHandoffNudgeOnce();
   } catch (err) {
     console.error('[handoff-nudge] tick failed:', err);
   }
-});
+}, { sentryMonitor: true });

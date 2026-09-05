@@ -34,7 +34,7 @@
  * of the retention tier — they stay unchanged from the old cron.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { deleteS3Object } from '../services/s3';
 import { Sentry } from '../services/sentry';
@@ -50,7 +50,7 @@ interface StepResult {
   error?:    string;
 }
 
-cron.schedule('0 0 * * *', runNightlyPurge);
+runJob('nightlyPurge', '0 0 * * *', runNightlyPurge, { sentryMonitor: true });
 
 /**
  * One purge run. Exported so a local harness can invoke it directly
@@ -61,6 +61,15 @@ cron.schedule('0 0 * * *', runNightlyPurge);
  * own try/catch feeding errorStep(), so anything escaping this function is
  * a genuine failure that must surface as an error rather than be swallowed
  * to force a summary event out.
+ *
+ * That surfacing is now real. It previously was not: node-cron catches the
+ * rejection itself and emits 'task-failed' on an emitter with no listener
+ * (src/task.js:25), so an escaping exception was swallowed by the scheduler
+ * and produced no log and no Sentry event -- the opposite of what the
+ * paragraph above intended. The runJob wrapper registered at the top of this
+ * file now catches it, logs [nightlyPurge] tick failed, reports it to Sentry
+ * tagged job=nightlyPurge, and records last_result='error' in
+ * cron_heartbeats. Purge logic is unchanged.
  */
 export async function runNightlyPurge(): Promise<StepResult[]> {
   const start = Date.now();

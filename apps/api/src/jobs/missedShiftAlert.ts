@@ -16,12 +16,12 @@
  * stops matching after the flip, so no duplicate alert is sent.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { sendMissedShiftAlert } from '../services/email';
 import { Sentry } from '../services/sentry';
 
-cron.schedule('*/5 * * * *', async () => {
+runJob('missedShiftAlert', '*/5 * * * *', async () => {
   const result = await pool.query(
     `SELECT id FROM shifts
      WHERE status = 'scheduled'
@@ -45,4 +45,4 @@ cron.schedule('*/5 * * * *', async () => {
       });
     }
   }
-});
+}, { sentryMonitor: true });

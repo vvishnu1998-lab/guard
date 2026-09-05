@@ -35,7 +35,7 @@
  * autoCompleteShifts.ts.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 import { Sentry } from '../services/sentry';
@@ -336,7 +336,7 @@ export async function sendReturnOverduePushes(client: PoolClient): Promise<{
   return { checked: due.rows.length, pushed };
 }
 
-cron.schedule('* * * * *', async () => {
+runJob('breakExpiryCron', '* * * * *', async () => {
   const tickStart = Date.now();
   const client = await pool.connect();
   try {
@@ -370,4 +370,4 @@ cron.schedule('* * * * *', async () => {
   } finally {
     client.release();
   }
-});
+}, { sentryMonitor: false });

@@ -37,6 +37,27 @@ verified: YES — `guard_devices.client` for GRD0005 Nikith Reddy = `runtime/1.0
 **N8 (new, found while verifying). Three divergent copies of the skills exist on disk.**
 verified: YES — `netraops-invariants/SKILL.md` hashes: repo `.claude/skills/` = `75d1cdf8ec` (2026-09-01, newest); Claude plugin session cache under `~/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/…` = `2eb54992f4` (2026-08-24, 11 days stale — **this is what the `anthropic-skills:` plugin serves**); three identical copies under `~/Downloads/.claude`, `.claude 2`, `.claude 3` = `8f26d16486` (2026-08-21). Supersedes carried item C11.
 
+
+**N9. `AGENTS.md` carried two stale facts — FIXED 2026-09-05 in this commit.**
+verified: YES — both corrected in the Phase 2 commit. (a) *"DB: PostgreSQL on Railway (22 tables,
+multi-tenant by company_id)"* — the live database has **48** base tables in `public`
+(`pg_class` count, 2026-09-05), now 49 once v67 is applied. Changed to 48. (b) *"Email: SendGrid
+(sender: alerts@netraops.com, domain verified)"* — the actual sender is
+`alerts@em6648.netraops.com`. Both were found in Phase 1 while adding `CLAUDE.md` and flagged as
+out of scope then. Nothing else in `AGENTS.md` was touched.
+
+**N10. Column-level grants do not cover columns added later — future `ALTER TABLE ADD COLUMN` on the eight narrowed tables must re-GRANT.**
+verified: YES, structural — this is documented Postgres behaviour, not a defect.
+`scripts/ops/readonly-column-revoke.sql` replaces `claude_readonly`'s table-level SELECT with
+column-level SELECT on `guards`, `company_admins`, `clients`, `guard_devices`,
+`password_reset_tokens`, `revoked_tokens`, `login_attempts` and `vishnu_state`. Once that runs, a
+new column on any of those eight is **unreadable** by `claude_readonly` until explicitly granted,
+and the failure surfaces as a runtime 42501 on a query that previously worked — most often a
+`SELECT *`. Every future migration touching those tables must carry
+`GRANT SELECT (new_column) ON <table> TO claude_readonly;`, or deliberately withhold it if the new
+column is itself a secret. The caveat is written into the header of the revoke script and into
+`CRONS.md`. **Not yet live — the revoke script has not been run** (`RUNBOOK-phase2-apply.md` step e).
+
 ---
 
 ## Carried items
@@ -56,8 +77,14 @@ verified: PARTIAL — the guard id is confirmed: `802a842f-da79-44a9-aa0e-f549a9
 **C5. India site under `starnet` `1bba063e` not created.**
 verified: YES — `starnet` (`1bba063e-a0df-4593-9466-81ee58bebc3d`) has exactly **1** site: `william pen hotel`, `America/Los_Angeles`. No India site exists under that tenant. (The four `Indian Test Site 1–4` sites belong to `Star Guard` `b7c7d32d`, not `starnet`.)
 
-**C6. `pingReminder` nags answered windows — add an `anyPingInWindow` guard per the `missedPingCron` pattern.**
-verified: **ALREADY FIXED — close this item.** `pingReminder.ts:274` already calls `anyPingInWindow(row.shift_session_id, closed.windowStart, closed.windowEnd)` and `continue`s with `[pingReminder.skipped.answered] session=… window=…`. Its comment states it is ordered *before* the claim deliberately, using "the same two Dates the break check just used, so the reminder and missedPingCron can never disagree about which window is in question."
+**C6. CLOSED 2026-09-05 — `pingReminder` nags answered windows; add an `anyPingInWindow` guard.**
+verified: **ALREADY FIXED IN CODE — no work required, item closed.** `pingReminder.ts:274` calls
+`anyPingInWindow(row.shift_session_id, closed.windowStart, closed.windowEnd)` and `continue`s,
+logging `[pingReminder.skipped.answered] session=... window=...`. Its comment states the ordering is
+deliberate — the check runs *before* `claimWindow` so a satisfied window never burns a claim, using
+"the same two Dates the break check just used, so the reminder and missedPingCron can never disagree
+about which window is in question." Re-confirmed on `f480fc2` during Phase 2; line number unchanged
+by the runJob conversion, which touched only the registration call at `:181`. Nothing to implement.
 
 **C7. Super-admin password rotation.**
 verified: NO — carried from chat memory. What *is* verified: super-admin auth is env-based, not a DB row — `apps/api/src/middleware/auth.ts:185` comments *"DB row (env-based auth), so revocation lives in the vishnu_state"*, and `:193` reads `SELECT tokens_not_before FROM vishnu_state WHERE id = 1`. A rotation date cannot be read from the repo or the DB; it lives in `VISHNU_JWT_SECRET` on Railway. Add to `EXPIRIES.md`.

@@ -54,6 +54,11 @@ import './jobs/breakExpiryCron';
 import './jobs/locationIntegrityCron';
 import './jobs/orphanedSessionCheck';
 import './jobs/clockOutReminder';
+// Job registration is an import side-effect, so this must run after the block
+// above or it reports 0. See jobs/_run.ts for why the wrapper exists.
+import { logJobRegistration } from './jobs/_run';
+
+logJobRegistration();
 
 const app = express();
 app.set('trust proxy', 1);

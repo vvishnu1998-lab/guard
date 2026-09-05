@@ -11,12 +11,13 @@
  * gives a safety margin for shifts that ran past midnight.
  */
 
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { sendDailyShiftReport } from '../services/email';
 import { Sentry } from '../services/sentry';
 
-cron.schedule(
+runJob(
+  'dailyShiftEmail',
   '0 9 * * *',
   async () => {
     console.log('[daily-email] Starting at', new Date().toISOString());
@@ -47,5 +48,5 @@ cron.schedule(
 
     console.log(`[daily-email] Done — sent: ${sent}, failed: ${failed}`);
   },
-  { timezone: 'America/Los_Angeles' },
+  { timezone: 'America/Los_Angeles', sentryMonitor: true },
 );

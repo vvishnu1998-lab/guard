@@ -74,7 +74,7 @@
  * a break five minutes before their shift ends is exactly who needs telling.
  * This diverges from pingReminder's break-quiet policy on purpose.
  */
-import cron from 'node-cron';
+import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
@@ -217,4 +217,4 @@ export async function runClockOutReminder(): Promise<number> {
 // Every 5 minutes. The eligibility window is 35 minutes wide, so any single
 // skipped tick is absorbed rather than costing the reminder — deliberately
 // unlike pingReminder's ±1-minute boundary tolerance.
-cron.schedule('*/5 * * * *', runClockOutReminder);
+runJob('clockOutReminder', '*/5 * * * *', runClockOutReminder, { sentryMonitor: true });
