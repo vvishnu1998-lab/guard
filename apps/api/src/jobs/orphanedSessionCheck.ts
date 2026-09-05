@@ -148,4 +148,4 @@ export async function runOrphanedSessionCheck(): Promise<number> {
 // :10 past the hour — chatRetention already holds '0 * * * *', and
 // locationIntegrityCron set the precedent of offsetting so two jobs never
 // contend. :10 is also clear of nightlyPurge (00:00) and its 00:20 scan.
-runJob('orphanedSessionCheck', '10 * * * *', runOrphanedSessionCheck, { sentryMonitor: true });
+runJob('orphanedSessionCheck', '10 * * * *', runOrphanedSessionCheck, { sentryMonitor: false });

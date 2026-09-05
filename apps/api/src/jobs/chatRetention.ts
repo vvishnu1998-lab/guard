@@ -16,4 +16,4 @@ runJob('chatRetention', '0 * * * *', async () => {
   } catch (err) {
     console.error('[chat-retention] Failed:', err);
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

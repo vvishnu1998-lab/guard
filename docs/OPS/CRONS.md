@@ -204,35 +204,48 @@ path is unreachable in normal operation.
 
 ## The 19 registrations
 
-`sentryMonitor: false` for the three per-minute jobs. At one tick per minute
-each they would alone produce roughly 1.3M check-ins a month, and the org's
-cron-monitor quota could not be read from the Sentry API (see UNVERIFIED
-below). They are covered by `cron_heartbeats`, which detects the same condition
-at no cost.
+**`sentryMonitor` is now `false` on all 19 jobs.** The capability is retained
+in `_run.ts` behind the flag -- it is off, not deleted -- and `_run.test.ts`
+still exercises both branches.
+
+Dead-cron detection moved to `GET /health/crons` probed by Sentry Uptime. Two
+reasons, one of them measured:
+
+1. **Cost.** The three per-minute jobs alone would produce roughly 1.3M
+   check-ins a month, and the org's cron-monitor quota could not be read from
+   the Sentry API.
+2. **The check-ins were producing false alarms.** Measured 2026-09-05:
+   `orphanedSessionCheck` ran at 10:10:00.430Z, completed in 80 ms and wrote
+   `last_result='ok'`; Sentry raised `Cron failure: orphanedsessioncheck`
+   (issue `NETRAOPS-API-G`) at 10:20:00Z -- exactly `max_runtime` (10 min)
+   later. That is the signature of an `in_progress` check-in Sentry received
+   and a closing `ok` it never matched, so it timed the check-in out. Why the
+   closing check-in did not match is UNCONFIRMED. A monitor that reports
+   failures for jobs that ran fine trains you to ignore it.
 
 | job name (= `cron_heartbeats.job_name` = Sentry monitor slug) | expr | timezone | `sentryMonitor` |
 |---|---|---|---|
-| `autoCompleteShifts` | `*/5 * * * *` | container (UTC) | true |
+| `autoCompleteShifts` | `*/5 * * * *` | container (UTC) | **false** |
 | `breakExpiryCron` | `* * * * *` | container (UTC) | **false** |
-| `chatRetention` | `0 * * * *` | container (UTC) | true |
-| `clockOutReminder` | `*/5 * * * *` | container (UTC) | true |
-| `dailyShiftEmail` | `0 9 * * *` | **America/Los_Angeles** | true |
+| `chatRetention` | `0 * * * *` | container (UTC) | **false** |
+| `clockOutReminder` | `*/5 * * * *` | container (UTC) | **false** |
+| `dailyShiftEmail` | `0 9 * * *` | **America/Los_Angeles** | **false** |
 | `expireSwapRequests` | `* * * * *` | container (UTC) | **false** |
-| `handoffNudge` | `*/5 * * * *` | container (UTC) | true |
-| `lateClockInReminder` | `*/5 * * * *` | container (UTC) | true |
-| `locationIntegrityCron` | `20 0 * * *` | **America/Los_Angeles** | true |
-| `missedPingCron` | `*/5 * * * *` | container (UTC) | true |
-| `missedReportCron` | `*/5 * * * *` | container (UTC) | true |
-| `missedShiftAlert` | `*/5 * * * *` | container (UTC) | true |
-| `monthlyHoursReport` | `0 12 1 * *` | container (UTC) | true |
-| `nightlyPurge` | `0 0 * * *` | container (UTC) | true |
-| `orphanedSessionCheck` | `10 * * * *` | container (UTC) | true |
+| `handoffNudge` | `*/5 * * * *` | container (UTC) | **false** |
+| `lateClockInReminder` | `*/5 * * * *` | container (UTC) | **false** |
+| `locationIntegrityCron` | `20 0 * * *` | **America/Los_Angeles** | **false** |
+| `missedPingCron` | `*/5 * * * *` | container (UTC) | **false** |
+| `missedReportCron` | `*/5 * * * *` | container (UTC) | **false** |
+| `missedShiftAlert` | `*/5 * * * *` | container (UTC) | **false** |
+| `monthlyHoursReport` | `0 12 1 * *` | container (UTC) | **false** |
+| `nightlyPurge` | `0 0 * * *` | container (UTC) | **false** |
+| `orphanedSessionCheck` | `10 * * * *` | container (UTC) | **false** |
 | `pingReminder` | `* * * * *` | container (UTC) | **false** |
-| `preShiftReminder` | `*/5 * * * *` | container (UTC) | true |
-| `shiftStartReminder` | `*/5 * * * *` | container (UTC) | true |
-| `taskDueCron` | `*/5 * * * *` | container (UTC) | true |
+| `preShiftReminder` | `*/5 * * * *` | container (UTC) | **false** |
+| `shiftStartReminder` | `*/5 * * * *` | container (UTC) | **false** |
+| `taskDueCron` | `*/5 * * * *` | container (UTC) | **false** |
 
-16 with Sentry check-ins, 3 without. Both timezone options are preserved
+**Zero with Sentry check-ins (Phase 4, 2026-09-05).** Both timezone options are preserved
 exactly as they were; the other 17 jobs pass no options object at all, which is
 byte-identical to the two-argument `cron.schedule` calls they replaced.
 
@@ -284,3 +297,102 @@ it. Tracked as N10 in `OPEN-ITEMS.md`.
   `cron.getTasks()` returns 19, all 19 write `last_result='ok'`, and dropping
   the table degrades to log-only without stopping any job. Production
   verification happens at `RUNBOOK-phase2-apply.md` step (h).
+
+---
+
+# GET /health/crons (Phase 4, 2026-09-05)
+
+The dead-cron probe. `GET /health` is **not** a substitute: it runs `SELECT 1`
+and nothing else, so a wedged job leaves it returning `{"status":"ok"}`.
+
+Route: `apps/api/src/index.ts`, immediately after `/health`, under the same
+`globalLimiter` (500 requests / 15 min). Logic lives in `computeStaleJobs`
+(`jobs/_run.ts`) so it is unit-testable without express or a database.
+
+## The 2x rule
+
+Two rules, depending on whether the job has ever ticked:
+
+- **Has a row** — stale when the row is older than **twice** its own interval.
+  2x absorbs one skipped tick without alarming; beyond that is a real gap.
+- **No row** — stale only once it has been *registered* for longer than that
+  same 2x window. Before then, "no row" means "not due yet".
+
+Exactly 2x is not stale on either branch; one tick past it is (both boundaries
+asserted in `_healthCrons.test.ts`).
+
+Intervals are derived at registration by `cronIntervalSeconds`, a deliberately
+narrow helper covering the five shapes actually in use. Anything else **throws
+at boot**, so an unsupported expression fails loudly rather than silently
+producing a wrong threshold. `cron-parser` is not a dependency and was not
+added for five patterns.
+
+| expression | interval |
+|---|---|
+| `* * * * *` | 60 s |
+| `*/N * * * *` | N x 60 s |
+| `M * * * *` | 3600 s |
+| `M H * * *` | 86400 s |
+| `M H D * *` | 2678400 s (31 d — the longest month, so the threshold never fires early on a short one) |
+
+## Responses
+
+| condition | status | body |
+|---|---|---|
+| all fresh | 200 | `{"status":"ok","jobs":19,"stale":[]}` |
+| any stale | 503 | `{"status":"stale","jobs":19,"stale":[{"job","age_s","interval_s","last_result"}]}` |
+| DB unreachable | 503 | `{"status":"error"}` |
+
+`age_s` and `last_result` are `null` for a job that has never ticked, which
+distinguishes "never ran" from "ran and went quiet".
+
+A heartbeat row with no matching registered job is **ignored**, not reported —
+that is a renamed or removed job leaving a stale row behind, not an outage.
+
+Job names and timings only. No guard, site or tenant data passes through this
+route, per the data rule in `POLICY.md`.
+
+## ACCEPTED v1 LIMIT — detection lag
+
+Lag scales with the interval, because the threshold is a multiple of it:
+
+| job class | flagged after |
+|---|---|
+| per-minute (3 jobs) | ~2 minutes |
+| `*/5` (10 jobs) | ~10 minutes |
+| hourly (2 jobs) | ~2 hours |
+| **daily (3 jobs)** | **up to 48 hours** |
+| **monthly (1 job)** | **about 62 days** |
+
+A `monthlyHoursReport` that dies is not detected for two months. Accepted for
+v1. The fix is to compare against the next expected fire time rather than a
+multiple of the interval, which needs a real cron parser.
+
+## First-tick grace (Phase 4.1)
+
+A job that has never ticked is **not** immediately stale. `RegisteredJob`
+records `registeredAt` at boot, and the no-row branch waits the same 2x window
+before reporting.
+
+Without it, every never-ticked job was stale the instant the process booted, so
+this route returned **503 from deploy until all 19 jobs had fired** — up to a
+month from a fresh database, gated by `monthlyHoursReport`. That is a probe
+that alarms continuously and then gets muted, right before it would start
+meaning something.
+
+**It costs no detection speed.** The grace uses the same 2x threshold as the
+row-age branch, so a genuinely dead job is caught on exactly the same schedule:
+a daily job within 48 hours, the monthly one within about 62 days. The only
+thing removed is the false positive at t=0.
+
+`registeredAt` resets on every restart, which is correct — a fresh process
+legitimately has no row yet for a job that is not due. A job that **has** a row
+is unaffected: the row outlives restarts and its age is measured from the last
+real tick, so a just-restarted process still reports a long-dead job
+(asserted).
+
+Measured in production 2026-09-05 11:00Z, before this change shipped: 15 of 19
+rows present, all `last_result='ok'`; the four absent were exactly the daily and
+monthly jobs — `dailyShiftEmail`, `locationIntegrityCron`, `monthlyHoursReport`,
+`nightlyPurge` — none of which had been due since the deploy. Under the grace
+rule that state is **200 `stale:[]`**, which is the honest answer.

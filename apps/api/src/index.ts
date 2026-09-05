@@ -56,7 +56,8 @@ import './jobs/orphanedSessionCheck';
 import './jobs/clockOutReminder';
 // Job registration is an import side-effect, so this must run after the block
 // above or it reports 0. See jobs/_run.ts for why the wrapper exists.
-import { logJobRegistration } from './jobs/_run';
+import { logJobRegistration, registeredJobs, computeStaleJobs } from './jobs/_run';
+import type { HeartbeatRow } from './jobs/_run';
 
 logJobRegistration();
 
@@ -133,6 +134,49 @@ app.get('/health', async (_req, res) => {
     res.json({ status: 'ok', db: 'connected' });
   } catch {
     res.status(503).json({ status: 'error', db: 'disconnected' });
+  }
+});
+
+// Dead-cron probe. GET /health is not a substitute: it runs SELECT 1 and
+// nothing else, so a wedged job leaves it returning {"status":"ok"}. This
+// route is the thing an external uptime monitor should watch.
+//
+// A job that HAS a heartbeat row is STALE when the row is older than TWICE its
+// own interval. 2x absorbs one skipped tick without alarming; beyond that is a
+// real gap.
+//
+// A job that has NEVER ticked is stale only once it has been REGISTERED for
+// longer than that same 2x window (Phase 4.1). Before that, "no row" means
+// "not due yet" -- the normal state of a daily job seconds after a deploy.
+// Without the grace, this route returned 503 from deploy until all 19 jobs had
+// fired, which from a fresh database is up to a month.
+//
+// ACCEPTED v1 LIMIT -- detection lag scales with the interval, under both
+// halves of the rule. The */5 and per-minute jobs are flagged within 10 and 2
+// minutes. The daily jobs (dailyShiftEmail, locationIntegrityCron,
+// nightlyPurge) take up to 48 HOURS, and monthlyHoursReport about 62 DAYS. A
+// better scheme would compare against the next expected fire time rather than
+// a multiple of the interval; that needs a real cron parser and is out of
+// scope for v1.
+//
+// Job names and timings only. No guard, site or tenant data passes through
+// here, per the data rule in docs/OPS/POLICY.md.
+app.get('/health/crons', async (_req, res) => {
+  const jobs = registeredJobs();
+  try {
+    const { rows } = await pool.query<HeartbeatRow>(
+      `SELECT job_name,
+              EXTRACT(EPOCH FROM (NOW() - last_tick_at))::int AS age_s,
+              last_result
+         FROM cron_heartbeats`,
+    );
+    const stale = computeStaleJobs(jobs, rows);
+    if (stale.length > 0) {
+      return res.status(503).json({ status: 'stale', jobs: jobs.length, stale });
+    }
+    return res.json({ status: 'ok', jobs: jobs.length, stale: [] });
+  } catch {
+    return res.status(503).json({ status: 'error' });
   }
 });
 

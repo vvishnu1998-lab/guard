@@ -198,4 +198,4 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
       console.log(`[missedPingCron] considered=${considered} created=${created}`);
     }
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

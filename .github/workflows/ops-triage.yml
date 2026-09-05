@@ -1,0 +1,86 @@
+name: ops-triage
+
+# Read-only triage pass over production. Collects health, cron heartbeats,
+# Railway logs, Sentry issues and the customer signal, then posts a report to
+# Slack and uploads it as an artifact.
+#
+# It fixes nothing. Every credential below is read-only and the tool allowlist
+# in scripts/ops/triage.sh is the enforcement.
+#
+# NO webhook trigger in v1 -- deliberate. A push- or alert-triggered run would
+# fire during incidents, which is exactly when a read-only agent burning API
+# budget and posting to Slack is least useful. Schedule plus manual dispatch.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: 'Optional free text -- something specific to look at this run'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-triage
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    name: Read-only triage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The triage prompt reads git log -20 for recent-change context.
+          fetch-depth: 50
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: npm i -g @anthropic-ai/claude-code
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Install psql client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Verify toolchain
+        run: |
+          node --version
+          claude --version
+          railway --version
+          psql --version
+
+      - name: Run triage
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          DATABASE_READONLY_URL: ${{ secrets.DATABASE_READONLY_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIAGE_FOCUS: ${{ inputs.focus }}
+        run: |
+          chmod +x scripts/ops/triage.sh
+          bash scripts/ops/triage.sh
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-report-${{ github.run_id }}
+          path: report.md
+          retention-days: 30

@@ -48,5 +48,5 @@ runJob(
 
     console.log(`[daily-email] Done — sent: ${sent}, failed: ${failed}`);
   },
-  { timezone: 'America/Los_Angeles', sentryMonitor: true },
+  { timezone: 'America/Los_Angeles', sentryMonitor: false },
 );

@@ -116,4 +116,4 @@ runJob('handoffNudge', '*/5 * * * *', async () => {
   } catch (err) {
     console.error('[handoff-nudge] tick failed:', err);
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

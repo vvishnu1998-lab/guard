@@ -12,9 +12,15 @@ those say so.
 
 ## New from Phase 0 (2026-09-05)
 
-**N1. `gho_` GitHub token in cleartext in `.claude/settings.local.json` — revoke (Vishnu).**
-A permission-allow entry embeds a full literal `gho_…` OAuth token in plaintext.
-verified: YES — string present in the file; `git ls-files --error-unmatch .claude/settings.local.json` → *"did not match any file(s) known to git"*; `git check-ignore -v` → `.gitignore:19`; `git log --all -S '<token>'` → zero commits. **Not a repo leak**, but a live-format credential on disk outside the keyring. Not tested for validity (testing transmits it). `gh auth status` shows an active `gho_` token in keyring with scopes `gist, read:org, repo, workflow`.
+**N1. UPDATED 2026-09-05 — `gho_` GitHub token in cleartext in `.claude/settings.local.json`.**
+verified: **the entry was still present at the start of Phase 4 and has now been removed from the file.**
+`grep -c "gho_" .claude/settings.local.json` returned **1** before the Phase 4 prune and **0** after
+(586 allow entries -> 471; the token entry is one of 115 removed). The file remains untracked and
+gitignored (`.gitignore:19`), and the token never entered git history — `git log --all -S` returns zero
+commits, re-confirmed.
+**STILL OPEN, and this is the part that matters: removing the line from a local file does not revoke the
+credential.** The token is valid until revoked at github.com/settings/tokens. **Vishnu revokes.**
+Deliberately not tested for validity — testing transmits it.
 
 **N2. `nightlyPurge` has no timezone → `0 0 * * *` runs at 00:00 UTC ≈ 17:00 PT; `RETENTION_DRY_RUN` defaults true.**
 verified: PARTIAL — `nightlyPurge.ts:53` is `cron.schedule('0 0 * * *', runNightlyPurge)` with no options arg; `grep -L timezone apps/api/src/jobs/*.ts` includes it. `nightlyPurge.ts:42`: `const DRY_RUN = process.env.RETENTION_DRY_RUN !== 'false'` → defaults **true**. **UNVERIFIED — the Railway env value of `RETENTION_DRY_RUN`** (would require reading service vars; not done in a read-only pass). If unset in prod, the purge has never deleted anything.
@@ -22,8 +28,15 @@ verified: PARTIAL — `nightlyPurge.ts:53` is `cron.schedule('0 0 * * *', runNig
 **N3. Four crons have no top-level catch; nine catch to console only; `missedPingCron` has no Sentry import.**
 verified: YES — no top-level catch: `dailyShiftEmail` (unwrapped `pool.query` `:24`), `missedShiftAlert` (`:25`), `monthlyHoursReport` (`:52`), `nightlyPurge` (deliberate, documented `:58-63`). Console-only top-level catch: `chatRetention`, `expireSwapRequests`, `handoffNudge`, `lateClockInReminder`, `locationIntegrityCron`, `missedPingCron`, `pingReminder` (`:407`, imports Sentry but does not call it), `preShiftReminder`, `shiftStartReminder`. `grep -c Sentry apps/api/src/jobs/missedPingCron.ts` → 0. Full table in `CRONS.md`.
 
-**N4. `netraops-api` has zero Sentry alert rules; nothing monitors `/health`.**
-verified: YES — `/api/0/projects/netraopscom/netraops-api/rules/` → `[]`; `netraops-web/rules/` → `[]`; `netraops-mobile/rules/` → 1 rule (id 17063121, Sentry's auto-created "high priority issues" default, last triggered 2026-08-23). Org metric alert rules → `[]`. Org cron monitors → `[]`. Uptime monitors → exactly one, id 8024493, on `https://www.netraops.com` (project `netraops-web`, 60s, auto-detected `mode: 3`). **No API or `/health` monitor exists.**
+**N4. CLOSED 2026-09-05 — `netraops-api` has zero Sentry alert rules; nothing monitors `/health`.**
+verified: **RESOLVED by Phase 4 — alerting now exists.** The replacement is not a Sentry issue-alert rule; it is
+`GET /health/crons` probed by Sentry Uptime, which is a better fit: an issue-alert rule fires on an
+*exception*, and the whole point of Phase 0's finding was that a wedged cron throws nothing. The probe
+detects absence, which is the actual failure mode. Remaining wiring is runbook work, not code:
+the uptime monitor (id `8024493`) is still pointed at `https://www.netraops.com` and must be repointed at
+`https://api.netraops.com/health/crons` — see `RUNBOOK-phase4-apply.md` step (d), and note the
+first-deploy 503 caveat in step (c). The 6-hourly `ops-triage` workflow adds a second, independent
+channel that reads Sentry, Railway and the database and posts to Slack.
 
 **N5. `locationIntegrityCron.ts:8-9` comment claims "20 minutes after nightlyPurge" — false, it is ~8 hours.**
 verified: YES — `locationIntegrityCron.ts:40` is `cron.schedule('20 0 * * *', runLocationIntegrityJob, { timezone: 'America/Los_Angeles' })` = 00:20 PT. `nightlyPurge.ts:53` has no timezone = 00:00 UTC ≈ 17:00 PT. Gap is ~7h20m–8h20m depending on DST, not 20 minutes.
@@ -57,6 +70,48 @@ and the failure surfaces as a runtime 42501 on a query that previously worked �
 `GRANT SELECT (new_column) ON <table> TO claude_readonly;`, or deliberately withhold it if the new
 column is itself a secret. The caveat is written into the header of the revoke script and into
 `CRONS.md`. **Not yet live — the revoke script has not been run** (`RUNBOOK-phase2-apply.md` step e).
+
+
+**N11. Request Sentry cron-monitor credits / confirm the quota.**
+verified: PARTIAL — the quota is still unreadable. `GET /api/0/organizations/netraopscom/` returns HTTP 200
+with `status: active` but **no `planTier` field, an empty `quota` object, and no cron entries in `features`**
+(re-checked 2026-09-05). What *is* now known: **11 cron monitors were auto-created** by the Phase 2/3
+check-ins and all 11 are `status: active`, `isMuted: false`. Phase 4 disables check-ins, so the question is
+no longer blocking — but if check-ins are ever re-enabled, the quota must be established first rather than
+discovered by exhausting it. **Tier 0** to ask Sentry; **Tier 1** to change any flag.
+
+**N12. Mobile base URL should move to `api.netraops.com` on Build 49.**
+verified: PARTIAL — `https://api.netraops.com/health` returns HTTP 200 `{"status":"ok","db":"connected"}`,
+so the host is live and serving the same body as `guard-production-6be4.up.railway.app`. **Which base URL
+the shipped mobile binary actually uses was NOT verified in this pass** — that requires reading the build
+commit's config, not the working tree, and Build 48 (`c932c09`) predates this. Bundling the switch into
+Build 49 avoids a standalone binary release. **Size S, Tier 2** (it is an EAS build).
+
+**N13. Twilio SMS layer for P0 escalation is not built.**
+verified: PARTIAL — `twilio` is a declared dependency of `apps/api` (`package.json`), so the library is
+present. **No SMS escalation path exists in the ops loop**: `DECISIONS.md` D3 requires P0 to escalate by SMS
+every 15 minutes until acknowledged, and Phase 4 ships Slack only (`scripts/ops/triage.sh` posts to a webhook
+and stops). Nothing in the runner can page anyone. Until this exists, **D3 is a decision without an
+implementation** — do not treat P0 escalation as covered. **Size M, Tier 1.**
+
+**N14. Vercel to Slack notifications — v2.**
+verified: NO — carried from the Phase 4 dispatch, not independently checked. No Vercel-to-Slack integration
+was looked for or found in this pass. Deferred to v2 by scope, not by evidence.
+
+**N15 (new, found while verifying). `password_reset_tokens` exists in production but is created by no migration.**
+verified: YES — production `public` holds **49** base tables; a full replay of the `migrate.ts` chain into an
+empty local database produces **48**, and the set difference is exactly `['password_reset_tokens']`
+(the reverse difference is empty). It appears in **zero** `schema_v*.sql` files
+(`grep -l password_reset_tokens apps/api/src/db/*.sql` → none) and is referenced by **zero** TypeScript files
+under `apps/api/src`. It holds **0 rows**.
+So it is an out-of-band orphan: a fresh database would not have it, and nothing would notice.
+**Consequence already fixed here:** it is one of the eight tables in `scripts/ops/readonly-column-revoke.sql`,
+which therefore aborted on any database lacking it. Both that script and its verify companion now guard each
+table on `to_regclass` and report `SKIPPED (absent)` instead of failing — confirmed against a fresh local
+`guard_dev`: 7 tables narrowed, `password_reset_tokens` skipped, exit 0. The production revoke already ran
+successfully on the unguarded version (the table exists there), so **no prod re-run is needed.**
+Open question is whether to drop the orphan or add it to the chain. **Size S, Tier 2** (it is a prod schema
+change either way).
 
 ---
 

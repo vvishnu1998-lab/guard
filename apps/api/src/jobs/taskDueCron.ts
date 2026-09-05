@@ -193,4 +193,4 @@ runJob('taskDueCron', '*/5 * * * *', async () => {
       );
     }
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

@@ -312,4 +312,4 @@ runJob('autoCompleteShifts', '*/5 * * * *', async () => {
   } finally {
     client.release();
   }
-}, { sentryMonitor: true });
+}, { sentryMonitor: false });

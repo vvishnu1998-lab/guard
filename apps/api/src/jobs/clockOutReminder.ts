@@ -217,4 +217,4 @@ export async function runClockOutReminder(): Promise<number> {
 // Every 5 minutes. The eligibility window is 35 minutes wide, so any single
 // skipped tick is absorbed rather than costing the reminder — deliberately
 // unlike pingReminder's ±1-minute boundary tolerance.
-runJob('clockOutReminder', '*/5 * * * *', runClockOutReminder, { sentryMonitor: true });
+runJob('clockOutReminder', '*/5 * * * *', runClockOutReminder, { sentryMonitor: false });
