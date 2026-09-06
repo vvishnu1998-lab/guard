@@ -339,6 +339,63 @@ c_failures_24h() {
     "$(printf '%s' "$logs" | grep -c 'ai.enhance.failed' || true)"
   printf 'log_lines_searched: %s\n' "$(printf '%s' "$logs" | wc -l | tr -d ' ')"
 
+  # ── email liveness ────────────────────────────────────────────────────────
+  # Incident: docs/OPS/INCIDENTS/2026-09-01-unauthorized-burst.md. A declining
+  # card made SendGrid 401 every send for 6d 18h and NOTHING reported it:
+  # /health runs SELECT 1, /health/crons proves the job RAN, and
+  # cron_heartbeats said last_result='ok' throughout -- because missedShiftAlert
+  # WAS working. It found the shifts, called SendGrid, caught the error and
+  # reported it. Every component was green while the product sent no mail.
+  #
+  # The oracle needs no new table. Both columns are stamped only AFTER a send
+  # succeeds (email.ts, and shifts.daily_report_email_sent_at at the end of
+  # sendDailyShiftReport), so their age is the age of the last delivered email.
+  #
+  # Two columns, not one, because they have different cadences:
+  #   missed_alert_sent_at      -- sparse; only stamps when a shift is a no-show
+  #   daily_report_email_sent_at -- daily; stamps per shift with an active client
+  # The alarm uses GREATEST of the two: any successful email resets the clock.
+  # Using missed_alert alone would false-fire on any week without a no-show.
+  #
+  # THRESHOLD CAVEAT -- read before trusting a green here. 26h was NOT
+  # validated clean against history. Gaps over 26h in the combined signal since
+  # 2026-07-01: 72.0h (07-13 -> 07-16) and 51.2h (07-19 -> 07-21), both OUTSIDE
+  # the known outage, and both with shifts whose client reports were due (9 and
+  # 2). Either those were undetected email outages, or the daily-report column
+  # does not stamp for every eligible shift. That is unresolved, so the
+  # shifts-due context below is emitted alongside the age: a long age with zero
+  # shifts due is a quiet period, a long age with shifts due is a finding.
+  printf '\nemail liveness (successful-send oracle):\n'
+  printf '  hours_since_last_successful_email: '
+  psql_at "SELECT COALESCE(ROUND(EXTRACT(EPOCH FROM (NOW() - GREATEST(
+             MAX(missed_alert_sent_at), MAX(daily_report_email_sent_at))))/3600.0, 1)::text,
+             'UNVERIFIED (no successful send ever recorded)') FROM shifts"
+  printf '  hours_since_last_missed_shift_alert: '
+  psql_at "SELECT COALESCE(ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(missed_alert_sent_at)))/3600.0, 1)::text, 'none ever')
+             FROM shifts"
+  printf '  hours_since_last_daily_client_report: '
+  psql_at "SELECT COALESCE(ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(daily_report_email_sent_at)))/3600.0, 1)::text, 'none ever')
+             FROM shifts"
+  printf '  shifts_ended_last_26h: '
+  psql_at "SELECT COUNT(*) FROM shifts WHERE scheduled_end > NOW() - INTERVAL '26 hours' AND scheduled_end <= NOW()"
+  printf '  of_those_with_active_client (report was due): '
+  psql_at "SELECT COUNT(*) FROM shifts sh
+             JOIN sites si ON si.id = sh.site_id
+             JOIN clients c ON c.site_id = si.id AND c.is_active = true
+            WHERE sh.scheduled_end > NOW() - INTERVAL '26 hours' AND sh.scheduled_end <= NOW()"
+  printf '  ALARM: '
+  psql_at "SELECT CASE
+             WHEN GREATEST(MAX(missed_alert_sent_at), MAX(daily_report_email_sent_at)) IS NULL
+               THEN 'UNVERIFIED -- no successful send has ever been recorded'
+             WHEN NOW() - GREATEST(MAX(missed_alert_sent_at), MAX(daily_report_email_sent_at)) > INTERVAL '26 hours'
+               THEN 'P1 -- no successful email in ' ||
+                    ROUND(EXTRACT(EPOCH FROM (NOW() - GREATEST(MAX(missed_alert_sent_at),
+                          MAX(daily_report_email_sent_at))))/3600.0, 1)::text || ' h'
+             ELSE 'none -- last successful email ' ||
+                  ROUND(EXTRACT(EPOCH FROM (NOW() - GREATEST(MAX(missed_alert_sent_at),
+                        MAX(daily_report_email_sent_at))))/3600.0, 1)::text || ' h ago'
+           END FROM shifts"
+
   printf '\nprevious_runner_conclusions (newest first): '
   gh run list --workflow ops-triage.yml --limit 2 --json conclusion \
     --jq '[.[].conclusion] | join(",")' 2>/dev/null || printf 'UNVERIFIED (gh unavailable)\n'

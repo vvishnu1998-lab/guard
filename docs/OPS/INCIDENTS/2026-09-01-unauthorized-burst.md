@@ -1,6 +1,6 @@
 # 2026-09-01 — `Error: Unauthorized` burst (N28)
 
-**Status:** **ROOT CAUSE FOUND. Not an auth incident.** The condition self-cleared
+**Status:** **CLOSED 2026-09-06 — N28 resolved.** Not an auth incident. The condition self-cleared
 2026-09-01 17:00:01Z; the amplifier that turned it into 3,770 events is still in
 the code, and the billing fault that started it is still **UNVERIFIED**.
 **Severity:** **P2.** No guard-facing impact. Customer-visible: ~7 STARNET daily
@@ -213,8 +213,10 @@ is what eventually drops each shift out of the set (`missedShiftAlert.ts:11-16`)
 `console.error` only — no Sentry — so it doubles the *sends* without doubling
 the shift-level events.
 
-**Surface.** `reportSendgridFailure` is called **10 times** in `email.ts` — it
-is every outbound flow, not just this one. Three jobs add their own
+**Surface.** `reportSendgridFailure` has **8 call sites** in `email.ts` — every
+outbound flow, not just this one. (An earlier draft said 10; that was a `grep -c`
+of every *mention*, which counts the definition and a comment. Corrected by
+grepping actual calls.) Three jobs add their own
 `captureException` on top: `missedShiftAlert.ts:42`, `dailyShiftEmail.ts:41`,
 `handoffNudge.ts:103`.
 
@@ -382,7 +384,7 @@ In `services/email.ts`, `reportSendgridFailure` (`:28`) should **count** rather
 than capture: aggregate per flow per tick, log one line with flow + recipient
 count + HTTP status, and `captureException` **only** on a threshold or a
 transition (first failure after a success, and every Nth thereafter). Fix it at
-`reportSendgridFailure` and all **10** call sites inherit it; add the same at
+`reportSendgridFailure` and all **8** call sites inherit it; add the same at
 `missedShiftAlert.ts:42`, `dailyShiftEmail.ts:41`, `handoffNudge.ts:103`.
 
 **Do not change the retry semantics.** Not stamping `missed_alert_sent_at` on
@@ -523,3 +525,191 @@ jobs *ran*, and `cron_heartbeats` recorded `last_result='ok'` throughout, becaus
 the error and reported it. Every component behaved correctly while the product's
 entire outbound communication was down. **A liveness check that asks "did the job
 run" cannot answer "did anything arrive."**
+
+---
+
+## Fix
+
+Approved 2026-09-06: **(a)** count instead of capture, **(f)** email liveness in
+the brief. **(b)**, **(c)**, **(d)** were verification-only or not applicable and
+changed nothing. **(e)** is Vishnu's and is tracked in `EXPIRIES.md` E15.
+
+### (a) `apps/api/src/services/email.ts` — the amplifier
+
+`reportSendgridFailure` no longer calls `Sentry.captureException`. It keeps a
+per-process state machine keyed by `flow`:
+
+```ts
+const SENDGRID_LOG_INTERVAL_MS = 60 * 1000;         // one console line / min / flow
+const SENDGRID_CAPTURE_INTERVAL_MS = 60 * 60 * 1000; // one Sentry event / hour / flow
+```
+
+- **console**: at most one line per minute per flow,
+  `[sendgrid.fail] flow=<f> count=<n> status=<code>`, where `count` is the number
+  of failures suppressed since the last line — nothing is silently lost.
+- **Sentry**: `captureMessage('sendgrid_failing')` on the **transition** into
+  failure (first failure after a success), then at most **once per hour** while
+  still failing. Tags are `service`, `flow`, `status`. `status` comes from
+  `err.code ?? err.response.statusCode ?? err.statusCode` — the HTTP number, not
+  the message text, because message text gets reworded.
+- **Recipient identity never reaches Sentry.** It was previously passed in
+  `extra`; the aggregated event carries counts only. The per-recipient
+  `console.error` at each call site is untouched, so Railway logs keep the
+  detail.
+
+`noteSendgridSuccess(flow)` is new and is wired at **all 8 success points** —
+`sendToAdmins`' fulfilled branch (which covers every admin-fan-out flow and
+passes `flow` through dynamically), plus `incident_alert`, `daily_shift_report`,
+`temp_password`, `welcome_guard`, `welcome_admin_primary`,
+`welcome_admin_secondary`, `welcome_client`. Without it the "first failure after
+a success" edge cannot exist and a flow that recovered and broke again would stay
+silent until the hourly timer came round.
+
+**Deliberately unchanged**, as instructed and as correct: the throw at
+`email.ts:736-739`, the `missed_alert_sent_at` stamping semantics, the retry in
+`missedShiftAlert.ts`, and every existing `console.error`. Not stamping on total
+failure is what makes an alert survive a transient outage. **The retry was never
+the bug** — reporting an expected, correlated, indefinitely-repeating condition
+as an individual event was.
+
+Under the old code the 09-01 burst emitted **3,770** events on this issue. Under
+the new code the same outage emits **1 per flow on the transition + 1 per flow
+per hour** — for a 6 d 18 h outage on one flow, **about 163 events instead of
+tens of thousands**, and the console keeps a per-minute count throughout.
+
+### (f) `scripts/ops/triage.sh` — email liveness in `c_failures_24h`
+
+New `email liveness` block emitting `hours_since_last_successful_email`
+(**`GREATEST`** of `shifts.missed_alert_sent_at` and
+`shifts.daily_report_email_sent_at`), the two per-column ages, `shifts_ended_last_26h`,
+`of_those_with_active_client`, and a precomputed `ALARM:` line.
+
+Both columns are stamped **only after a send succeeds**, so their age is the age
+of the last delivered email — no new table, no new write path.
+`daily_report_email_sent_at` was **confirmed to exist** in production
+(`information_schema`) rather than assumed, so this is not `UNVERIFIED`.
+
+`GREATEST` of the two, not `missed_alert_sent_at` alone: that column only stamps
+on a no-show, so a week without one would false-fire. Proven — the
+`30 h missed-alert + 4 h daily-report` case returns **no alarm**.
+
+`.github/ops/triage-prompt.md` gains the P1 BROKE rule
+`P1 · no successful email in N h · all tenants · check SendGrid billing/key`,
+with an instruction to read `shifts_ended_last_26h` first and say
+`UNVERIFIED (no shifts due)` when it is 0.
+
+**The 26 h threshold is shipped unvalidated, and the code says so.** Two gaps
+over 26 h since 2026-07-01 — **72.0 h** (07-13 → 07-16) and **51.2 h**
+(07-19 → 07-21) — sit outside the known outage, and both had client reports due
+(9 and 2 shifts). The "nothing was due" explanation was tested and **falsified**.
+So either those were undetected email outages, or `daily_report_email_sent_at`
+does not stamp for every eligible shift. Both the collector comment and the
+prompt carry the caveat, and **answering it is the collector's first job.**
+
+### Tests
+
+`apps/api/src/services/_sendgridFailure.test.ts`, 7 assertions, ts-node +
+`node:assert` like its siblings. Sentry is a Proxy that records **every** method,
+so a stray `captureException` fails the test.
+
+| test | asserts |
+|---|---|
+| 50 consecutive failures | **≤ 1** capture (exactly 1, the transition) |
+| success → failure | **exactly 1** capture |
+| recipient | not a tag, and the address does not appear **anywhere** in the serialised payload |
+| status | tagged `401` from the HTTP code; `unknown` when absent |
+| console | exactly one `[sendgrid.fail]` line in <60 s, matching the required format |
+| flows | independent — 2 flows, 22 failures, 2 captures |
+| old behaviour | `captureException` never called from this path |
+
+Full suite, all green:
+
+```
+_run.test.ts             10 passed, 0 failed
+_healthCrons.test.ts     36 passed, 0 failed
+_pingReminder.test.ts     5 passed, 0 failed
+_aiEnhance.test.ts       10 passed, 0 failed
+_sendgridFailure.test.ts  7 passed, 0 failed
+                        ---------------------
+                         68 passed, 0 failed
+```
+
+`npx tsc --noEmit` in `apps/api`: **clean**.
+
+The collector SQL was exercised against production read-only across six cases —
+healthy, sparse-but-fresh, 25.9 h, 26.1 h, the real 162 h outage, and
+never-sent — and returned the correct branch each time, including
+`UNVERIFIED` for never-sent.
+
+---
+
+## Verification plan
+
+Nothing below has run yet. Written **before** deploy so it is a test rather than
+a rationalisation.
+
+**Deploy gate.** `POLICY.md` — merging to `main` restarts the API. This touches
+`services/email.ts`, which every cron uses. Hold the gate and **name the route**
+(CONDITION / PROXY / OVERRIDE).
+
+1. **Force one send and watch what Sentry does *not* get.** Trigger a single
+   admin email on the **Star Guard test tenant** — never STARNET, whose admins
+   are real people. Confirm delivery, then confirm `netraops-api` records
+   **zero** new events for that flow. Under the old code a failure would have
+   produced one event per recipient.
+2. **Force a failure and confirm exactly one capture.** With a deliberately bad
+   key on the test path, expect **one** `sendgrid_failing` event tagged
+   `flow=<f> status=401`, then **silence for an hour** while failures continue.
+   Then confirm `[sendgrid.fail] flow=… count=N status=401` appears in
+   `railway logs` at most once a minute, with `count` climbing.
+   **This is the assertion that matters** — item 1 only shows the noise is gone;
+   this shows a real outage is still reported once.
+3. **No recipient in Sentry.** On the event from item 2, confirm the tag list is
+   exactly `service`, `flow`, `status` (plus SDK defaults) and that no email
+   address appears in the payload.
+4. **`hours_since_last_successful_email` drops below 1.** Run
+   `scripts/ops/triage.sh` (or `workflow_dispatch` with `dry_run: true`) after
+   item 1 and confirm the `failures-24h` section shows `< 1` and
+   `ALARM: none`.
+5. **The alarm is reachable.** The P1 branch has been proven in SQL but **never
+   end-to-end**. Confirm it in the pack the first time a genuine gap appears, or
+   by running the collector against a clock-shifted copy. **Until a real
+   firing is observed, treat this alarm as armed but unproven** — the same
+   caution the ping-reminder incident earned.
+6. **Guard-facing behaviour is unchanged.** `missed_alert_sent_at` keeps
+   stamping at its normal daily rate (12–14/day since 09-02). A drop here means
+   the change touched the retry path and must be reverted.
+
+Item 2 is the one that matters. Items 1 and 4 confirm the noise is gone; item 2
+confirms nothing was lost with it.
+
+---
+
+## N28 — CLOSED 2026-09-06
+
+**Resolution.** Root cause identified and outside our code: SendGrid returned
+401 on every send because the payment card was declining (`EXPIRIES.md` E15,
+**card fixed 2026-09-06 per Vishnu**). The three hypotheses the item was opened
+to separate are settled — **(iii), and outbound, not inbound**. Every
+inbound-auth candidate is falsified on data, not on argument.
+
+**Answered, each with its evidence above:** what it was (SendGrid 401,
+`service=sendgrid` + `flow=missed_shift_alert` + the `@sendgrid/client` frame +
+250 `401` breadcrumbs); why it started (card declining, last good send
+`2026-08-25 23:10:01Z`); why it stopped (**not** the quota at 12:00 — the burst
+ran five more hours invisibly and truly ended at `2026-09-01 17:00:01Z`, the
+first successful send); and what amplified it (a designed 5-minute retry × one
+capture per recipient).
+
+**Not answered, and deliberately left open rather than guessed:** **why service
+recovered at 17:00:01Z on 2026-09-01**, five days before the card was fixed.
+Nothing in the repo or the database records a billing action that day. Carried
+onto E15, because if it was a retried charge or a grace period it can lapse
+again.
+
+**Shipped with the close:** (a) the amplifier fix + 7 tests, (f) email liveness
+in `failures-24h` with a P1 BROKE rule, the E15 annotation, and **N22 upgraded
+to "migration recommended, no longer optional"**.
+
+**Not closed by this:** N22 itself; E15's console check; and the unvalidated 26 h
+threshold above.

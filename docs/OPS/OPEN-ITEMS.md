@@ -194,7 +194,8 @@ Do **not** simply truncate it: the model needs deployment ids, schema tip and th
 a finding, and those live at the top.
 
 
-**N22. Migrate transactional email off SendGrid — Resend or Postmark.**
+**N22. Migrate transactional email off SendGrid — Resend or Postmark. UPGRADED 2026-09-06: MIGRATION RECOMMENDED, no longer optional.**
+**Why the upgrade.** The billing risk stopped being hypothetical. The declining card produced a **6 d 18 h** total email outage (2026-08-25 23:10Z → 2026-09-01 17:00Z, `INCIDENTS/2026-09-01-unauthorized-burst.md`, N28): no admin alert and no client report reached anyone on any tenant, ~7 STARNET daily client reports were lost, and the retry loop it drove exhausted the Sentry quota and blinded error monitoring for a further 94 h (N27). Nothing detected it — that gap is now closed by `hours_since_last_successful_email` in the `failures-24h` collector, but **detection is not resilience**. Evaluate on how a provider signals a billing problem *before* it starts refusing sends, alongside the criteria below.
 verified: PARTIAL — the dependency is confirmed, the volume figure is not. `@sendgrid/mail` is a
 declared dependency of `apps/api`, and SendGrid carries `dailyShiftEmail`, `missedShiftAlert` and the
 handoff admin FYI. The brief gives **323 emails/month on a 50K plan** — a rounding error against the

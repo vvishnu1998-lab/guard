@@ -67,6 +67,7 @@ The pack contains these sections, each with a line count:
 | `git-log` | `git log -10 --oneline` |
 | `deploy-vs-main` | current SUCCESS deployment id + status + `origin/main` sha. **`deploy_matches_main` is always UNVERIFIED** — the Railway CLI prints no commit sha, so the match cannot be established read-only. Say UNVERIFIED in the UP line; do not infer it from timestamps. |
 | `failures-24h` | cron heartbeats with `last_result='error'` (count + job names), push failures and `ai.enhance.failed` counts grepped from the log window, the previous two runner conclusions, per-project Sentry issue counts since the 24h cutoff, and **`sentry-dropped`** |
+| `failures-24h` → `email liveness` | age of the last **successful** email, from `shifts.missed_alert_sent_at` and `shifts.daily_report_email_sent_at` — both stamped only after a send succeeds. `hours_since_last_successful_email` is the **GREATEST** of the two and is the alarm number; the two per-column ages and the shifts-due context are there to interpret it. The collector prints an `ALARM:` line; use it, do not recompute. |
 | `failures-24h` → `sentry-dropped` | events Sentry **refused**, per project, split by reason, over an explicit 24h window (both the requested and the API-returned window are printed — quote the returned one). `platform_refused_24h` is the alarm number: `rate_limited` of any reason, plus `client_discard/ratelimit_backoff`, which is the SDK obeying a 429 Sentry sent. `client_local_discard_24h` (`event_processor`, `network_error`) is **our own `beforeSend`/`ignoreErrors` and device connectivity — never a finding**. The collector prints an `ALARM:` line; use it, do not recompute. |
 | `customer-pulse` | STARNET sessions yesterday (Pacific day), active guards 7d vs prior 7d, and `nataniel_last_contact` read from `STATE.md`. If that line is absent or still the seeded placeholder, treat it as UNVERIFIED. |
 | `ahead` | `EXPIRIES.md` rows dated within 30 days with days remaining, a count of rows carrying no date at all, Sentry 30-day error outcomes, and last-run Anthropic cost if a previous run left `cost.json` |
@@ -190,6 +191,30 @@ coloured by what you know and says `UNVERIFIED` for the rest.
   never allowed** — badge or `guard_id`, per `POLICY.md`.
 - **Every BROKE line ends in a next step.** If you cannot name one, the finding
   is not ready for Slack; leave it in the full report.
+- **Email liveness over 26 h is a BROKE line at P1.** Shape:
+
+  ```
+  P1 · no successful email in N h · all tenants · check SendGrid billing/key
+  ```
+
+  It is **P1, not P2**: no admin alert and no client report is reaching anyone,
+  it affects every tenant at once, and it is invisible everywhere else — the
+  2026-09-01 outage ran **6 days 18 hours** while `/health`, `/health/crons` and
+  every `cron_heartbeats` row stayed green, because the job *was* running and
+  SendGrid was refusing it (`INCIDENTS/2026-09-01-unauthorized-burst.md`).
+  **A green cron is not a delivered email.**
+
+  **Read `shifts_ended_last_26h` before writing the line.** If it is 0 there was
+  nothing to send and the age is meaningless — say `UNVERIFIED (no shifts due)`
+  rather than P1. If it is non-zero, the age is real.
+
+  **This threshold is not yet trusted.** Two gaps over 26 h since 2026-07-01
+  (72.0 h and 51.2 h, both in July) sit outside the known outage and both had
+  client reports due. Nobody knows yet whether those were undetected outages or
+  a column that does not always stamp. **Until that is settled, treat the first
+  few firings as questions, not verdicts** — report the number, name the gap,
+  and say the threshold is unvalidated.
+
 - **`sentry-dropped` with a non-zero `platform_refused_24h` is always a BROKE
   line, at minimum P2.** Shape:
 
