@@ -101,6 +101,33 @@ If there is nothing to decide, write `No decisions this run.`
 | open-items delta | new / closed since the last report |
 | last Nataniel contact | date from `STATE.md`, or `UNVERIFIED` |
 
+## Slack brief
+
+**The last section. Headed exactly `## Slack brief`, and containing only the
+brief.** Everything after that heading is extracted verbatim and posted to
+Slack; the rest of this report stays in the run artifact.
+
+```
+<emoji> <Day Mon D> — <"no failures in 24 h" | "N failures, worst Pn">
+<emoji> UP        <API · DB · N/19 crons · deploy = main | deploy ≠ main | UNVERIFIED>
+<emoji> BROKE     <"nothing in 24 h" | one line per failure: Pn · what · who · duration · next step>
+<emoji> CUSTOMER  <STARNET active yesterday yes/no · N guards this week (↑ → ↓ vs last) · Nataniel last spoken N d ago>
+<emoji> AHEAD     <expiries ≤30 d with days left · API $X MTD of $50 | UNVERIFIED · Sentry N/50K · any failed payment>
+<emoji> WAITING   <open PRs by number · [VISHNU] items>
+Full evidence: <run url>
+```
+
+🔴 any P0/P1 or UP not green · 🟡 P2, or AHEAD/WAITING non-empty · 🟢 otherwise ·
+⚪ a line that is **entirely** UNVERIFIED. The header takes the worst of the five.
+
+Plain sentences, no tables, no headers, no bullets — it is read on a phone. IDs
+only where they are needed to act. Tenant names allowed, **guard names never**.
+Every BROKE line ends in a next step; if you cannot name one, the finding is not
+ready for Slack. A `COLLECTOR FAILED` section makes its brief field UNVERIFIED —
+**never infer a green from a missing signal.**
+
+---
+
 ---
 
 ## When there is nothing to report

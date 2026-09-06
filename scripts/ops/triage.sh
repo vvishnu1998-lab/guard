@@ -45,6 +45,7 @@ OUT="${TRIAGE_OUT:-report.md}"
 CONTEXT="${TRIAGE_CONTEXT:-/tmp/triage-context.md}"
 LOCAL="${TRIAGE_LOCAL:-0}"
 DRY_RUN="${TRIAGE_DRY_RUN:-0}"
+COST_FILE="${TRIAGE_COST_FILE:-cost.json}"
 
 STARNET='27c4d404-8769-49ca-bfd6-93cb9b890067'
 BETHEL='53c71c64-1973-4f82-be9c-98e4800beece'
@@ -288,6 +289,305 @@ c_sentry_mobile() { c_sentry netraops-mobile; }
 
 c_git_log() { git log -10 --oneline; }
 
+# ── Phase 4.5 brief collectors ──────────────────────────────────────────────
+
+c_deploy_vs_main() {
+  local top id status main_sha
+  top="$(railway deployment list --service guard --environment production 2>&1 \
+        | grep SUCCESS | head -1)"
+  if [ -z "$top" ]; then
+    printf 'no SUCCESS deployment row returned\n'
+    return 1
+  fi
+  id="$(printf '%s' "$top" | awk '{print $1}')"
+  status="$(printf '%s' "$top" | awk -F'|' '{gsub(/ /,"",$2); print $2}')"
+  main_sha="$(git rev-parse origin/main 2>/dev/null || git rev-parse HEAD)"
+
+  printf 'deployment_id: %s\n' "$id"
+  printf 'status: %s\n' "$status"
+  printf 'origin_main: %s\n' "$main_sha"
+  # The Railway CLI does not print a commit sha on `deployment list` (checked
+  # again 2026-09-06, CLI 4.36.1 / 5.49.2). There is no read-only way to get it
+  # from the CLI, so the match is UNVERIFIED rather than guessed. Do not infer
+  # it from timestamps -- that inference was already flagged as circumstantial
+  # in STATE.md and it is not good enough to drive a green UP line.
+  printf 'deploy_matches_main: UNVERIFIED (railway CLI prints no commit sha)\n'
+}
+
+c_failures_24h() {
+  local cutoff
+  cutoff="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ)"
+
+  printf 'cron_heartbeats_error: '
+  psql_at "SELECT COUNT(*) FROM cron_heartbeats WHERE last_result = 'error'"
+  printf 'cron_heartbeat_error_jobs: '
+  psql_at "SELECT COALESCE(string_agg(job_name, ','), 'none')
+             FROM cron_heartbeats WHERE last_result = 'error'"
+
+  # Push failures, from the log text the jobs actually emit. Patterns verified
+  # against source: breakExpiryCron:220,324 / clockOutReminder:179 ("push
+  # failed"), pingReminder:114 ("FCM <type> failed").
+  # One log fetch, two greps. `grep -c` EXITS 1 on a zero count, so a naive
+  # `grep -c ... || printf 0` prints "0" twice -- caught in the 2026-09-06 dry
+  # run. `|| true` on the count itself is the fix.
+  local logs
+  logs="$(railway logs --service guard --environment production --lines 100 2>/dev/null || true)"
+  printf 'push_failures_in_log_window: %s\n' \
+    "$(printf '%s' "$logs" | grep -ciE 'push failed|FCM .* failed' || true)"
+  printf 'enhancement_failed_in_log_window: %s\n' \
+    "$(printf '%s' "$logs" | grep -c 'ai.enhance.failed' || true)"
+  printf 'log_lines_searched: %s\n' "$(printf '%s' "$logs" | wc -l | tr -d ' ')"
+
+  # ── email liveness ────────────────────────────────────────────────────────
+  # Incident: docs/OPS/INCIDENTS/2026-09-01-unauthorized-burst.md. A declining
+  # card made SendGrid 401 every send for 6d 18h and NOTHING reported it:
+  # /health runs SELECT 1, /health/crons proves the job RAN, and
+  # cron_heartbeats said last_result='ok' throughout -- because missedShiftAlert
+  # WAS working. It found the shifts, called SendGrid, caught the error and
+  # reported it. Every component was green while the product sent no mail.
+  #
+  # The oracle needs no new table. Both columns are stamped only AFTER a send
+  # succeeds (email.ts, and shifts.daily_report_email_sent_at at the end of
+  # sendDailyShiftReport), so their age is the age of the last delivered email.
+  #
+  # Two columns, not one, because they have different cadences:
+  #   missed_alert_sent_at      -- sparse; only stamps when a shift is a no-show
+  #   daily_report_email_sent_at -- daily; stamps per shift with an active client
+  # The alarm uses GREATEST of the two: any successful email resets the clock.
+  # Using missed_alert alone would false-fire on any week without a no-show.
+  #
+  # THRESHOLD CAVEAT -- read before trusting a green here. 26h was NOT
+  # validated clean against history. Gaps over 26h in the combined signal since
+  # 2026-07-01: 72.0h (07-13 -> 07-16) and 51.2h (07-19 -> 07-21), both OUTSIDE
+  # the known outage, and both with shifts whose client reports were due (9 and
+  # 2). Either those were undetected email outages, or the daily-report column
+  # does not stamp for every eligible shift. That is unresolved, so the
+  # shifts-due context below is emitted alongside the age: a long age with zero
+  # shifts due is a quiet period, a long age with shifts due is a finding.
+  printf '\nemail liveness (successful-send oracle):\n'
+  printf '  hours_since_last_successful_email: '
+  psql_at "SELECT COALESCE(ROUND(EXTRACT(EPOCH FROM (NOW() - GREATEST(
+             MAX(missed_alert_sent_at), MAX(daily_report_email_sent_at))))/3600.0, 1)::text,
+             'UNVERIFIED (no successful send ever recorded)') FROM shifts"
+  printf '  hours_since_last_missed_shift_alert: '
+  psql_at "SELECT COALESCE(ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(missed_alert_sent_at)))/3600.0, 1)::text, 'none ever')
+             FROM shifts"
+  printf '  hours_since_last_daily_client_report: '
+  psql_at "SELECT COALESCE(ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(daily_report_email_sent_at)))/3600.0, 1)::text, 'none ever')
+             FROM shifts"
+  printf '  shifts_ended_last_26h: '
+  psql_at "SELECT COUNT(*) FROM shifts WHERE scheduled_end > NOW() - INTERVAL '26 hours' AND scheduled_end <= NOW()"
+  printf '  of_those_with_active_client (report was due): '
+  psql_at "SELECT COUNT(*) FROM shifts sh
+             JOIN sites si ON si.id = sh.site_id
+             JOIN clients c ON c.site_id = si.id AND c.is_active = true
+            WHERE sh.scheduled_end > NOW() - INTERVAL '26 hours' AND sh.scheduled_end <= NOW()"
+  printf '  ALARM: '
+  psql_at "SELECT CASE
+             WHEN GREATEST(MAX(missed_alert_sent_at), MAX(daily_report_email_sent_at)) IS NULL
+               THEN 'UNVERIFIED -- no successful send has ever been recorded'
+             WHEN NOW() - GREATEST(MAX(missed_alert_sent_at), MAX(daily_report_email_sent_at)) > INTERVAL '26 hours'
+               THEN 'P1 -- no successful email in ' ||
+                    ROUND(EXTRACT(EPOCH FROM (NOW() - GREATEST(MAX(missed_alert_sent_at),
+                          MAX(daily_report_email_sent_at))))/3600.0, 1)::text || ' h'
+             ELSE 'none -- last successful email ' ||
+                  ROUND(EXTRACT(EPOCH FROM (NOW() - GREATEST(MAX(missed_alert_sent_at),
+                        MAX(daily_report_email_sent_at))))/3600.0, 1)::text || ' h ago'
+           END FROM shifts"
+
+  printf '\nprevious_runner_conclusions (newest first): '
+  gh run list --workflow ops-triage.yml --limit 2 --json conclusion \
+    --jq '[.[].conclusion] | join(",")' 2>/dev/null || printf 'UNVERIFIED (gh unavailable)\n'
+
+  printf '\nsentry issues with events since %s:\n' "$cutoff"
+  local t
+  for pr in netraops-api netraops-mobile; do
+    t="$(curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+         "https://sentry.io/api/0/projects/netraopscom/$pr/issues/?statsPeriod=24h" \
+       | jq -r --arg c "$cutoff" '
+           if type=="array" then
+             [ .[] | select(.lastSeen >= $c) ] as $r
+             | "  '"$pr"': \($r|length) issue(s); levels=\([$r[].level]|unique|join(","))"
+           else "  '"$pr"': SENTRY API ERROR" end' 2>/dev/null)"
+    printf '%s\n' "${t:-  $pr: UNVERIFIED}"
+  done
+
+  # ── sentry-dropped ────────────────────────────────────────────────────────
+  # Events Sentry REFUSED, per project, split by reason.
+  #
+  # Why this exists: nothing else in the loop reads ingestion OUTCOMES. Both
+  # `c_sentry` collectors and the issue counts above read what ARRIVED, and
+  # during a quota blackout that is indistinguishable from a quiet day. It is
+  # how 2026-09-01 12:00Z -> 2026-09-05 10:00Z passed unremarked for 94 hours
+  # while the org accepted ZERO error events on all three projects and every
+  # health signal stayed green. See
+  # docs/OPS/INCIDENTS/2026-09-06-sentry-rate-limited.md.
+  #
+  # Explicit start/end, never statsPeriod. statsPeriod is evaluated at call
+  # time, so two calls minutes apart cover different windows -- that drift made
+  # two tables in the N27 investigation disagree by 14 events. The window the
+  # API actually RETURNED is printed next to the one requested, because Sentry
+  # snaps to hour boundaries and the two are not the same thing.
+  #
+  # One call, three groupBys. Verified 2026-09-06 that stats_v2 accepts
+  # groupBy=project&groupBy=outcome&groupBy=reason together (14 groups over
+  # 30d), so this does not need one request per project.
+  #
+  # What counts as a drop. `ratelimit_backoff` is counted as a PLATFORM drop
+  # even though Sentry files it under client_discard: it is the SDK honouring a
+  # 429 that Sentry sent. It was zero on every day outside the incident window
+  # and 1,755 inside it -- three times the 582 the server refused outright, and
+  # invisible in the headline number. `event_processor` and `network_error` are
+  # NOT platform drops: the first is our own beforeSend / ignoreErrors /
+  # denyUrls working as designed (apps/web/sentry.shared.ts:124-130 and the
+  # scrubbers in apps/api and apps/mobile), the second is device connectivity.
+  # Both occur on ordinary days -- 12 of them on 2026-08-17 alone -- so alarming
+  # on them would fire a false P2 most days and train the reader to ignore the
+  # line. They are reported for context and excluded from the alarm.
+  local w_start w_end pmap stats
+  w_end="$(date -u +%Y-%m-%dT%H:00:00Z)"
+  w_start="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:00:00Z 2>/dev/null \
+             || date -u -v-24H +%Y-%m-%dT%H:00:00Z)"
+
+  # id -> slug, so the pack names projects rather than printing bare numeric
+  # ids. Falls back to the id if the projects endpoint is unreadable; a bare id
+  # is still actionable, an aborted collector is not.
+  pmap="$(curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+          "https://sentry.io/api/0/organizations/netraopscom/projects/" \
+        | jq -c 'if type=="array" then (map({key:(.id|tostring), value:.slug})|from_entries) else {} end' \
+          2>/dev/null || printf '{}')"
+  # `|| printf '{}'` above does NOT cover an empty curl body: jq exits 0 on
+  # empty input and prints nothing, so pmap ends up "" and --argjson dies with
+  # "invalid JSON text", taking the whole section to UNVERIFIED. Validate it
+  # explicitly. (The first version used "${pmap:-{\}}" as the guard; inside a
+  # default-value expansion bash does not strip that backslash, so it produced
+  # the literal {\} -- invalid JSON, and the guard was the bug. Caught
+  # 2026-09-06 by testing the failure path, not the happy one.)
+  printf '%s' "$pmap" | jq -e . >/dev/null 2>&1 || pmap='{}'
+
+  stats="$(curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+           "https://sentry.io/api/0/organizations/netraopscom/stats_v2/?field=sum(quantity)&start=${w_start}&end=${w_end}&groupBy=project&groupBy=outcome&groupBy=reason&category=error")"
+
+  printf '\nsentry-dropped requested window: %s -> %s\n' "$w_start" "$w_end"
+  printf '%s' "$stats" | jq -r --argjson m "$pmap" '
+    if (.groups | type) != "array" then
+      "  SENTRY API ERROR: " + (.|tostring|.[0:160])
+    else
+      "  window returned by API: \(.start) -> \(.end)",
+      ( [ .groups[]
+          | select(.by.outcome=="rate_limited" or .by.outcome=="client_discard")
+          | { p: ($m[(.by.project|tostring)] // (.by.project|tostring)),
+              o: .by.outcome, r: (.by.reason // "none"),
+              n: .totals["sum(quantity)"] }
+          | select(.n > 0) ] ) as $rows
+      | ( [ $rows[] | select(.o=="rate_limited" or .r=="ratelimit_backoff") | .n ] | add // 0 ) as $refused
+      | ( [ $rows[] | select(.o=="client_discard" and .r!="ratelimit_backoff") | .n ] | add // 0 ) as $local
+      | "  platform_refused_24h: \($refused)",
+        "  client_local_discard_24h: \($local)   (beforeSend/ignoreErrors/network -- NOT a platform drop, excluded from the alarm)",
+        ( if ($rows|length)==0 then "  rows: none"
+          else ( $rows | sort_by(-.n)[] | "  \(.p) | \(.o) | \(.r) | \(.n)" ) end ),
+        ( if $refused > 0 then
+            "  ALARM: platform refused \($refused) event(s) in 24h -- reasons: " +
+            ([ $rows[] | select(.o=="rate_limited" or .r=="ratelimit_backoff") | .r ] | unique | join(","))
+          else "  ALARM: none -- 0 events refused by the platform in 24h" end )
+    end' 2>/dev/null || printf '  UNVERIFIED (stats_v2 unreadable or jq failed)\n'
+}
+
+c_customer_pulse() {
+  printf 'starnet_sessions_yesterday: '
+  psql_at "SELECT COUNT(*) FROM shift_sessions ss JOIN guards g ON g.id = ss.guard_id
+            WHERE g.company_id = '$STARNET'
+              AND ss.clocked_in_at >= (NOW() AT TIME ZONE 'America/Los_Angeles')::date - 1
+              AND ss.clocked_in_at <  (NOW() AT TIME ZONE 'America/Los_Angeles')::date"
+
+  printf 'starnet_active_guards_7d|prior_7d: '
+  psql_at "SELECT
+      (SELECT COUNT(DISTINCT ss.guard_id) FROM shift_sessions ss JOIN guards g ON g.id=ss.guard_id
+        WHERE g.company_id='$STARNET' AND ss.clocked_in_at >= NOW() - INTERVAL '7 days')
+      || '|' ||
+      (SELECT COUNT(DISTINCT ss.guard_id) FROM shift_sessions ss JOIN guards g ON g.id=ss.guard_id
+        WHERE g.company_id='$STARNET' AND ss.clocked_in_at >= NOW() - INTERVAL '14 days'
+          AND ss.clocked_in_at < NOW() - INTERVAL '7 days')"
+
+  # Human-maintained line in STATE.md. If it is missing or still the seeded
+  # placeholder, say so -- a stale contact date read as fresh is worse than none.
+  printf 'nataniel_last_contact: '
+  grep -m1 '^Nataniel last contact:' docs/OPS/STATE.md \
+    | sed 's/^Nataniel last contact: *//' || printf 'UNVERIFIED (line absent from STATE.md)\n'
+}
+
+c_ahead() {
+  printf 'expiries with a date within 30 days:\n'
+  python3 - <<'PYEOF'
+import re, datetime, sys
+# Read the DATE COLUMN ONLY. A naive "first date anywhere in the row" match
+# reported E4/E9/E10/E11 as expiring 2026-09-05 in the 2026-09-06 dry run --
+# those are "verified present on" dates sitting in the Notes column, not expiry
+# dates. Four false expiries in a founder brief is worse than none.
+# Columns: | id | item | where | expires | owner | notes |
+today = datetime.date.today()
+dated, undated = [], []
+try:
+    for line in open('docs/OPS/EXPIRIES.md'):
+        if not line.startswith('| E'):
+            continue
+        cols = [c.strip() for c in line.strip().strip('|').split('|')]
+        if len(cols) < 4:
+            continue
+        ident = re.sub(r'[*`]', '', cols[0]).strip()
+        label = re.sub(r'[*`]', '', cols[1]).strip()
+        d = re.search(r'(\d{4})-(\d{2})-(\d{2})', cols[3])
+        if not d:
+            undated.append(ident)
+            continue
+        due = datetime.date(int(d.group(1)), int(d.group(2)), int(d.group(3)))
+        days = (due - today).days
+        if days <= 30:
+            dated.append(f'  {ident}: {label} -- {due} ({days} days)')
+except Exception as e:
+    print('  EXPIRIES parse failed:', e); sys.exit(0)
+print('\n'.join(dated) if dated else '  none dated within 30 days')
+print(f'  {len(undated)} row(s) carry no date in the expires column: {", ".join(undated) or "none"}')
+print('  UNDATED ROWS ARE NOT "FINE" -- they are unchecked.')
+PYEOF
+
+  printf '\nsentry errors last 30d (accepted / rate_limited / filtered):\n'
+  curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+    "https://sentry.io/api/0/organizations/netraopscom/stats_v2/?field=sum(quantity)&groupBy=outcome&statsPeriod=30d&category=error" \
+  | jq -r 'if .groups then (.groups[] | "  \(.by.outcome): \(.totals["sum(quantity)"])")
+           else "  UNVERIFIED: " + (.|tostring|.[0:120]) end' 2>/dev/null \
+    || printf '  UNVERIFIED (stats endpoint unreadable)\n'
+  printf '  NOTE: quota denominator is the plan tier, not returned here.\n'
+
+  printf '\nanthropic spend: '
+  if [ -f "$COST_FILE" ]; then
+    jq -r '"last run $" + (.total_cost_usd|tostring)' "$COST_FILE" 2>/dev/null \
+      || printf 'UNVERIFIED (cost.json unparseable)\n'
+  else
+    printf 'UNVERIFIED — no cost.json from a previous run yet\n'
+  fi
+  printf '  MTD total: UNVERIFIED — summing across run artifacts is not implemented (N26).\n'
+}
+
+c_waiting() {
+  printf 'open PRs:\n'
+  gh pr list --state open --json number,title,createdAt \
+    --jq '.[] | "  #\(.number) \(.title) (opened \(.createdAt[0:10]))"' 2>/dev/null \
+    || printf '  UNVERIFIED (gh unavailable)\n'
+
+  printf '\n[VISHNU] items in OPEN-ITEMS.md:\n'
+  # Anchor on the ITEM HEADING form (**N<n>. [VISHNU] ...), not a bare grep for
+  # the tag -- the convention paragraph and the merge-order note both contain
+  # the literal string and were being reported as items in the 2026-09-06 dry
+  # run. Emit the number and the first few words so the line is actionable.
+  local tagged
+  tagged="$(grep -oE '^\*\*(N[0-9]+)\. \[VISHNU\][^*]*' docs/OPS/OPEN-ITEMS.md \
+            | sed -E 's/^\*\*(N[0-9]+)\. \[VISHNU\] */  \1 /' | cut -c1-90 || true)"
+  if [ -n "$tagged" ]; then printf '%s\n' "$tagged"; else printf '  none tagged\n'; fi
+}
+
+
 # ---------------------------------------------------------------------------
 # Build the pack.
 # ---------------------------------------------------------------------------
@@ -317,6 +617,11 @@ c_git_log() { git log -10 --oneline; }
   collect 'sentry-netraops-api'         c_sentry_api
   collect 'sentry-netraops-mobile'      c_sentry_mobile
   collect 'git-log'                     c_git_log
+  collect 'deploy-vs-main'              c_deploy_vs_main
+  collect 'failures-24h'                c_failures_24h
+  collect 'customer-pulse'              c_customer_pulse
+  collect 'ahead'                       c_ahead
+  collect 'waiting'                     c_waiting
 
   printf '\n---\n\n# REPO MEMORY\n'
 
@@ -424,16 +729,34 @@ MODEL="${MODEL:-claude-sonnet-5}"
 
 printf 'starting claude -p (model=%s, max-turns 15)\n' "$MODEL"
 
+# --output-format json so the run's own cost is recoverable. The payload
+# carries `result` (the report text) and `total_cost_usd`; text format carries
+# neither, which is why every cost figure so far has been UNVERIFIED (N21).
+RAW="${TRIAGE_RAW:-/tmp/triage-raw.json}"
+
 set +e
 claude -p "$PROMPT_BODY" \
-  --output-format text \
+  --output-format json \
   --max-turns 15 \
   --model "$MODEL" \
   --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
-  > "$OUT"
+  > "$RAW"
 CLAUDE_EXIT=$?
 set -e
+
+# Unwrap to the shape the rest of this script expects. If the payload is not
+# the documented JSON -- an auth failure writes a bare line to stdout -- keep
+# whatever arrived rather than silently producing an empty report.
+if jq -e '.result' "$RAW" >/dev/null 2>&1; then
+  jq -r '.result' "$RAW" > "$OUT"
+  jq '{total_cost_usd, session_id, num_turns, model: (.modelUsage // null)}' "$RAW" > "$COST_FILE" 2>/dev/null || true
+  printf 'cost: %s\n' "$(jq -r '.total_cost_usd // "unknown"' "$RAW" 2>/dev/null)"
+else
+  cp "$RAW" "$OUT"
+  printf 'WARNING: claude output was not the documented JSON; passing it through verbatim.\n' >&2
+  CLAUDE_EXIT=$(( CLAUDE_EXIT == 0 ? 1 : CLAUDE_EXIT ))
+fi
 
 # A rejected model id is a startup error, not a triage result. Surface it as
 # itself rather than letting the generic banner call it a runner failure.
@@ -467,7 +790,22 @@ printf 'report: %s (%s lines)\n' "$OUT" "$(wc -l < "$OUT" | tr -d ' ')"
 # Slack.
 # ---------------------------------------------------------------------------
 RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-vvishnu1998-lab/guard}/actions/runs/${GITHUB_RUN_ID:-0}"
-BODY="$(head -c 3500 "$OUT")"
+
+# Slack gets the five-line brief ONLY. The full report is the artifact.
+# Nothing goes to Slack that has no decision attached (DECISIONS.md D14).
+#
+# Extract everything after the '## Slack brief' heading. If the model did not
+# emit that section the format has regressed, and that is itself worth seeing --
+# so fall back to the old first-3500-chars post with a loud prefix rather than
+# posting nothing or pretending the brief was empty.
+BODY="$(awk '/^## Slack brief[[:space:]]*$/{flag=1; next} flag' "$OUT" | sed '/^[[:space:]]*$/d')"
+
+if [ -z "$BODY" ]; then
+  printf 'WARNING: no "## Slack brief" section in the report\n' >&2
+  BODY="BRIEF MISSING — runner format regression
+
+$(head -c 3500 "$OUT")"
+fi
 
 PAYLOAD="$(BODY="$BODY" RUN_URL="$RUN_URL" FAILS="$COLLECTOR_FAILURES" python3 -c '
 import json, os

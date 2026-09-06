@@ -22,15 +22,116 @@ import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
 
-// Central SendGrid error tag helper. Called from every sgMail.send catch
-// site so a Sentry.setTag('service','sendgrid') + flow tag lets us slice
-// the issues list by workflow when triaging delivery failures.
-function reportSendgridFailure(flow: string, err: any, extra?: Record<string, unknown>): void {
-  Sentry.captureException(err, {
-    tags: { service: 'sendgrid', flow },
-    extra: { ...(extra ?? {}), response_body: err?.response?.body },
-  });
+// Central SendGrid failure accounting. Called from every sgMail.send catch
+// site so delivery failures are sliceable by workflow when triaging.
+//
+// This COUNTS; it does not capture per occurrence. Incident:
+// docs/OPS/INCIDENTS/2026-09-01-unauthorized-burst.md — a declining card made
+// SendGrid return 401 on every send for 6d 18h. The old body was a
+// `Sentry.captureException` per failed RECIPIENT, and `sendMissedShiftAlert`
+// deliberately does not stamp `missed_alert_sent_at` when every recipient
+// fails, so the same shifts retried every 5 minutes indefinitely:
+// 8 shifts x (4 admins + 1 throw) x 12 ticks = 480 events/hour, which
+// exhausted the org's monthly Sentry quota in ~10 hours and blinded error
+// monitoring for the following 94 hours.
+//
+// The failure was never the retry — it is correct that an alert survives a
+// transient outage. It was reporting an expected, correlated, indefinitely
+// repeating condition as an individual event.
+//
+// Emission policy, per flow, per process:
+//   - console: at most one `[sendgrid.fail]` line per minute, carrying the
+//     suppressed count so nothing is silently lost;
+//   - Sentry: `sendgrid_failing` on the TRANSITION into failure (first failure
+//     after a success), then at most once per hour while still failing.
+//
+// `flow` and `status` are tags. Recipient identity is NEVER a tag and never
+// reaches Sentry from here: it is unbounded cardinality and it is PII. The
+// per-recipient console.error at each call site still carries it, so Railway
+// logs keep the detail (docs/OPS/POLICY.md).
+const SENDGRID_LOG_INTERVAL_MS = 60 * 1000;
+const SENDGRID_CAPTURE_INTERVAL_MS = 60 * 60 * 1000;
+
+interface SendgridFlowState {
+  failing: boolean;
+  consecutive: number;
+  sinceLastLog: number;
+  lastLogAt: number;
+  lastCaptureAt: number;
 }
+
+const sendgridState = new Map<string, SendgridFlowState>();
+
+function sendgridFlowState(flow: string): SendgridFlowState {
+  let st = sendgridState.get(flow);
+  if (!st) {
+    st = { failing: false, consecutive: 0, sinceLastLog: 0, lastLogAt: 0, lastCaptureAt: 0 };
+    sendgridState.set(flow, st);
+  }
+  return st;
+}
+
+// SendGrid's client puts the HTTP status on `code`; the raw response carries
+// `statusCode`. Take whichever exists so the tag is a number like 401 or 429
+// rather than the message text, which gets reworded.
+function sendgridStatus(err: any): string {
+  const s = err?.code ?? err?.response?.statusCode ?? err?.statusCode;
+  return s === undefined || s === null ? 'unknown' : String(s);
+}
+
+function reportSendgridFailure(flow: string, err: any, _extra?: Record<string, unknown>): void {
+  const st = sendgridFlowState(flow);
+  const now = Date.now();
+  const status = sendgridStatus(err);
+
+  st.consecutive += 1;
+  st.sinceLastLog += 1;
+
+  const transition = !st.failing;
+  if (transition) st.failing = true;
+
+  if (transition || now - st.lastLogAt >= SENDGRID_LOG_INTERVAL_MS) {
+    console.error(`[sendgrid.fail] flow=${flow} count=${st.sinceLastLog} status=${status}`);
+    st.lastLogAt = now;
+    st.sinceLastLog = 0;
+  }
+
+  if (transition || now - st.lastCaptureAt >= SENDGRID_CAPTURE_INTERVAL_MS) {
+    Sentry.captureMessage('sendgrid_failing', {
+      level: 'error',
+      tags: { service: 'sendgrid', flow, status },
+      extra: { consecutive_failures: st.consecutive, transition },
+    });
+    st.lastCaptureAt = now;
+  }
+}
+
+// Called on a successful send so the next failure is a real transition rather
+// than being folded into an hours-old burst. Without this the "first failure
+// after a success" edge cannot be detected and a flow that recovers and breaks
+// again would stay silent until the hourly timer came round.
+export function noteSendgridSuccess(flow: string): void {
+  const st = sendgridState.get(flow);
+  if (!st) return;
+  if (st.failing) {
+    console.log(`[sendgrid.recovered] flow=${flow} after=${st.consecutive} consecutive failure(s)`);
+  }
+  st.failing = false;
+  st.consecutive = 0;
+  st.sinceLastLog = 0;
+  st.lastCaptureAt = 0;
+}
+
+// Test-only. The state is per-process and deliberately has no TTL; tests need
+// a clean slate between cases.
+export function __resetSendgridFailureState(): void {
+  sendgridState.clear();
+}
+
+// Test-only door to the module-private reporter. Production code reaches it
+// through the sgMail catch sites; the test needs to drive it directly to assert
+// the emission policy without standing up a fake SendGrid.
+export const __reportSendgridFailureForTest = reportSendgridFailure;
 
 // Recipient resolver for all admin-alert flows. Fans out to every active
 // admin on the tenant, ordered primary-first so log ordering matches the
@@ -61,7 +162,7 @@ async function sendToAdmins(
   );
   let succeeded = 0, failed = 0;
   results.forEach((r, i) => {
-    if (r.status === 'fulfilled') { succeeded += 1; return; }
+    if (r.status === 'fulfilled') { succeeded += 1; noteSendgridSuccess(flow); return; }
     failed += 1;
     const err: any = r.reason;
     console.error(
@@ -240,6 +341,7 @@ export async function sendIncidentAlert(
     const email = result.rows[i].client_email;
     if (o.status === 'fulfilled') {
       console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${email} (report=${report.id})`);
+      noteSendgridSuccess('incident_alert');
     } else {
       const err: any = o.reason;
       console.error(`[email] sendIncidentAlert: SENDGRID ERROR for ${email} — ${err?.message ?? err}`, err?.response?.body);
@@ -537,6 +639,7 @@ export async function sendDailyShiftReport(shiftId: string) {
 
   try {
     await sgMail.send(sendOpts);
+    noteSendgridSuccess('daily_shift_report');
   } catch (err: any) {
     console.error(`[email] sendDailyShiftReport: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('daily_shift_report', err, { shift_id: shiftId });
@@ -893,6 +996,7 @@ export async function sendTempPasswordEmail(
       <div class="footer">NetraOps — Do not reply to this email</div>
     </div>`,
     });
+    noteSendgridSuccess('temp_password');
   } catch (err: any) {
     console.error(`[email] sendTempPasswordEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('temp_password', err, { portal });
@@ -1478,6 +1582,7 @@ export async function sendGuardWelcomeEmail(args: {
   try {
     await sgMail.send({ to: args.guard_email, from: FROM, replyTo: REPLY_TO, subject, html });
     console.log(`[email] sendGuardWelcomeEmail: SUCCESS — delivered to ${args.guard_email}`);
+    noteSendgridSuccess('welcome_guard');
   } catch (err: any) {
     console.error(`[email] sendGuardWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('welcome_guard', err, { guard_id: args.guard_id });
@@ -1543,6 +1648,7 @@ export async function sendPrimaryAdminWelcomeEmail(args: {
   try {
     await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
     console.log(`[email] sendPrimaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
+    noteSendgridSuccess('welcome_admin_primary');
   } catch (err: any) {
     console.error(`[email] sendPrimaryAdminWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('welcome_admin_primary', err, { admin_id: args.admin_id });
@@ -1630,6 +1736,7 @@ export async function sendSecondaryAdminWelcomeEmail(args: {
   try {
     await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
     console.log(`[email] sendSecondaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
+    noteSendgridSuccess('welcome_admin_secondary');
   } catch (err: any) {
     console.error(`[email] sendSecondaryAdminWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('welcome_admin_secondary', err, { admin_id: args.admin_id });
@@ -1725,6 +1832,7 @@ export async function sendClientWelcomeEmail(args: {
   try {
     await sgMail.send({ to: args.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
     console.log(`[email] sendClientWelcomeEmail: SUCCESS — delivered to ${args.client_email}`);
+    noteSendgridSuccess('welcome_client');
   } catch (err: any) {
     console.error(`[email] sendClientWelcomeEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('welcome_client', err, { client_id: args.client_id });

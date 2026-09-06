@@ -92,6 +92,35 @@ Short of half. See N21 — the remaining bulk is `STATE.md`.
 
 ---
 
+## 2026-09-06 — what Slack is for
+
+### D14. Slack gets a five-line founder brief. Nothing else.
+
+UP / BROKE / CUSTOMER / AHEAD / WAITING, one line each, under a header carrying
+the worst status of the five. The full report goes to the run artifact and is
+read only when a brief line sends you there.
+
+**Failures first, and named.** BROKE is the second line, above customer and
+ahead, because a failure with a next step is the only thing that reliably needs
+action today. A brief that opens with metrics trains the reader to skim.
+
+**Nothing in Slack that has no decision attached.** Every BROKE line ends in a
+next step; if one cannot be named, the finding stays in the report. WAITING
+exists to make "this is blocked on you" unambiguous rather than implied.
+
+**No customer ops metrics.** CUSTOMER carries three facts — active yesterday,
+guard count with direction, days since last contact — and no dashboard. Session
+counts, ping ratios, report volumes and completion rates are operational
+telemetry: they belong in the report, and acting on them is the admin portal's
+job, not a founder brief's. The one question this line answers is *is the
+customer still there, and when did I last speak to them.*
+
+**⚪ is a real state.** A line that could not be established at all is white, not
+green. Inferring a green from a missing signal is the failure this whole loop was
+built to stop, and the brief is the surface where it would be least visible.
+
+---
+
 ## How to add to this file
 
 One dated section per decision batch. State the decision, then — if it references
