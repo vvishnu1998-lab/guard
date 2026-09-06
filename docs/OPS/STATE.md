@@ -226,17 +226,45 @@ Every query selects **ID and count columns only**. Verified on the 2026-09-05
 local run: the live-signals half of the pack contained **0 email addresses, 0
 coordinate pairs, 0 phone numbers and 0 guard names**.
 
+**Cadence: daily at 08:00 PT (Phase 4.4).** `cron: '0 15 * * *'`. GitHub Actions
+cron is always UTC with no timezone option, so this is 08:00 PDT most of the
+year and 07:00 PST between the November and March switches — accepted rather
+than adding two cron entries and a date guard. Restores `DECISIONS.md` D7; the
+6-hourly schedule it replaces was shake-out only. `workflow_dispatch` unchanged.
+
+**Pack trimmed for cost (D13).** `railway-logs` 300 -> 100 lines, `git log`
+-20 -> -10, `SENTRY_ISSUE_CAP` 15 -> 10, `--max-turns` 40 -> 15, and
+`OPEN-ITEMS.md` embedded as **open items only** — the "Carried items" archive
+and every item marked CLOSED are dropped, with the omission stated in the pack
+itself. The Sentry `lastSeen` filter widened 6h -> 24h to match the daily
+cadence; a daily run filtering to 6h would silently drop 18 hours of issues.
+
+Measured on the same machine, before and immediately after the code change:
+**1421 -> 1114 lines, 67,251 -> 49,875 bytes (-26%)**. Live signals 463 -> 263;
+repo memory 958 -> 851.
+
+**Re-measured after writing this section: 1190 lines / 54,213 bytes.** Documenting
+the trim added ~76 lines to the pack, because `STATE.md`, `DECISIONS.md` and
+`OPEN-ITEMS.md` are all embedded in it. Net against the 1421 baseline is
+**-16% lines / -19% bytes** — the honest figure to plan cost against, and the
+one that will drift upward every phase.
+
+**Short of the "roughly halved" target**, and that self-inflation is why.
+`STATE.md` — this file — is 348+ lines, roughly a third of the whole pack and
+larger than every live signal combined, and it grows by a section per phase. It
+is still embedded in full. Splitting it is the next lever: see **N21**.
+
 **Dry run.** `workflow_dispatch` takes `dry_run: true`, which collects and
 uploads the pack without calling the model — a cheap way to prove collection
 works. The context pack is uploaded as an artifact on **every** run, dry or not,
 including failures: a report claiming all-green is only trustworthy alongside
 the signals it was written from.
 
-First local run: **1147 lines, 0 collector failures.** Section line counts —
-`health` 2, `health-crons` 4, `cron-heartbeats` 16, `starnet-open-sessions` 8,
-`customer-signal` 4, `open-geofence-violations` 1, `stuck-sessions` 1,
-`railway-logs` 204, `sentry-netraops-api` 15, `sentry-netraops-mobile` 4,
-`git-log` 20.
+Latest local run (2026-09-05, post-trim, post-docs): **1190 lines, 0 collector failures.**
+Section line counts — `health` 2, `health-crons` 4, `cron-heartbeats` 18,
+`starnet-open-sessions` 8, `customer-signal` 4, `open-geofence-violations` 1,
+`stuck-sessions` 1, `railway-logs` 100, `sentry-netraops-api` 14,
+`sentry-netraops-mobile` 4, `git-log` 10.
 
 **Repo memory in the pack is now name-free (Phase 4.3, N16).** The pack embeds
 `STATE.md`, `OPEN-ITEMS.md`, `FREEZES.md`, `DECISIONS.md`, `POLICY.md` and

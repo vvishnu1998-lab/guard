@@ -166,6 +166,27 @@ in one PR.
 
 **Size M, Tier 1.** Incident context: `docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md`.
 
+
+**N21. Measure per-run API cost after 3 daily runs; target <= $0.40.**
+verified: PARTIAL — the pack size is measured, the cost is not. Phase 4.4 trimmed the pack from
+**1421 to 1114 lines / 67,251 to 49,875 bytes (-26%)** and cut `--max-turns` 40 -> 15. Target is
+**~$0.35/run** (`DECISIONS.md` D13). **No run has been costed** — `claude -p` cannot authenticate on
+this workstation, so the first real figure comes from CI. Use `--output-format json`, whose payload
+carries `total_cost_usd` and a per-model breakdown, or the Console usage page for the runner's
+dedicated key.
+
+**The trim fell short of "roughly halved", and the reason is `STATE.md`.** Composition of the
+repo-memory half after trimming, in lines: **STATE 348**, OPEN-ITEMS 154 (was 259), REPORT-TEMPLATE
+116, POLICY 84, FREEZES 70, DECISIONS 69. STATE.md is **41% of repo memory and 31% of the entire
+pack** — larger than every live signal combined (263 lines). It was embedded in full on the
+instruction that it is "small"; it is now the largest file in the pack and grows every phase, because
+each one appends a section.
+
+Next lever, if the measured cost misses target: split `STATE.md` the way `DEVICES.md` was split in
+N16 — a short current-state head that the pack embeds, and a per-phase history tail that it does not.
+Do **not** simply truncate it: the model needs deployment ids, schema tip and the freeze list to grade
+a finding, and those live at the top.
+
 ---
 
 ## Carried items

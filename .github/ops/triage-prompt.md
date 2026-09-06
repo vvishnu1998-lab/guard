@@ -16,7 +16,10 @@ Read these first, in this order. They are the contract:
 1. `docs/OPS/STATE.md` — what is deployed and what is known
 2. `docs/OPS/FREEZES.md` — entities you must not propose touching
 3. `docs/OPS/POLICY.md` — the tier ladder every proposed fix is graded against
-4. `docs/OPS/OPEN-ITEMS.md` — what is already known; do not re-report it as new
+4. `docs/OPS/OPEN-ITEMS.md` — what is already known; do not re-report it as new.
+   The pack carries a TRIMMED copy: open items only, with closed items and the
+   "Carried items" archive omitted and the omission stated. If you need the
+   full list, read the file from the repo.
 5. `docs/OPS/DECISIONS.md` — settled calls; do not relitigate
 6. `docs/OPS/REPORT-TEMPLATE.md` — the exact output format
 
@@ -59,9 +62,9 @@ The pack contains these sections, each with a line count:
 | `customer-signal` | distinct STARNET guards active last 7d vs prior 7d, and session count. Counts only. |
 | `open-geofence-violations` | unresolved violations older than 6h, excluding Bethel AME (enforcement is off there per `DECISIONS.md` D11) |
 | `stuck-sessions` | sessions still open more than 3h past `scheduled_end` |
-| `railway-logs` | up to 300 log lines with the count actually returned |
-| `sentry-netraops-api` / `sentry-netraops-mobile` | issues with events in the last 6h, as `id\|shortId\|level\|count_24h\|lifetime\|firstSeen\|lastSeen\|title`. **`count_24h` is the last 24 hours; `lifetime` is the total since `firstSeen` and may span months — never quote `lifetime` as a 24h figure.** |
-| `git-log` | `git log -20 --oneline` |
+| `railway-logs` | up to 100 log lines with the count actually returned |
+| `sentry-netraops-api` / `sentry-netraops-mobile` | issues with events in the last 24h, as `id\|shortId\|level\|count_24h\|lifetime\|firstSeen\|lastSeen\|title`. **`count_24h` is the last 24 hours; `lifetime` is the total since `firstSeen` and may span months — never quote `lifetime` as a 24h figure.** |
+| `git-log` | `git log -10 --oneline` |
 
 ### When a section says COLLECTOR FAILED
 
@@ -88,7 +91,7 @@ from Sentry's own hourly buckets. `lifetime` is the total since `firstSeen`.
 Quoting `lifetime` as a recent volume is how a six-week-old issue at 54
 events/24h got reported as "303 in 24 h" on 2026-09-05. Check `firstSeen`
 before calling anything new, and do not describe an issue as "continuous"
-unless you can point at the evidence for it — the pack gives you a 6h subset
+unless you can point at the evidence for it — the pack gives you a 24h subset
 and a 24h total, not a distribution.
 
 Sentry issue titles may contain user data. If a title contains an email or a
