@@ -5,9 +5,32 @@
 import { Router } from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import { requireAuth } from '../middleware/auth';
+import { Sentry } from '../services/sentry';
 
 const router = Router();
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+/**
+ * ENHANCEMENT_TIMEOUT_MS and maxRetries are a pair -- changing one without the
+ * other does not bound anything.
+ *
+ * The SDK default timeout is 10 MINUTES and its default maxRetries is 2, and
+ * the SDK's own docs note that "request timeouts are retried by default, so in
+ * a worst-case scenario you may wait much longer than this timeout". Layered
+ * under the 529 loop below, an unresponsive upstream could hold a guard's
+ * spinner for the better part of an hour.
+ *
+ * maxRetries: 0 hands retry policy entirely to the loop below, so the worst
+ * case is bounded and countable: 2 attempts x 8s + one 1s backoff = 17s.
+ *
+ * See docs/OPS/INCIDENTS/2026-09-06-enhancement-credit-exhaustion.md.
+ */
+const ENHANCEMENT_TIMEOUT_MS = 8_000;
+
+const anthropic = new Anthropic({
+  apiKey:     process.env.ANTHROPIC_API_KEY,
+  timeout:    ENHANCEMENT_TIMEOUT_MS,
+  maxRetries: 0,
+});
 
 /**
  * Anthropic model ID — sourced from env so we can roll forward without
@@ -122,7 +145,9 @@ Rewrite this as a professional security report entry:`;
 
   try {
     let enhanced = '';
-    let retries = 3;
+    // 2 attempts total, i.e. ONE retry, and only for 529 (overloaded). Was 3.
+    // A guard is watching a spinner; a third attempt buys little and costs 8s.
+    let retries = 2;
     let delay = 1000;
     while (retries > 0) {
       try {
@@ -151,13 +176,61 @@ Rewrite this as a professional security report entry:`;
     }
 
     if (!enhanced) {
-      return res.status(500).json({ error: 'Empty response from AI' });
+      // Same shape as the catch below: stable code, guard-safe copy.
+      Sentry.captureMessage('enhancement_failed', {
+        level: 'warning',
+        tags:  { status: 'empty', flow: 'report_enhance' },
+        extra: { guard_id: req.user!.sub, company_id: req.user!.company_id ?? null },
+      } as unknown as Parameters<typeof Sentry.captureMessage>[1]);
+      console.error(
+        `[ai.enhance.failed] guard=${req.user!.sub} company=${req.user!.company_id ?? 'n/a'} ` +
+        `status=empty name=EmptyResponse`,
+      );
+      return res.status(503).json({
+        error:   'ENHANCEMENT_UNAVAILABLE',
+        message: 'Enhancement unavailable — your text will be submitted as written.',
+      });
     }
 
     res.json({ enhanced });
   } catch (err: any) {
-    console.error('[AI enhance-description] Error:', err);
-    res.status(500).json({ error: err?.message ?? 'AI enhancement failed' });
+    // NEVER return err.message. On 2026-09-06 this line put Anthropic's own
+    // billing text -- "Your credit balance is too low to access the Anthropic
+    // API. Please go to Plans & Billing..." -- into the client-facing `error`
+    // field, and a STARNET guard read it in a modal on their phone mid-shift.
+    //
+    // apps/mobile/lib/errorCopy.ts:53 renders any ApiError.message to the guard
+    // verbatim, by contract: that field is server-AUTHORED guard-facing copy.
+    // The defect was putting an upstream VENDOR's message into it.
+    //
+    // Per the error contract: `error` is a stable CODE, `message` is the copy.
+    const status = typeof err?.status === 'number' ? err.status : 0;
+
+    // Attribution parity with the success line above. Until now the success
+    // path logged guard= and company= and the FAILURE path logged neither, so
+    // the 9 failures on 2026-09-06 could not be attributed to a guard at all.
+    console.error(
+      `[ai.enhance.failed] guard=${req.user!.sub} company=${req.user!.company_id ?? 'n/a'} ` +
+      `status=${status} name=${err?.name ?? 'unknown'}`,
+      err,
+    );
+
+    // Tags stay low-cardinality and carry NO guard identity, per
+    // docs/OPS/POLICY.md. Ids go in extra.
+    Sentry.captureMessage('enhancement_failed', {
+      level: 'warning',
+      tags:  { status: String(status), flow: 'report_enhance' },
+      extra: {
+        guard_id:   req.user!.sub,
+        company_id: req.user!.company_id ?? null,
+        error_name: err?.name ?? 'unknown',
+      },
+    } as unknown as Parameters<typeof Sentry.captureMessage>[1]);
+
+    res.status(503).json({
+      error:   'ENHANCEMENT_UNAVAILABLE',
+      message: 'Enhancement unavailable — your text will be submitted as written.',
+    });
   }
 });
 

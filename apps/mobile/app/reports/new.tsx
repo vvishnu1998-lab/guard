@@ -89,6 +89,12 @@ export default function CreateReport() {
   const [reportIdempotencyKey] = useState(() => uuidv4());
   const [enhancing,    setEnhancing]    = useState(false);
   const [enhanced,     setEnhanced]     = useState<string | null>(null);
+  // Non-blocking failure notice. Deliberately NOT an Alert: on 2026-09-06 a
+  // modal carrying the server's text put Anthropic's billing message on a
+  // guard's phone mid-shift, and a modal has to be dismissed before the guard
+  // can carry on. Enhancement is an optional writing aid; failing it must not
+  // interrupt. See docs/OPS/INCIDENTS/2026-09-06-enhancement-credit-exhaustion.md
+  const [enhanceNotice, setEnhanceNotice] = useState<string | null>(null);
   const [originalDesc, setOriginalDesc] = useState<string | null>(null);
 
   const { activeShift, activeSession } = useShiftStore();
@@ -120,6 +126,7 @@ export default function CreateReport() {
 
   async function handleEnhance() {
     if (countWords(description) < MIN_ENHANCE_WORDS) return;
+    setEnhanceNotice(null);
     setEnhancing(true);
     Sentry.addBreadcrumb({
       category: 'reports_wizard',
@@ -147,7 +154,11 @@ export default function CreateReport() {
         data: { error: err?.message ?? String(err) },
       });
       Sentry.captureException(err, { extra: { where: 'reports.new.handleEnhance' } });
-      Alert.alert('Enhancement Failed', guardMessage(err, 'Could not enhance the description. Write it yourself and carry on.', 'report.enhance'));
+      // FIXED COPY. Never guardMessage(err) here, and never the server's text:
+      // this call reaches a third-party API, so its errors are not ours to
+      // show. The guard's own text is untouched in `description` and submit is
+      // unaffected -- the notice says exactly that.
+      setEnhanceNotice('Enhancement unavailable — your text will be submitted as written.');
     } finally {
       setEnhancing(false);
     }
@@ -414,6 +425,11 @@ export default function CreateReport() {
               )}
             </>
           )}
+          {enhanceNotice && (
+            <View style={styles.enhanceNotice}>
+              <Text style={styles.enhanceNoticeText}>{enhanceNotice}</Text>
+            </View>
+          )}
           {enhancing && (
             <View style={styles.enhancingRow}>
               <ActivityIndicator size="small" color="#F59E0B" />
@@ -554,6 +570,12 @@ const styles = StyleSheet.create({
   enhanceBtnText: { color: '#F59E0B', fontSize: 13, letterSpacing: 1 },
   enhanceBtnTextDisabled: { color: Colors.muted },
   enhanceHint: { color: Colors.muted, fontSize: 12, marginTop: 6 },
+  enhanceNotice: {
+    marginTop: 8, padding: 10, borderRadius: 8,
+    backgroundColor: 'rgba(245,158,11,0.10)',
+    borderWidth: 1, borderColor: 'rgba(245,158,11,0.35)',
+  },
+  enhanceNoticeText: { color: Colors.muted, fontSize: 13, lineHeight: 18 },
 
   enhancingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginTop: Spacing.sm },
   enhancingText: { color: Colors.muted, fontSize: 13 },

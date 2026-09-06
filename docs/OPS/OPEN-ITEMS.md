@@ -194,6 +194,58 @@ Do **not** simply truncate it: the model needs deployment ids, schema tip and th
 a finding, and those live at the top.
 
 
+**N22. Migrate transactional email off SendGrid — Resend or Postmark.**
+verified: PARTIAL — the dependency is confirmed, the volume figure is not. `@sendgrid/mail` is a
+declared dependency of `apps/api`, and SendGrid carries `dailyShiftEmail`, `missedShiftAlert` and the
+handoff admin FYI. The brief gives **323 emails/month on a 50K plan** — a rounding error against the
+plan, so the migration is about **billing risk, not capacity**. That figure is **UNVERIFIED**: there is
+no `emails_sent` table, so volume is not derivable from the database; it would have to come from the
+SendGrid dashboard.
+Trigger is **E15**: the card is failing. A suspension silently stops every admin and client email, and
+**the triage pack has no email-delivery signal at all**, so nobody would learn of it from the loop.
+Evaluate Resend and Postmark on: domain re-verification effort (the sender is
+`alerts@em6648.netraops.com`), template parity, and whether a failed send surfaces anywhere we already
+watch. **Size M, Tier 1.** Fix the card first — that is E15, and it is hours not weeks.
+
+**N23. Report enhancement degraded gracefully; budget isolation pending.**
+verified: YES — code half landed on branch `ops/n23-enhancement`; console half is **not** done.
+Incident: `docs/OPS/INCIDENTS/2026-09-06-enhancement-credit-exhaustion.md`. `routes/ai.ts` no longer
+returns `err.message` (it returned Anthropic's billing text to a STARNET guard's phone), gained an 8s
+timeout with `maxRetries: 0`, a 529 retry cap of 1, `Sentry.captureMessage('enhancement_failed')`, and
+`guard=`/`company=` on the failure log line. Mobile shows a non-blocking inline notice instead of a
+modal carrying server text.
+**Still open: the budget isolation itself** — two Console workspaces, two keys, $20/$30 limits, org
+auto-reload. Until that is applied the runner and the product still share one credit pool and the
+runner can still starve the product; the code change only makes that invisible to guards rather than
+preventing it. Runbook: `docs/OPS/RUNBOOK-n23-budget-isolation.md`. **Vishnu applies. Tier 2** —
+credential rotation, and step (b) restarts the API.
+
+**N24. Vercel Hobby plan is non-commercial under Vercel's ToS.**
+verified: NO — carried from the brief, not independently checked. `apps/web` deploys to Vercel and
+NetraOps has a paying customer, which is commercial use. If the project is on Hobby this is a terms
+violation with a plausible enforcement outcome of the site being taken down — the same class of risk
+as E14, and the web app is the client portal. **Not a technical question**: route to
+`us-business-counsel` for the ToS reading, then to a plan decision. Confirm the current plan first;
+the answer may be that it is already on Pro. **Size S to check, unknown to remediate. Tier 1.**
+
+**N25. Mobile `Sentry.captureException` produced ZERO events on a shipped path.**
+verified: YES, and this is the one that undermines other findings. `apps/mobile/app/reports/new.tsx:149`
+calls `Sentry.captureException(err, { extra: { where: 'reports.new.handleEnhance' } })`. It is present
+in the **shipped** ref, not just the working tree — `git show c932c09:apps/mobile/app/reports/new.tsx`
+shows it at line 149, and `git diff c932c09 HEAD` on that file is empty. `c932c09` is production
+Build 48 / v1.0.17.
+On 2026-09-06 that path failed **9 times in 2m36s** and `netraops-mobile` recorded **zero** events in
+the following 24h — its only issue was `NETRAOPS-MOBILE-9 startBackgroundLocation`.
+**Why is UNCONFIRMED.** Check, in order: (1) the mobile Sentry **DSN** is set in the shipped build,
+(2) the `environment` tag — two STARNET devices are on runtime **1.0.16**, not 1.0.17 (see **N7**), so
+the failing device may be running older JS entirely, (3) **flush on background** — React Native drops
+queued events if the app is backgrounded before the transport runs, (4) sample rate.
+**Test with a forced capture**: add a temporary dev-only button that calls
+`Sentry.captureException(new Error('n25-probe'))` and confirm the event arrives from a real device on
+the production channel. Until this resolves, **treat "no mobile Sentry events" as "no information",
+never as "no errors"** — the same lesson as the API-side blindness in this incident, one tier further
+out. **Size S to diagnose, Tier 1.**
+
 **N26. Anthropic month-to-date spend is not summed across runs.**
 verified: PARTIAL — the per-run half is **done** in Phase 4.5, the month sum is **not**.
 `scripts/ops/triage.sh` now calls `claude -p --output-format json` and writes `total_cost_usd`,
@@ -213,17 +265,31 @@ Deferred deliberately rather than half-built. Until it lands, the AHEAD line rea
 
 ---
 
-### Merge-order note (2026-09-06)
+### Merge-order note (2026-09-06, superseded)
 
-Phase 4.5 was branched from `main` @ `34a32c8`, which **does not contain the N23 branch** (PR #9,
-open at the time of writing). The Phase 4.5 dispatch asked for `[VISHNU]` tags on *"N1, N23 runbook,
-AWS upgrade, SendGrid card"* — but **N22–N25 and the AWS / SendGrid expiry rows exist only on that
-unmerged branch**. Only **N1** could be tagged here.
+The Phase 4.5 note here said N22–N25 and the AWS / SendGrid expiry rows existed
+only on the unmerged PR #9 branch, so only **N1** could carry a `[VISHNU]` tag.
+**That is now resolved on this branch:** `ops/n23-enhancement` is merged in
+(below), so N22–N25, **E14** and **E15** are all present and taggable.
 
-**When PR #9 merges, tag these four:** N23 (budget-isolation runbook — console work), N24 (Vercel ToS
-— Counsel), E14 (AWS free plan ends 2026-09-30 — the only hard-dated row), E15 (SendGrid card
-failing). Until then the brief's WAITING line will under-report by four items, and the AHEAD line will
-show no dated expiry at all — because on this branch there isn't one.
+**The branch stack is now four deep**, and this is the whole of it:
+
+```
+main @ 34a32c8
+  +-- ops/n23-enhancement        (PR #9)      N22-N25, E14, E15, ai.ts, N23 runbook
+  +-- ops/phase-4-5-digest       (5897516)    five-line brief, c_failures_24h
+        +-- ops/n27-sentry-ratelimit (12ab534)  sentry-dropped collector, N27
+              +-- ops/n28-unauthorized          this branch: N28 (a) + (f)
+```
+
+**Merging this branch merges all four.** Both prerequisites were pulled in
+because N28 (f) extends `c_failures_24h` (Phase 4.5) alongside the
+`sentry-dropped` line (N27) and annotates the **E15** row (PR #9) — none of
+which exist on `main`. Reimplementing any of them would have collided on merge.
+
+**Still to do once this lands:** tag N23 (budget-isolation runbook — console
+work), N24 (Vercel ToS — Counsel), E14 (AWS free plan ends 2026-09-30) and E15
+with `[VISHNU]`, so the brief's WAITING line stops under-reporting them.
 
 ---
 
