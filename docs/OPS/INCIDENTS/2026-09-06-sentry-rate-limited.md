@@ -1,8 +1,8 @@
 # 2026-09-06 — Sentry rate_limited (582 / 30 d)
 
-**Status:** **RESOLVED — self-resolved by the 2026-09-05 Team upgrade.** No code
-change required. Two follow-ups raised, one of them urgent for an unrelated
-reason.
+**Status:** **CLOSED 2026-09-06 — N27 resolved.** Self-resolved by the
+2026-09-05 Team upgrade; no code change was required for the rate limiting
+itself. Phase B shipped the monitoring gap it exposed and opened **N28**.
 **Severity:** P3 in effect (observability only), but it **blinded Sentry for
 94 hours**, and one closed incident was investigated during the blackout.
 **Item:** N27. **Branch:** `ops/n27-sentry-ratelimit`, cut from `main` @
@@ -543,13 +543,13 @@ a month's quota in ten hours at a sustained 480/h. It is quiet now, and nobody
 knows why it started or why it stopped. On the Team plan the same burst reaches
 50,000 in roughly four days with **no on-demand cushion behind it**.
 
-**Item numbering — do not allocate on this branch.** `main` @ `34a32c8` ends at
-**N21**; N22–N25 exist only on `ops/n23-enhancement` (PR #9) and N26 only on
-`ops/phase-4-5-digest`. Writing N27/N28 into `OPEN-ITEMS.md` from a branch cut
-from `main` would collide on merge, the same trap the "Merge-order note
-(2026-09-06)" already records. `OPEN-ITEMS.md` is therefore **untouched here**;
-add these after PR #9 and the Phase 4.5 branch land, and this file is the
-evidence they cite.
+**Item numbering — N27 and N28 live in this file, not in `OPEN-ITEMS.md`.**
+`main` @ `34a32c8` ends at **N21**; N22–N25 exist only on `ops/n23-enhancement`
+(PR #9) and N26 only on `ops/phase-4-5-digest`. Writing new numbers into
+`OPEN-ITEMS.md` from here would collide on merge — the same trap its own
+"Merge-order note (2026-09-06)" records. **`OPEN-ITEMS.md` is untouched by this
+branch.** Both items are stated in full under *Items* below; transcribe them
+into `OPEN-ITEMS.md` once PR #9 and Phase 4.5 have landed, citing this file.
 
 ---
 
@@ -616,3 +616,123 @@ returning an all-zero bucket array for an issue with 4,671 events, that is two
 more instances of the failure class this loop keeps finding: **a source that
 answers confidently and wrongly.** The defence that worked, again, was measuring
 the same quantity from two places and refusing to write until they agreed.
+
+---
+
+## Items
+
+Both items live here rather than in `OPEN-ITEMS.md` — see the numbering note
+above. Transcribe them once PR #9 and Phase 4.5 land.
+
+### N27 — Sentry dropping events — **CLOSED 2026-09-06**
+
+**Resolution: resolved by the 2026-09-05 Team upgrade.** Root cause was an
+organisation-level error-quota exhaustion (`error_usage_exceeded`), not a
+per-key limit, not spike protection as the primary cause, and nothing in the
+three SDK configs. Everything under *Root cause* above is the evidence.
+
+**Closing evidence, measured 2026-09-06 16:52Z:**
+
+| check | result |
+|---|---|
+| `rate_limited`, last 24 h, per project | **0 / 0 / 0** (`2026-09-05T16:00Z → 2026-09-06T17:00Z`) |
+| control — `accepted` in the same window | api 26, mobile 1, web 5 — the pipe is live, so the zero means "nothing refused" |
+| time since the last hour bucket carrying a refusal | **30.9 h** (last was `2026-09-05 09:00Z`) |
+| `client_discard/ratelimit_backoff`, last 24 h | **0** — the SDKs have stopped backing off |
+| quota headroom | `categories.errors`: `usage: 90` of `reserved: 50000`, `usageExceeded: false` |
+
+**What shipped with the close** (this branch, one commit):
+
+- `scripts/ops/triage.sh` — `sentry-dropped` added to `c_failures_24h`. The
+  monitoring gap, not the quota, was the actual defect: **three green daily
+  briefs went out during a 94-hour total blackout** because every Sentry signal
+  in the pack reads what arrived.
+- `.github/ops/triage-prompt.md` — the BROKE rule, with a reason → next-step
+  table.
+- `INCIDENTS/2026-09-05-push-skip-null-token.md` — its `UNCONFIRMED` "Sentry
+  undercounts the emission" note answered, and the misleading
+  `10:00:01 Sentry begins recording` timeline row corrected to the quota
+  lifting.
+
+**Still open and NOT closed by this** — carried to the recommendations above,
+because neither is N27:
+
+- **Rec 1 [VISHNU], Tier 2** — delete the 11 Sentry cron monitors. They consume
+  **100%** of the on-demand budget ($8.58 of $8.58), so the 50,000 reserved
+  errors currently have **zero** PAYG headroom behind them. Also read whether
+  that $8.58 ceiling was set or auto-raised; the API cannot tell them apart.
+- **N28**, below.
+
+### N28 — `Error: Unauthorized` (`7602645302`): identify the client — **OPEN, Tier 0**
+
+**The finding.** Sentry issue `7602645302` (`NETRAOPS-API-4`, `netraops-api`),
+`Error: Unauthorized`, level `error`, `status: unresolved`, **4,671 lifetime
+events**, `userCount: 5`, `firstSeen 2026-07-09T21:15:01.068Z`,
+`lastSeen 2026-09-01T12:00:00.486Z`.
+
+On **2026-09-01** it ran at a sustained **480 events/hour for four straight
+hours** (08:00–11:00Z, after a ramp from 02:00Z) and **consumed the entire
+free-plan monthly error quota in roughly ten hours**. That is what caused N27.
+It has emitted nothing since — and that is a real silence, not a hidden one:
+ingestion has been open since 2026-09-05 10:00Z and the issue has not
+reappeared.
+
+**Nobody knows what it was, why it started, or why it stopped.** All three
+matter, because on the Team plan the same burst reaches 50,000 in about four
+days, and per Rec 1 there is currently **no on-demand headroom** behind that.
+
+**Task — read-only, no writes, `POLICY.md` Tier 0.** Identify the client from
+the events Sentry still holds (90-day retention on this plan, so the 09-01
+events are readable until ~2026-11-30 — *this has an expiry*):
+
+1. Pull the latest and oldest events on `7602645302` and tabulate **counts
+   only** for: `request.url` / route, `request.method`, `user-agent`,
+   client IP **prefix**, `tags.role`, `tags.endpoint`, `tags.company_id`,
+   `release`, `server_name`.
+2. Decide between the three candidate shapes:
+   - **a stale token on an old binary** — the referent is **GRD0002
+     `802a842f-da79-44a9-aa0e-f549a9420cef`** on **STARNET SECURITY**
+     (`27c4d404-8769-49ca-bfd6-93cb9b890067`), carried in `OPEN-ITEMS.md` **C4**
+     as being on Build 44 and unreachable by OTA. **C4 records that build number
+     as UNVERIFIED from the DB** — `guard_devices.client` is NULL for that
+     device, so it has never made a `clock-in` / `handoff-clock-in` / `ping` /
+     `clock-in-verification` write since claiming its token. Confirm or drop the
+     Build 44 claim as part of this, rather than inheriting it.
+   - **a scanner or crawler** — unauthenticated, many routes, no `company_id`,
+     one IP range.
+   - **a client-side retry loop** — one route, one identity, fixed period. The
+     flat 480/h (= 8/min, four hours, no jitter) leans this way, but **480/h is
+     an observation, not a diagnosis**: it is equally consistent with a
+     server-side ingest smoothing, which has not been ruled out.
+3. Say explicitly which of the three it was, or that the evidence does not
+   separate them.
+
+**Constraints.** IDs, badges and counts only — no names, no coordinates, no
+token values, no full IPs (`POLICY.md`). `guard_devices.push_token` is
+**unreadable** by `claude_readonly`; derive device state from `revoked_at` /
+`EXISTS`, as the 09-05 incident had to. **Do not resolve the issue in Sentry** —
+that is a write to Vishnu's account and it destroys the read-only evidence this
+task depends on.
+
+**Why Tier 0:** every step is a read. Any *fix* that follows will not be, and
+gets tiered on its own.
+
+---
+
+## Merge-order note (2026-09-06)
+
+**This branch contains Phase 4.5 and cannot merge to `main` ahead of it.**
+
+Phase B item 1 targets `c_failures_24h` and the five-line brief's BROKE line.
+Both arrived in `5897516` (Phase 4.5), which is on `ops/phase-4-5-digest` and
+**not** on `main` @ `34a32c8`, where this branch was cut. `ops/phase-4-5-digest`
+was therefore merged into `ops/n27-sentry-ratelimit` (merge commit, Phase A's
+`234caed` preserved) rather than reimplementing the collector against `main` —
+a parallel collector would have conflicted with `5897516` and duplicated the
+section registry.
+
+Consequence, stated rather than discovered later: **merge Phase 4.5 first, or
+merge this branch and take Phase 4.5 with it.** There are now three branches in
+flight off `34a32c8` — `ops/n23-enhancement` (PR #9), `ops/phase-4-5-digest`,
+and this one — which is the same condition that produced `OPEN-ITEMS.md`'s own
+merge-order note, one day earlier.

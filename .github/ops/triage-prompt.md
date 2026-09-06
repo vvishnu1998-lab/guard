@@ -66,7 +66,8 @@ The pack contains these sections, each with a line count:
 | `sentry-netraops-api` / `sentry-netraops-mobile` | issues with events in the last 24h, as `id\|shortId\|level\|count_24h\|lifetime\|firstSeen\|lastSeen\|title`. **`count_24h` is the last 24 hours; `lifetime` is the total since `firstSeen` and may span months — never quote `lifetime` as a 24h figure.** |
 | `git-log` | `git log -10 --oneline` |
 | `deploy-vs-main` | current SUCCESS deployment id + status + `origin/main` sha. **`deploy_matches_main` is always UNVERIFIED** — the Railway CLI prints no commit sha, so the match cannot be established read-only. Say UNVERIFIED in the UP line; do not infer it from timestamps. |
-| `failures-24h` | cron heartbeats with `last_result='error'` (count + job names), push failures and `ai.enhance.failed` counts grepped from the log window, the previous two runner conclusions, and per-project Sentry issue counts since the 24h cutoff |
+| `failures-24h` | cron heartbeats with `last_result='error'` (count + job names), push failures and `ai.enhance.failed` counts grepped from the log window, the previous two runner conclusions, per-project Sentry issue counts since the 24h cutoff, and **`sentry-dropped`** |
+| `failures-24h` → `sentry-dropped` | events Sentry **refused**, per project, split by reason, over an explicit 24h window (both the requested and the API-returned window are printed — quote the returned one). `platform_refused_24h` is the alarm number: `rate_limited` of any reason, plus `client_discard/ratelimit_backoff`, which is the SDK obeying a 429 Sentry sent. `client_local_discard_24h` (`event_processor`, `network_error`) is **our own `beforeSend`/`ignoreErrors` and device connectivity — never a finding**. The collector prints an `ALARM:` line; use it, do not recompute. |
 | `customer-pulse` | STARNET sessions yesterday (Pacific day), active guards 7d vs prior 7d, and `nataniel_last_contact` read from `STATE.md`. If that line is absent or still the seeded placeholder, treat it as UNVERIFIED. |
 | `ahead` | `EXPIRIES.md` rows dated within 30 days with days remaining, a count of rows carrying no date at all, Sentry 30-day error outcomes, and last-run Anthropic cost if a previous run left `cost.json` |
 | `waiting` | open PRs by number, and `[VISHNU]` items from `OPEN-ITEMS.md` |
@@ -189,6 +190,32 @@ coloured by what you know and says `UNVERIFIED` for the rest.
   never allowed** — badge or `guard_id`, per `POLICY.md`.
 - **Every BROKE line ends in a next step.** If you cannot name one, the finding
   is not ready for Slack; leave it in the full report.
+- **`sentry-dropped` with a non-zero `platform_refused_24h` is always a BROKE
+  line, at minimum P2.** Shape:
+
+  ```
+  P2 · Sentry dropped N events (<reason>) · monitoring blind · <next step>
+  ```
+
+  **Blind monitoring is a failure of the platform, not a quiet day.** Every
+  other Sentry signal in this pack reads what *arrived*; during a drop they all
+  look healthy, which is exactly how 94 hours of total blackout
+  (2026-09-01 → 2026-09-05) went unreported while three green briefs went out.
+  If events are being refused, **every other Sentry-derived line in the brief is
+  a floor, not a measure** — say so in the report.
+
+  Next step by reason, all Vishnu's to action:
+
+  | reason | what it means | next step to write |
+  |---|---|---|
+  | `error_usage_exceeded` | the org's monthly error quota is gone | `check Sentry quota + on-demand budget` |
+  | `spike_protection` | a burst tripped the per-project limiter | `find the emitting issue` |
+  | `ratelimit_backoff` | SDKs backing off from Sentry's 429s — always accompanies one of the above | fold into the line above; do not report alone |
+  | anything else | unseen before | `unrecognised reason — investigate` |
+
+  Escalate above P2 if `platform_refused_24h` exceeds the day's `accepted`
+  count, i.e. more was refused than landed. Report the **number the collector
+  printed**; do not add `client_local_discard_24h` to it.
 - **Do not pad.** "nothing in 24 h" is a complete BROKE line and a good outcome.
   Do not manufacture a finding to fill the space.
 - The counts come from the pack's `deploy-vs-main`, `failures-24h`,

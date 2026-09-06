@@ -355,6 +355,86 @@ c_failures_24h() {
            else "  '"$pr"': SENTRY API ERROR" end' 2>/dev/null)"
     printf '%s\n' "${t:-  $pr: UNVERIFIED}"
   done
+
+  # ── sentry-dropped ────────────────────────────────────────────────────────
+  # Events Sentry REFUSED, per project, split by reason.
+  #
+  # Why this exists: nothing else in the loop reads ingestion OUTCOMES. Both
+  # `c_sentry` collectors and the issue counts above read what ARRIVED, and
+  # during a quota blackout that is indistinguishable from a quiet day. It is
+  # how 2026-09-01 12:00Z -> 2026-09-05 10:00Z passed unremarked for 94 hours
+  # while the org accepted ZERO error events on all three projects and every
+  # health signal stayed green. See
+  # docs/OPS/INCIDENTS/2026-09-06-sentry-rate-limited.md.
+  #
+  # Explicit start/end, never statsPeriod. statsPeriod is evaluated at call
+  # time, so two calls minutes apart cover different windows -- that drift made
+  # two tables in the N27 investigation disagree by 14 events. The window the
+  # API actually RETURNED is printed next to the one requested, because Sentry
+  # snaps to hour boundaries and the two are not the same thing.
+  #
+  # One call, three groupBys. Verified 2026-09-06 that stats_v2 accepts
+  # groupBy=project&groupBy=outcome&groupBy=reason together (14 groups over
+  # 30d), so this does not need one request per project.
+  #
+  # What counts as a drop. `ratelimit_backoff` is counted as a PLATFORM drop
+  # even though Sentry files it under client_discard: it is the SDK honouring a
+  # 429 that Sentry sent. It was zero on every day outside the incident window
+  # and 1,755 inside it -- three times the 582 the server refused outright, and
+  # invisible in the headline number. `event_processor` and `network_error` are
+  # NOT platform drops: the first is our own beforeSend / ignoreErrors /
+  # denyUrls working as designed (apps/web/sentry.shared.ts:124-130 and the
+  # scrubbers in apps/api and apps/mobile), the second is device connectivity.
+  # Both occur on ordinary days -- 12 of them on 2026-08-17 alone -- so alarming
+  # on them would fire a false P2 most days and train the reader to ignore the
+  # line. They are reported for context and excluded from the alarm.
+  local w_start w_end pmap stats
+  w_end="$(date -u +%Y-%m-%dT%H:00:00Z)"
+  w_start="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:00:00Z 2>/dev/null \
+             || date -u -v-24H +%Y-%m-%dT%H:00:00Z)"
+
+  # id -> slug, so the pack names projects rather than printing bare numeric
+  # ids. Falls back to the id if the projects endpoint is unreadable; a bare id
+  # is still actionable, an aborted collector is not.
+  pmap="$(curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+          "https://sentry.io/api/0/organizations/netraopscom/projects/" \
+        | jq -c 'if type=="array" then (map({key:(.id|tostring), value:.slug})|from_entries) else {} end' \
+          2>/dev/null || printf '{}')"
+  # `|| printf '{}'` above does NOT cover an empty curl body: jq exits 0 on
+  # empty input and prints nothing, so pmap ends up "" and --argjson dies with
+  # "invalid JSON text", taking the whole section to UNVERIFIED. Validate it
+  # explicitly. (The first version used "${pmap:-{\}}" as the guard; inside a
+  # default-value expansion bash does not strip that backslash, so it produced
+  # the literal {\} -- invalid JSON, and the guard was the bug. Caught
+  # 2026-09-06 by testing the failure path, not the happy one.)
+  printf '%s' "$pmap" | jq -e . >/dev/null 2>&1 || pmap='{}'
+
+  stats="$(curl -s --max-time 30 -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+           "https://sentry.io/api/0/organizations/netraopscom/stats_v2/?field=sum(quantity)&start=${w_start}&end=${w_end}&groupBy=project&groupBy=outcome&groupBy=reason&category=error")"
+
+  printf '\nsentry-dropped requested window: %s -> %s\n' "$w_start" "$w_end"
+  printf '%s' "$stats" | jq -r --argjson m "$pmap" '
+    if (.groups | type) != "array" then
+      "  SENTRY API ERROR: " + (.|tostring|.[0:160])
+    else
+      "  window returned by API: \(.start) -> \(.end)",
+      ( [ .groups[]
+          | select(.by.outcome=="rate_limited" or .by.outcome=="client_discard")
+          | { p: ($m[(.by.project|tostring)] // (.by.project|tostring)),
+              o: .by.outcome, r: (.by.reason // "none"),
+              n: .totals["sum(quantity)"] }
+          | select(.n > 0) ] ) as $rows
+      | ( [ $rows[] | select(.o=="rate_limited" or .r=="ratelimit_backoff") | .n ] | add // 0 ) as $refused
+      | ( [ $rows[] | select(.o=="client_discard" and .r!="ratelimit_backoff") | .n ] | add // 0 ) as $local
+      | "  platform_refused_24h: \($refused)",
+        "  client_local_discard_24h: \($local)   (beforeSend/ignoreErrors/network -- NOT a platform drop, excluded from the alarm)",
+        ( if ($rows|length)==0 then "  rows: none"
+          else ( $rows | sort_by(-.n)[] | "  \(.p) | \(.o) | \(.r) | \(.n)" ) end ),
+        ( if $refused > 0 then
+            "  ALARM: platform refused \($refused) event(s) in 24h -- reasons: " +
+            ([ $rows[] | select(.o=="rate_limited" or .r=="ratelimit_backoff") | .r ] | unique | join(","))
+          else "  ALARM: none -- 0 events refused by the platform in 24h" end )
+    end' 2>/dev/null || printf '  UNVERIFIED (stats_v2 unreadable or jq failed)\n'
 }
 
 c_customer_pulse() {

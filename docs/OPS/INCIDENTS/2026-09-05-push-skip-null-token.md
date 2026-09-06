@@ -34,7 +34,7 @@ below with evidence: the issue id, the event volume, and "continuously".
 | 2026-09-05 04:00–09:59 | job demonstrably firing; **Sentry records 0 events** (see Evidence) |
 | 2026-09-05 **08:31:58** | GRD0017 `98401c5a` clocks in — no device row |
 | 2026-09-05 **09:22:54** | GRD0016 `0716914b` clocks in — no device row |
-| 2026-09-05 **10:00:01** | Sentry begins recording; **9/hour** from here |
+| 2026-09-05 **10:00:01** | **the org error quota lifts** — Sentry resumes accepting, and the 9/hour becomes visible. **Not an onset:** the job had been emitting since 05:00:01 and every event was refused. See `2026-09-06-sentry-rate-limited.md` |
 | 2026-09-05 15:01 | triage run 33973502815 reports it |
 | 2026-09-05 16:00:04 | **last `flow: ping_reminder` event ever recorded on this issue** |
 | 2026-09-05 **16:12:04** | deploy `9775a777-9523-4b58-91c0-9e49edd6b21e` SUCCESS — fix live |
@@ -167,10 +167,33 @@ GRD0022 has 22 reminders starting 05:00:01 — one per 30-minute window through
 branch. **Sentry recorded zero events before 10:00**, so at least ~15 emissions
 in 04:00–09:59 are absent from Sentry.
 
-**Why is UNCONFIRMED.** Plausibly client- or server-side rate limiting or a
-quota drop; it cannot be checked with this token, which is refused
-`/api/0/api-tokens/` (403). What is confirmed is the consequence: **the Sentry
-event count is a floor on emission volume, not a measure of it.**
+**Why — ANSWERED 2026-09-06, it was the org quota.** See
+`2026-09-06-sentry-rate-limited.md` (N27). The organisation's monthly error
+quota was exhausted at **2026-09-01 12:00Z** and did not reset until the Team
+plan's billing period began at **2026-09-05 10:00Z**. Across those 94 hours
+Sentry accepted **zero** error events on all three projects and refused them
+with `rate_limited / error_usage_exceeded`. `netraops-api` alone shows
+**3, 3, 3, 2, 3** refusals per hour over 05:00–09:00Z on 09-05 against
+`accepted: 0` — those are these emissions. At 10:00Z `accepted` jumps to 9/hour
+and `rate_limited` goes to 0.
+
+So the missing ~15 emissions were not un-emitted and not sampled away: they were
+**refused at ingestion**. The guess above named the right mechanism ("a quota
+drop") and was right to stop there — the check needs
+`/organizations/<org>/stats_v2/`, not `/api-tokens/`, and that endpoint reads
+fine with this token.
+
+The consequence stands and is now proven rather than inferred: **the Sentry
+event count is a floor on emission volume, not a measure of it.** It is a floor
+twice over, because the SDK also discards locally while backing off from
+Sentry's 429s — 1,755 such events org-wide inside the window, against 582
+refused outright.
+
+**The failure this exposes is in the loop, not in this file.** Nothing in the
+ops pack read ingestion *outcomes*, so a total blackout was indistinguishable
+from a quiet day and three green briefs went out during it. Fixed by the
+`sentry-dropped` line added to the `failures-24h` collector in the same commit
+that closed N27.
 
 ### Latent, not live: the subquery has no LIMIT 1
 
