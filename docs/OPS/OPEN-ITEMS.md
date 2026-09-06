@@ -187,6 +187,59 @@ N16 — a short current-state head that the pack embeds, and a per-phase history
 Do **not** simply truncate it: the model needs deployment ids, schema tip and the freeze list to grade
 a finding, and those live at the top.
 
+
+**N22. Migrate transactional email off SendGrid — Resend or Postmark.**
+verified: PARTIAL — the dependency is confirmed, the volume figure is not. `@sendgrid/mail` is a
+declared dependency of `apps/api`, and SendGrid carries `dailyShiftEmail`, `missedShiftAlert` and the
+handoff admin FYI. The brief gives **323 emails/month on a 50K plan** — a rounding error against the
+plan, so the migration is about **billing risk, not capacity**. That figure is **UNVERIFIED**: there is
+no `emails_sent` table, so volume is not derivable from the database; it would have to come from the
+SendGrid dashboard.
+Trigger is **E15**: the card is failing. A suspension silently stops every admin and client email, and
+**the triage pack has no email-delivery signal at all**, so nobody would learn of it from the loop.
+Evaluate Resend and Postmark on: domain re-verification effort (the sender is
+`alerts@em6648.netraops.com`), template parity, and whether a failed send surfaces anywhere we already
+watch. **Size M, Tier 1.** Fix the card first — that is E15, and it is hours not weeks.
+
+**N23. Report enhancement degraded gracefully; budget isolation pending.**
+verified: YES — code half landed on branch `ops/n23-enhancement`; console half is **not** done.
+Incident: `docs/OPS/INCIDENTS/2026-09-06-enhancement-credit-exhaustion.md`. `routes/ai.ts` no longer
+returns `err.message` (it returned Anthropic's billing text to a STARNET guard's phone), gained an 8s
+timeout with `maxRetries: 0`, a 529 retry cap of 1, `Sentry.captureMessage('enhancement_failed')`, and
+`guard=`/`company=` on the failure log line. Mobile shows a non-blocking inline notice instead of a
+modal carrying server text.
+**Still open: the budget isolation itself** — two Console workspaces, two keys, $20/$30 limits, org
+auto-reload. Until that is applied the runner and the product still share one credit pool and the
+runner can still starve the product; the code change only makes that invisible to guards rather than
+preventing it. Runbook: `docs/OPS/RUNBOOK-n23-budget-isolation.md`. **Vishnu applies. Tier 2** —
+credential rotation, and step (b) restarts the API.
+
+**N24. Vercel Hobby plan is non-commercial under Vercel's ToS.**
+verified: NO — carried from the brief, not independently checked. `apps/web` deploys to Vercel and
+NetraOps has a paying customer, which is commercial use. If the project is on Hobby this is a terms
+violation with a plausible enforcement outcome of the site being taken down — the same class of risk
+as E14, and the web app is the client portal. **Not a technical question**: route to
+`us-business-counsel` for the ToS reading, then to a plan decision. Confirm the current plan first;
+the answer may be that it is already on Pro. **Size S to check, unknown to remediate. Tier 1.**
+
+**N25. Mobile `Sentry.captureException` produced ZERO events on a shipped path.**
+verified: YES, and this is the one that undermines other findings. `apps/mobile/app/reports/new.tsx:149`
+calls `Sentry.captureException(err, { extra: { where: 'reports.new.handleEnhance' } })`. It is present
+in the **shipped** ref, not just the working tree — `git show c932c09:apps/mobile/app/reports/new.tsx`
+shows it at line 149, and `git diff c932c09 HEAD` on that file is empty. `c932c09` is production
+Build 48 / v1.0.17.
+On 2026-09-06 that path failed **9 times in 2m36s** and `netraops-mobile` recorded **zero** events in
+the following 24h — its only issue was `NETRAOPS-MOBILE-9 startBackgroundLocation`.
+**Why is UNCONFIRMED.** Check, in order: (1) the mobile Sentry **DSN** is set in the shipped build,
+(2) the `environment` tag — two STARNET devices are on runtime **1.0.16**, not 1.0.17 (see **N7**), so
+the failing device may be running older JS entirely, (3) **flush on background** — React Native drops
+queued events if the app is backgrounded before the transport runs, (4) sample rate.
+**Test with a forced capture**: add a temporary dev-only button that calls
+`Sentry.captureException(new Error('n25-probe'))` and confirm the event arrives from a real device on
+the production channel. Until this resolves, **treat "no mobile Sentry events" as "no information",
+never as "no errors"** — the same lesson as the API-side blindness in this incident, one tier further
+out. **Size S to diagnose, Tier 1.**
+
 ---
 
 ## Carried items

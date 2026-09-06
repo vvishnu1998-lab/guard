@@ -1,6 +1,6 @@
 # 2026-09-06 — report enhancement: Anthropic credit exhaustion leaked to a guard
 
-**Status:** investigated, unfixed. Awaiting a decision.
+**Status:** **fix committed, not yet merged.** Budget isolation still pending — see N23.
 **Severity:** **P2** — customer-visible, on the paying tenant, but non-blocking.
 **Surface:** `POST /api/ai/enhance-description` → mobile `reports/new.tsx`.
 
@@ -331,6 +331,163 @@ runner's spending discipline; doing only 5 leaves the leak in place for any othe
 upstream error.
 
 ---
+
+---
+
+## Fix
+
+Approved 2026-09-06: **1-a** (all five), **2-b** (mobile Sentry blindness → its
+own item), **3-b** (pack `/api/ai` coverage → folded into N21).
+
+Branch `ops/n23-enhancement`. Merge sha recorded on merge.
+
+### `apps/api/src/routes/ai.ts`
+
+**Never returns `err.message`.** Both failure exits now emit the same shape:
+
+```
+HTTP 503
+{ "error": "ENHANCEMENT_UNAVAILABLE",
+  "message": "Enhancement unavailable — your text will be submitted as written." }
+```
+
+`error` is a stable **code**, `message` is the copy — the documented contract.
+`ApiError.code` therefore becomes something a client could branch on, and
+`ApiError.message` becomes copy we wrote rather than copy Anthropic wrote.
+
+503 rather than 500: the upstream is unavailable, and nothing retries on 5xx
+(`apiClient.ts` retries only 401, for token refresh), so the status change costs
+nothing.
+
+The **empty-response** branch previously returned `500 {"error":"Empty response
+from AI"}` — a different shape for the same user-visible situation. It now
+returns the identical 503 body, so the client has one case to handle.
+
+**Timeout: 8s, with `maxRetries: 0`.** The pair matters. The SDK default is a
+**10-minute** timeout with **2** internal retries, and the SDK's own docs warn
+that "request timeouts are retried by default, so in a worst-case scenario you
+may wait much longer than this timeout". Setting a timeout without disabling SDK
+retries would not bound anything. Retry policy now lives entirely in the route's
+529 loop, so the worst case is countable: **2 attempts × 8s + one 1s backoff = 17s.**
+
+**529 retries capped at 1** (2 attempts, was 3). A guard is watching a spinner.
+
+**Observability.** `Sentry.captureMessage('enhancement_failed', ...)` with
+`tags: { status, flow: 'report_enhance' }` — low-cardinality, **no guard
+identity in tags** per `POLICY.md`; ids go in `extra`. And the failure log line
+gains `guard=` / `company=`, matching the success line. Until now the *success*
+path was attributable and the *failure* path was not, which is why the nine
+failures on 2026-09-06 could not be pinned to a guard from logs.
+
+### `apps/mobile/app/reports/new.tsx`
+
+The modal `Alert.alert('Enhancement Failed', guardMessage(err, ...))` is replaced
+by a non-blocking inline notice rendered beside the Enhance control:
+
+> Enhancement unavailable — your text will be submitted as written.
+
+**Fixed copy — `guardMessage(err)` is not called on this path.** That is the
+change that matters: `guardMessage` renders `ApiError.message` verbatim by
+contract, so any future upstream string would leak again even with the API fix
+in place. Belt and braces on both sides of the wire.
+
+`guardMessage` is deliberately **kept** for the *submit* failure at `:347` —
+that is our own error, and a failed submit genuinely warrants a modal.
+
+The notice clears when a new attempt starts. `description`, `submit()`,
+`submitting` and every other piece of state are untouched — submit was already
+unblocked and stays that way.
+
+### OTA safety
+
+**This mobile change is JS-only and OTA-publishable.** No native module, no
+dependency, no `app.json` change — a `useState`, a `<View>`, and two styles.
+
+- runtime: **1.0.17** (`expo.runtimeVersion: {policy: 'appVersion'}`)
+- channel: **production** (also `preview` — `release-ops` §3b requires both)
+- current production group: `6536a189-52c6-4816-bda9-bcb7ba44116d`
+
+**Not published.** Publishing is a separate, explicit act.
+
+**Reach caveat:** two STARNET devices are on runtime **1.0.16** (N7) and cannot
+receive a 1.0.17 update at all. They need a store install. **The API-side fix
+covers them anyway** — with `err.message` gone, an old client shows the fixed
+`message` field, so the vendor text cannot reach even an un-updated device.
+That is the reason for fixing both sides rather than just the client.
+
+### Tests
+
+`apps/api/src/routes/_aiEnhance.test.ts`, 10 assertions, ts-node + `node:assert`
+like its siblings. The Anthropic SDK, Sentry and `requireAuth` are stubbed in
+`require.cache`, so no network call and no event is sent.
+
+Most assertions are **negative** — what must never appear in the response —
+because that is what actually broke:
+
+| test | asserts |
+|---|---|
+| client construction | `timeout: 8000` **and** `maxRetries: 0` |
+| credit 400 | body contains no `credit balance`, `Plans & Billing`, `invalid_request_error`, upstream `request_id`, or the word `Anthropic` |
+| failure shape | 503, `ENHANCEMENT_UNAVAILABLE`, exact guard-safe copy |
+| Sentry | one `enhancement_failed`; tags are exactly `{status, flow}`; **no guard/company id in tags**; ids present in `extra` |
+| log line | `[ai.enhance.failed]` carries `guard=`, `company=`, `status=` |
+| retry | a 400 makes exactly **one** upstream call |
+| timeout | same 503 shape; no upstream wording; `status` tag `'0'` |
+| empty response | 503, not the old 500 |
+| success | unchanged, 200, no Sentry event |
+| validation | short text still 400, **zero** paid calls |
+
+Full suite: `tsc --noEmit` clean in **both** `apps/api` and `apps/mobile`;
+`_run` 10, `_healthCrons` 36, `_pingReminder` 5, `_aiEnhance` 10 — **61 passed,
+0 failed**.
+
+---
+
+## Verification plan
+
+Observe after merge and deploy. The API fix is verifiable immediately; the mobile
+half is not, until an OTA is published.
+
+1. **The vendor text cannot reach a client.** Force a failure — the cheapest
+   trigger is an invalid `ANTHROPIC_API_KEY` in a non-production environment, or
+   simply wait for the next real upstream error. The response body must be
+   exactly `{"error":"ENHANCEMENT_UNAVAILABLE","message":"Enhancement
+   unavailable — your text will be submitted as written."}` with **no** vendor
+   string anywhere in it.
+2. **Sentry now sees it.** A failure produces `enhancement_failed` on
+   `netraops-api` with `flow: report_enhance`. Before this change the path was
+   invisible: 9 failures, 0 events.
+3. **Failures are attributable.**
+   `railway logs --service guard --environment production | grep ai.enhance.failed`
+   shows `guard=` and `company=`.
+4. **The success path is unharmed.** A normal enhancement still returns text and
+   still logs `[ai.enhance.success] guard=... company=...` with token counts.
+   **This is the one that matters** — items 1–3 confirm the failure is handled;
+   4 confirms the feature still works. An 8s timeout is a real behaviour change,
+   and a slow-but-healthy upstream would now fail where it previously succeeded.
+   If success rates drop after deploy, the timeout is the first suspect.
+5. **Mobile, manual — cannot be automated.** No test framework exists in
+   `apps/mobile`, and this is a render path. On a device on runtime 1.0.17,
+   after an OTA: open a new report, type ≥10 words, tap **Enhance** while the
+   API is failing. Expect an inline amber notice with the fixed copy, **no
+   modal**, the typed text still present and editable, and **Submit still
+   working**. The last of those is the Tier-2 boundary — if submit is blocked,
+   revert.
+
+**Budget isolation is NOT verified by any of the above.** It is console work in
+`RUNBOOK-n23-budget-isolation.md`, tracked as **N23**, and until it is applied
+the runner and the product still share one credit pool.
+
+### Related items opened
+
+- **N22** — SendGrid migration (card failing, E15).
+- **N23** — this; budget isolation still pending.
+- **N24** — Vercel Hobby ToS, for Counsel.
+- **N25** — **mobile `captureException` produced zero events on a shipped path.**
+  Directly relevant here: it is why this incident had no mobile telemetry, and
+  until it is resolved, "no mobile Sentry events" means "no information", not
+  "no errors".
+
 
 ## Loop notes
 
