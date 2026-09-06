@@ -1,5 +1,11 @@
 # OPEN ITEMS
 
+**`[VISHNU]` tag.** An item whose next action is Vishnu's alone — a console
+change, a payment, a credential revoke — carries `[VISHNU]` in its heading. The
+`waiting` collector greps for that tag and surfaces those items in the WAITING
+line of the daily Slack brief, so tagging one is how it becomes visible daily
+rather than only when someone re-reads this file.
+
 Every item carries a `verified:` line. Either it names evidence checked on
 2026-09-05 against repo / DB / CLI, or it says `NO — carried from chat memory`,
 which means the claim is unconfirmed and must be checked before anyone acts on it.
@@ -12,7 +18,7 @@ those say so.
 
 ## New from Phase 0 (2026-09-05)
 
-**N1. UPDATED 2026-09-05 — `gho_` GitHub token in cleartext in `.claude/settings.local.json`.**
+**N1. [VISHNU] UPDATED 2026-09-05 — `gho_` GitHub token in cleartext in `.claude/settings.local.json`.**
 verified: **the entry was still present at the start of Phase 4 and has now been removed from the file.**
 `grep -c "gho_" .claude/settings.local.json` returned **1** before the Phase 4 prune and **0** after
 (586 allow entries -> 471; the token entry is one of 115 removed). The file remains untracked and
@@ -186,6 +192,38 @@ Next lever, if the measured cost misses target: split `STATE.md` the way `DEVICE
 N16 — a short current-state head that the pack embeds, and a per-phase history tail that it does not.
 Do **not** simply truncate it: the model needs deployment ids, schema tip and the freeze list to grade
 a finding, and those live at the top.
+
+
+**N26. Anthropic month-to-date spend is not summed across runs.**
+verified: PARTIAL — the per-run half is **done** in Phase 4.5, the month sum is **not**.
+`scripts/ops/triage.sh` now calls `claude -p --output-format json` and writes `total_cost_usd`,
+`session_id` and `num_turns` to `cost.json`, uploaded as artifact `triage-cost-<run_id>` with 90-day
+retention. So from the next run onward, **each run's cost is recorded**, which is what N21 actually
+asked for.
+
+**Month-to-date is still UNVERIFIED.** Summing it means listing prior runs via `gh api`, downloading
+each `triage-cost-*` artifact and adding them up — roughly 30 artifact downloads per brief, on a job
+that is meant to be cheap. Two better options exist and neither is a one-PR change: query the Console
+usage API per workspace (needs a key the runner does not have and should probably not get), or keep a
+running total in a small committed file (needs the runner to write to the repo, which it currently
+cannot — `permissions: contents: read`).
+
+Deferred deliberately rather than half-built. Until it lands, the AHEAD line reads
+`API $X last run · MTD UNVERIFIED`. **Size M, Tier 1.** Blocks the `$X MTD of $50` field of the brief.
+
+---
+
+### Merge-order note (2026-09-06)
+
+Phase 4.5 was branched from `main` @ `34a32c8`, which **does not contain the N23 branch** (PR #9,
+open at the time of writing). The Phase 4.5 dispatch asked for `[VISHNU]` tags on *"N1, N23 runbook,
+AWS upgrade, SendGrid card"* — but **N22–N25 and the AWS / SendGrid expiry rows exist only on that
+unmerged branch**. Only **N1** could be tagged here.
+
+**When PR #9 merges, tag these four:** N23 (budget-isolation runbook — console work), N24 (Vercel ToS
+— Counsel), E14 (AWS free plan ends 2026-09-30 — the only hard-dated row), E15 (SendGrid card
+failing). Until then the brief's WAITING line will under-report by four items, and the AHEAD line will
+show no dated expiry at all — because on this branch there isn't one.
 
 ---
 

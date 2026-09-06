@@ -31,3 +31,5 @@ start-metro.command
 .antigravity/
 *.jks
 *.tsbuildinfo
+cost.json
+report.md

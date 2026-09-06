@@ -117,6 +117,17 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+      # Per-run cost, captured from claude's JSON output. The month-to-date sum
+      # across runs is NOT implemented -- see N26.
+      - name: Upload cost
+        if: always() && !inputs.dry_run
+        uses: actions/upload-artifact@v7
+        with:
+          name: triage-cost-${{ github.run_id }}
+          path: cost.json
+          retention-days: 90
+          if-no-files-found: warn
+
       - name: Upload report
         if: always() && !inputs.dry_run
         uses: actions/upload-artifact@v7
