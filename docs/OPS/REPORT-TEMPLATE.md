@@ -36,8 +36,8 @@ One row per signal. `status` is `ok` / `warn` / `fail` / `UNVERIFIED`.
 | `/health` | | body | `curl` + HTTP code |
 | `/health/crons` | | `jobs:N stale:M` | `curl` + HTTP code |
 | deployment | | id + status | `railway status` / `railway logs` line count |
-| Sentry `netraops-api` | | issue count last 6h | API path + row count |
-| Sentry `netraops-mobile` | | issue count last 6h | API path + row count |
+| Sentry `netraops-api` | | issue count last 24h | API path + row count |
+| Sentry `netraops-mobile` | | issue count last 24h | API path + row count |
 | STARNET open sessions | | count | query + row count |
 | customer signal | | active guards this 7d vs prior 7d | query + both counts |
 

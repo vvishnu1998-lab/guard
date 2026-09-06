@@ -1,8 +1,8 @@
 name: ops-triage
 
-# Read-only triage pass over production. Collects health, cron heartbeats,
-# Railway logs, Sentry issues and the customer signal, then posts a report to
-# Slack and uploads it as an artifact.
+# Read-only triage pass over production, once a day at 08:00 PT. Collects
+# health, cron heartbeats, Railway logs, Sentry issues and the customer signal,
+# then posts a report to Slack and uploads it as an artifact.
 #
 # It fixes nothing. Every credential below is read-only and the tool allowlist
 # in scripts/ops/triage.sh is the enforcement.
@@ -18,7 +18,20 @@ name: ops-triage
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # 15:00 UTC daily = 08:00 PDT / 07:00 PST.
+    #
+    # GitHub Actions cron is ALWAYS UTC and has no timezone option, so this
+    # cannot follow DST. 15:00 UTC was chosen to land at the target 08:00
+    # during Pacific Daylight Time, which is most of the year; from the
+    # November switch to the March one it arrives at 07:00 PST instead. An hour
+    # early in winter is the accepted trade -- the alternative is two cron
+    # entries plus a date guard in the job, which is more machinery than a
+    # daily read-only report is worth.
+    #
+    # Cadence restored to daily per DECISIONS.md D7. The 6-hourly schedule this
+    # replaces was shake-out only, to surface runner bugs quickly while the
+    # loop was being built; it was never the intended steady state.
+    - cron: '0 15 * * *'
   workflow_dispatch:
     inputs:
       focus:

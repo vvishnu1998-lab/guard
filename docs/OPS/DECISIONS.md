@@ -56,6 +56,42 @@ and the evidence noted inline.
 
 ---
 
+## 2026-09-05 — cadence and cost
+
+### D12. Triage runs **daily at 08:00 PT**, not every 6 hours.
+
+This restores **D7**. The 6-hourly schedule was **shake-out only** — it existed
+to surface runner bugs quickly while the loop was being built, and it earned its
+keep: the silent `railway-logs` failure, the `push_skip_null_token` volume
+mislabel and the Sentry listing/per-issue disagreement were all found because
+runs came often enough to compare. That work is done; four runs a day of a
+read-only report is cost without signal.
+
+Implemented as `cron: '0 15 * * *'`. GitHub Actions cron is always UTC with no
+timezone option, so this lands at 08:00 PDT for most of the year and 07:00 PST
+between the November and March switches. An hour early in winter is accepted
+rather than adding two cron entries and a date guard.
+
+`workflow_dispatch` is unchanged — a manual run is still available at any time,
+and still gets the stronger model when a `focus` is supplied.
+
+### D13. The context pack is trimmed for cost. Target **~$0.35/run**.
+
+`railway-logs` 300 → 100 lines, `git log` −20 → −10, `SENTRY_ISSUE_CAP` 15 → 10,
+`--max-turns` 40 → 15, and `OPEN-ITEMS.md` embedded as open items only rather
+than in full.
+
+**Trimming states what it dropped.** The OPEN-ITEMS section carries an explicit
+note naming what was omitted and where the full file is. A trimmed file that
+does not say it was trimmed is how a reader concludes an item does not exist —
+the same failure class as a mislabelled field.
+
+Measured effect on the pack: **1421 → 1114 lines, 67,251 → 49,875 bytes (−26%)**.
+Short of half. See N21 — the remaining bulk is `STATE.md`.
+
+
+---
+
 ## How to add to this file
 
 One dated section per decision batch. State the decision, then — if it references

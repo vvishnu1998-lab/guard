@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# NetraOps triage runner. Invoked by .github/workflows/ops-triage.yml on a
-# 6-hour schedule and by manual dispatch. Read-only throughout.
+# NetraOps triage runner. Invoked by .github/workflows/ops-triage.yml daily at
+# 08:00 PT and by manual dispatch. Read-only throughout.
 #
 # WHY THE SHELL COLLECTS THE SIGNALS (Phase 4.2)
 # ----------------------------------------------
@@ -203,7 +203,7 @@ c_railway_logs() {
   # before this call. Not added now because the observed error names the
   # SERVICE, not the project, and an unused link step is a thing that rots.
   local out rc
-  out="$(railway logs --service guard --environment production --lines 300 2>&1)" && rc=0 || rc=$?
+  out="$(railway logs --service guard --environment production --lines 100 2>&1)" && rc=0 || rc=$?
   printf '%s\n' "$out"
   if [ "$rc" -ne 0 ]; then
     return "$rc"
@@ -220,13 +220,15 @@ c_railway_logs() {
 # Cap on per-issue stat lookups. Each recent issue costs one extra API call;
 # this bounds a bad day rather than letting the collector run unbounded. If it
 # binds, the collector says so rather than silently truncating.
-SENTRY_ISSUE_CAP=15
+SENTRY_ISSUE_CAP=10
 
 c_sentry() {
   local project="$1"
   local cutoff
-  cutoff="$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-            || date -u -v-6H +%Y-%m-%dT%H:%M:%SZ)"
+  # 24h, matching the daily cadence. Was 6h when the runner ran every 6 hours;
+  # a daily run filtering to 6h would silently drop 18 hours of issues.
+  cutoff="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ)"
 
   # TWO COUNTS, NAMED HONESTLY.
   #
@@ -259,9 +261,9 @@ c_sentry() {
     '[ .[] | select(.lastSeen >= $cutoff) ]')"
   shown="$(printf '%s' "$recent" | jq 'length')"
 
-  printf 'issues_24h: %s   issues_last_6h: %s\n' "$total" "$shown"
+  printf 'issues_24h: %s   issues_with_events_24h: %s\n' "$total" "$shown"
   if [ "$shown" -gt "$SENTRY_ISSUE_CAP" ]; then
-    printf 'NOTE: %s issues in the last 6h; showing the %s most recent.\n' \
+    printf 'NOTE: %s issues with events in the last 24h; showing the %s most recent.\n' \
       "$shown" "$SENTRY_ISSUE_CAP"
   fi
   printf '\n'
@@ -284,7 +286,7 @@ c_sentry() {
 c_sentry_api()    { c_sentry netraops-api; }
 c_sentry_mobile() { c_sentry netraops-mobile; }
 
-c_git_log() { git log -20 --oneline; }
+c_git_log() { git log -10 --oneline; }
 
 # ---------------------------------------------------------------------------
 # Build the pack.
@@ -317,12 +319,47 @@ c_git_log() { git log -20 --oneline; }
   collect 'git-log'                     c_git_log
 
   printf '\n---\n\n# REPO MEMORY\n'
-  for f in docs/OPS/STATE.md docs/OPS/OPEN-ITEMS.md docs/OPS/FREEZES.md \
+
+  # Embedded in full: all small, and all load-bearing for grading a finding.
+  for f in docs/OPS/STATE.md docs/OPS/FREEZES.md \
            docs/OPS/DECISIONS.md docs/OPS/POLICY.md docs/OPS/REPORT-TEMPLATE.md; do
     printf -- '\n---\n\n# FILE: %s\n\n' "$f"
     cat "$f"
     printf '\n'
   done
+
+  # OPEN-ITEMS.md is TRIMMED, not embedded whole. It is the largest and
+  # fastest-growing repo-memory file and most of it is history: the "Carried
+  # items" section is a backlog inherited from Phase 1, and several entries in
+  # both sections are marked CLOSED. The model needs the open items so it does
+  # not re-report a known issue as new; it does not need the archive.
+  #
+  # What is dropped is stated in the pack rather than silently omitted -- a
+  # trimmed file that does not say it was trimmed is how a reader concludes an
+  # item does not exist.
+  printf -- '\n---\n\n# FILE: docs/OPS/OPEN-ITEMS.md (TRIMMED -- open items only)\n\n'
+  awk '
+    /^## Carried items/ { carried = NR; exit }
+    { print > "/tmp/triage-openitems.txt" }
+  ' docs/OPS/OPEN-ITEMS.md
+  if [ -s /tmp/triage-openitems.txt ]; then
+    # Drop item blocks whose heading line says CLOSED. Blocks start at a bold
+    # item marker such as **N4. or **C6.
+    awk '
+      /^\*\*[NC][0-9]+\./ { skip = ($0 ~ /CLOSED/) ? 1 : 0 }
+      !skip { print }
+    ' /tmp/triage-openitems.txt
+    printf '\n> TRIMMED: the "Carried items" section and every item marked CLOSED\n'
+    printf '> were omitted from this pack. Read docs/OPS/OPEN-ITEMS.md in the repo\n'
+    printf '> for the full list -- you have the Read tool.\n'
+    rm -f /tmp/triage-openitems.txt
+  else
+    # No "## Carried items" heading: fall back to a fixed head and SAY SO.
+    printf '> NOTE: no "## Carried items" heading found; showing the first 80\n'
+    printf '> lines only. The file structure changed -- fix this collector.\n\n'
+    head -80 docs/OPS/OPEN-ITEMS.md
+  fi
+  printf '\n'
 } > "$CONTEXT"
 
 printf 'context pack: %s (%s lines, %s collector failure(s))\n' \
@@ -385,12 +422,12 @@ Read that file first. Do not attempt to collect anything yourself."
 # local run working.
 MODEL="${MODEL:-claude-sonnet-5}"
 
-printf 'starting claude -p (model=%s, max-turns 40)\n' "$MODEL"
+printf 'starting claude -p (model=%s, max-turns 15)\n' "$MODEL"
 
 set +e
 claude -p "$PROMPT_BODY" \
   --output-format text \
-  --max-turns 40 \
+  --max-turns 15 \
   --model "$MODEL" \
   --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
