@@ -188,8 +188,18 @@ authority.
 
 ### Last Nataniel contact
 
-**UNVERIFIED** — not recorded anywhere in the repo. The Monday weekly section
-of the triage report asks for it. **Vishnu fills.**
+The line below is **machine-read** by the `customer-pulse` collector
+(`scripts/ops/triage.sh`) and feeds the CUSTOMER line of the daily Slack brief.
+Keep the exact `Nataniel last contact: YYYY-MM-DD` form — the collector matches
+it literally.
+
+Nataniel last contact: 2026-09-06
+
+**SEEDED PLACEHOLDER — not a real contact date.** It was set to the day the line
+was added so the collector has something to parse. **Vishnu maintains it**:
+update it whenever you actually speak to Nataniel. Until it is updated for the
+first time, the brief's "Nataniel last spoken N d ago" is measuring the age of
+this placeholder, not the age of a conversation.
 
 ---
 

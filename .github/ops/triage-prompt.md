@@ -65,6 +65,11 @@ The pack contains these sections, each with a line count:
 | `railway-logs` | up to 100 log lines with the count actually returned |
 | `sentry-netraops-api` / `sentry-netraops-mobile` | issues with events in the last 24h, as `id\|shortId\|level\|count_24h\|lifetime\|firstSeen\|lastSeen\|title`. **`count_24h` is the last 24 hours; `lifetime` is the total since `firstSeen` and may span months — never quote `lifetime` as a 24h figure.** |
 | `git-log` | `git log -10 --oneline` |
+| `deploy-vs-main` | current SUCCESS deployment id + status + `origin/main` sha. **`deploy_matches_main` is always UNVERIFIED** — the Railway CLI prints no commit sha, so the match cannot be established read-only. Say UNVERIFIED in the UP line; do not infer it from timestamps. |
+| `failures-24h` | cron heartbeats with `last_result='error'` (count + job names), push failures and `ai.enhance.failed` counts grepped from the log window, the previous two runner conclusions, and per-project Sentry issue counts since the 24h cutoff |
+| `customer-pulse` | STARNET sessions yesterday (Pacific day), active guards 7d vs prior 7d, and `nataniel_last_contact` read from `STATE.md`. If that line is absent or still the seeded placeholder, treat it as UNVERIFIED. |
+| `ahead` | `EXPIRIES.md` rows dated within 30 days with days remaining, a count of rows carrying no date at all, Sentry 30-day error outcomes, and last-run Anthropic cost if a previous run left `cost.json` |
+| `waiting` | open PRs by number, and `[VISHNU]` items from `OPEN-ITEMS.md` |
 
 ### When a section says COLLECTOR FAILED
 
@@ -135,3 +140,59 @@ recommendation.
 Evidence tables.** An all-green report with no evidence is indistinguishable
 from a run that collected nothing, which is the exact failure this loop exists
 to catch.
+
+---
+
+## The Slack brief — the last thing you write
+
+After the full report, emit a final section headed exactly `## Slack brief`.
+**Only the five-line brief goes in it.** The shell extracts everything after that
+heading and posts it to Slack verbatim; the full report stays in the artifact.
+
+This is the only thing Vishnu reads on a normal day. **Nothing goes in it that
+has no decision attached.**
+
+### Exact shape
+
+```
+<emoji> <Day Mon D> — <"no failures in 24 h" | "N failures, worst Pn">
+<emoji> UP        <API · DB · N/19 crons · deploy = main | deploy ≠ main | UNVERIFIED>
+<emoji> BROKE     <"nothing in 24 h" | one line per failure: Pn · what · who (tenant/IDs/count) · duration · next step>
+<emoji> CUSTOMER  <STARNET active yesterday yes/no · N guards this week (↑ → ↓ vs last) · Nataniel last spoken N d ago>
+<emoji> AHEAD     <expiries ≤30 d with days left · API $X MTD of $50 | UNVERIFIED · Sentry N/50K · any failed payment>
+<emoji> WAITING   <open PRs by number · [VISHNU] items>
+Full evidence: <run url>
+```
+
+### Emoji
+
+Per line, and the header takes the **worst** of the five:
+
+| emoji | when |
+|---|---|
+| 🔴 | any P0 or P1, or UP is not green |
+| 🟡 | P2, or AHEAD / WAITING is non-empty |
+| 🟢 | otherwise |
+| ⚪ | that line is **entirely** UNVERIFIED |
+
+Severity per `POLICY.md`. ⚪ is for a line you could not establish at all — not
+for a line with one unverified field in it. A line that is partly known is
+coloured by what you know and says `UNVERIFIED` for the rest.
+
+### Rules
+
+- **Plain sentences. No tables, no markdown headers, no bullet lists** inside
+  the brief. It is read on a phone.
+- **IDs only where they are needed to act.** A `guard_id` in BROKE is useful
+  because it tells you who to call; a `guard_id` in CUSTOMER is noise.
+- **Tenant names are allowed** (`STARNET`, `Star Guard`). **Guard names are
+  never allowed** — badge or `guard_id`, per `POLICY.md`.
+- **Every BROKE line ends in a next step.** If you cannot name one, the finding
+  is not ready for Slack; leave it in the full report.
+- **Do not pad.** "nothing in 24 h" is a complete BROKE line and a good outcome.
+  Do not manufacture a finding to fill the space.
+- The counts come from the pack's `deploy-vs-main`, `failures-24h`,
+  `customer-pulse`, `ahead` and `waiting` sections. Do not recompute them.
+- If a pack section says `COLLECTOR FAILED` or `UNVERIFIED`, the corresponding
+  brief field says `UNVERIFIED`. **Never infer a green from a missing signal** —
+  that is the failure this loop was built to stop.
