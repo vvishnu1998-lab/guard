@@ -120,13 +120,26 @@ guards in that position.
 
 Device inventory: see DEVICES.md (not included in the triage context pack — contains guard names).
 
-## STARNET sites — verified 2026-09-05 08:36 UTC
+## STARNET sites — verified 2026-09-07 02:30 UTC (2026-09-06 19:30 PT)
 
-| site_id | name | `checkpoints_enabled` | `is_active` | timezone |
-|---|---|---|---|---|
-| `fea19254-6d65-4fbb-9f17-022081cf3472` | 23000 Cristo Rey Los Altos | true | true | America/Los_Angeles |
-| `53c71c64-1973-4f82-be9c-98e4800beece` | Bethel AME Church | **false** | true | America/Los_Angeles |
-| `6c638a80-a887-4375-9687-bfb6c1acb3bc` | william pen hotel | true | **false** | America/Los_Angeles |
+**Expansion: +4 sites created 2026-09-06, go-live 2026-09-07.** All four have a
+`site_geofence` row (4-vertex polygon + center + radius). Only 375 Shopping Complex
+has shifts (26, 14:00–00:00 PT daily through 10-10, 2 guards). Five new guards
+(GRD0010–GRD0014), **none has logged in; GRD0011 has a shift tomorrow 14:00 PT.**
+Readiness check: `INCIDENTS/2026-09-06-starnet-expansion-readiness.md` (N29).
+
+| site_id | name | `checkpoints_enabled` | `is_active` | fence | timezone |
+|---|---|---|---|---|---|
+| `fea19254-6d65-4fbb-9f17-022081cf3472` | 23000 Cristo Rey Los Altos | true | true | r=190 m, 4 verts | America/Los_Angeles |
+| `53c71c64-1973-4f82-be9c-98e4800beece` | Bethel AME Church | **false** | true | r=100 m, 16 verts | America/Los_Angeles |
+| `6c638a80-a887-4375-9687-bfb6c1acb3bc` | william pen hotel | true | **false** | **none** | America/Los_Angeles |
+| `015a37e9-7566-46b9-9cd6-c40705e2e2d7` | CCDC Folsom (**new 09-06**) | true | true | r=90 m, 4 verts | America/Los_Angeles |
+| `a4588d96-b45e-4fdb-a1f1-34a9cada6015` | CCDC Broadway (**new 09-06**) | true | true | r=70 m, 4 verts | America/Los_Angeles |
+| `ab450901-c434-417c-b5b6-292b4d09e80c` | 375 Shopping Complex (**new 09-06**) | true | true | r=300 m, 4 verts | America/Los_Angeles |
+| `7fabf0ee-f100-43e4-aabd-71cf0dae31fc` | Jasper (**new 09-06**) | true | true | r=50 m, 4 verts | America/Los_Angeles |
+
+**`MOCK_LOCATION_ENFORCEMENT` is `on` in Railway production** (read 2026-09-07
+02:3xZ). Code default is `off`; no decision records the flip. See N29 §5.
 
 ---
 
@@ -195,11 +208,10 @@ it literally.
 
 Nataniel last contact: 2026-09-06
 
-**SEEDED PLACEHOLDER — not a real contact date.** It was set to the day the line
-was added so the collector has something to parse. **Vishnu maintains it**:
-update it whenever you actually speak to Nataniel. Until it is updated for the
-first time, the brief's "Nataniel last spoken N d ago" is measuring the age of
-this placeholder, not the age of a conversation.
+**Real contact date as of 2026-09-06** — the STARNET +4 site expansion
+(CCDC Folsom, CCDC Broadway, 375 Shopping Complex, Jasper; go-live 2026-09-07).
+Previously a seeded placeholder. **Vishnu maintains it**: update it whenever you
+actually speak to Nataniel.
 
 ---
 

@@ -208,7 +208,7 @@ Evaluate Resend and Postmark on: domain re-verification effort (the sender is
 `alerts@em6648.netraops.com`), template parity, and whether a failed send surfaces anywhere we already
 watch. **Size M, Tier 1.** Fix the card first — that is E15, and it is hours not weeks.
 
-**N23. Report enhancement degraded gracefully; budget isolation pending.**
+**N23. [VISHNU] Report enhancement degraded gracefully; budget isolation pending.**
 verified: YES — code half landed on branch `ops/n23-enhancement`; console half is **not** done.
 Incident: `docs/OPS/INCIDENTS/2026-09-06-enhancement-credit-exhaustion.md`. `routes/ai.ts` no longer
 returns `err.message` (it returned Anthropic's billing text to a STARNET guard's phone), gained an 8s
@@ -221,7 +221,7 @@ runner can still starve the product; the code change only makes that invisible t
 preventing it. Runbook: `docs/OPS/RUNBOOK-n23-budget-isolation.md`. **Vishnu applies. Tier 2** —
 credential rotation, and step (b) restarts the API.
 
-**N24. Vercel Hobby plan is non-commercial under Vercel's ToS.**
+**N24. [VISHNU] Vercel Hobby plan is non-commercial under Vercel's ToS.**
 verified: NO — carried from the brief, not independently checked. `apps/web` deploys to Vercel and
 NetraOps has a paying customer, which is commercial use. If the project is on Hobby this is a terms
 violation with a plausible enforcement outcome of the site being taken down — the same class of risk
@@ -263,6 +263,46 @@ cannot — `permissions: contents: read`).
 
 Deferred deliberately rather than half-built. Until it lands, the AHEAD line reads
 `API $X last run · MTD UNVERIFIED`. **Size M, Tier 1.** Blocks the `$X MTD of $50` field of the brief.
+
+**N29. STARNET +4 sites go-live 2026-09-07 — readiness check. Tier 0 (read-only).**
+verified: YES — `INCIDENTS/2026-09-06-starnet-expansion-readiness.md`, 2026-09-07 02:30Z, `main` @ `0a5439e`,
+`postgres-readonly` + one `railway variables` read. Four sites (`015a37e9` CCDC Folsom, `a4588d96` CCDC
+Broadway, `ab450901` 375 Shopping Complex, `7fabf0ee` Jasper) created 2026-09-06 22:11–22:34Z; **all four
+have a `site_geofence` row** (4-vertex polygon, center, radius 90/70/300/50 m). Five guards GRD0010–GRD0014
+created the same hour, all `must_change_password = true`, **0 `guard_devices` rows** — none has ever logged
+in successfully. 375 Shopping Complex has **26 shifts, 14:00–00:00 PT daily** through 10-10 (GRD0011 ×17,
+GRD0010 ×9); the other three new sites have **0 shifts and 0 clients**. STARNET open sessions 0 at write
+time (control 3).
+
+**Blockers for tomorrow (Nataniel, Tier 2, admin portal):**
+- **GRD0011 `7b79fc50` has a shift 09-07 14:00 PT and has never opened the app** (0 auth events, no
+  device row). Clock-in opens 13:30. Without a login + password change: no clock-in, `missed` at 00:30,
+  admin email at 14:10, no report.
+- **Clock-in requires a shift row** — `routes/shifts.ts:3443-3446`, `shift_sessions.shift_id NOT NULL`,
+  no ad-hoc path exists. If CCDC Folsom / CCDC Broadway / Jasper are staffed tomorrow, shifts must exist
+  30 min before start or the guard cannot work in the app at all. UNVERIFIED whether they are staffed.
+- **No new site has a client row** → `sendDailyShiftReport` skips and flags `daily_report_email_sent =
+  true` anyway (`services/email.ts:483-491`). No backfill.
+
+**Findings that outlive tomorrow:**
+- **Brief premise inverted:** a site with **no** fence row is *allowed* (`geofence.ts:176-184`,
+  `reason: 'no_geofence'`), not rejected. Fenceless = unenforced, silently.
+- **`MOCK_LOCATION_ENFORCEMENT = on` in Railway production.** Code default `off`; the module header says
+  `on` is not yet safe; no decision records it. Android-only; 0 of 35 STARNET sessions in 14 d carry
+  `clock_in_location_mocked = true` (21 NULL). **[VISHNU] to confirm deliberate or move to `shadow`.**
+  Tier 2.
+- **Daily report ignores `client_sites`** — recipient join is `clients.site_id` only (`email.ts:476`);
+  the "link client to site" path writes only `client_sites` (`routes/clients.ts:330`). Bethel AME has 0
+  `clients.site_id` rows, 1 `client_sites` row, and 30 completed shifts flagged sent. **UNVERIFIED
+  sent-vs-skipped** — the `[email] sendDailyShiftReport: skipped` log line at the next 09:00 PT run
+  settles it. If skipped, Bethel has had no client report since 08-20 and linking a client to the four
+  new sites the same way produces none either.
+- GRD0013 `95505419` (4 `login_failed`, `failed_count = 3`, lockout at 5) and GRD0014 `faf47dd5`
+  (1 `login_failed`) have the app installed and are failing on the password. No shifts, so not a
+  tomorrow blocker; the only live signal on onboarding, and it is 2 of 2 failing.
+- **Deploy gate:** STARNET now has an open session ~08:00–00:30 PT daily. CONDITION route is available
+  ~00:30–08:00 PT only. Coverage is not derivable from contract fields (`contract_end` NULL on all four,
+  0 `site_scheduling_profiles`).
 
 ---
 
