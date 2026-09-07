@@ -14,6 +14,7 @@ import { sendPushNotification } from './firebase';
 import { getActivePushToken } from './deviceRegistry';
 import { insertNotification, NotificationType } from './notifications';
 import { Sentry } from './sentry';
+import { reportPushSkip } from './pushSkipReporter';
 
 const PACIFIC = 'America/Los_Angeles';
 
@@ -78,15 +79,14 @@ async function fireOne(
   const pushPromise = (async () => {
     const token = await getActivePushToken(guardId);
     if (!token) {
-      Sentry.captureMessage('push_skip_null_token', {
-        level: 'warning',
-        tags: { flow: 'swap_push' },
-        extra: {
-          guard_id:   guardId,
-          shift_id:   data.shift_id,
-          history_id: data.history_id,
-          type,
-        },
+      // Rate-limited to one Sentry event per 10 min per (flow, company_id),
+      // and tagged with the tenant so a burst on the test tenant cannot
+      // suppress the first report for the paying one (N20). Every occurrence
+      // is still logged with guard_id + company_id.
+      await reportPushSkip('swap_push', guardId, {
+        shift_id:   data.shift_id,
+        history_id: data.history_id,
+        type,
       });
       return;
     }

@@ -403,7 +403,8 @@ Observe after merge and deploy:
    boundary after deploy is the earliest proof and the first `:00` is the
    confirmation. Compare the 30 minutes after deploy against the 30 before.
    **Expect 0 new `flow: ping_reminder` events.** Events from the other five
-   call sites may still appear — that is N20, not a failed fix.
+   call sites may still appear — that is N20, not a failed fix. **(N20 closed
+   2026-09-06: those five no longer emit per occurrence either.)**
 2. **The job still runs.** `cron_heartbeats` row for `pingReminder`:
    `last_result = 'ok'`, age under 120s (2× its 60s interval).
 3. **The route stays healthy.** `GET /health/crons` → 200, `jobs: 19`,
@@ -597,6 +598,27 @@ same class — a source that answers confidently and wrongly:
 occurrence, none tags `company_id` consistently, and
 `ACTIVE_PUSH_TOKEN_SQL` still lacks `LIMIT 1`. Deliberately deferred, not
 forgotten.
+
+**CLOSED 2026-09-06 — remaining call sites fixed in N20.** Branch
+`ops/n20-push-skip`; **commit sha recorded on merge**, same convention this file
+uses for its own fix above (a commit cannot cite its own hash). The three crons
+— `preShiftReminder`, `shiftStartReminder`, `lateClockInReminder` — now count
+into a tick-scoped counter and print `skipped_no_device=N` on their existing
+summary line, exactly as `pingReminder` does here. The two request-path services
+— `swapPush`, `shiftPush` — keep one Sentry event, rate-limited to once per 10
+minutes per **(flow, company_id)** via `services/pushSkipReporter.ts`, which is
+what finally makes "test tenant, ignore" versus "paying customer, act"
+answerable from the issues list.
+
+**One correction to what this incident recorded.** It called the missing
+`LIMIT 1` "latent, not live" on the strength of
+`guards_with_multiple_active_devices = 0`. That zero was **enforcement, not
+luck**: `uq_guard_devices_one_active_per_guard` — a unique partial index on
+`(guard_id) WHERE revoked_at IS NULL` — has existed since `schema_v63.sql:79-80`
+and is in the `migrate.ts` chain, re-verified in production 2026-09-06. The
+`21000` cardinality error was **unreachable**, not merely un-hit. `LIMIT 1` was
+added anyway as defence in depth against that index being dropped, but it fixed
+nothing that could happen. See OPEN-ITEMS N20 for the full counts.
 
 **One process note.** The Phase 5A dispatch asked for
 `(push_token IS NULL) AS token_null`, which the Phase 2/3 column revoke makes

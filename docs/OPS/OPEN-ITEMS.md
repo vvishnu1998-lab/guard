@@ -150,7 +150,61 @@ verified: NO — carried from the dispatch, not independently checked. No Vercel
 was searched for or found in this pass. Deferred to v2 by scope, not by evidence. Supersedes N14.
 
 
-**N20. `push_skip_null_token` at five other call sites, plus a latent missing `LIMIT 1`.**
+**N20. CLOSED 2026-09-06 — `push_skip_null_token` at five other call sites, plus the missing `LIMIT 1`.**
+**Resolution: both halves done on `ops/n20-push-skip`.** `grep -rn "captureMessage('push_skip_null_token'"
+over `apps/api/src` now returns **one** live call — the rate-limited one inside
+`services/pushSkipReporter.ts`. The three other matches are comments recording what was removed.
+
+**The five call sites, by shape.** Three are crons with a natural batch boundary and now count into a
+tick-scoped counter reported on their existing summary line as `skipped_no_device=N`, exactly as
+`pingReminder` does: `preShiftReminder`, `shiftStartReminder`, `lateClockInReminder`. In
+`lateClockInReminder` the counter is threaded into `fireGuardPush` rather than kept at module scope
+(node-cron does not serialise ticks) and is named `skipped_no_device` because that job **already has a
+`skipped`** meaning "unassigned shift, guard_id IS NULL" — a different condition, and conflating them
+would have silently changed what an existing field meant. The `Sentry` import became dead in all
+three and was removed; tick errors still reach Sentry through `runJob`.
+
+The two services are request-path with no tick and no summary line, so a counter there would be
+written and never read. They keep ONE `Sentry.captureMessage`, rate-limited per process to **once per
+10 minutes per (flow, company_id)**, carrying `occurrences_since_last_report`. Every occurrence is
+still logged as `[push.skip] flow=… guard=… company=…`.
+
+**The company_id tag is the part this item actually asked for**, and it is now a tag rather than a
+DB question. The window is keyed per tenant precisely so a burst on the test tenant cannot suppress
+the first report for the paying one — asserted in the tests. `guard_id` is deliberately NOT a tag
+(unbounded cardinality); it goes to `extra` and to every log line.
+
+**The `LIMIT 1` half was mis-scoped in this item, and the correction matters more than the fix.**
+This item said two non-revoked rows "would raise 21000 … and fail the entire tick", and called it
+"latent, not live" on the strength of `guards_with_multiple_active_devices = 0`. Re-verified against
+production 2026-09-06: **`uq_guard_devices_one_active_per_guard` exists** —
+`CREATE UNIQUE INDEX … ON guard_devices (guard_id) WHERE revoked_at IS NULL` — created by
+`schema_v63.sql:79-80`, which is in the `migrate.ts` chain, so a fresh database gets it too. The
+state is therefore **unreachable, not merely absent**: that zero was enforcement, not luck, and
+reading it as luck is what made this look urgent. `deviceRegistry.ts`'s own doc comment said so all
+along.
+
+Current counts, read-only: 44 guards, 23 with any device row, 22 non-revoked rows,
+**`max_nonrevoked_rows_for_one_guard = 1`**, `guards_with_gt1_nonrevoked_device = 0`, and 13 guards
+have more than one row once revoked history is counted — so the table does accumulate, and only the
+partial index keeps actives unique.
+
+`ORDER BY last_seen_at DESC NULLS LAST LIMIT 1` was still added to all three lookup paths
+(`ACTIVE_PUSH_TOKEN_SQL`, `getActivePushToken`, `getActivePushTokens`) as **defence in depth**: a
+future migration dropping or narrowing that index would otherwise silently re-arm a whole-tick
+failure across six call sites. **The tie-break is unobservable today** — at most one row can match,
+and 0 of the 22 active rows have a NULL `last_seen_at` — so the "which device gets the push" change
+this item anticipated does not occur, and only would if the index were removed. `getActivePushTokens`
+needed a second edit for the same reason: it builds a Map, so a plain `set()` on every row would have
+left the **oldest** device winning and silently contradicted the other two paths.
+
+**Tests:** `_pushSkipCounters.test.ts` (8) drives all three cron bodies through the real `runJob`
+registration and asserts the counter, **zero Sentry calls**, no push, and that the in-app
+notification is **still written** (the Tier-2 boundary). `_pushSkipReporter.test.ts` (8) asserts the
+limiter fires once per window, the per-tenant and per-flow keying, that `company_id` is a tag and
+`guard_id` is not, and that a failed tenant lookup degrades to `company=unknown` rather than throwing.
+Full suite **84 passed, 0 failed**; `tsc --noEmit` clean.
+
 verified: YES — `grep -rn "push_skip_null_token" apps/api/src` returns six sites. The 2026-09-05 fix
 touched **only** `pingReminder.ts`; the other five still emit a `warning`-level Sentry event per call:
 `preShiftReminder.ts:99`, `lateClockInReminder.ts:100`, `shiftStartReminder.ts:100`,

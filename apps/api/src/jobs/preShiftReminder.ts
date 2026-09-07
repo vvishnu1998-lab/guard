@@ -23,7 +23,6 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
-import { Sentry } from '../services/sentry';
 
 interface CandidateRow {
   shift_id: string;
@@ -38,6 +37,10 @@ runJob('preShiftReminder', '*/5 * * * *', async () => {
   let candidates = 0;
   let successes = 0;
   let failures = 0;
+  // Tick-scoped, declared here rather than at module scope: node-cron does
+  // not serialise ticks, so a tick that overran its interval would share a
+  // module-level counter with the next one (same reasoning as pingReminder).
+  let skippedNoDevice = 0;
 
   try {
     const { rows } = await pool.query<CandidateRow>(
@@ -96,15 +99,22 @@ runJob('preShiftReminder', '*/5 * * * *', async () => {
           }
         } else {
           console.warn(`[preShiftReminder] shift=${row.shift_id} — no fcm_token; notification row still written`);
-          Sentry.captureMessage('push_skip_null_token', {
-            level: 'warning',
-            tags: { flow: 'pre_shift_reminder' },
-            extra: {
-              guard_id:  row.guard_id,
-              shift_id:  row.shift_id,
-              site_name: row.site_name,
-            },
-          });
+          // COUNTED, NOT REPORTED PER OCCURRENCE (N20).
+          //
+          // This used to be Sentry.captureMessage('push_skip_null_token',
+          // { level: 'warning', ... }) on every call. A guard with no active
+          // guard_devices row is an ordinary, recurring state, so reporting
+          // each occurrence as an individual warning trains the reader to
+          // ignore the issue rather than telling them anything -- the same
+          // defect fixed in pingReminder on 2026-09-05, which alone produced
+          // 9 events/hour indefinitely from three test-tenant guards.
+          //
+          // Nothing is lost by counting: the condition stays fully derivable
+          // from guard_devices joined to the notifications rows this job
+          // still writes. The per-row console.warn above keeps the identity.
+          //
+          // See docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md.
+          skippedNoDevice += 1;
         }
 
         // 3. Stamp unconditionally — cron must not retry this row now
@@ -123,6 +133,9 @@ runJob('preShiftReminder', '*/5 * * * *', async () => {
   } catch (err) {
     console.error('[preShiftReminder] Cron error:', err);
   } finally {
-    console.log(`[preShiftReminder] candidates=${candidates} success=${successes} failure=${failures}`);
+    console.log(
+      `[preShiftReminder] candidates=${candidates} success=${successes} failure=${failures} `
+      + `skipped_no_device=${skippedNoDevice}`,
+    );
   }
 }, { sentryMonitor: false });
