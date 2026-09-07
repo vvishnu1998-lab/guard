@@ -248,7 +248,9 @@ Every query selects **ID and count columns only**. Verified on the 2026-09-05
 local run: the live-signals half of the pack contained **0 email addresses, 0
 coordinate pairs, 0 phone numbers and 0 guard names**.
 
-**Cadence: daily at 08:00 PT (Phase 4.4).** `cron: '0 15 * * *'`. GitHub Actions
+**Cadence: daily, targeting the 08:00 PT hour.** `cron: '7 13 * * *'` since
+2026-09-07 — nominally 06:07 PT, aimed early because GitHub ran this repo's
+schedules **2-4 h late** on 09-05/06 (D12 amendment). GitHub Actions
 cron is always UTC with no timezone option, so this is 08:00 PDT most of the
 year and 07:00 PST between the November and March switches — accepted rather
 than adding two cron entries and a date guard. Restores `DECISIONS.md` D7; the

@@ -1,6 +1,7 @@
 name: ops-triage
 
-# Read-only triage pass over production, once a day at 08:00 PT. Collects
+# Read-only triage pass over production, once a day, targeting the 08:00 PT
+# hour (see the schedule comment -- GitHub runs it late). Collects
 # health, cron heartbeats, Railway logs, Sentry issues and the customer signal,
 # then posts a report to Slack and uploads it as an artifact.
 #
@@ -18,20 +19,26 @@ name: ops-triage
 
 on:
   schedule:
-    # 15:00 UTC daily = 08:00 PDT / 07:00 PST.
+    # 13:07 UTC daily = 06:07 PDT / 05:07 PST NOMINAL.
     #
-    # GitHub Actions cron is ALWAYS UTC and has no timezone option, so this
-    # cannot follow DST. 15:00 UTC was chosen to land at the target 08:00
-    # during Pacific Daylight Time, which is most of the year; from the
-    # November switch to the March one it arrives at 07:00 PST instead. An hour
-    # early in winter is the accepted trade -- the alternative is two cron
-    # entries plus a date guard in the job, which is more machinery than a
-    # daily read-only report is worth.
+    # GitHub delays this repo's schedules 2-4 h (measured 09-05/06); 06:07 PT
+    # nominal lands ~08:00-09:30 PT. Off-hour minute per GitHub docs.
     #
-    # Cadence restored to daily per DECISIONS.md D7. The 6-hourly schedule this
-    # replaces was shake-out only, to surface runner bugs quickly while the
-    # loop was being built; it was never the intended steady state.
-    - cron: '0 15 * * *'
+    # Scheduled workflows are best-effort: GitHub queues them and drops them
+    # entirely under load, so the nominal time is a floor, never a promise. The
+    # previous '0 15 * * *' aimed at 08:00 PT and, with that lag, arrived
+    # late-morning. Aiming EARLY absorbs the delay instead of adding to it.
+    #
+    # The ':07' is deliberate. GitHub's own docs advise against the top of the
+    # hour because that is when the most jobs are queued and the delay is
+    # worst; an off-hour minute is queued against less contention.
+    #
+    # This does NOT make the arrival time predictable -- nothing available here
+    # can. If a run must happen at a known time, dispatch it by hand.
+    #
+    # Still daily per DECISIONS.md D7/D12. Still UTC: GitHub Actions cron has no
+    # timezone option, so the PT arrival shifts an hour across DST either way.
+    - cron: '7 13 * * *'
   workflow_dispatch:
     inputs:
       focus:

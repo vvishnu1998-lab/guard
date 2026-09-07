@@ -58,7 +58,7 @@ and the evidence noted inline.
 
 ## 2026-09-05 — cadence and cost
 
-### D12. Triage runs **daily at 08:00 PT**, not every 6 hours.
+### D12. Triage runs **daily, targeting the 08:00 PT hour**, not every 6 hours.
 
 This restores **D7**. The 6-hourly schedule was **shake-out only** — it existed
 to surface runner bugs quickly while the loop was being built, and it earned its
@@ -67,10 +67,26 @@ mislabel and the Sentry listing/per-issue disagreement were all found because
 runs came often enough to compare. That work is done; four runs a day of a
 read-only report is cost without signal.
 
-Implemented as `cron: '0 15 * * *'`. GitHub Actions cron is always UTC with no
-timezone option, so this lands at 08:00 PDT for most of the year and 07:00 PST
-between the November and March switches. An hour early in winter is accepted
-rather than adding two cron entries and a date guard.
+**AMENDED 2026-09-07 — `cron: '7 13 * * *'`, nominally 06:07 PT.**
+
+Originally `cron: '0 15 * * *'`, aimed squarely at 08:00 PT. That assumed
+GitHub fires a scheduled workflow at the time you ask for. It does not.
+**Measured on 09-05 and 09-06, this repo's schedules ran 2–4 hours late**, so a
+brief meant for 08:00 was arriving late-morning — past the point where it can
+shape the day, which is the entire purpose of a founder brief.
+
+The schedule now aims **early** so the lag is absorbed rather than added to:
+06:07 PT nominal lands ~08:00–09:30 PT. The `:07` follows GitHub's own advice to
+avoid the top of the hour, where queue contention and therefore delay are worst.
+
+**This buys a better distribution, not a guarantee.** Scheduled workflows are
+best-effort — GitHub may run one late or skip it entirely under load, and
+nothing available here changes that. If a run has to happen at a known time,
+dispatch it by hand. If briefs start arriving before 08:00, the lag has eased
+and the nominal time should move back later, not stay early by habit.
+
+Still UTC — GitHub Actions cron has no timezone option — so the PT arrival
+shifts an hour across DST in either direction.
 
 `workflow_dispatch` is unchanged — a manual run is still available at any time,
 and still gets the stronger model when a `focus` is supplied.
