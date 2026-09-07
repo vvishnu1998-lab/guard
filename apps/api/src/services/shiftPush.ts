@@ -19,7 +19,7 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from './firebase';
 import { getActivePushToken } from './deviceRegistry';
 import { insertNotification } from './notifications';
-import { Sentry } from './sentry';
+import { reportPushSkip } from './pushSkipReporter';
 
 export interface CreatedShift {
   id:              string;
@@ -165,11 +165,10 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
 
       const token = await getActivePushToken(guardId);
       if (!token) {
-        Sentry.captureMessage('push_skip_null_token', {
-          level: 'warning',
-          tags: { flow: 'shift_assignment' },
-          extra: { guard_id: guardId, shift_ids: shiftIds },
-        });
+        // Rate-limited + tenant-tagged; see pushSkipReporter (N20). The
+        // in-app Alerts row above is already committed, so awaiting here
+        // changes nothing about what the guard sees.
+        await reportPushSkip('shift_assignment', guardId, { shift_ids: shiftIds });
         continue;
       }
 

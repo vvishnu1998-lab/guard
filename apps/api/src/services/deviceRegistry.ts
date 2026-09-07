@@ -245,10 +245,37 @@ export async function revokeDeviceByToken(token: string): Promise<number> {
  * `if (row.fcm_token)` branch behaves identically.
  *
  *   SELECT g.id, ${ACTIVE_PUSH_TOKEN_SQL('g')} FROM guards g ...
+ *
+ * ORDER BY ... LIMIT 1 is DEFENCE IN DEPTH, not a live fix (N20).
+ *
+ * The sentence above is true and was re-verified in production 2026-09-06:
+ * `uq_guard_devices_one_active_per_guard` exists as
+ *   CREATE UNIQUE INDEX ... ON guard_devices (guard_id) WHERE revoked_at IS NULL
+ * and is created by schema_v63.sql:79-80, which is in the migrate.ts chain, so
+ * a fresh database gets it too. `guards_with_gt1_nonrevoked_device = 0` across
+ * all 44 guards, and `max_nonrevoked_rows_for_one_guard = 1`.
+ *
+ * So the failure this guards against -- `21000 more than one row returned by a
+ * subquery used as an expression`, which would abort the whole statement and
+ * therefore a whole cron tick rather than one push -- is UNREACHABLE while that
+ * index stands. OPEN-ITEMS N20 described it as latent; it is better than
+ * latent, it is prevented. The zero measured on 2026-09-05 was enforcement, not
+ * luck, and reading it as luck is what made this look urgent.
+ *
+ * It is still worth the two clauses: a future migration that drops or narrows
+ * the index would silently re-arm a whole-tick failure in six call sites, and
+ * this makes that degrade to "one arbitrary-but-defined device wins" instead.
+ *
+ * The tie-break is `last_seen_at DESC NULLS LAST` -- most recently active
+ * device wins, and a never-seen device is chosen last. Today that ordering is
+ * unobservable (at most one row can match, and 0 of the 22 active rows have a
+ * NULL last_seen_at); it only becomes behaviour if the index is ever dropped.
  */
 export function ACTIVE_PUSH_TOKEN_SQL(guardAlias: string): string {
   return `(SELECT d.push_token FROM guard_devices d
-            WHERE d.guard_id = ${guardAlias}.id AND d.revoked_at IS NULL) AS fcm_token`;
+            WHERE d.guard_id = ${guardAlias}.id AND d.revoked_at IS NULL
+            ORDER BY d.last_seen_at DESC NULLS LAST
+            LIMIT 1) AS fcm_token`;
 }
 
 /**
@@ -265,8 +292,14 @@ export function ACTIVE_PUSH_TOKEN_SQL(guardAlias: string): string {
 export async function getActivePushToken(guardId: string): Promise<string | null> {
   try {
     const res = await pool.query<{ push_token: string }>(
+      // Same ORDER BY / LIMIT 1 as ACTIVE_PUSH_TOKEN_SQL. This path was never
+      // at risk -- `rows[0]?.push_token` already tolerates multiple rows -- but
+      // if the unique index ever went away, the two paths silently disagreeing
+      // about WHICH device gets the push would be worse than either choice.
       `SELECT push_token FROM guard_devices
-        WHERE guard_id = $1 AND revoked_at IS NULL`,
+        WHERE guard_id = $1 AND revoked_at IS NULL
+        ORDER BY last_seen_at DESC NULLS LAST
+        LIMIT 1`,
       [guardId],
     );
     return res.rows[0]?.push_token ?? null;
@@ -293,11 +326,20 @@ export async function getActivePushTokens(
   if (guardIds.length === 0) return out;
   try {
     const res = await pool.query<{ guard_id: string; push_token: string }>(
+      // Ordered for the same reason as the two single-guard paths (N20): if
+      // uq_guard_devices_one_active_per_guard were ever dropped, all three
+      // must still agree on WHICH device wins. Note this one cannot raise
+      // 21000 -- it is a row set, not a scalar subquery -- so the ordering is
+      // the only thing that mattered here.
       `SELECT guard_id, push_token FROM guard_devices
-        WHERE guard_id = ANY($1::uuid[]) AND revoked_at IS NULL`,
+        WHERE guard_id = ANY($1::uuid[]) AND revoked_at IS NULL
+        ORDER BY last_seen_at DESC NULLS LAST`,
       [guardIds],
     );
-    for (const r of res.rows) out.set(r.guard_id, r.push_token);
+    // First row per guard wins, NOT last: the query is DESC, so a plain
+    // out.set() on every row would leave the OLDEST device in the map and
+    // silently contradict getActivePushToken.
+    for (const r of res.rows) if (!out.has(r.guard_id)) out.set(r.guard_id, r.push_token);
     return out;
   } catch (err) {
     console.error('[deviceRegistry] bulk token lookup failed', err);

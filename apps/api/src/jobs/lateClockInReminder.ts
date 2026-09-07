@@ -41,7 +41,6 @@ import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { sendMissedShiftAlert } from '../services/email';
-import { Sentry } from '../services/sentry';
 
 interface LateCandidateRow {
   shift_id: string;
@@ -56,7 +55,31 @@ interface LateCandidateRow {
   late_admin_email_sent_at: Date | null;
 }
 
-async function fireGuardPush(row: LateCandidateRow, rung: 10 | 15): Promise<boolean> {
+/**
+ * Tick-scoped tally of rungs that had no push token to send to (N20).
+ *
+ * Threaded as a parameter rather than kept at module scope for the same reason
+ * pingReminder does it: node-cron does not serialise ticks, so a tick that
+ * overran its 5-minute interval would share a module-level counter with the
+ * next one.
+ *
+ * NOT the same thing as this job's existing `skipped`, which counts UNASSIGNED
+ * shifts (guard_id IS NULL) and is a different condition entirely. They are
+ * reported as separate fields on the summary line for that reason.
+ */
+export interface SkipCounter {
+  skippedNoDevice: number;
+}
+
+export function newSkipCounter(): SkipCounter {
+  return { skippedNoDevice: 0 };
+}
+
+async function fireGuardPush(
+  row: LateCandidateRow,
+  rung: 10 | 15,
+  skipped?: SkipCounter,
+): Promise<boolean> {
   const title = `You're ${rung} min late`;
   const body  = `Clock in at ${row.site_name} to start your shift.`;
 
@@ -97,15 +120,14 @@ async function fireGuardPush(row: LateCandidateRow, rung: 10 | 15): Promise<bool
     }
   } else {
     console.warn(`[lateClockIn] shift=${row.shift_id} rung=T+${rung} — no fcm_token; notification row still written`);
-    Sentry.captureMessage('push_skip_null_token', {
-      level: 'warning',
-      tags: { flow: 'late_clock_in' },
-      extra: {
-        guard_id: row.guard_id,
-        shift_id: row.shift_id,
-        rung,
-      },
-    });
+    // COUNTED, NOT REPORTED PER OCCURRENCE (N20). A guard with no active
+    // guard_devices row is an ordinary, recurring state; reporting each
+    // occurrence as an individual Sentry warning trains the reader to ignore
+    // the issue. Same fix as pingReminder on 2026-09-05. The console.warn
+    // above keeps guard_id, shift_id and rung in the Railway logs, and the
+    // condition stays derivable from guard_devices + notifications.
+    // See docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md.
+    if (skipped) skipped.skippedNoDevice += 1;
   }
 
   return true;
@@ -114,6 +136,7 @@ async function fireGuardPush(row: LateCandidateRow, rung: 10 | 15): Promise<bool
 runJob('lateClockInReminder', '*/5 * * * *', async () => {
   const startedAt = Date.now();
   let t10 = 0, t15 = 0, t30 = 0, skipped = 0;
+  const noDevice = newSkipCounter();
 
   try {
     // Pull every scheduled shift whose start has passed by at least
@@ -149,7 +172,7 @@ runJob('lateClockInReminder', '*/5 * * * *', async () => {
 
       // T+10 rung
       if (row.late_10_reminder_sent_at === null && row.minutes_late >= 10) {
-        const ok = await fireGuardPush(row, 10);
+        const ok = await fireGuardPush(row, 10, noDevice);
         if (ok) {
           await pool.query(
             'UPDATE shifts SET late_10_reminder_sent_at = NOW() WHERE id = $1',
@@ -161,7 +184,7 @@ runJob('lateClockInReminder', '*/5 * * * *', async () => {
 
       // T+15 rung
       if (row.late_15_reminder_sent_at === null && row.minutes_late >= 15) {
-        const ok = await fireGuardPush(row, 15);
+        const ok = await fireGuardPush(row, 15, noDevice);
         if (ok) {
           await pool.query(
             'UPDATE shifts SET late_15_reminder_sent_at = NOW() WHERE id = $1',
@@ -194,9 +217,10 @@ runJob('lateClockInReminder', '*/5 * * * *', async () => {
   } catch (err) {
     console.error('[lateClockIn] Cron error:', err);
   } finally {
-    if (t10 + t15 + t30 + skipped > 0) {
+    if (t10 + t15 + t30 + skipped + noDevice.skippedNoDevice > 0) {
       console.log(
         `[lateClockIn] fired t+10=${t10} t+15=${t15} t+30=${t30} skipped=${skipped} ` +
+        `skipped_no_device=${noDevice.skippedNoDevice} ` +
         `(${Date.now() - startedAt}ms)`,
       );
     }
