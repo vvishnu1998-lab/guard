@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# NetraOps triage runner. Invoked by .github/workflows/ops-triage.yml daily at
-# 08:00 PT and by manual dispatch. Read-only throughout.
+# NetraOps triage runner. Invoked by .github/workflows/ops-triage.yml daily,
+# targeting the 08:00 PT hour, and by manual dispatch. Read-only throughout.
 #
 # WHY THE SHELL COLLECTS THE SIGNALS (Phase 4.2)
 # ----------------------------------------------
