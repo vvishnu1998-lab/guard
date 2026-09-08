@@ -8,39 +8,98 @@ Re-verify before acting. This file goes stale the moment something deploys.
 
 ---
 
-## Git — verified 2026-09-05 08:25 UTC (01:25 PT)
+## Git — verified 2026-09-08 18:05 UTC (11:05 PT)
 
 | thing | value |
 |---|---|
-| `main` sha | `57c26e146371212c1f5bf538cbbc09123348ed97` (`57c26e1`) — will be updated again post-merge of the Phase 4 branch |
-| `main` subject | `Merge pull request #2 from vvishnu1998-lab/ops/phase-2-heartbeats` |
-| last known good `main` sha | `57c26e1` — same as tip; no known-bad state as of this write |
+| `main` sha | `8729290` |
+| `main` subject | `Merge pull request #18 from vvishnu1998-lab/fix/live-status-lateness-anchor` |
+| last known good `main` sha | `e7e868a` (PR #17) — Railway `e47c6396-6fd3-429b-82b9-75ef9d0d505c` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, Vercel green on the apex. **`8729290` is newer but its deploy was not verified by this commit** — check it before treating it as the good state. |
 | working tree | clean (untracked only: `.playwright-mcp/`, `.vscode/`, `load test/`, `marketing/`, 4 loose PNGs) |
-| branch protection on `main` | **NONE** — `gh api repos/vvishnu1998-lab/guard/branches/main/protection` → 404 `"Branch not protected"` |
-| CI | one workflow, `.github/workflows/gitleaks.yml`, active (id 266080625). Last 5 runs SUCCESS. Advisory only — main is unprotected, so a failing scan blocks nothing. |
+| branch protection on `main` | **ENFORCED** — **two** required status checks: `Scan for hard-coded secrets` **and** `Ping window anchor (TS vs SQL)`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
+| CI | **three** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978) — all active. **Not advisory** — `gitleaks` and `window-anchor` supply the two required contexts, so either failing blocks the merge. |
 
 **Worktrees** (`git worktree list`) — 6 exist under `.claude/worktrees/`; none pins
-`main`. The primary checkout at `/Users/vishnuvardhanreddy/guard` is on `main` @ `40d2297`.
+`main`. The primary checkout at `/Users/vishnuvardhanreddy/guard` is on `main` @ `e7e868a`.
+
+### Direct refspec pushes to `main` are DEAD — PR flow only
+
+Pushing a bare sha at `main` (`<sha>:main`) **cannot work any more**, whatever the diff
+contains — docs-only included. Protection rejects it with **GH006** ("Changes must be
+made through a pull request"), naming the expected `Scan for hard-coded secrets` status.
+This is not a permissions problem to route around: `enforce_admins: true`, so it binds
+the repo owner too.
+
+**This cost a night's plan.** The split-push sequence for the vehicle-inspection work
+was built on the "NONE / 404 Branch not protected" row that stood here until this
+commit. That row was accurate when written on 2026-09-05 and went stale silently — no
+announcement, and nothing in the repo records who enabled protection or when. The push
+was rejected, nothing landed, and the work was re-cut as PR #16 (API + docs) and
+PR #17 (web + docs).
+
+**Ordering now lives in the PR sequence, not in the commit order.** A change whose parts
+must land in a set order — here the API endpoint before the web tab that calls it, or
+the tab 404s — needs **one PR per stage**, each merged and verified before the next is
+opened. A single branch carrying the commits in the right order does *not* give you
+that: merging it lands everything at once.
+
+`strict: true` compounds this — a PR must be up to date with `main` before it can merge,
+so a second PR opened alongside the first needs a rebase once the first lands. Open them
+sequentially, not in parallel.
+
+**Re-verify this row before planning any push.** It flipped once with no signal; the
+only reliable check is
+`gh api repos/vvishnu1998-lab/guard/branches/main/protection` at the moment of use.
 
 ---
 
-## Railway (API) — verified 2026-09-05 11:00 UTC (Phase 4)
+## Railway (API) — deployment row verified 2026-09-08 07:35 UTC; rest 2026-09-05 11:00 UTC (Phase 4)
 
 | thing | value |
 |---|---|
 | project / env / service | `adorable-courage` / `production` / `guard` (`railway status`) |
-| current deployment id | `087ead46-7087-4c6b-b047-c1d4679b8ae4` |
+| current deployment id | `e47c6396-6fd3-429b-82b9-75ef9d0d505c` |
 | status | **SUCCESS** |
-| deployed at | 2026-09-05 02:14:23 -07:00 |
-| previous deployments | all `REMOVED` (Railway retains one active) |
+| deployed at | 2026-09-08 00:30:39 -07:00 |
+| previous deployments | all `REMOVED` (Railway retains one active) — `22b51990-6fbe-48db-a6b4-c345175e4b77` and `dfe120b8-00fe-4907-b3a1-6fe1f4a8f29a` went `REMOVED` as each successor landed |
 | `/health` live body | `{"status":"ok","db":"connected"}` — HTTP 200 |
+| `/health/crons` live body | `{"status":"ok","jobs":19,"stale":[]}` — HTTP 200 |
 
-**Deployment → commit linkage is INFERRED, not read from Railway.** `railway
-deployment list` does not print a commit sha. The inference: the gitleaks run for
-`main` @ `40d2297` (run 33836221028) completed 2026-09-04T04:16:47Z = 2026-09-03
-21:16:47 PT, and deployment `48c7fbbe` started 21:16:45 PT — 2 seconds apart.
-Treat as strong but circumstantial. **UNVERIFIED — deployed commit sha** (Vishnu
-can confirm from the Railway dashboard).
+**Deployment → commit linkage is READ, not inferred.** `railway deployment list`
+still does not print a commit sha — but Railway posts a commit status back to
+GitHub, so the mapping is one call and needs no dashboard:
+
+```bash
+gh api repos/vvishnu1998-lab/guard/commits/<sha>/status \
+  --jq '.statuses[] | "\(.context)\t\(.state)\t\(.target_url)"'
+```
+
+For `e7e868a` (2026-09-08 07:35 UTC) that returns both deploy targets:
+
+```
+adorable-courage - guard  success  https://railway.com/project/6bb1814f-…/service/0d067db4-…?id=e47c6396-6fd3-429b-82b9-75ef9d0d505c&environmentId=9df064b0-…
+Vercel                    success  https://vercel.com/vvishnu1998-labs-projects/guard/2v1xSXRCzxWm7fCjTcsuxWthFMdj
+```
+
+The Railway `target_url` carries `id=<deployment id>`, so commit → deployment is
+exact. To pull just the id:
+
+```bash
+gh api repos/vvishnu1998-lab/guard/commits/<sha>/status \
+  --jq '.statuses[] | select(.context|startswith("adorable-courage")) | .target_url' \
+  | grep -oE 'id=[0-9a-f-]+'
+```
+
+`gh api repos/vvishnu1998-lab/guard/deployments?sha=<sha>` gives the same linkage
+from the other direction, with an `environment` of `Production` (Vercel) or
+`adorable-courage / production` (Railway).
+
+**This replaces a timestamp-correlation inference** that previously stood here —
+it matched a gitleaks run against a deployment start time 2 seconds apart and was
+labelled "strong but circumstantial", with the deployed commit sha marked
+UNVERIFIED pending a dashboard check. That method is no longer needed and should
+not be reached for: it fails silently whenever two pushes land close together,
+which is exactly when knowing the deployed sha matters most.
 
 `/health` checks **only** `SELECT 1` (`apps/api/src/index.ts:125-132`). It does not
 check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns

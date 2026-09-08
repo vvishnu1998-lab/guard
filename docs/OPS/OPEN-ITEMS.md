@@ -508,6 +508,99 @@ Functionally invisible, which is why it has survived, but it lands on the one pa
 all shift. **Size S, Tier 1.** Deliberately not fixed in this dispatch — unrelated to inspections, and
 folding it in would have quietly widened a scoped change.
 
+**N34. No odometer sanity check — a reading is validated for RANGE only, never against the vehicle.**
+verified: YES — read-only against production 2026-09-08.
+
+`PATCH /inspections/:id` accepts any integer in `[0, 9_999_999]`
+(`apps/api/src/routes/inspections.ts:220-226`) and the only database constraint agrees:
+`chk_vehicle_inspections_odometer` is `odometer_reading IS NULL OR (>= 0 AND <= 9999999)`.
+**No monotonicity check, no plausible-delta check, no trigger** (`pg_trigger` on
+`vehicle_inspections` returns zero non-internal rows). Nothing anywhere reads the vehicle's previous
+reading, because nothing needs to: there is no per-vehicle odometer state — the entire history is
+the `vehicle_inspections` rows themselves.
+
+**The reported instance, confirmed.** Same `vehicle_id` `c121646b-bb89-4d30-a91a-87eb409afad0`
+(Star Guard, SFMTA, "patrol car 1", plate `ts157651`):
+
+| Pacific date | reading | guard |
+|---|---|---|
+| 2026-08-24 | **42,130 mi** | `2945918a-d8bd-4309-9a39-30abeee836e7` (GRD0009) |
+| 2026-09-07 | **12,201 mi** | `9a92092e-b393-4003-9f7e-8c7b607a5d9b` (GRD0001) |
+
+Backwards by **29,929 mi** on one vehicle, and both rows are `completed_at`-stamped — the server
+called each inspection complete.
+
+**The paying tenant's series is ALSO unusable, and that is the part the brief understated.**
+Star Guard is the test tenant, so the backwards jump is indeed harmless. But STARNET's
+"Maryknoll Patrol Car" (`45d12160-ea9a-46f7-87d0-52e3a371d898`, Cristo Rey) reads
+**0 → 5,577 → 5,590 → 5,594 mi** across 2026-08-23 → 08-30. It is monotonic, so a
+monotonicity-only rule would pass it — but the anchor is **0**, which is not an odometer, and the
+implied first delta is **5,577 mi in 6 days (~930 mi/day)** for a patrol car working one site.
+Any mileage-over-time series computed from that first point is wrong by the whole 5,577, on the
+customer who asked for the feature. `0` passes the range check today because the constraint's floor
+is `>= 0`.
+
+**Blast radius is currently zero, which is exactly why it is worth fixing now.** Grepped: no code in
+`apps/api/src`, `apps/web/app` or `apps/mobile` computes a mileage delta, trend or total — every
+consumer of `odometer_reading` displays a single row's value verbatim (shift detail, the new
+INSPECTIONS tab, the mobile capture screen). So **nothing is producing a wrong number today**; the
+corruption is sitting in the data waiting for the first consumer. Building the client's
+mileage-over-time report on top of this without a cleaning pass would ship those two defects as
+features.
+
+Design notes for whoever takes it, so the obvious fix does not get written twice:
+- **Monotonicity alone is insufficient** (STARNET's series is monotonic and still wrong) and also
+  **too strict** to hard-fail on: odometer rollover, a vehicle swap, and a genuine typo corrected on
+  the next shift all look identical to a decrease.
+- Prefer **flag, do not block** — same posture as break overrun, and consistent with the whole
+  inspection flow being *prompted, never blocking* (`inspections.ts:4`). A guard on post at 3am must
+  not be stuck behind a validator.
+- A floor above `0` and a per-day delta ceiling would catch both live cases. Both need the previous
+  reading for that `vehicle_id`, which is one indexed query on `vehicle_inspections`.
+- Historic rows need a **backfill decision** regardless: a validator added today does not clean the
+  two bad series already stored.
+
+**Latent, not urgent. Size M, Tier 1** (API read-path plus a new write-path validation; no schema
+change if it is flag-only, one column if the flag is persisted).
+
+**N35. An EXPIRED presigned inspection photo renders as a broken image, not the MISSING tile.**
+verified: YES — reproduced against production 2026-09-08, and the code path confirmed on both
+surfaces that render inspection photos.
+
+S3 answers an expired link with `AccessDenied` / *"Request has expired"*, quoting
+`X-Amz-Expires: 900`, `Expires: 15:46:29Z` against `ServerTime: 17:20:27Z` — 94 minutes past a
+15-minute link — on a key under `inspection/27c4d404-…/2026-08-31/`.
+
+**Why it degrades badly rather than gracefully.** The per-slot render keys the empty state on the
+URL being absent, not on the image failing to load:
+
+- `apps/web/app/admin/sites/[id]/page.tsx:2245,2249` — `const url = inspDetail[key] as string | null;`
+  then `{url ? (<img src={url} …/>) : (…MISSING…)}`
+- `apps/web/app/admin/shifts/[shiftId]/page.tsx:564,568` — the same two lines
+
+An expired URL is still a perfectly good non-empty string, so it takes the truthy branch and lands
+in an `<img>` that 403s. **Neither file has any `onError` handler** (`grep -rn 'onError'` over both
+returns nothing), so the browser's broken-image glyph is the entire feedback. The admin sees the
+same visual for "this photo was never taken" and "your link went stale while the tab was open",
+which are opposite facts — one is a guard compliance gap, the other is nothing at all.
+
+Refreshing the page re-signs and the photos return, so the data is fine and this is purely a
+presentation defect.
+
+**The fix is `onError`, NOT a longer TTL.** The 900s window is the containment property —
+`PRESIGN_GET_TTL_SECONDS = 60 * 15` (`apps/api/src/services/s3.ts:189-192`), whose own comment says
+it is short so *"a screenshot of the URL becomes useless quickly."* Raising it to paper over a
+missing error handler trades a real security property for a cosmetic one. Swap the broken glyph for
+an explicit "Link expired — refresh the page" state, distinct from MISSING.
+
+**Wider than the tab.** Any inspection photo opened in a new tab or pasted to someone else hits the
+same wall, and there the page-refresh remedy is not available — the recipient has only a dead URL
+with no explanation. Same shape applies to every presigned read path, since `urlOrPresign` is shared;
+this item is scoped to inspections because that is where it was reproduced.
+
+**Cosmetic, latent.** No data loss, no wrong number, and the failure is self-healing on reload.
+**Size S, Tier 1.**
+
 
 ---
 
