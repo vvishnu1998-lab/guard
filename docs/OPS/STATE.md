@@ -65,12 +65,41 @@ only reliable check is
 | `/health` live body | `{"status":"ok","db":"connected"}` — HTTP 200 |
 | `/health/crons` live body | `{"status":"ok","jobs":19,"stale":[]}` — HTTP 200 |
 
-**Deployment → commit linkage is INFERRED, not read from Railway.** `railway
-deployment list` does not print a commit sha. The inference: the gitleaks run for
-`main` @ `40d2297` (run 33836221028) completed 2026-09-04T04:16:47Z = 2026-09-03
-21:16:47 PT, and deployment `48c7fbbe` started 21:16:45 PT — 2 seconds apart.
-Treat as strong but circumstantial. **UNVERIFIED — deployed commit sha** (Vishnu
-can confirm from the Railway dashboard).
+**Deployment → commit linkage is READ, not inferred.** `railway deployment list`
+still does not print a commit sha — but Railway posts a commit status back to
+GitHub, so the mapping is one call and needs no dashboard:
+
+```bash
+gh api repos/vvishnu1998-lab/guard/commits/<sha>/status \
+  --jq '.statuses[] | "\(.context)\t\(.state)\t\(.target_url)"'
+```
+
+For `e7e868a` (2026-09-08 07:35 UTC) that returns both deploy targets:
+
+```
+adorable-courage - guard  success  https://railway.com/project/6bb1814f-…/service/0d067db4-…?id=e47c6396-6fd3-429b-82b9-75ef9d0d505c&environmentId=9df064b0-…
+Vercel                    success  https://vercel.com/vvishnu1998-labs-projects/guard/2v1xSXRCzxWm7fCjTcsuxWthFMdj
+```
+
+The Railway `target_url` carries `id=<deployment id>`, so commit → deployment is
+exact. To pull just the id:
+
+```bash
+gh api repos/vvishnu1998-lab/guard/commits/<sha>/status \
+  --jq '.statuses[] | select(.context|startswith("adorable-courage")) | .target_url' \
+  | grep -oE 'id=[0-9a-f-]+'
+```
+
+`gh api repos/vvishnu1998-lab/guard/deployments?sha=<sha>` gives the same linkage
+from the other direction, with an `environment` of `Production` (Vercel) or
+`adorable-courage / production` (Railway).
+
+**This replaces a timestamp-correlation inference** that previously stood here —
+it matched a gitleaks run against a deployment start time 2 seconds apart and was
+labelled "strong but circumstantial", with the deployed commit sha marked
+UNVERIFIED pending a dashboard check. That method is no longer needed and should
+not be reached for: it fails silently whenever two pushes land close together,
+which is exactly when knowing the deployed sha matters most.
 
 `/health` checks **only** `SELECT 1` (`apps/api/src/index.ts:125-132`). It does not
 check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
