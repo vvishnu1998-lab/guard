@@ -438,6 +438,43 @@ Pacific over `inspection/<company>/<date>/` is off by one for any evening upload
 happened once during the 2026-09-07 triage. Changing the key format is **not** backfillable (existing
 keys are immutable and referenced by stored URLs), so the realistic fix is a documented convention,
 not a rewrite. **Tier 0 to document; Tier 1 if `uploads.ts` changes.** Size S.
+**N32. SCAN HISTORY filters guards by NAME STRING, not `guard_id`.**
+verified: YES — `main` @ `eb974a4`, three call sites in
+`apps/web/app/admin/sites/[id]/page.tsx`. `guardOptions` builds a `Set<string>` of `guard_name`
+(`:787-791`); the `<select>` emits the **name** as the option value (`:1612`,
+`<option key={g} value={g}>`); and the predicate compares strings (`:819`,
+`if (fGuard && !r.scans.some((sc) => sc.guard_name === fGuard)) return false;`). The filter value
+round-trips through the URL as `?guard=<name>`.
+
+**The CHECKPOINT filter immediately below it does this correctly** — `<option value={c.id}>`
+(`:1622`), a uuid. So this is an inconsistency inside one control group, not a codebase-wide
+convention.
+
+**Names are not identifiers.** Per `netraops-invariants`, badge numbers collide across tenants and
+`GRD0004` is "deepak naik" on **both** Star Guard and STARNET SECURITY. Names collide *within* a
+tenant too — verified read-only 2026-09-08, `Star Guard` (`b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee`)
+holds **two same-name pairs**: `c2f4b9e3-bed9-4693-b752-a04bc115e863` / `a532b077-39ba-43f1-93bd-176752fb6e21`
+(GRD0003 / GRD0004, also carried item C23) and `0af98d92-b028-44d6-b1e3-d242161087ac` /
+`ed2ccfa0-a9fd-4e5c-a14b-45bc9b2696fd` (GRD0012 / GRD0020). Selecting either name filters to the
+union of both guards' scans with no way to separate them, and no indication in the UI that it did.
+
+**Latent, not live — and the check that establishes that is worth keeping.** A site's scan list is
+already scoped to one site, hence one tenant, so a collision only bites when both members of a pair
+scanned at the **same** site. They have not: grouping `checkpoint_scans` by site and comparing
+`COUNT(DISTINCT guard_id)` against `COUNT(DISTINCT LOWER(TRIM(g.name)))` returns **zero rows** —
+every site's scan history currently has as many distinct names as distinct guards. Re-run that query
+before downgrading this item; it is one roster change away from being wrong.
+
+Second-order: `guard_name` is nullable (`LEFT JOIN guards` at `checkpoints.ts:256`), and `:789`
+skips falsy names, so scans with a NULL guard are absent from the dropdown and unreachable by any
+filter value.
+
+**Not fixed in this dispatch** — the INSPECTIONS tab shipping alongside keys its guard filter on
+`guard_id` from the start, so this item covers SCAN HISTORY only. Fixing it is a contained change to
+the three lines above plus the `?guard=` param contract (existing shared links carrying a name would
+stop matching — acceptable, or handle by falling back to a name match when the value is not a uuid).
+**Size S, Tier 1.**
+
 
 
 ---
