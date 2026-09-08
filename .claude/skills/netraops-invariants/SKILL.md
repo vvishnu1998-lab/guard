@@ -35,6 +35,15 @@ Verified ground truth for the NetraOps platform. When live state may have change
 - Timezone anchor: `CURRENT_DATE` in a UTC session at ~01:xx UTC resolves to tomorrow PT. Anchor via `(NOW() AT TIME ZONE 'America/Los_Angeles')::date`.
 - Known bug class: DOW off-by-one in `repeat_days` expansion (Node UTC vs Pacific near midnight).
 
+## Scheduling profiles (`site_scheduling_profiles` / `site_profile_shifts`)
+
+- **TEMPLATE-ONLY. Nothing ever generates a `shifts` row from profile data.** No generator, cron, job, script, trigger, function, view or `pg_cron` — re-verified at `eb974a4`: `INSERT INTO shifts` appears **only** in `routes/shifts.ts:287,396,431`; `apps/api/src/jobs/` references the profile tables zero times; and the DB carries 0 user triggers on `site_scheduling_profiles`/`site_profile_shifts`/`shifts`, 0 functions and 0 views referencing them, and no `pg_cron` extension installed. **Bulk shift edits are SAFE from profiles** — a direct `UPDATE` on `shifts` for a profiled site is NOT regenerated over, because nothing regenerates. `schema_v32.sql`'s own header says it: rolling the pattern forward stays a separate action; the profile is a template plus a baseline for the coverage pill.
+- **One active profile per site**, enforced by the partial unique index `idx_one_active_profile_per_site` (`schema_v32.sql`) — `ON site_scheduling_profiles (site_id) WHERE is_active = true`. Activating one deactivates the incumbent in the SAME transaction (`scheduling.ts:162-172` — `BEGIN`, `UPDATE … SET is_active = false WHERE site_id = $1 AND is_active = true`, `INSERT`, `COMMIT`).
+- **Three consumers, and only three.** Coverage-gap pill (`apps/web/app/admin/shifts/page.tsx:176`); Sites-detail CRUD UI (`apps/web/app/admin/sites/page.tsx:381`+); `ScheduleShiftModal.tsx:154` auto-fill — **the only path by which template data becomes a shift, one at a time, admin-confirmed.**
+- **Coverage math (`scheduling.ts:287-335`):** `required` = `SUM(guards_needed WHERE active) × 2` over a rolling 14-day window; `scheduled` = a raw `COUNT` of non-cancelled shifts whose `scheduled_start` falls in that window; `gap` = `max(0, required − scheduled)`. **It does NOT pattern-match day or time** — a site scheduled entirely off-template can still read as covered. Measured, not theoretical: see **N30** in `docs/OPS/OPEN-ITEMS.md`.
+- `POST /api/scheduling/site/:siteId/profile` with an empty `shifts[]` returns **400** `'shifts must have at least one entry'` (`scheduling.ts:158`) — a profile always carries at least one slot.
+- **Profile inventory is date-sensitive — re-query, never recite.** As of 2026-09-07 there are **2 profiles DB-wide, both on the Star Guard TEST tenant**: `bethel ame church` (`8c96d119`) and `SFMTA` (`21eb9729`). **STARNET SECURITY has none, and never has.** Resolve by `site_id`, never by name — the only profiled "bethel" is Star Guard's `8c96d119`, **not** STARNET's `53c71c64`.
+
 ## Geofence behavior
 
 - Server validation: `polygonOk OR radiusOk`.

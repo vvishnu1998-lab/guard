@@ -358,6 +358,27 @@ time (control 3).
   ~00:30–08:00 PT only. Coverage is not derivable from contract fields (`contract_end` NULL on all four,
   0 `site_scheduling_profiles`).
 
+**N30. Coverage pill counts quantity, not pattern. Priority: low.**
+verified: YES — `main` @ `eb974a4`, 2026-09-07, `postgres-readonly` + source read at that ref.
+`computeCoverage` (`apps/api/src/routes/scheduling.ts:287-335`) counts **any** non-cancelled shift whose
+`scheduled_start` falls in the rolling 14-day window, regardless of whether it matches a template slot.
+
+Proven on Star Guard **SFMTA** (`21eb9729-2a31-4566-a885-22077a257f23`): all **10** forward shifts start
+**15:30 PT**; the active profile's 11 slots sit only at 08:00 / 10:00 / 12:00 / 14:00, so **0 of 10 match**
+— yet all 10 count, pulling the gap from 24 down to **14** and rendering a fully off-template site as
+**58% covered**. `required` is derived from the template and `scheduled` from a bare row count; the two are
+compared as though they measured the same thing.
+
+**Second, separate defect in the same feature.** `ScheduleShiftModal.tsx:161-162,178` computes the next
+matching day from the **browser's** local date/day (`new Date().getDay()`, then
+`new Date(y, m, d + daysToAdd)`) rather than the site timezone — same family as the `repeat_days` DOW
+off-by-one. The same file already does it correctly 40 lines below (`:202-205`, `Intl.DateTimeFormat` with
+`timeZone: 'America/Los_Angeles'`), so the fix has a pattern to copy in place.
+
+**No customer impact today: STARNET has 0 `site_scheduling_profiles`** across all 7 sites, the four new
+ones included. Both defects are latent until the first STARNET profile exists — which makes this cheap to
+fix *before* one does, not after. **Do NOT fix in the documenting PR.** Size S, Tier 1.
+
 ---
 
 ### Merge-order note (2026-09-06, superseded)
