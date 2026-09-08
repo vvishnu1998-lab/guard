@@ -644,6 +644,137 @@ cannot be skipped by a person in a hurry.
 
 ---
 
+## New from Phases A–D (2026-09-08)
+
+**N37. Activity-log PDF sorts one row out of order — sorting on a key it does not display.**
+verified: PARTIAL — the symptom is observed; the cause is inferred and the age is unknown.
+
+A `19:05 MISSED / ANSWERED LATE` row renders **between 18:04 and 18:50** in the activity-log
+PDF. The row is a merged `missed_answered_late`, which by design sorts at the **window's
+start** (`event_time = window_start`, where the obligation fell due) while LOG TIME displays
+**when it was actually answered**. So the row is almost certainly sorted correctly on
+`window_start` and displaying the resolving ping's timestamp — two different instants, one
+column. `routes/activityLog.ts` documents that merge and the sort choice explicitly.
+
+**UNVERIFIED — whether this predates Phase D.** The merged-row behaviour long predates it, but
+Phase D changed the grid `windows[]` is built from in the same file, so "it was always like
+this" cannot be assumed. Cheapest check: render the same shift's PDF from `origin/main` at
+`7b30e69` (pre-D) and at `dfdcc8c` (post-D) and compare row order. If identical, it predates
+Phase D and is a display bug, not a regression.
+
+Client-facing surface. **Size S to diagnose, S–M to fix. Tier 1.**
+
+---
+
+**N38. Duplicated Pacific formatter in `lib/lateness.ts` — collapse during Phase G, NOT before.**
+verified: YES — read directly.
+
+`computeLatenessAnchored` uses a module-level `fmtPacificHHMM`; `computeLateness` keeps its own
+inline `Intl.DateTimeFormat` with a byte-identical option bag. Two copies of a three-line
+formatter, which this codebase's own doctrine argues against.
+
+**Deliberate, and the timing matters.** PR #18 froze `computeLateness` so the two hourly-report
+call sites could not regress, and proved it byte-identical to `main` with a mechanical `diff`.
+Collapsing the formatter now edits that function and **destroys the byte-identity proof** that
+is currently the only thing protecting the `computeLateness(…, [0])` report columns.
+
+Do it in Phase G, when `lateness.ts` is open anyway for `PING_STALE_MINUTES`, and re-establish
+the proof on the other side. Flagged in-code at `lib/lateness.ts` so it is not discovered as an
+oversight.
+
+**Size S. Tier 1. Blocked on Phase G by choice, not by dependency.**
+
+---
+
+**N39. CI runs `ts-node` directly, so the `npm run check:window-anchor` path is unexercised.**
+verified: YES.
+
+`.github/workflows/window-anchor.yml` invokes `npx ts-node scripts/check-window-anchor.ts`
+rather than the npm script. Deliberate: `check:window-anchor` passes
+`dotenv_config_path=../../.env`, which does not exist on a runner, and routing CI through
+`dotenv` adds a dependency the check does not need.
+
+**The cost is that the npm script is now the untested path.** A local run and a CI run no
+longer exercise the same entry point, so the two can drift — a change to the npm script's flags
+would be invisible to CI, and the CI invocation could drift from what a developer runs locally.
+Neither is load-bearing today; both are the kind of gap that surfaces as "it passes in CI".
+
+Options: point CI at the npm script and make the dotenv path optional, or delete the npm script
+and document the direct invocation. **Do not leave two entry points with one tested.**
+
+**Size S. Tier 0.**
+
+---
+
+**N40. `docs/03-UX-DESIGN.md:202` and `docs/04-APP-FLOW.md:564,571` document a hook that does not exist.**
+verified: YES — `grep -r useBatteryThrottle apps/` returns **zero** occurrences.
+
+Both files describe
+`pingIntervalMs = useBatteryThrottle((activeShift.ping_interval_minutes ?? 30) * 60_000)`
+and a battery-throttled background ping cadence. **There is no `useBatteryThrottle`**, and
+`ping_interval_minutes` — though carried in the active-session payload and declared in three
+mobile type definitions — **is never read on mobile at all**. Background location is
+event-driven native geofencing, not a periodic timer.
+
+**Do not plan Phase F from those two sections.** They describe an architecture that was either
+never built or was removed without the docs following. `04-APP-FLOW.md` was modified 2026-09-03
+and still carries it; `03-UX-DESIGN.md` has not been touched since 2026-05-16.
+
+The correct sources for mobile ping behaviour are `apps/mobile/lib/pingSchedule.ts` (the grid,
+hardcoded 30) and `apps/mobile/tasks/locationBackground.ts` (geofencing, not polling).
+
+**Size S to correct the docs. Tier 0. Blocks nothing, misleads everything.**
+
+---
+
+**N41. `schema_v68.sql` comment says "138 existing rows"; the real count was 210.**
+verified: YES — 211 sessions at write time, 210 NULL.
+
+The figure was taken from a `routes/admin.ts` comment dated 2026-09-03 during the C0 audit and
+not re-counted before the migration was written.
+
+**Do NOT amend the migration.** It is applied in production, and editing an applied migration —
+even for a comment — changes what a replay-from-empty produces, for a number that is
+illustrative and load-bearing on nothing. The semantics of NULL do not depend on how many rows
+carry it.
+
+Recorded here so the discrepancy is not later mistaken for evidence that the migration ran
+against a different dataset than intended.
+
+**No action. Recorded only.**
+
+---
+
+**N42. Phase H must narrow the `shift_sessions` CHECK so an interval ≤ 10 is unreachable.**
+verified: YES — the inversion is reasoned from code read this session, not observed in prod.
+
+`sites.ping_interval_minutes` permits **5–240** (`schema_v14.sql:39`) and
+`shift_sessions.ping_interval_minutes` (schema_v68) has **no CHECK at all** — deliberately, so
+the constraint could land with the picker that defines the allowed set.
+
+**Below ~10 minutes the `pingReminder` recovery range inverts.** `recoveryMsFor` is
+`min(10 min, interval/3)`, so at interval 5 it yields 1 min 40 s — correct. But the *reason* the
+formula exists is that a flat range at or above the interval spans past the **next** window's
+close, at which point `windowJustClosed` has already advanced to the newer window and the tail
+of the range is unreachable. The recovery that `schema_v57` was written to provide then
+**silently becomes a no-op** — no error, no log, no missing row. Exactly the failure class this
+repo keeps re-encountering.
+
+The formula protects the code path; it does **not** protect the data. A direct
+`UPDATE sites SET ping_interval_minutes = 5` remains possible, and the picker is not an
+enforcement boundary (D15).
+
+Phase H should add a CHECK on `shift_sessions.ping_interval_minutes` admitting only the picker
+set, and consider narrowing the `sites` CHECK to match. **Verify the existing 211 rows satisfy
+any new constraint before adding it** — 210 are NULL and one is 30, so a NULL-permitting CHECK
+on {15,30,45} passes today, but re-check at the time.
+
+**Size S. Tier 1 (expand-only migration). Blocks: nothing. Blocked by: the picker set, now
+locked as D15.**
+
+
+---
+
 ## Carried items
 
 **C1. Build 49: device-position-on-Exit + AD_ID revert, after Build 48 review.**

@@ -224,14 +224,33 @@ export function BREAK_HOURS_ROW_SQL(breakAlias: string, sessionAlias: string): s
  * lists and fails the build if either side moves. If you change the anchor
  * here, change it there, and the test will tell you if you forgot.
  *
- * ── TRAP: sites.ping_interval_minutes IS NOT READ HERE ──────────────────
+ * ── THIS FRAGMENT IS THE LAST HARDCODED GRID — PHASE E ──────────────────
  *
- * That column exists, is NOT NULL, is editable, and is sent to the mobile app
- * (routes/shifts.ts:2596) — but NO server-side window reads it. pingReminder,
- * missedPingCron and this fragment all hardcode PING_WINDOW_MS (30 min). All
- * 15 prod sites read 30 today so nothing diverges, but set one site to 20 and
- * the guard's countdown, the reminder cron, the missed-ping flags and this
- * number all disagree at once. Deliberately not fixed here.
+ * This block used to say no server-side window read the per-site cadence, and
+ * that pingReminder, missedPingCron and this fragment all hardcoded
+ * PING_WINDOW_MS. As of 2026-09-08 (PR #23) the first two statements are
+ * false: every TypeScript window reader takes its cadence from
+ * shift_sessions.ping_interval_minutes (schema_v68), COALESCEd to 30 —
+ * missedPingCron, pingReminder, services/email.ts, routes/locations.ts and
+ * routes/activityLog.ts. See services/pingWindows.ts.
+ *
+ * THIS SQL FRAGMENT STILL HARDCODES PING_WINDOW_MS. It is the one grid that
+ * was not threaded, deliberately: it is interpolated into SQL rather than
+ * called, so it needs the session's snapshot plumbed in as a COLUMN, not a
+ * parameter, and that is a larger change than the rest of the sweep. Phase E
+ * owns it.
+ *
+ * Nothing diverges TODAY. All **23** production sites read 30 (the "15" this
+ * comment previously claimed was already stale; the platform has grown), and
+ * every session snapshot written so far is 30 because the mobile capability
+ * gate has no capable client to admit. So this fragment and the threaded
+ * readers agree by coincidence of data, not by construction.
+ *
+ * The moment one site is set to anything else, violation_hours computed here
+ * disagrees with the missed-ping flags, the client email's ratio and the
+ * activity log — all of which now follow the session. scripts/check-window-anchor.ts
+ * compares this fragment against the TypeScript grid at 15/30/45/60/75/90 and
+ * is a required check, so the drift fails CI rather than reaching a client.
  *
  * Aliases must be trusted identifiers (never user input).
  */
