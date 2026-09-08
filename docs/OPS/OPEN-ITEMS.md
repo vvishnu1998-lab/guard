@@ -385,6 +385,60 @@ which exist on `main`. Reimplementing any of them would have collided on merge.
 **Still to do once this lands:** tag N23 (budget-isolation runbook — console
 work), N24 (Vercel ToS — Counsel), E14 (AWS free plan ends 2026-09-30) and E15
 with `[VISHNU]`, so the brief's WAITING line stops under-reporting them.
+**N30. Vehicle-inspection S3 orphans are permanent and uncounted — a fourth orphan population.**
+verified: YES — code read on `main` @ `eb974a4`, plus a prod S3 listing.
+`submitSlotPhoto` wraps two statements in one `try` (`apps/mobile/app/inspection/index.tsx:182-198`):
+`uploadToS3(...)` at `:186`, then `PATCH /inspections/:id` at `:188`. When the S3 POST succeeds
+(`apps/mobile/lib/uploadToS3.ts:98`) and the PATCH then fails, the object is already in the bucket
+and **nothing references it**: `public_url` is a local `const` returned at `uploadToS3.ts:108`,
+consumed only by the PATCH argument, and discarded by `return 'reset'` at `index.tsx:196`. The retry
+calls `uploadToS3` again, which requests a **fresh presign** (`uploadToS3.ts:49`) and therefore a
+**fresh `uuidv4()` key** (`apps/api/src/routes/uploads.ts:53`). So every failed retry that got past
+the S3 POST leaves exactly one permanent orphan.
+
+**The purge cannot reach them.** `step5c_expiredVehicleInspections` selects
+`FROM vehicle_inspections` (`apps/api/src/jobs/nightlyPurge.ts:297`) and deletes S3 objects named by
+those rows (`:317`). An object with no row is invisible to it — this is row-keyed cleanup, not a
+bucket sweep. Same structural shape as the three orphan populations already tracked against S3
+retention; this is the fourth.
+
+Not currently measurable from the repo: **no code anywhere in `apps/api/src` performs a
+`ListObjects`/`Prefix` scan** (grepped, zero hits), so nothing counts bucket objects against DB rows.
+The orphan count is therefore **UNVERIFIED** — establishing it needs an out-of-band reconciliation
+listing `inspection/<company_id>/` against the five URL columns.
+
+Population context, read-only 2026-09-08: **9 `vehicle_inspections` rows total** — STARNET 6 (1
+incomplete), Star Guard 3 (1 incomplete). Both incomplete rows are 0-photo shells (see N31 note
+below), so **neither is evidence of this failure mode**; no orphan has yet been observed, only shown
+to be reachable. **Counting is Tier 0; deleting anything from the bucket is Tier 2.** Size M.
+
+**N31. S3 inspection keys are UTC-dated while shifts are Pacific-dated.**
+verified: YES — `apps/api/src/routes/uploads.ts:52` is
+`const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD`, and `:53` builds the key as
+`${context}/${company_id}/${date}/${uuid}.${ext}`. `toISOString()` answers in **UTC**, so every
+object uploaded after 17:00 PT (16:00 during PST) files under **tomorrow's** date.
+
+Live instance: session `7d0b32fb-840a-48bb-a9fe-d53f545d9a58` (SFMTA, Star Guard
+`b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee`) is Pacific **2026-09-07**; its five objects all sit under
+prefix `inspection/b7c7d32d-.../2026-09-08/` — confirmed by `head-object` on all five and a
+`list-objects-v2` returning exactly those five. The adjacent `2026-09-07/` prefix is **empty**.
+
+**This is the same bug family as the DOW `getDay()` UTC trap**, and the web already fixed its half:
+`apps/web/app/admin/sites/[id]/page.tsx:181-190` replaced `toISOString().slice(0, 10)` with an
+`Intl.DateTimeFormat('en-CA', { timeZone })` helper, and its comment says exactly why — *"at 5pm
+Pacific it reads as tomorrow"*. `uploads.ts:52` is the same line the web deleted, still live on the
+API side. The server-side query fix already exists too and is unrelated to keys:
+`siteLocalDayRange` (`apps/api/src/services/dateRange.ts:82-102`) anchors bounds with
+`AT TIME ZONE s.timezone`.
+
+**Impact is narrow today and that is the reason to file rather than fix:** no in-repo tool scans by
+date prefix (grep for `ListObjects`/`Prefix:` over `apps/api/src` → zero hits), so nothing in
+production is currently wrong. The exposure is ad-hoc ops work — a human or agent reasoning in
+Pacific over `inspection/<company>/<date>/` is off by one for any evening upload, which already
+happened once during the 2026-09-07 triage. Changing the key format is **not** backfillable (existing
+keys are immutable and referenced by stored URLs), so the realistic fix is a documented convention,
+not a rewrite. **Tier 0 to document; Tier 1 if `uploads.ts` changes.** Size S.
+
 
 ---
 
