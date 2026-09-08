@@ -477,6 +477,38 @@ stop matching — acceptable, or handle by falling back to a name match when the
 
 
 
+**N33. Pre-existing hydration mismatch on `/admin/live-status` — the "Last updated" clock.**
+verified: YES, and verified as **NOT introduced by the inspection work**, which is the part that took
+evidence rather than assertion. Loading the page logs
+`Warning: Text content did not match. Server: "22:52:39" Client: "22:52:40"`, traced to a `<p>` inside
+`LiveMapPage` (`apps/web/app/admin/live-status/page.tsx`, the "Refreshes in Ns · Last updated
+HH:MM:SS" line), followed by `An error occurred during hydration. The server HTML was replaced with
+client content in <#document>` — React discards the SSR tree and re-renders the whole page client-side.
+
+**Method, because "it was already broken" is the easiest claim in the world to get wrong:** the
+`inspection_incomplete` chip added on `db595cb` edits the same file, so the disproof was
+`git stash push -- apps/web/app/admin/live-status/page.tsx`, reload, re-read the console — **the
+mismatch reproduced on the unmodified file** — then `git stash pop`. Same-file proximity is not
+causation, and stashing is the cheapest way to separate them.
+
+**The cause is structural, not a race.** A wall-clock timestamp rendered during SSR and again at
+hydration differs whenever the two straddle a second boundary, which at one-second resolution is most
+loads. The value is non-deterministic by construction. The fix is to render the clock only after
+mount (`useEffect` + state, so the server emits a placeholder); `suppressHydrationWarning` would hide
+the warning while leaving the mismatch in place.
+
+**Same family as the production React errors already carried** — minified `#418` / `#423` / `#425` are
+the prod encodings of "text content did not match" and "there was an error while hydrating", recorded
+as open after the 2026-08-21 site-detail restructure and never attributed to a cause. This is the
+first instance of that family with a named file and a reproduction. It does **not** prove the prod
+errors are this line — that mapping is **UNVERIFIED**, and the site-detail page is a different route.
+
+Cost while unfixed: every Live Status load throws away the server render and rebuilds on the client.
+Functionally invisible, which is why it has survived, but it lands on the one page an admin keeps open
+all shift. **Size S, Tier 1.** Deliberately not fixed in this dispatch — unrelated to inspections, and
+folding it in would have quietly widened a scoped change.
+
+
 ---
 
 ## Carried items
