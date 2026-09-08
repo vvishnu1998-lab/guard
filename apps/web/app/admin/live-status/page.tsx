@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { useSearchParams } from 'next/navigation';
 import { adminDownload, adminGet } from '../../../lib/adminApi';
-import { computeLateness, isPingStale } from '../../../lib/lateness';
+import { computeLateness, computeLatenessAnchored, isPingStale } from '../../../lib/lateness';
 
 // Leaflet touches `window` on import, so the map panel must never be part
 // of the server bundle. Same contract GeofenceMapEditor is loaded under
@@ -60,6 +60,13 @@ interface LiveGuard {
    *  Read with a strict `=== true` for that reason: `undefined` means "the
    *  API cannot tell us", which must not render as "inspection missing". */
   inspection_incomplete?: boolean;
+  /** The SHIFT's scheduled_start — the anchor every ping window hangs off
+   *  (scheduled_start + N*30min). Served by GET /api/admin/live-guards since
+   *  commit 9c98957 (apps/api/src/routes/admin.ts:934). Optional per the
+   *  stale-API rule: an API predating that commit omits it, and
+   *  computeLatenessAnchored then renders the bare time rather than a
+   *  wall-clock guess. */
+  scheduled_start?: string | null;
 }
 
 interface Breach {
@@ -461,7 +468,15 @@ export default function LiveMapPage() {
               <tr><td colSpan={6} className="text-center text-gray-500 py-10">No guards currently on duty</td></tr>
             )}
             {guards.map((g) => {
-              const ping   = computeLateness(g.last_ping_at,   [0, 30]);
+              // Anchored on the SHIFT's grid, not the wall clock. The old
+              // computeLateness(..., [0, 30]) form graded every ping against
+              // :00/:30 and was wrong in BOTH directions on any shift that
+              // does not start there — see lib/lateness.ts's header for the
+              // measured 375 Shopping Complex case.
+              const ping   = computeLatenessAnchored(g.last_ping_at, g.scheduled_start);
+              // UNCHANGED and correct: the hourly activity-report leg really
+              // does fire on a wall-clock top-of-hour cadence (R5,
+              // apps/api/src/jobs/pingReminder.ts:344-354).
               const report = computeLateness(g.last_report_at, [0]);
               // Stale-ping urgency signal: unchanged from prior behavior —
               // colors the LAST PING cell red when the last ping is older

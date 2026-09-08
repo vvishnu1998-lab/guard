@@ -288,9 +288,16 @@ function guardInitial(name: string): string {
 // window_label match, timestamp containment as the legacy fallback); this
 // column's job is to show that, not to recompute it from a weaker input.
 //
-// computeLateness still lives in lib/lateness.ts and is still correct for
-// the live-status page, where "last ping vs. now" genuinely IS a wall-clock
-// question with no window to attribute to.
+// computeLateness still lives in lib/lateness.ts, but the claim that used to
+// stand here — that it was "still correct for the live-status page, where
+// 'last ping vs. now' genuinely IS a wall-clock question with no window to
+// attribute to" — was wrong twice, and is why the second call site outlived
+// this fix. computeLateness never measured "vs. now" (isPingStale does); and
+// there IS a window to attribute to, because scheduled_start has been on
+// GET /api/admin/live-guards since commit 9c98957. Live-status now uses
+// computeLatenessAnchored, which grades against that anchor. computeLateness
+// remains correct only for the hourly-report columns, whose cadence really
+// is wall-clock top-of-hour.
 //
 // on_time and late are separate arms: a late ping is satisfied-but-late, so
 // it gets AMBER. RED stays reserved for an unmet obligation (missed).
