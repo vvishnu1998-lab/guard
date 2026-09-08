@@ -935,6 +935,13 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        ss.clocked_in_at,
        sh.scheduled_start,
        sh.scheduled_end,
+       -- schema_v68 snapshot: the cadence THIS session is judged by. Served
+       -- so the web can grade a ping and decide staleness on the session's
+       -- own grid instead of assuming 30 (Phase G). From the SESSION, never
+       -- live from sites (D16) — and this row IS a session: one open session
+       -- per guard is enforced by idx_shift_sessions_one_open_per_guard.
+       -- NULL for a session predating the column; the web COALESCEs to 30.
+       ss.ping_interval_minutes,
        -- POSITION, with a clock-in fallback.
        --
        -- A guard who has not pinged this session used to have no coordinates
