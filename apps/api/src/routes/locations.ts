@@ -304,9 +304,15 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     scheduled_start: Date;
     scheduled_end:   Date;
     site_tz:         string | null;
+    /** schema_v68 snapshot — the grid this session's labels live on.
+     *  From the SESSION, not sites: a label submitted now must be validated
+     *  against the cadence in force when the session started, not against a
+     *  site value an admin may have edited mid-shift. */
+    ping_interval_minutes: number | null;
   }>(
     `SELECT ss.site_id, ss.clocked_in_at, ss.clocked_out_at,
-            sh.scheduled_start, sh.scheduled_end, si.timezone AS site_tz
+            sh.scheduled_start, sh.scheduled_end, si.timezone AS site_tz,
+            ss.ping_interval_minutes
        FROM shift_sessions ss
        JOIN shifts sh ON sh.id = ss.shift_id
        JOIN sites  si ON si.id = ss.site_id
@@ -320,6 +326,7 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     scheduled_start: pingScheduledStart,
     scheduled_end:   pingScheduledEnd,
     site_tz:         pingSiteTz,
+    ping_interval_minutes: pingIntervalMinutes,
   } = sessionResult.rows[0];
 
   // Liveness gate — same shape as POST /violation (5a6de20). A ping against
@@ -363,7 +370,10 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
   // wrong" apart from "your coordinates are wrong", and `reason` lets the
   // app distinguish a stale label from a clock-skewed one.
   if (windowLabel) {
-    const windows    = scheduleWindows(pingScheduledStart, pingScheduledEnd, pingSiteTz);
+    const windows    = scheduleWindows(
+      pingScheduledStart, pingScheduledEnd, pingSiteTz,
+      (pingIntervalMinutes ?? 30) * 60_000,
+    );
     const windowOpen = windows.get(windowLabel);
     const reason =
       windowOpen === undefined      ? 'not_in_schedule'

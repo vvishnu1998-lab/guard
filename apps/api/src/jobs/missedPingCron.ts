@@ -52,6 +52,9 @@ interface SessionRow {
   scheduled_start: Date;
   scheduled_end: Date;
   site_tz: string | null;
+  /** schema_v68 snapshot. NULL for a session that predates the column —
+   *  COALESCEd to 30 at the call site, never joined live from sites. */
+  ping_interval_minutes: number | null;
 }
 
 function siteLocalLabel(when: Date, siteTz: string | null): string {
@@ -93,7 +96,8 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
               ss.clocked_in_at,
               s.scheduled_start,
               s.scheduled_end,
-              si.timezone AS site_tz
+              si.timezone AS site_tz,
+              ss.ping_interval_minutes
        FROM shift_sessions ss
        JOIN shifts s  ON s.id  = ss.shift_id
        JOIN sites  si ON si.id = ss.site_id
@@ -104,11 +108,18 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
     );
 
     for (const s of sessions) {
+      // Cadence from the SESSION SNAPSHOT, never a live join to sites: this
+      // cron re-derives windows for sessions that closed up to 15 min ago,
+      // and a site edit must not retroactively change what a guard was
+      // flagged for. NULL = pre-schema_v68 session, which is not the same
+      // claim as "ran on 30" — hence COALESCE here rather than a default.
+      const intervalMs = (s.ping_interval_minutes ?? 30) * 60_000;
       const windows = completedTrackableWindows(
         new Date(s.scheduled_start),
         new Date(s.scheduled_end),
         new Date(s.clocked_in_at),
         now,
+        intervalMs,
       );
 
       for (const w of windows) {

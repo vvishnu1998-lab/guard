@@ -495,6 +495,12 @@ export async function sendDailyShiftReport(shiftId: string) {
   const sessionResult = await pool.query(
     `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at,
             ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
+            -- schema_v68 snapshot: the cadence this session was actually
+            -- judged by. Read from the SESSION, never joined live from
+            -- sites — this email renders over an hour after scheduled_end
+            -- and the ratio below goes to a paying client, so a site edit
+            -- must not be able to move a number already sent.
+            ss.ping_interval_minutes,
             ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
      FROM shift_sessions ss
      JOIN shifts sh ON sh.id = ss.shift_id
@@ -579,6 +585,7 @@ export async function sendDailyShiftReport(shiftId: string) {
         new Date(sh.scheduled_end),
         new Date(session.clocked_in_at),
         new Date(),
+        (session.ping_interval_minutes ?? 30) * 60_000,
       )
     : [];
 
