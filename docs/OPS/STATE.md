@@ -12,9 +12,9 @@ Re-verify before acting. This file goes stale the moment something deploys.
 
 | thing | value |
 |---|---|
-| `main` sha | `8729290` |
-| `main` subject | `Merge pull request #18 from vvishnu1998-lab/fix/live-status-lateness-anchor` |
-| last known good `main` sha | `e7e868a` (PR #17) — Railway `e47c6396-6fd3-429b-82b9-75ef9d0d505c` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, Vercel green on the apex. **`8729290` is newer but its deploy was not verified by this commit** — check it before treating it as the good state. |
+| `main` sha | `996733c` |
+| `main` subject | `Merge pull request #19 from vvishnu1998-lab/docs/state-branch-protection` |
+| last known good `main` sha | `996733c` (PR #19) — Railway `7579554d-4209-4b20-bd73-20208a4818fb` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, `/health` 200, and GitHub's combined status on the sha is `success` on **both** contexts (`adorable-courage - guard`, `Vercel`). Vercel alias confirmed by content-hash match between the apex and the Production deployment, not by trusting the dashboard. |
 | working tree | clean (untracked only: `.playwright-mcp/`, `.vscode/`, `load test/`, `marketing/`, 4 loose PNGs) |
 | branch protection on `main` | **ENFORCED** — **two** required status checks: `Scan for hard-coded secrets` **and** `Ping window anchor (TS vs SQL)`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
 | CI | **three** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978) — all active. **Not advisory** — `gitleaks` and `window-anchor` supply the two required contexts, so either failing blocks the merge. |
