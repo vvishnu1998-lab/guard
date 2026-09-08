@@ -8,16 +8,16 @@ Re-verify before acting. This file goes stale the moment something deploys.
 
 ---
 
-## Git — verified 2026-09-08 07:35 UTC (00:35 PT)
+## Git — verified 2026-09-08 18:05 UTC (11:05 PT)
 
 | thing | value |
 |---|---|
-| `main` sha | `e7e868aa544873c0d140c761879f00f2e1f3a308` (`e7e868a`) |
-| `main` subject | `Merge pull request #17 from vvishnu1998-lab/feat/inspections-web` |
-| last known good `main` sha | `e7e868a` — same as tip. Railway `e47c6396-6fd3-429b-82b9-75ef9d0d505c` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, Vercel Production green and serving on the apex |
+| `main` sha | `8729290` |
+| `main` subject | `Merge pull request #18 from vvishnu1998-lab/fix/live-status-lateness-anchor` |
+| last known good `main` sha | `e7e868a` (PR #17) — Railway `e47c6396-6fd3-429b-82b9-75ef9d0d505c` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, Vercel green on the apex. **`8729290` is newer but its deploy was not verified by this commit** — check it before treating it as the good state. |
 | working tree | clean (untracked only: `.playwright-mcp/`, `.vscode/`, `load test/`, `marketing/`, 4 loose PNGs) |
-| branch protection on `main` | **ENFORCED** — required status check `Scan for hard-coded secrets`, `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
-| CI | one workflow, `.github/workflows/gitleaks.yml`, active (id 266080625). **No longer advisory** — its check `Scan for hard-coded secrets` is the required context on `main`, so a failing scan now blocks the merge. |
+| branch protection on `main` | **ENFORCED** — **two** required status checks: `Scan for hard-coded secrets` **and** `Ping window anchor (TS vs SQL)`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
+| CI | **three** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978) — all active. **Not advisory** — `gitleaks` and `window-anchor` supply the two required contexts, so either failing blocks the merge. |
 
 **Worktrees** (`git worktree list`) — 6 exist under `.claude/worktrees/`; none pins
 `main`. The primary checkout at `/Users/vishnuvardhanreddy/guard` is on `main` @ `e7e868a`.
