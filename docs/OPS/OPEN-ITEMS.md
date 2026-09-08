@@ -601,6 +601,46 @@ this item is scoped to inspections because that is where it was reproduced.
 **Cosmetic, latent.** No data loss, no wrong number, and the failure is self-healing on reload.
 **Size S, Tier 1.**
 
+**N36. A deploy can be superseded before anyone verifies it — nothing enforces verify-before-next-merge.**
+verified: YES — observed live 2026-09-08, not reasoned about.
+
+`770f38b1-951e-475a-b7b5-5cf28b5da9a4` carried **PR #18**, a real code change: the live-status ping
+lateness anchor (`ced1f7b`, 4 files incl. `lib/lateness.ts`) plus a new required CI check
+(`13508da`, `.github/workflows/window-anchor.yml`). It reached SUCCESS at **10:50:10 PT**. The next
+merge — PR #19, **docs-only** — started `7579554d-4209-4b20-bd73-20208a4818fb` at **11:01:53 PT** and
+superseded it. **11 minutes 43 seconds, no health check in between.** `770f38b1` went
+SUCCESS → REMOVING having never been probed.
+
+**The code is fine; the process is the hole.** `770f38b1`'s changes are verified now, but only
+*transitively*: they are ancestors of `996733c`, whose deploy `7579554d` was checked
+(`/health/crons` 200 / 19 jobs / `stale: []`). That is luck of ordering, not a control. Had the
+lateness anchor wedged a cron, the docs deploy on top would have produced an identical green and the
+regression would read as healthy.
+
+**Nothing gates this.** Branch protection's required contexts are
+`["Scan for hard-coded secrets", "Ping window anchor (TS vs SQL)"]` — **both are CI checks on the
+code, neither observes the running service.** A merge is never blocked by the previous deploy being
+unverified, or unhealthy, or still building. The deploy gate in `POLICY.md` protects *guards from
+restarts*; it says nothing about *verifying what the last restart shipped*.
+
+**Sharpened, because "SUCCESS" is the trap.** Railway `SUCCESS` means the container built and
+started. It is not a health signal — `/health` only runs `SELECT 1`, and a wedged cron still returns
+`{"status":"ok"}` (see the Railway section of `STATE.md`). So even reading the deployment list is
+not verification; `/health/crons` is the weakest check that would actually catch this class.
+
+Related and compounding: the Sentry uptime monitor (id `8024493`) is **still pointed at
+`https://www.netraops.com`**, the web app, rather than `api.netraops.com/health/crons` — see N4 and
+`RUNBOOK-phase4-apply.md` step (d). Until it is repointed there is no automated backstop either, so
+an unverified deploy is genuinely unobserved rather than merely unverified-by-a-human.
+
+Cheapest fixes, in order of effort: (a) repoint the uptime monitor, which closes the automated half
+without any process change; (b) a one-line post-merge check on `/health/crons` before the next merge
+is opened — the sequential-PR discipline that `strict: true` already forces makes the slot natural;
+(c) a CI job that polls the deployment and its health after merge, which is the only version that
+cannot be skipped by a person in a hurry.
+
+**Procedural, not code. Size S for (a), M for (c). Tier 1.**
+
 
 ---
 
