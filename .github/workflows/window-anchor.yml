@@ -1,0 +1,93 @@
+name: window-anchor
+
+# The ping-window ANCHOR is written twice: in TypeScript
+# (apps/api/src/services/pingWindows.ts) and in SQL
+# (apps/api/src/services/shiftHours.ts, VIOLATION_HOURS_ROW_SQL's
+# generate_series). Interpolating PING_WINDOW_MS shares the CONSTANT but not
+# the EXPRESSION, so the two can still drift on the anchor, the FLOOR
+# direction, or the half-open boundary convention.
+#
+# apps/api/scripts/check-window-anchor.ts enumerates both for the same inputs
+# and asserts identical boundary lists. Three source comments already claimed
+# it "fails the build" — pingWindows.ts:40, shiftHours.ts:223 and the script's
+# own header. Nothing ran it. `npm run build` is `tsc` alone and apps/api has
+# no test script, so the drift detector this design leans on was manual and
+# had never executed in CI. This workflow is what makes those comments true.
+#
+# ── WHY A SERVICE CONTAINER AND NOT A SECRET ────────────────────────────────
+#
+# The script must EXECUTE the SQL half in Postgres rather than model it — a TS
+# model would just be a third copy of the same expression. But its query is a
+# generate_series over bind parameters and references NO TABLE, so it needs a
+# Postgres engine and not a schema. An empty throwaway container is a complete
+# substitute for any real database, which means:
+#   * no secret in Actions, and nothing to rotate;
+#   * no schema seeding step to keep in sync with apps/api/src/db/;
+#   * CI never points at production.
+#
+# ── WHY REQUIRE_DB IS NOT OPTIONAL HERE ─────────────────────────────────────
+#
+# Without a connection string the script exits 0 with a SKIPPED notice, which
+# is right for a bare checkout and fatal for a required check: it would report
+# success while comparing nothing. This repo has shipped that exact bug — the
+# railway-logs collector exited 0 while printing its own error and was recorded
+# as a successful collection (docs/OPS/STATE.md, "Two bugs, not one").
+# REQUIRE_DB=1 turns the skip into a hard failure with the reason printed.
+# If you ever copy this job, copy that line with it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  anchor:
+    name: Ping window anchor (TS vs SQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Throwaway, job-local, empty. Credentials below are literals on
+        # purpose: they are created and destroyed with this job and grant
+        # access to nothing. Do not replace them with secrets — that would
+        # imply this container holds something worth protecting.
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # Without the health check the job races the container and the script
+        # fails on connection refused — which would look like an anchor drift.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Node 20 leaves hosted runners on 2026-09-16; the action majors below
+      # are the Node 24 ones (see docs/OPS/STATE.md, "Actions on Node 24").
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # Root lockfile, npm workspaces ("workspaces": ["apps/*","packages/*"]).
+      - name: Install
+        run: npm ci
+
+      - name: Compare TS and SQL window anchors
+        working-directory: apps/api
+        env:
+          # Built here from job-local literals matching the service container
+          # above. Never a secret, never production.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          # The whole point. See the header.
+          REQUIRE_DB: '1'
+        run: npx ts-node scripts/check-window-anchor.ts
