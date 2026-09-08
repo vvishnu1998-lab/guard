@@ -8,13 +8,13 @@ Re-verify before acting. This file goes stale the moment something deploys.
 
 ---
 
-## Git — verified 2026-09-08 18:05 UTC (11:05 PT)
+## Git — verified 2026-09-08 21:40 UTC (14:40 PT)
 
 | thing | value |
 |---|---|
-| `main` sha | `996733c` |
-| `main` subject | `Merge pull request #19 from vvishnu1998-lab/docs/state-branch-protection` |
-| last known good `main` sha | `996733c` (PR #19) — Railway `7579554d-4209-4b20-bd73-20208a4818fb` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, `/health` 200, and GitHub's combined status on the sha is `success` on **both** contexts (`adorable-courage - guard`, `Vercel`). Vercel alias confirmed by content-hash match between the apex and the Production deployment, not by trusting the dashboard. |
+| `main` sha | `dfdcc8c` |
+| `main` subject | `Merge pull request #23 from vvishnu1998-lab/feat/thread-ping-interval` |
+| last known good `main` sha | `996733c` (PR #19) — Railway `7579554d-4209-4b20-bd73-20208a4818fb` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, `/health` 200, and GitHub's combined status on the sha is `success` on **both** contexts (`adorable-courage - guard`, `Vercel`). Vercel alias confirmed by content-hash match between the apex and the Production deployment, not by trusting the dashboard. **NOT advanced to `dfdcc8c`**: PRs #18/#21/#22/#23 merged green, but "last known good" in this table means post-merge Railway + `/health/crons` + Vercel alias re-verified on the sha, and that pass has not been run since. Advance it only after re-running those four checks. |
 | working tree | clean (untracked only: `.playwright-mcp/`, `.vscode/`, `load test/`, `marketing/`, 4 loose PNGs) |
 | branch protection on `main` | **ENFORCED** — **two** required status checks: `Scan for hard-coded secrets` **and** `Ping window anchor (TS vs SQL)`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
 | CI | **three** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978) — all active. **Not advisory** — `gitleaks` and `window-anchor` supply the two required contexts, so either failing blocks the merge. |
@@ -50,6 +50,162 @@ sequentially, not in parallel.
 **Re-verify this row before planning any push.** It flipped once with no signal; the
 only reliable check is
 `gh api repos/vvishnu1998-lab/guard/branches/main/protection` at the moment of use.
+
+---
+
+## Shipped 2026-09-08 — per-site ping cadence, Phases A/B/C/D
+
+Four PRs, merged in order. **All four are behavioural no-ops today**: every one
+of the 23 production sites reads `ping_interval_minutes = 30`, and the
+capability gate returns 30 for every client in the field. What shipped is the
+plumbing and the proof, not a change in what any guard experiences.
+
+| PR | branch | what |
+|---|---|---|
+| **#18** | `fix/live-status-lateness-anchor` | live-status lateness anchored on `scheduled_start`; `check-window-anchor` wired to CI |
+| **#21** | `feat/schema-v68-session-ping-interval` | `schema_v68` — the column, nullable, unread |
+| **#22** | `feat/session-ping-interval-snapshot` | snapshot written at clock-in on both paths, capability-gated |
+| **#23** | `feat/thread-ping-interval` | interval threaded through all six grid consumers |
+
+### #18 — live-status lateness was wrong in production, in BOTH directions
+
+`computeLateness(last_ping_at, [0, 30])` graded every ping against `:00`/`:30`
+past the hour. Ping windows are `scheduled_start + N*30min`, which lands there
+only when `scheduled_start` does — true for **466 of 492** production shifts,
+false for **26**.
+
+**The case worth naming is the UNDERSTATEMENT, not the overstatement.** On
+session `9021350a` (375 Shopping Complex, `scheduled_start` **14:48 PT**,
+2026-09-07) a ping submitted at **18:04:21** for the **17:48** window is **16
+minutes late** and the column rendered it **`+4m late`**. The column made a late
+guard look punctual. The mirror case — an on-time 15:18 ping rendering
+`+18m late` — is the visible half and the harmless one.
+
+That asymmetry is the whole point: had it only ever exaggerated, the column
+could have been read as a conservative over-estimate and left alone.
+
+Fixed by `computeLatenessAnchored`, measuring `(ping − scheduled_start) mod
+interval`. No API change was needed — `scheduled_start` had been on
+`GET /api/admin/live-guards` since `9c98957`; the client simply never declared
+it. Unknown anchor, or a ping preceding `scheduled_start`, renders the bare time
+with **no lateness clause**: state WHEN, not HOW LATE.
+
+`computeLateness` is byte-identical to its pre-PR form and still serves the two
+hourly-report columns, whose cadence really is wall-clock top-of-hour.
+
+**This bug class had already been found and fixed once**, in the activity log
+(`ActivityLogTable.tsx`). The comment left behind by that fix asserted
+`computeLateness` was "still correct for the live-status page" — wrong twice
+(it never measured "vs. now"; there *was* an anchor available) — and that
+sentence is why the second call site survived. Corrected in the same PR.
+
+### #18 — `check-window-anchor` previously exited 0 with no database
+
+Three source comments claimed the script "fails the build". Nothing ran it:
+`build` is `tsc` alone, `apps/api` has no `test` script, and the only workflows
+were `gitleaks` and `ops-triage`.
+
+Worse, wiring it as-is would have produced a **permanently green required check
+that verified nothing**: with no connection string the script exits **0** with a
+`SKIPPED` notice. Measured both ways before the fix — `exit 0` with a database,
+`exit 0` without one.
+
+`REQUIRE_DB=1` turns that skip into a hard failure with the reason printed;
+unset, the bare-checkout skip is unchanged. `.github/workflows/window-anchor.yml`
+runs it on every PR and push to `main` against a throwaway `postgres:16` service
+container — **no secret, no schema seeding**, because the script's query is a
+`generate_series` over bind parameters and touches no table. CI therefore never
+points at production.
+
+This is the same silent-failure class as the `railway-logs` collector, which
+exited 0 while printing its own error and was recorded as a successful
+collection. Reintroducing it inside the commit meant to close it would have been
+the whole point missed.
+
+### #21 / #22 — the snapshot
+
+`schema_v68` adds `shift_sessions.ping_interval_minutes INTEGER NULL` — no
+default, no CHECK. NULL means "session predates the column", which is a
+different statement from "runs on 30"; readers `COALESCE(x, 30)` in one place
+rather than a backfill asserting a cadence nobody measured.
+
+Written once at clock-in on **both** session-creation paths —
+`POST /:id/clock-in` and `POST /:id/handoff-clock-in`, the only two INSERTs into
+`shift_sessions` outside five unwired test scripts.
+
+**Capability-gated on `runtime/`.** Honouring a non-30 cadence is a JS-level
+capability in `apps/mobile/lib/pingSchedule.ts`, which hardcodes 30 on every
+shipped build. Stamping 45 onto a session whose handset still counts in 30-minute
+steps would judge the guard against a grid their own app never showed them.
+Threshold `MIN_RUNTIME_READING_SESSION_INTERVAL = '1.1.0'` **does not exist** —
+production is on runtime 1.0.17 — so the gate returns 30 for every client today.
+
+`handoff-clock-in` already joined `sites` and cost no extra round trip; `si` was
+deliberately kept out of `FOR UPDATE OF ssr, sh`. `clock-in` reads the site value
+as its **own** SELECT rather than joining `sites` into a query carrying a bare
+`FOR UPDATE`, which in Postgres locks a row from every table in the join and
+would serialise concurrent clock-ins across every guard at that site.
+
+**Wire change, recorded as such and not as "no behaviour change":** both routes
+end in `RETURNING *`, so the clock-in and handoff-clock-in **201 bodies each
+gained a `ping_interval_minutes` field**. Additive and inert — mobile types the
+response narrowly, spreads it into a store that is not persisted, and nothing
+branches on it.
+
+### #23 — threaded through all six grid consumers
+
+`scheduleWindows`, `completedTrackableWindows` and `windowJustClosed` take an
+**optional** trailing `intervalMs`, defaulting to `PING_WINDOW_MS` so frozen
+`shiftHours.ts` (Phase E) keeps compiling untouched. Consumers, all reading the
+**session snapshot**:
+
+`missedPingCron` · `pingReminder` · `services/email.ts` · `routes/locations.ts` ·
+`routes/activityLog.ts` · `scripts/check-window-anchor.ts`
+
+**`activityLog.ts` was a sixth consumer nobody had counted.** It carried an
+independent `const WINDOW_MIN = 30` and its own grid loop, importing nothing from
+`pingWindows.ts`, and it drives the activity log and its PDF export — both
+client-facing. Threading the other five and leaving it would have put the log on
+a different grid from `missed_pings` for the same shift.
+
+`RECOVERY_MS` moved from tick-scoped to per-row: `min(10 min, interval/3)`. The
+old flat 10 minutes was justified as "well inside the 30-min window", which stops
+being true as cadence varies — 67% of a 15-minute window, and at a cadence of 10
+or below the range spans past the next window's close, at which point
+`windowJustClosed` has already advanced and the recovery **silently becomes a
+no-op**. At 30 min the formula computes exactly 10 minutes.
+
+The `n < 250` loop bounds were a latent bug, not merely a literal: 250 silently
+meant "125 hours" only because the interval was 30. At interval 15 the same
+literal caps the grid at 62 h — enough to **truncate** a long shift's window list
+with no error. Now span-derived, yielding exactly 250 at 30 minutes.
+
+### The proof — 211-session golden, byte-identical
+
+Before branching, window lists were enumerated for **all 211 production
+sessions** using the shipped code, from a frozen input fixture so the two runs
+differ **only in code** — never in data or clock. Re-run on the threaded branch
+fed `COALESCE(snapshot, 30)`:
+
+```
+before  211 sessions  228990 bytes  md5 a36238a254c16082023e4b7c08e20851
+after   211 sessions  228990 bytes  md5 a36238a254c16082023e4b7c08e20851
+```
+
+**Byte-identical, 0 differing lines.** Four independent projections per session:
+`completedTrackableWindows` at a far-future `now`, the same at the session's real
+close, `scheduleWindows`' full label→start map, and `windowJustClosed`.
+
+**Exhaustive, not sampled** — 210 of 211 rows are NULL and the one stamped row is
+30, so `COALESCE(x, 30)` yields 30 for every session that exists in production.
+
+The golden is **not committed**: it holds session ids. Regenerate it before any
+future phase that touches the grid; comparing against the shipped code is the
+only form of this proof that is not a tautology.
+
+`check-window-anchor` now runs **36 comparisons** — 6 cases × 15/30/45/60/75/90.
+The 30-minute row (`16/16/24/15/1/24`) is byte-identical to the pre-change 6-case
+output and is the regression guard.
 
 ---
 
@@ -107,15 +263,22 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
-## Schema — verified 2026-09-05 08:34 UTC (v67 row updated 2026-09-05, Phase 2)
+## Schema — verified 2026-09-08 21:40 UTC (v68 applied; v66 rows corrected)
 
 | thing | value |
 |---|---|
-| tip in `migrate.ts` (file) | **v66** — `files` array ends `'schema_v65.sql', 'schema_v66.sql'` (`apps/api/src/db/migrate.ts:10`) |
-| tip on disk | **v66** — `ls schema_v*.sql \| sort -V \| tail -1` → `schema_v66.sql` |
-| tip applied in prod DB | **v66** — `pg_attribute` probe: `geofence_violations.position_source` and `off_post_events.position_source` both `attnotnull = true`, which is v66's entire contract |
-| **v67** | **APPLIED in production 2026-09-05.** `to_regclass('public.cron_heartbeats')` returns `cron_heartbeats`; 15 of 19 heartbeat rows present at 11:00Z, all `last_result='ok'`. The 4 absent are the daily/monthly jobs, which had not been due since deploy. |
-| **v68** | **FREE** — no `schema_v68.sql` on disk; `migrate.ts` chain ends at v67 (68 files, verified applying clean from empty into a local `guard_dev` 2026-09-05). |
+| tip in `migrate.ts` (file) | **v68** — `files` array ends `'schema_v67.sql', 'schema_v68.sql'` (`apps/api/src/db/migrate.ts:10`) |
+| tip on disk | **v68** — `ls schema_v*.sql \| sort -V \| tail -1` → `schema_v68.sql`. 67 files on disk, 67 entries in the array, no duplicates, every entry resolves. |
+| tip applied in prod DB | **v68** — `information_schema.columns` shows `shift_sessions.ping_interval_minutes` `integer`, `is_nullable=YES`, `column_default=null`. Applied by Vishnu 2026-09-08. |
+| **v67** | **APPLIED 2026-09-05.** `to_regclass('public.cron_heartbeats')` returns `cron_heartbeats` — v67's entire contract. |
+| **v68** | **APPLIED 2026-09-08** (PR #21). `shift_sessions.ping_interval_minutes INTEGER NULL`, no default, no CHECK. 211 sessions: **210 NULL, 1 stamped `30`** (first at 19:00:14Z), so the Phase D `COALESCE(x, 30)` resolves to 30 for every row that exists. |
+| **v69** | **FREE** — no `schema_v69.sql` on disk; the chain ends at v68. |
+
+**The v66 rows above were stale for three days.** This table recorded v66 as the
+tip of both the file and the DB while v67 was already applied and v68 was free.
+The lesson is the one the invariants file already states: **read the chain from
+`migrate.ts` and `ls schema_v*.sql` at the start of every session, never from
+this table.** This section is a snapshot, and the number moves within a session.
 
 **There is no migrations ledger table.** A `pg_class` sweep for `%migration%` /
 `%schema_version%` / `%migrate%` in `public` returns zero rows. `migrate.ts`
@@ -192,10 +355,27 @@ Readiness check: `INCIDENTS/2026-09-06-starnet-expansion-readiness.md` (N29).
 | `fea19254-6d65-4fbb-9f17-022081cf3472` | 23000 Cristo Rey Los Altos | true | true | r=190 m, 4 verts | America/Los_Angeles |
 | `53c71c64-1973-4f82-be9c-98e4800beece` | Bethel AME Church | **false** | true | r=100 m, 16 verts | America/Los_Angeles |
 | `6c638a80-a887-4375-9687-bfb6c1acb3bc` | william pen hotel | true | **false** | **none** | America/Los_Angeles |
-| `015a37e9-7566-46b9-9cd6-c40705e2e2d7` | CCDC Folsom (**new 09-06**) | true | true | r=90 m, 4 verts | America/Los_Angeles |
-| `a4588d96-b45e-4fdb-a1f1-34a9cada6015` | CCDC Broadway (**new 09-06**) | true | true | r=70 m, 4 verts | America/Los_Angeles |
+| `015a37e9-7566-46b9-9cd6-c40705e2e2d7` | CCDC Folsom (**new 09-06**) | **false** | true | r=90 m, 4 verts | America/Los_Angeles |
+| `a4588d96-b45e-4fdb-a1f1-34a9cada6015` | CCDC Broadway (**new 09-06**) | **false** | true | r=70 m, 4 verts | America/Los_Angeles |
 | `ab450901-c434-417c-b5b6-292b4d09e80c` | 375 Shopping Complex (**new 09-06**) | true | true | r=300 m, 4 verts | America/Los_Angeles |
-| `7fabf0ee-f100-43e4-aabd-71cf0dae31fc` | Jasper (**new 09-06**) | true | true | r=50 m, 4 verts | America/Los_Angeles |
+| `7fabf0ee-f100-43e4-aabd-71cf0dae31fc` | Jasper (**new 09-06**) | **false** | true | r=50 m, 4 verts | America/Los_Angeles |
+
+**`checkpoints_enabled` corrected 2026-09-08** — this table recorded `true` for
+CCDC Folsom, CCDC Broadway and Jasper. Production says **`false`** for all three.
+Re-read directly: `SELECT name FROM sites WHERE NOT checkpoints_enabled` returns
+exactly four rows — **Bethel AME Church, CCDC Broadway, CCDC Folsom, Jasper**.
+375 Shopping Complex is `true` and was recorded correctly.
+
+Nothing in this file dates the flip, so **UNVERIFIED: whether the three were
+created `false` on 09-06 or toggled since.** `sites` has no `updated_at`, so the
+DB cannot answer it either — the only trace would be an admin action log.
+Consequence, since checkpoints are guard-facing: scanning is **off** at three of
+the four new sites, and `siteFlags.ts` fails safe to TRUE only when the field is
+ABSENT, never when it is explicitly `false`.
+
+**Platform-wide site count: 23** (22 active). All 23 read
+`ping_interval_minutes = 30`. Recorded because two source comments claimed "15
+production sites" — see the correction note in the Schema section.
 
 **`MOCK_LOCATION_ENFORCEMENT` is `on` in Railway production** (read 2026-09-07
 02:3xZ). Code default is `off`; no decision records the flip. See N29 §5.

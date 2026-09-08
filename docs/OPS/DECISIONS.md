@@ -137,6 +137,77 @@ built to stop, and the brief is the surface where it would be least visible.
 
 ---
 
+## 2026-09-08 — per-site ping cadence (Phases A–D)
+
+### D15. The picker set is **15 / 30 / 45**. Nothing else.
+
+Three values, not six. The earlier working set (15/30/45/60/75/90) was a
+placeholder carried through the D0 audit and is **superseded**; it survives only
+as the parameter matrix in `scripts/check-window-anchor.ts`, where extra
+coverage is harmless.
+
+`sites.ping_interval_minutes` still permits **5–240** (`schema_v14.sql:39`), so
+the column is wider than the picker and always was. **The picker is not the
+enforcement boundary** — direct SQL can still set 5, and at that value the
+`pingReminder` recovery range inverts (see D17 and the Phase H open item). The
+CHECK narrowing that makes the picker real is Phase H work.
+
+### D16. Readers take the cadence from the **SESSION SNAPSHOT**, never from `sites`.
+
+`shift_sessions.ping_interval_minutes` (schema_v68) is written once at clock-in
+and is immutable thereafter. `sites.ping_interval_minutes` is only ever its
+SOURCE. No reader may join `sites` for a cadence.
+
+**Why this is not a style preference.** `missedPingCron`, `pingReminder`,
+`services/email.ts` and `shiftHours.ts`'s `VIOLATION_HOURS_ROW_SQL` all
+re-derive windows **long after a session closes** — the daily client report
+renders over an hour past `scheduled_end`, `violation_hours` is recomputed on
+every read of the hours export, and the activity log is queried for arbitrary
+past ranges. A live join would let an admin editing a site at 21:00
+retroactively change how many windows a guard was accountable for at 14:00, and
+move a ratio **already emailed to a paying client**.
+
+That is not a display bug. It rewrites a closed session's obligations and a
+billed number after the fact, with no record that either changed.
+
+NULL means "session predates schema_v68" — a different statement from "ran on
+30" — so readers `COALESCE(x, 30)` at the call site rather than defaulting
+inside the window functions or backfilling a cadence nobody measured.
+
+### D17. The capability gate keys on `runtime/`, not `version/` and not `build/`.
+
+The client header is
+`platform/<os>; version/<v>; build/<b>; runtime/<r>; update/<id>`
+(`apps/mobile/lib/apiClient.ts:56`).
+
+**`build/` is unusable.** It comes from `app.json`, which EAS remote versioning
+ignores. Production proves the gap: handsets report `build/41` (iOS) and
+`build/17` (Android) while the shipped builds are **48** and **24**.
+
+**`version/` is nearly right and still wrong.** The capability being gated is
+JS-level — it lives in `apps/mobile/lib/pingSchedule.ts` — and an OTA replaces
+that JS **without moving the store version**. A device can gain the capability
+while `version` stands still. `runtimeVersion` is what an update group is
+published against, so it is the field that tracks which JS a handset can run.
+
+**They look identical in the field, which is exactly why this is written down.**
+All eight client strings production has recorded carry `version` and `runtime`
+as the same value, because `app.json` sets `runtimeVersion` to
+`{"policy": "appVersion"}`. The two diverge **only** in the OTA case the gate
+exists to catch — so a reader comparing them today would reasonably conclude
+either would do, and be wrong in the one scenario that matters.
+
+Comparison is **numeric per segment**, never lexicographic: `'1.0.9' > '1.0.10'`
+as strings, which would open the gate to a handset older than the threshold.
+`_pingIntervalGate.test.ts` asserts the string form really would disagree, so
+the test fails if anyone reduces it to `localeCompare`.
+
+Evidence dates: header format read from `apps/mobile/lib/apiClient.ts`
+2026-09-08; the build/48-vs-`build/41` gap and the eight client strings read
+from `guard_devices.client` in production the same day.
+
+---
+
 ## How to add to this file
 
 One dated section per decision batch. State the decision, then — if it references
