@@ -4,20 +4,29 @@
  *
  * ── WHY THIS EXISTS ─────────────────────────────────────────────────────
  *
- * The rule "windows are PING_WINDOW_MS slots anchored at scheduled_start"
- * is written twice:
+ * The rule "windows are fixed-length slots anchored at scheduled_start" is
+ * written twice:
  *
- *   TypeScript  services/pingWindows.ts:119   ssMs + n * PING_WINDOW_MS
- *   SQL         services/shiftHours.ts        VIOLATION_HOURS_ROW_SQL's
- *                                             generate_series grid
+ *   TypeScript  services/pingWindows.ts   completedTrackableWindows's loop
+ *   SQL         services/shiftHours.ts    VIOLATION_HOURS_ROW_SQL's
+ *                                         generate_series grid
  *
- * Interpolating PING_WINDOW_MS shares the CONSTANT. It does not share the
- * EXPRESSION, and a SQL fragment cannot call a TS function, so the two can
- * still drift on the anchor, on the FLOOR direction, or on the half-open
- * boundary convention. A comment on each pointing at the other is what this
- * codebase has already watched fail — see the header of
+ * Sharing a constant shares the CONSTANT. It does not share the EXPRESSION,
+ * and a SQL fragment cannot call a TS function, so the two can still drift on
+ * the anchor, on the FLOOR direction, or on the half-open boundary
+ * convention. A comment on each pointing at the other is what this codebase
+ * has already watched fail — see the header of
  * apps/mobile/constants/breakDurations.ts, where exactly that arrangement
  * did not prevent the drift it was written to prevent.
+ *
+ * ── AND THE LENGTH IS NO LONGER CONSTANT ────────────────────────────────
+ *
+ * pingWindows.ts now takes an optional intervalMs and every caller passes the
+ * session's schema_v68 snapshot, so agreement has to hold at EVERY cadence
+ * the picker offers — not only at the one value production happens to use.
+ * Each case below therefore runs at 15/30/45/60/75/90 minutes: 6 cases x 6
+ * cadences = 36 comparisons. The 30-minute rows double as the regression
+ * guard that threading the parameter did not move the existing grid.
  *
  * So: enumerate the windows both ways for the same inputs and assert the
  * boundary lists are identical. Any change to either anchor that is not
@@ -56,7 +65,7 @@
  * if you are wiring this anywhere new, set REQUIRE_DB=1 or do not bother.
  */
 import { Pool } from 'pg';
-import { PING_WINDOW_MS, completedTrackableWindows } from '../src/services/pingWindows';
+import { completedTrackableWindows } from '../src/services/pingWindows';
 
 const CASES: Array<{ name: string; start: string; end: string }> = [
   { name: 'ordinary 8h on the half hour', start: '2026-08-01T14:00:00Z', end: '2026-08-01T22:00:00Z' },
@@ -66,6 +75,25 @@ const CASES: Array<{ name: string; start: string; end: string }> = [
   { name: 'short 45m',                     start: '2026-08-01T14:00:00Z', end: '2026-08-01T14:45:00Z' },
   { name: 'DST fall-back night',           start: '2026-11-01T00:00:00Z', end: '2026-11-01T12:00:00Z' },
 ];
+
+/**
+ * Every cadence the per-site picker will offer, in minutes.
+ *
+ * The grid is no longer a constant: services/pingWindows.ts takes an optional
+ * intervalMs and every caller passes the session's schema_v68 snapshot. So the
+ * TS-vs-SQL agreement has to hold at each cadence, not just at 30 — otherwise
+ * this gate would keep passing while the two implementations drift apart
+ * everywhere except the one value it happens to test.
+ *
+ * 30 stays in the list and is load-bearing twice over: it is the only cadence
+ * in production today, so those six comparisons are also the regression guard
+ * proving this refactor did not move the existing grid.
+ *
+ * sites.ping_interval_minutes permits 5..240 (schema_v14.sql:39), which is
+ * wider than this list. These are the picker's values; widen the list if the
+ * picker widens.
+ */
+const INTERVALS_MIN = [15, 30, 45, 60, 75, 90];
 
 /** CI sets this. See the REQUIRE_DB block in the header: without it, a
  *  required check that cannot reach a database reports success. */
@@ -90,6 +118,8 @@ async function main(): Promise<number> {
   let failures = 0;
   try {
     for (const c of CASES) {
+    for (const intervalMin of INTERVALS_MIN) {
+      const intervalMs = intervalMin * 60_000;
       const start = new Date(c.start), end = new Date(c.end);
 
       // TS side — the authority. completedTrackableWindows enumerates the raw
@@ -106,7 +136,8 @@ async function main(): Promise<number> {
       // can be unconfirmed. Comparing against it reported a 22-vs-24
       // "mismatch" that was a difference of purpose, not of anchor.
       const FAR = new Date('2100-01-01T00:00:00Z');
-      const ts = completedTrackableWindows(start, end, start, FAR).map((w) => w.windowStart.getTime());
+      const ts = completedTrackableWindows(start, end, start, FAR, intervalMs)
+        .map((w) => w.windowStart.getTime());
 
       // SQL side — the same grid, executed by Postgres, with R3 applied by
       // the generate_series upper bound rather than by a break.
@@ -118,20 +149,24 @@ async function main(): Promise<number> {
            (INTERVAL '1 millisecond' * $3::bigint)) AS w(ws)
           WHERE ws + (INTERVAL '1 millisecond' * $3::bigint) <= $2::timestamptz
           ORDER BY ws`,
-        [start.toISOString(), end.toISOString(), PING_WINDOW_MS],
+        [start.toISOString(), end.toISOString(), intervalMs],
       );
       const sql = rows.map((r) => new Date(r.ws).getTime());
 
       const same = ts.length === sql.length && ts.every((v, i) => v === sql[i]);
       if (!same) {
         failures += 1;
-        console.error(`\n[check-window-anchor] MISMATCH — ${c.name}`);
+        console.error(`\n[check-window-anchor] MISMATCH — ${c.name} @ ${intervalMin}min`);
         console.error(`  scheduled_start ${c.start}   scheduled_end ${c.end}`);
         console.error(`  TS  (pingWindows.ts)  ${ts.length} windows: ${ts.slice(0, 6).map(iso).join(', ')}${ts.length > 6 ? ' …' : ''}`);
         console.error(`  SQL (shiftHours.ts)   ${sql.length} windows: ${sql.slice(0, 6).map(iso).join(', ')}${sql.length > 6 ? ' …' : ''}`);
       } else {
-        console.log(`[check-window-anchor] OK  ${String(ts.length).padStart(2)} windows  ${c.name}`);
+        console.log(
+          `[check-window-anchor] OK  ${String(intervalMin).padStart(2)}min  ` +
+          `${String(ts.length).padStart(3)} windows  ${c.name}`,
+        );
       }
+    }
     }
   } finally {
     await pool.end();

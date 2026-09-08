@@ -72,7 +72,19 @@ import {
 
 const router = Router();
 
-const WINDOW_MIN = 30;
+/**
+ * Fallback cadence for a session with no schema_v68 snapshot.
+ *
+ * This was `const WINDOW_MIN = 30` — an INDEPENDENT copy of the ping grid,
+ * reimplemented locally and importing nothing from services/pingWindows.ts.
+ * It drives this log and its PDF export, both client-facing, so leaving it
+ * fixed while the crons moved to a per-session cadence would have shown one
+ * grid here and a different one in missed_pings for the same shift.
+ *
+ * The per-session value now comes from ss.ping_interval_minutes; this is only
+ * the COALESCE floor for rows written before that column existed.
+ */
+const DEFAULT_WINDOW_MIN = 30;
 const LATE_THRESHOLD_MIN = 10;
 
 // Hard cap on rows the PDF export walks. 3000 events is ~150 pages
@@ -95,6 +107,10 @@ interface SessionRow {
   scheduled_end:   string;
   /** Site IANA zone — needed to reproduce the crons' window labels. */
   site_tz:         string | null;
+  /** schema_v68 snapshot — the cadence this session was judged by, so the
+   *  log's grid matches missed_pings exactly. NULL for a pre-column
+   *  session, COALESCEd to 30. From the SESSION, never live from sites. */
+  ping_interval_minutes: number | null;
 }
 
 interface PingRow {
@@ -365,7 +381,8 @@ export async function fetchActivityRows(
       sh.id              AS shift_id,
       sh.scheduled_start,
       sh.scheduled_end,
-      si.timezone        AS site_tz
+      si.timezone        AS site_tz,
+      ss.ping_interval_minutes
     FROM shift_sessions ss
     JOIN guards g  ON g.id  = ss.guard_id
     JOIN sites  si ON si.id = ss.site_id
@@ -688,11 +705,16 @@ export async function fetchActivityRows(
         .filter((id): id is string => id != null),
     );
 
+    // Per-session cadence (schema_v68), so this log's grid is the same grid
+    // missedPingCron flagged against. NULL = pre-column session.
+    const windowMin = s.ping_interval_minutes ?? DEFAULT_WINDOW_MIN;
+    const windowMs  = windowMin * 60_000;
+
     const windows: { startMs: number; label: string }[] = [];
     for (
       let ws = scheduledStartMs;
-      ws + WINDOW_MIN * 60_000 <= scheduledEndMs;
-      ws += WINDOW_MIN * 60_000
+      ws + windowMs <= scheduledEndMs;
+      ws += windowMs
     ) {
       windows.push({ startMs: ws, label: siteLocalLabel(new Date(ws), s.site_tz) });
     }
@@ -706,7 +728,7 @@ export async function fetchActivityRows(
           ? windows.find((w) => w.label === ping.window_label)
           : undefined) ??
         windows.find(
-          (w) => pingMs >= w.startMs && pingMs < w.startMs + WINDOW_MIN * 60_000,
+          (w) => pingMs >= w.startMs && pingMs < w.startMs + windowMs,
         ) ??
         null;
       // No matching window (e.g. out-of-schedule submission): grade as

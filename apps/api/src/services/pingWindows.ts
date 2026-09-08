@@ -42,17 +42,52 @@ import { pool } from '../db/pool';
  * the build if you forget. Do not rely on this comment alone; a
  * keep-in-sync comment is precisely what failed for the break constants.
  *
- * ── TRAP: sites.ping_interval_minutes IS NOT THE CADENCE THE SERVER USES ─
+ * ── THE INTERVAL COMES FROM THE SESSION, NEVER FROM sites ───────────────
  *
- * That column exists, is NOT NULL, is editable per site, and is sent to the
- * mobile app (routes/shifts.ts:2596) — but NOTHING on the server reads it.
- * pingReminder, missedPingCron, missedReportCron and the violation-hours SQL
- * all use this constant. All 15 production sites read 30 today, so nothing
- * diverges; set one site to 20 and the guard's countdown, the reminder cron,
- * the missed-ping flags and the off-post number would all disagree at once.
- * Deliberately not fixed here — noted so it is not discovered the hard way.
+ * This block used to record a trap: sites.ping_interval_minutes existed, was
+ * editable, was sent to mobile, and NOTHING on the server read it. That is no
+ * longer true — the three window functions below take an optional intervalMs,
+ * and every caller passes COALESCE(shift_sessions.ping_interval_minutes, 30).
+ *
+ * READ IT FROM THE SESSION SNAPSHOT (schema_v68), NOT FROM sites. The two are
+ * not interchangeable and the difference is not cosmetic. missedPingCron,
+ * pingReminder, services/email.ts and shiftHours.ts's VIOLATION_HOURS_ROW_SQL
+ * all re-derive windows LONG after a session closes — the daily client report
+ * runs over an hour past scheduled_end, and violation_hours is recomputed on
+ * every read of the hours export. A live join to sites would let an admin
+ * editing a site at 21:00 retroactively change how many windows a guard was
+ * accountable for at 14:00, and change a number already emailed to a paying
+ * client. The snapshot is written once at clock-in (routes/shifts.ts) and is
+ * immutable thereafter; sites.ping_interval_minutes is only ever its SOURCE.
+ *
+ * NULL means "session predates schema_v68", which is a different statement
+ * from "runs on 30" — hence COALESCE at the call site rather than a default
+ * baked in here or a backfill asserting a cadence nobody measured.
+ *
+ * The parameter is OPTIONAL and defaults to PING_WINDOW_MS so that
+ * services/shiftHours.ts — which imports the constant to interpolate into
+ * SQL and is frozen until Phase E — keeps compiling untouched.
  */
 export const PING_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * Runaway guard for the grid loops, expressed as a SPAN OF TIME rather than
+ * a window count.
+ *
+ * Both loops used to stop at a literal `n < 250`, which silently meant "125
+ * hours" only because the interval happened to be 30 minutes. At interval 15
+ * the same literal caps the grid at 62 h — short enough that a long shift
+ * would be TRUNCATED rather than rejected, producing a short window list with
+ * no error. Bounding the span keeps the guard's meaning constant as the
+ * interval varies, and yields exactly 250 iterations at 30 minutes, which is
+ * what makes this change a no-op on every session in production.
+ */
+const MAX_GRID_SPAN_MS = 250 * PING_WINDOW_MS;   // 125 hours
+
+/** Iteration cap for a given cadence. 250 at 30 min; 500 at 15; 83 at 90. */
+function maxWindowsFor(intervalMs: number): number {
+  return Math.floor(MAX_GRID_SPAN_MS / intervalMs);
+}
 
 /**
  * Break-time quiet policy (locked 2026-08-20): a ping window is WAIVED when
@@ -135,15 +170,17 @@ export function scheduleWindows(
   scheduledStart: Date,
   scheduledEnd:   Date,
   siteTz:         string | null,
+  intervalMs:     number = PING_WINDOW_MS,
 ): Map<string, number> {
   const ssMs = scheduledStart.getTime();
   const seMs = scheduledEnd.getTime();
   const out = new Map<string, number>();
-  // Same 250-window safety bound as completedTrackableWindows: a bad
+  // Same span-bounded safety guard as completedTrackableWindows: a bad
   // scheduled_start must not spin forever.
-  for (let n = 0; n < 250; n += 1) {
-    const wsMs = ssMs + n * PING_WINDOW_MS;
-    if (wsMs + PING_WINDOW_MS > seMs) break;   // R3 — end must fit in shift
+  const maxN = maxWindowsFor(intervalMs);
+  for (let n = 0; n < maxN; n += 1) {
+    const wsMs = ssMs + n * intervalMs;
+    if (wsMs + intervalMs > seMs) break;       // R3 — end must fit in shift
     const label = siteLocalLabel(new Date(wsMs), siteTz);
     if (!out.has(label)) out.set(label, wsMs);  // first occurrence wins (DST)
   }
@@ -160,6 +197,7 @@ export function completedTrackableWindows(
   scheduledEnd:   Date,
   clockedInAt:    Date,
   now:            Date,
+  intervalMs:     number = PING_WINDOW_MS,
 ): Array<{ windowStart: Date; windowEnd: Date }> {
   const ssMs = scheduledStart.getTime();
   const seMs = scheduledEnd.getTime();
@@ -168,11 +206,12 @@ export function completedTrackableWindows(
 
   const out: Array<{ windowStart: Date; windowEnd: Date }> = [];
   // We only inspect windows whose window_end has already passed.
-  // Cap the loop with a safety bound so a bad row (say, a
+  // Cap the loop with a span-bounded safety guard so a bad row (say, a
   // scheduled_start way in the past) can't spin forever.
-  for (let n = 0; n < 250; n += 1) {
-    const wsMs = ssMs + n * PING_WINDOW_MS;
-    const weMs = wsMs + PING_WINDOW_MS;
+  const maxN = maxWindowsFor(intervalMs);
+  for (let n = 0; n < maxN; n += 1) {
+    const wsMs = ssMs + n * intervalMs;
+    const weMs = wsMs + intervalMs;
     if (weMs > seMs) break;             // R3 — end must fit within shift
     if (weMs > nowMs) break;            // window hasn't closed yet
     if (wsMs < ciMs) continue;          // R4/SD-D — skip pre-clock-in windows
@@ -223,8 +262,9 @@ export function windowJustClosed(
   clockedInAt:    Date,
   now:            Date,
   maxAgeMs:       number,
+  intervalMs:     number = PING_WINDOW_MS,
 ): { windowStart: Date; windowEnd: Date } | null {
-  const closed = completedTrackableWindows(scheduledStart, scheduledEnd, clockedInAt, now);
+  const closed = completedTrackableWindows(scheduledStart, scheduledEnd, clockedInAt, now, intervalMs);
   const latest = closed[closed.length - 1];
   if (!latest) return null;
   if (now.getTime() - latest.windowEnd.getTime() > maxAgeMs) return null;

@@ -65,6 +65,9 @@ interface ActiveGuardRow {
   clocked_in_at: Date;
   site_tz: string | null;
   last_ping_reminder_window: Date | null;
+  /** schema_v68 snapshot. NULL for a pre-column session; COALESCEd to 30
+   *  per row below. Never joined live from sites. */
+  ping_interval_minutes: number | null;
 }
 
 /**
@@ -201,18 +204,34 @@ async function claimWindow(shiftSessionId: string, windowStart: Date): Promise<b
 
 runJob('pingReminder', '* * * * *', async () => {
   const now = new Date();
-  // ELIGIBILITY RANGE, not a firing instant. The old ±60s tolerance meant a
+  // ELIGIBILITY RANGE, not a firing instant — computed PER ROW below, because
+  // it is a function of that session's cadence. The old ±60s tolerance meant a
   // single skipped cron minute lost the reminder outright and never retried
   // — see schema_v57's header for the 2026-08-24 04:00Z case, where the gap
   // cost Naveen his ping AND flagged him for missing it.
   //
-  // A window stays eligible for RECOVERY_MS after it closes, so a later tick
+  // A window stays eligible for recoveryMs after it closes, so a later tick
   // still fires. The once-per-window claim below is what makes widening this
-  // safe. Bounded well inside the 30-min window length so a recovered push
-  // can never arrive after the NEXT window has already closed.
-  const RECOVERY_MS = 10 * 60 * 1000;
+  // safe.
+  //
+  // WHY IT IS NO LONGER A FLAT 10 MINUTES. The old constant was justified as
+  // "well inside the 30-min window length". That sentence stops being true
+  // the moment the cadence varies: 10 min is 33% of a 30-min window but 67%
+  // of a 15-min one, and at or below a 10-minute cadence the range spans past
+  // the NEXT window's close — at which point the tail of it is unreachable,
+  // because windowJustClosed has already advanced to the newer window. The
+  // recovery this range exists to provide would silently become a no-op, with
+  // no error and no log. sites.ping_interval_minutes permits 5..240
+  // (schema_v14.sql:39), which is wider than any picker, so that is reachable.
+  //
+  // interval/3 keeps the guarantee proportional, and Math.min pins the upper
+  // bound where it has always been. At 30 min it computes exactly 10 minutes,
+  // which is what keeps this commit a no-op on every session in production.
+  const recoveryMsFor = (intervalMs: number) => Math.min(10 * 60 * 1000, Math.floor(intervalMs / 3));
   // A close within this age is "just now"; older is a catch-up, and the copy
-  // must say so rather than claim a freshness it does not have.
+  // must say so rather than claim a freshness it does not have. Wall-clock and
+  // cadence-independent on purpose: "is this push fresh" is a question about
+  // the reader, not about the grid.
   const FRESH_MS = 90 * 1000;
   // Tick-scoped; reported in the summary lines below rather than per call.
   const skipped = newSkipCounter();
@@ -230,7 +249,8 @@ runJob('pingReminder', '* * * * *', async () => {
               s.scheduled_end,
               ss.clocked_in_at,
               ss.last_ping_reminder_window,
-              si.timezone AS site_tz
+              si.timezone AS site_tz,
+              ss.ping_interval_minutes
        FROM shift_sessions ss
        JOIN shifts s  ON s.id  = ss.shift_id
        JOIN sites  si ON si.id = ss.site_id
@@ -245,12 +265,17 @@ runJob('pingReminder', '* * * * *', async () => {
       // The window that just CLOSED — R3 + R4 + closure, from the same
       // module missedPingCron flags from. Never a boundary: see the
       // windowJustClosed docblock for the two faults a boundary produced.
+      // Cadence from the SESSION SNAPSHOT (schema_v68), never a live join to
+      // sites — a mid-shift site edit must not change the grid a guard is
+      // being nagged against. NULL = pre-column session, COALESCEd to 30.
+      const intervalMs = (row.ping_interval_minutes ?? 30) * 60_000;
       const closed = windowJustClosed(
         new Date(row.scheduled_start),
         new Date(row.scheduled_end),
         new Date(row.clocked_in_at),
         now,
-        RECOVERY_MS,
+        recoveryMsFor(intervalMs),
+        intervalMs,
       );
       if (!closed) continue;
 
