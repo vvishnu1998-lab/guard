@@ -358,6 +358,91 @@ function roundWorstScan(scans: CheckpointScan[]): CheckpointScan | null {
   return worst;
 }
 
+/** One row of GET /api/inspections/site/:siteId.
+ *
+ *  PHOTO SLOTS ARE ALWAYS NULL HERE — the list endpoint does not read the
+ *  columns at all, deliberately (routes/inspections.ts, the mapping at the
+ *  foot of the /site/:siteId handler): presigning a page of rows would burn
+ *  up to 5000 signatures with a 15-minute TTL on photos nobody opened. The
+ *  collapsed row shows `photo_count`; expanding fetches
+ *  GET /api/inspections/session/:sessionId, which presigns that row's five.
+ *  The slots are declared so the two shapes stay assignable. */
+interface InspectionRow {
+  id:                 string;
+  shift_session_id:   string;
+  vehicle_id:         string | null;
+  odometer_reading:   number | null;
+  completed_at:       string | null;
+  created_at:         string;
+  guard_id:           string | null;
+  clocked_in_at:      string;
+  clocked_out_at:     string | null;
+  guard_name:         string | null;
+  badge_number:       string | null;
+  vehicle_label:      string | null;
+  vehicle_plate:      string | null;
+  vehicle_make_model: string | null;
+  odometer_unit:      'mi' | 'km' | null;
+  status:             InspectionStatus;
+  photo_count:        number;
+}
+
+/** THREE values, not two. `abandoned` is terminal: the session is closed and
+ *  PATCH /inspections/:id 409s after clock-out (routes/inspections.ts:110-112),
+ *  so the row can never be finished. Collapsing it into `incomplete` would
+ *  invite an admin to chase a guard about a record neither of them can
+ *  change. Two such rows exist in production. */
+type InspectionStatus = 'complete' | 'incomplete' | 'abandoned';
+
+interface InspectionsListResponse {
+  inspections: InspectionRow[];
+  truncated:   boolean;
+}
+
+/** GET /api/inspections/session/:sessionId — the expanded row. Photo URLs
+ *  ARE presigned here (15-minute GETs), which is why it is fetched per row
+ *  on expand rather than for the whole list. */
+interface InspectionDetail {
+  id:                       string;
+  odometer_reading:         number | null;
+  completed_at:             string | null;
+  photo_front_url:          string | null;
+  photo_rear_url:           string | null;
+  photo_driver_side_url:    string | null;
+  photo_passenger_side_url: string | null;
+  photo_odometer_url:       string | null;
+}
+
+const INSPECTION_PHOTO_SLOTS: Array<{ key: keyof InspectionDetail; label: string }> = [
+  { key: 'photo_front_url',          label: 'FRONT' },
+  { key: 'photo_rear_url',           label: 'REAR' },
+  { key: 'photo_driver_side_url',    label: 'DRIVER SIDE' },
+  { key: 'photo_passenger_side_url', label: 'PASSENGER SIDE' },
+  { key: 'photo_odometer_url',       label: 'ODOMETER' },
+];
+
+/** Status pill styling. `abandoned` is deliberately the most muted of the
+ *  three — it is a dead record, not an outstanding task, and must not read
+ *  as something to act on. Amber (INCOMPLETE) is the only one that asks for
+ *  attention, matching the amber-as-warning use on the shift detail page. */
+const INSPECTION_STATUS_STYLES: Record<InspectionStatus, { cls: string; label: string; title: string }> = {
+  complete: {
+    cls:   'bg-green-500/20 text-green-400 border-green-500/40',
+    label: 'COMPLETE',
+    title: 'All five photos and the odometer reading were recorded.',
+  },
+  incomplete: {
+    cls:   'bg-amber-400/20 text-amber-400 border-amber-400/40',
+    label: 'INCOMPLETE',
+    title: 'The shift session is still open — the guard can still finish this inspection.',
+  },
+  abandoned: {
+    cls:   'bg-gray-700/30 text-gray-500 border-gray-600/40',
+    label: 'ABANDONED',
+    title: 'The shift ended before the inspection was finished. It can no longer be completed — the API rejects edits after clock-out.',
+  },
+};
+
 /**
  * Tab model. State lives in `?tab=`, never in React state, so a tab is a
  * shareable URL and Back works — the same contract as /admin/shifts?view=.
@@ -368,6 +453,7 @@ const TABS = [
   ['overview',     'OVERVIEW'],
   ['checkpoints',  'CHECKPOINTS'],
   ['scan-history', 'SCAN HISTORY'],
+  ['inspections',  'INSPECTIONS'],
 ] as const;
 
 type TabSlug = (typeof TABS)[number][0];
@@ -483,6 +569,47 @@ function SiteDetailPageInner() {
     const qs = p.toString();
     router.replace(qs ? `/admin/sites/${siteId}?${qs}` : `/admin/sites/${siteId}`, { scroll: false });
   }
+  // ── Inspections tab range + filters (all URL-driven) ───────────────────
+  // DISTINCT param names from scan history (`ifrom`/`ito`/`ig`/`iv`, not
+  // `from`/`to`/`guard`). tabHref() clones every param, so sharing keys
+  // would leak one tab's state into the other — and `guard` would be
+  // actively wrong: scan history puts a NAME in it (see the guard filter
+  // below), while this tab's API takes a guard_id UUID and 400s on a name.
+  const inspDefaults = useMemo(
+    () => ({ from: dateInputValue(30, siteTz), to: dateInputValue(0, siteTz) }),
+    [siteTz],
+  );
+  const inspFrom    = searchParams?.get('ifrom') || inspDefaults.from;
+  const inspTo      = searchParams?.get('ito')   || inspDefaults.to;
+  const inspGuard   = searchParams?.get('ig')    ?? '';
+  const inspVehicle = searchParams?.get('iv')    ?? '';
+
+  const [inspections,        setInspections]        = useState<InspectionRow[]>([]);
+  const [inspLoading,        setInspLoading]        = useState(true);
+  const [inspError,          setInspError]          = useState('');
+  const [inspTruncated,      setInspTruncated]      = useState(false);
+  // sessionId of the expanded row, '' = none. One at a time: the photos are
+  // presigned per expand, so keeping several open multiplies signatures for
+  // rows the admin has already scrolled past.
+  const [inspExpanded,       setInspExpanded]       = useState('');
+  const [inspDetail,         setInspDetail]         = useState<InspectionDetail | null>(null);
+  const [inspDetailLoading,  setInspDetailLoading]  = useState(false);
+  const [inspDetailError,    setInspDetailError]    = useState('');
+
+  // Same pre-flight as scan history — an invalid range shows a message
+  // instead of firing a request the API would 400.
+  const inspRangeError = useMemo(() => {
+    if (!inspFrom || !inspTo) return 'Pick both dates.';
+    const from = new Date(inspFrom);
+    const to   = new Date(inspTo);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 'Invalid date.';
+    if (from > to) return 'FROM must be on or before TO.';
+    if (to.getTime() - from.getTime() > MAX_RANGE_DAYS * 24 * 60 * 60 * 1000) {
+      return `Range is limited to ${MAX_RANGE_DAYS} days — narrow the dates.`;
+    }
+    return '';
+  }, [inspFrom, inspTo]);
+
   const [scans,         setScans]         = useState<CheckpointScan[]>([]);
   const [scansLoading,  setScansLoading]  = useState(true);
   const [scansError,    setScansError]    = useState('');
@@ -673,6 +800,89 @@ function SiteDetailPageInner() {
     })();
     return () => { cancelled = true; };
   }, [siteId, scanFrom, scanTo, scanRangeError, scanRefresh]);
+
+  // ── Inspections fetch ──────────────────────────────────────────────────
+  // Bare YYYY-MM-DD, same contract as the scans request: the server anchors
+  // each bound to a whole day in the SITE's timezone via siteLocalDayRange.
+  useEffect(() => {
+    if (!siteId || inspRangeError) return;
+    let cancelled = false;
+    (async () => {
+      setInspLoading(true);
+      try {
+        const qs = new URLSearchParams({ from: inspFrom, to: inspTo });
+        if (inspGuard)   qs.set('guard_id', inspGuard);
+        if (inspVehicle) qs.set('vehicle_id', inspVehicle);
+        const data = await adminGet<InspectionsListResponse>(
+          `/api/inspections/site/${siteId}?${qs.toString()}`,
+        );
+        if (cancelled) return;
+        // `?? []` per the stale-API rule: Vercel and Railway never deploy
+        // simultaneously, so this page can run for a window against an API
+        // that has no /site/:siteId route. adminGet throws on the 404 and
+        // the catch below handles it, but a 200 with an unexpected shape
+        // must not put undefined into a .map().
+        setInspections(data?.inspections ?? []);
+        setInspTruncated(data?.truncated === true);
+        setInspError('');
+      } catch (e: any) {
+        if (!cancelled) setInspError(e?.message ?? 'Failed to load inspections');
+      } finally {
+        if (!cancelled) setInspLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [siteId, inspFrom, inspTo, inspGuard, inspVehicle, inspRangeError]);
+
+  // Collapse the open row whenever the result set changes underneath it —
+  // otherwise a filter change leaves photos on screen for a row that is no
+  // longer listed.
+  useEffect(() => {
+    setInspExpanded('');
+    setInspDetail(null);
+    setInspDetailError('');
+  }, [inspFrom, inspTo, inspGuard, inspVehicle]);
+
+  /** Expand one row and fetch its presigned photos. Toggles closed if the
+   *  same row is clicked again, which also drops the signatures. */
+  const toggleInspection = useCallback(async (sessionId: string) => {
+    if (inspExpanded === sessionId) {
+      setInspExpanded('');
+      setInspDetail(null);
+      setInspDetailError('');
+      return;
+    }
+    setInspExpanded(sessionId);
+    setInspDetail(null);
+    setInspDetailError('');
+    setInspDetailLoading(true);
+    try {
+      const row = await adminGet<InspectionDetail>(`/api/inspections/session/${sessionId}`);
+      setInspDetail(row);
+    } catch (e: any) {
+      setInspDetailError(e?.message ?? 'Failed to load photos');
+    } finally {
+      setInspDetailLoading(false);
+    }
+  }, [inspExpanded]);
+
+  /** Guards who actually have an inspection in this range — filtering by a
+   *  guard with none would only ever return nothing. Keyed on guard_id, NOT
+   *  on name: names collide (OPEN-ITEMS N32, and two same-name pairs exist
+   *  on Star Guard), so the label is decoration and the id is the value. */
+  const inspGuardOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const r of inspections) {
+      if (!r.guard_id) continue;
+      if (!byId.has(r.guard_id)) {
+        byId.set(r.guard_id, r.badge_number ? `${r.guard_name ?? 'Unknown'} · ${r.badge_number}` : (r.guard_name ?? 'Unknown'));
+      }
+    }
+    return Array.from(byId, ([id, label]) => ({ id, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [inspections]);
+
+  const inspFiltersActive = !!inspGuard || !!inspVehicle;
 
   // ── Round grouping (C7) ────────────────────────────────────────────────
   // The scannable set, using the SERVER's own definition from windowCounter
@@ -1845,6 +2055,224 @@ function SiteDetailPageInner() {
         )}
       </section>
       </>
+      )}
+
+      {tab === 'inspections' && (
+      <section>
+        {/* Vehicle inspections (schema_v48). NOT gated on
+            vehicle_inspection_required: like scan history, a record already
+            captured must stay visible after the toggle is turned off. */}
+        <h2 className="text-amber-400 font-bold tracking-widest text-sm mb-3">INSPECTIONS</h2>
+
+        {/* Range presets. Mechanically identical to SCAN HISTORY — every
+            chip writes searchParams, so a filtered view is a link, and the
+            custom FROM/TO pair below stays authoritative. Bounds are whole
+            days AT THE SITE: the request sends bare dates and the server
+            anchors them with AT TIME ZONE s.timezone. */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <span className="text-gray-500 text-xs tracking-widest mr-1">RANGE</span>
+          {([[7, '7 DAYS'], [30, '30 DAYS'], [90, '90 DAYS']] as const).map(([days, label]) => {
+            const from = dateInputValue(days, siteTz);
+            const to   = dateInputValue(0,    siteTz);
+            return (
+              <button
+                key={days}
+                onClick={() => setParams({ ifrom: from, ito: to })}
+                className={presetCls(inspFrom === from && inspTo === to)}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-wrap gap-4 mb-3">
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1" htmlFor="i-from">FROM</label>
+            <input
+              id="i-from" type="date" value={inspFrom}
+              onChange={(e) => setParams({ ifrom: e.target.value })}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            />
+          </div>
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1" htmlFor="i-to">TO</label>
+            <input
+              id="i-to" type="date" value={inspTo}
+              onChange={(e) => setParams({ ito: e.target.value })}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            />
+          </div>
+        </div>
+
+        {/* Filters. Both key on UUIDs, never on a display string. */}
+        <div className="flex flex-wrap items-end gap-3 mb-4">
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1" htmlFor="i-guard">GUARD</label>
+            <select
+              id="i-guard" value={inspGuard}
+              onChange={(e) => setParams({ ig: e.target.value })}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            >
+              <option value="">All guards</option>
+              {inspGuardOptions.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-gray-500 text-xs tracking-widest mb-1" htmlFor="i-vehicle">VEHICLE</label>
+            <select
+              id="i-vehicle" value={inspVehicle}
+              onChange={(e) => setParams({ iv: e.target.value })}
+              className="bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-amber-400"
+            >
+              <option value="">All vehicles</option>
+              {vehicles.map((v) => (
+                <option key={v.id} value={v.id}>{v.plate ? `${v.label} · ${v.plate}` : v.label}</option>
+              ))}
+            </select>
+          </div>
+          {inspFiltersActive && (
+            <button
+              onClick={() => setParams({ ig: null, iv: null })}
+              className="text-xs text-gray-400 tracking-widest border border-[#1A3050] rounded px-3 py-2 hover:border-gray-500 transition-colors"
+            >
+              CLEAR FILTERS
+            </button>
+          )}
+        </div>
+
+        {inspRangeError && <p className="text-amber-400 text-sm mb-3">{inspRangeError}</p>}
+        {inspError && !inspRangeError && <p className="text-red-400 text-sm mb-3">{inspError}</p>}
+        {inspTruncated && !inspRangeError && (
+          <p className="text-amber-400/80 text-xs mb-3">
+            Showing the most recent 1000 inspections — narrow the date range to see the rest.
+          </p>
+        )}
+
+        {inspLoading && !inspRangeError ? (
+          <p className="text-gray-500 text-sm">Loading inspections…</p>
+        ) : !inspRangeError && !inspError && inspections.length === 0 ? (
+          /* Real empty state. Zero rows is the NORMAL case on most sites and
+             in most windows — a bare table header would read as a broken
+             page. Each branch names the actual reason and the next action. */
+          <div className="border border-dashed border-[#1A3050] rounded-lg p-6 text-center">
+            <p className="text-gray-400 text-sm mb-1">
+              {inspFiltersActive
+                ? 'No inspections match these filters.'
+                : 'No vehicle inspections in this date range.'}
+            </p>
+            <p className="text-gray-500 text-xs leading-relaxed">
+              {inspFiltersActive
+                ? 'Clear the guard or vehicle filter, or widen the range.'
+                : !site.vehicle_inspection_required
+                  ? 'Vehicle inspections are turned off for this site — turn on VEHICLE INSPECTION in the Overview tab to start collecting them.'
+                  : vehicles.length === 0
+                    ? 'This site has no vehicles yet. Add a patrol vehicle so guards can select one and start an inspection.'
+                    : 'Inspections are prompted after clock-in and are never required, so a shift can end without one. Try a wider range.'}
+            </p>
+          </div>
+        ) : !inspRangeError && !inspError && (
+          <div className="space-y-2">
+            {inspections.map((r) => {
+              const st       = INSPECTION_STATUS_STYLES[r.status] ?? INSPECTION_STATUS_STYLES.incomplete;
+              const expanded = inspExpanded === r.shift_session_id;
+              return (
+                <div key={r.id} className="border border-[#1A3050] rounded-lg bg-[#0B1526]">
+                  <button
+                    onClick={() => toggleInspection(r.shift_session_id)}
+                    aria-expanded={expanded}
+                    className="w-full text-left px-4 py-3 hover:bg-[#0F1E35] transition-colors rounded-lg"
+                  >
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 justify-between">
+                      {/* w-full below sm: the date and guard take their own line
+                          on a phone. Left as flex-1 they collapse to a few
+                          characters and collide with the VEHICLE column at
+                          390px — verified at 375/390 before this was added. */}
+                      <div className="w-full sm:w-auto sm:flex-1 min-w-0">
+                        {/* Rendered in the SITE's zone via the same formatter the
+                            scan table uses — an admin in New York reading a
+                            Phoenix site must see Phoenix hours. */}
+                        <p className="text-gray-200 text-sm font-mono whitespace-nowrap">{scanTs.format(new Date(r.created_at))}</p>
+                        <p className="text-gray-500 text-xs mt-0.5 truncate">
+                          {r.guard_name ?? 'Unknown guard'}
+                          {r.badge_number && <span className="font-mono"> · {r.badge_number}</span>}
+                        </p>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-gray-500 text-[10px] tracking-widest">VEHICLE</p>
+                        <p className="text-gray-300 text-xs truncate">
+                          {r.vehicle_label ?? '—'}
+                          {r.vehicle_plate && <span className="text-gray-500 font-mono"> · {r.vehicle_plate}</span>}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-gray-500 text-[10px] tracking-widest">ODOMETER</p>
+                        <p className="text-gray-300 text-xs font-mono">
+                          {r.odometer_reading !== null
+                            ? `${r.odometer_reading.toLocaleString()} ${r.odometer_unit ?? 'mi'}`
+                            : '—'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-gray-500 text-[10px] tracking-widest">PHOTOS</p>
+                        <p className="text-gray-300 text-xs font-mono">{r.photo_count} / 5</p>
+                      </div>
+                      <span
+                        title={st.title}
+                        className={`inline-block text-xs tracking-widest font-medium px-2 py-0.5 rounded border ${st.cls}`}
+                      >
+                        {st.label}
+                      </span>
+                      <span className="text-gray-600 text-xs" aria-hidden="true">{expanded ? '▲' : '▼'}</span>
+                    </div>
+                  </button>
+
+                  {expanded && (
+                    <div className="px-4 pb-4 border-t border-[#1A3050] pt-3">
+                      {r.status === 'abandoned' && (
+                        <p className="text-gray-500 text-xs mb-3 leading-relaxed">
+                          This inspection was never finished and the shift has ended. It cannot be
+                          completed — the app rejects edits once the guard clocks out. Nothing to chase.
+                        </p>
+                      )}
+                      {inspDetailLoading ? (
+                        <p className="text-gray-500 text-sm">Loading photos…</p>
+                      ) : inspDetailError ? (
+                        <p className="text-red-400 text-sm">{inspDetailError}</p>
+                      ) : inspDetail ? (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+                          {INSPECTION_PHOTO_SLOTS.map(({ key, label }) => {
+                            const url = inspDetail[key] as string | null;
+                            return (
+                              <div key={label}>
+                                <p className="text-gray-500 text-[10px] tracking-widest mb-1">{label}</p>
+                                {url ? (
+                                  <a href={url} target="_blank" rel="noreferrer" className="block">
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img
+                                      src={url}
+                                      alt={`${label} inspection photo`}
+                                      className="w-full h-24 object-cover rounded border border-[#1A3050] hover:border-amber-400/60 transition-colors"
+                                    />
+                                  </a>
+                                ) : (
+                                  <div className="w-full h-24 rounded border border-dashed border-[#1A3050] flex items-center justify-center">
+                                    <span className="text-gray-600 text-[10px] tracking-widest">MISSING</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
       )}
 
       {/* Modals stay mounted on every tab: they are opened from the
