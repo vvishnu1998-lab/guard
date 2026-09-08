@@ -136,7 +136,14 @@ interface InspectionSessionRow {
 
 interface InspectionsResponse {
   vehicle_inspection_required: boolean;
-  sessions: InspectionSessionRow[];
+  // OPTIONAL for the same reason as schedule_audit and has_session above:
+  // web and API deploy independently, so this page can run against an API
+  // that answers 200 without the field. Declared required, the unguarded
+  // `.some()` below threw a TypeError during render and took out the WHOLE
+  // shift-detail page, not just this card. The `.catch(() => null)` on the
+  // fetch does not cover it — that catches transport failures, not a 200
+  // with an unexpected body.
+  sessions?: InspectionSessionRow[];
 }
 
 const PHOTO_SLOT_LABELS: Array<{ key: keyof InspectionSessionRow; label: string }> = [
@@ -497,14 +504,14 @@ export default function ShiftDetailPage() {
           show several. Rendered only when the site requires inspection or
           an inspection actually exists. Admin-only page; photos are
           15-minute presigned GETs. */}
-      {inspections && (inspections.vehicle_inspection_required || inspections.sessions.some((s) => s.id)) && (
+      {inspections && (inspections.vehicle_inspection_required || (inspections.sessions ?? []).some((s) => s.id)) && (
         <div className="bg-[#0F1E35] border border-[#1A3050] rounded-2xl p-5">
           <h2 className="text-gray-500 text-xs tracking-widest mb-4">VEHICLE INSPECTION</h2>
-          {inspections.sessions.length === 0 ? (
+          {(inspections.sessions ?? []).length === 0 ? (
             <p className="text-gray-500 text-sm">No clock-in yet — inspection starts after the guard clocks in.</p>
           ) : (
             <div className="space-y-5">
-              {inspections.sessions.map((s) => (
+              {(inspections.sessions ?? []).map((s) => (
                 <div key={s.session_id} className="border border-[#1A3050] rounded-lg p-4">
                   <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
                     <div className="min-w-0">
