@@ -53,6 +53,13 @@ interface LiveGuard {
    *  an older API returns neither and the map reads the pin as a ping. */
   last_position_at?:     string | null;
   last_position_source?: 'ping' | 'clock_in' | null;
+  /** schema_v48. True when the site requires a vehicle inspection and this
+   *  OPEN session has no completed one. Optional per the stale-API rule —
+   *  Vercel and Railway are never simultaneous, so an API that predates the
+   *  field returns nothing and the chip below simply does not render.
+   *  Read with a strict `=== true` for that reason: `undefined` means "the
+   *  API cannot tell us", which must not render as "inspection missing". */
+  inspection_incomplete?: boolean;
 }
 
 interface Breach {
@@ -512,6 +519,20 @@ export default function LiveMapPage() {
                       <span className="text-xs tracking-widest text-red-400 font-bold animate-pulse">VIOLATION</span>
                     ) : (
                       <span className="text-xs tracking-widest text-green-400">OK</span>
+                    )}
+                    {/* Secondary flag, not a second status: an outstanding
+                        inspection is a paperwork gap, never a breach, so it
+                        must not compete with VIOLATION for attention. Lives
+                        inside the STATUS cell rather than a new column —
+                        a seventh column overflows at 375px, and colSpan={6}
+                        on the loading/empty rows stays correct. */}
+                    {g.inspection_incomplete === true && (
+                      <span
+                        title="This site requires a vehicle inspection and this shift has not completed one. The guard can still finish it while the session is open."
+                        className="block mt-1 text-[10px] tracking-widest text-amber-400/90"
+                      >
+                        INSPECTION
+                      </span>
                     )}
                   </td>
                 </tr>
