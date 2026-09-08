@@ -965,7 +965,27 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
        EXISTS (
          SELECT 1 FROM geofence_violations gv
          WHERE gv.shift_session_id = ss.id AND gv.resolved_at IS NULL
-       ) AS has_violation
+       ) AS has_violation,
+       -- schema_v48. The SAME definition of incompleteness as the shift
+       -- list's badge (routes/shifts.ts:2529-2533), re-expressed for a row
+       -- that IS a session rather than a shift. That one reads
+       --   required AND EXISTS (session with no row, or a row with
+       --                        completed_at IS NULL)
+       -- over every session on the shift; scoped to a single session the
+       -- EXISTS collapses, because vehicle_inspections carries
+       -- UNIQUE (shift_session_id) so a session has at most one row.
+       -- "no row, or an incomplete row" is then exactly "no COMPLETE row",
+       -- which is the NOT EXISTS below. Writing the self-join form would be
+       -- the same predicate spelled more obscurely, not a stricter one.
+       --
+       -- This handler returns only OPEN sessions (the WHERE clause at the
+       -- foot of this query), so an incomplete here is always still fillable
+       -- by the guard — the ABANDONED status that the site-history endpoint
+       -- reports cannot appear on this surface.
+       (s.vehicle_inspection_required AND NOT EXISTS (
+          SELECT 1 FROM vehicle_inspections vi
+          WHERE vi.shift_session_id = ss.id AND vi.completed_at IS NOT NULL
+       )) AS inspection_incomplete
      FROM shift_sessions ss
      JOIN guards g ON g.id = ss.guard_id
      JOIN sites  s ON s.id = ss.site_id

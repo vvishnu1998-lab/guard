@@ -28,6 +28,7 @@ import { pool } from '../db/pool';
 import { expiresAtFor } from '../services/retention';
 import { getS3ObjectHead, s3KeyFromPublicUrl, urlOrPresign } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
+import { siteLocalDayRange } from '../services/dateRange';
 
 const router = Router();
 
@@ -41,6 +42,40 @@ const PHOTO_SLOTS = [
 type PhotoSlot = (typeof PHOTO_SLOTS)[number];
 
 const ODOMETER_MAX = 9_999_999;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Same cap the scan-history list uses (routes/checkpoints.ts:225,254) — a
+ *  92-day ceiling on the range and a 1000-row ceiling on the response, with
+ *  `truncated` telling the caller which one it hit. Deliberately not
+ *  offset pagination: the browse surface is a bounded date window, and a
+ *  page cursor over a range the user already narrowed buys nothing. */
+const MAX_RANGE_DAYS = 92;
+const LIST_CAP = 1000;
+
+/**
+ * `YYYY-MM-DD`, `daysAgo` calendar days before today **at the site**.
+ *
+ * The step back runs on a synthetic noon-UTC anchor built from the site's
+ * own calendar day: noon sits far enough from midnight that a DST shift on
+ * either side cannot move the date, so this is plain arithmetic on a date
+ * rather than a conversion of a real instant.
+ *
+ * Twin of `dateInputValue()` in apps/web/app/admin/sites/[id]/page.tsx:199,
+ * kept local because this route is its only caller — promote it into
+ * services/dateRange.ts if a second one appears.
+ *
+ * An invalid `sites.timezone` makes Intl throw, and that throw is left to
+ * propagate — same deliberate loud failure as services/siteTime.ts:25.
+ */
+function siteLocalDateStr(daysAgo: number, timeZone: string, now: Date = new Date()): string {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
+  const anchor = new Date(`${today}T12:00:00Z`);
+  anchor.setUTCDate(anchor.getUTCDate() - daysAgo);
+  return anchor.toISOString().slice(0, 10);
+}
 
 /** Swap the five stored photo URLs for short-lived presigned GETs — same
  *  S3-lockdown path report photos use (services/s3.ts PR1 helpers). Raw
@@ -299,6 +334,150 @@ router.get('/shift/:shiftId', requireAuth('company_admin', 'vishnu'), async (req
     vehicle_inspection_required: shiftRow.vehicle_inspection_required,
     sessions: rows,
   });
+});
+
+// GET /api/inspections/site/:siteId — inspection history for ONE site,
+// backing the admin site-detail INSPECTIONS tab.
+//
+// ROLES: company_admin (own company only) and vishnu. **The 'client' role
+// cannot reach this**, structurally and in two independent ways: requireAuth
+// refuses any role outside its argument list with 403 before a line of this
+// handler runs (middleware/auth.ts:75-77), and this router is mounted at
+// /api/inspections (index.ts:207) while the client role is served entirely
+// from /api/client by clientPortal.ts, which is untouched. That matches the
+// admin-only visibility stated in this file's header (:15-19).
+//
+// SCOPING: 404 — never 403 — on a company mismatch, the same shape as
+// GET /shift/:shiftId (:277). A 403 would confirm the site exists and turn
+// the endpoint into a site-id oracle for a neighbouring tenant.
+//
+// RANGE: bounds are whole days **at the site** via siteLocalDayRange
+// (services/dateRange.ts:82-102), which anchors each bound with
+// `AT TIME ZONE s.timezone` per row. Not hardcoded Pacific: every site is
+// America/Los_Angeles today, so the two are indistinguishable now, which is
+// exactly why the correct one is free to adopt (that file's header, :24-32).
+router.get('/site/:siteId', requireAuth('company_admin', 'vishnu'), async (req, res) => {
+  const siteId = req.params.siteId;
+  if (!UUID_RE.test(siteId)) return res.status(400).json({ error: 'invalid siteId' });
+
+  const siteResult = await pool.query(
+    'SELECT id, company_id, timezone FROM sites WHERE id = $1',
+    [siteId]
+  );
+  const site = siteResult.rows[0];
+  if (!site) return res.status(404).json({ error: 'Site not found' });
+  if (req.user!.role === 'company_admin' && site.company_id !== req.user!.company_id) {
+    return res.status(404).json({ error: 'Site not found' });
+  }
+
+  const { guard_id, vehicle_id } = req.query;
+  if (guard_id !== undefined && !UUID_RE.test(String(guard_id))) {
+    return res.status(400).json({ error: 'guard_id must be a uuid' });
+  }
+  if (vehicle_id !== undefined && !UUID_RE.test(String(vehicle_id))) {
+    return res.status(400).json({ error: 'vehicle_id must be a uuid' });
+  }
+
+  // Default window: the last 30 whole days AT THE SITE, emitted as bare
+  // dates so the default takes the identical whole-day-at-the-site path
+  // that a caller-supplied range does, rather than a second code path.
+  const from = req.query.from !== undefined ? String(req.query.from) : siteLocalDateStr(30, site.timezone);
+  const to   = req.query.to   !== undefined ? String(req.query.to)   : siteLocalDateStr(0,  site.timezone);
+
+  // Validation ONLY. Parsing a bare date flattens it to UTC midnight, so
+  // these Dates grade NaN / ordering / the 92-day cap and never become the
+  // bounds — the raw strings do. Same split as checkpoints.ts:235-239,
+  // where a seven-hour difference at the edges is immaterial to all three.
+  const fromDate = new Date(from);
+  const toDate   = new Date(to);
+  if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    return res.status(400).json({ error: 'from/to must be YYYY-MM-DD or an ISO instant' });
+  }
+  if (fromDate > toDate) {
+    return res.status(400).json({ error: 'from must be before to' });
+  }
+  if (toDate.getTime() - fromDate.getTime() > MAX_RANGE_DAYS * 24 * 60 * 60 * 1000) {
+    return res.status(400).json({ error: `Range must be ${MAX_RANGE_DAYS} days or less` });
+  }
+
+  const args: unknown[] = [siteId];
+  // siteLocalDayRange MUTATES args — invoked here so its params land in
+  // position before the two filters below push theirs.
+  const rangeClauses = siteLocalDayRange({
+    column: 'vi.created_at',
+    siteAlias: 's',
+    from,
+    to,
+    args,
+  });
+
+  const filters: string[] = [];
+  if (guard_id !== undefined) {
+    args.push(String(guard_id));
+    filters.push(`AND ss.guard_id = $${args.length}`);
+  }
+  if (vehicle_id !== undefined) {
+    args.push(String(vehicle_id));
+    filters.push(`AND vi.vehicle_id = $${args.length}`);
+  }
+
+  // STATUS is three-valued, because "incomplete" conflates two situations
+  // that need different handling:
+  //   complete   — completed_at stamped by the server (:216-224)
+  //   incomplete — session still OPEN, so the guard can still finish it
+  //   abandoned  — session CLOSED with completed_at NULL. PATCH 409s after
+  //                clock-out (:110-112), so this row is permanently
+  //                uncompletable. Two exist in production.
+  // Photo URL columns are NOT selected at all — see the mapping below.
+  const result = await pool.query(
+    `SELECT vi.id, vi.shift_session_id, vi.vehicle_id, vi.odometer_reading,
+            vi.completed_at, vi.created_at,
+            ss.guard_id, ss.clocked_in_at, ss.clocked_out_at,
+            g.name AS guard_name, g.badge_number,
+            sv.label AS vehicle_label, sv.plate AS vehicle_plate,
+            sv.make_model AS vehicle_make_model, sv.odometer_unit,
+            CASE
+              WHEN vi.completed_at   IS NOT NULL THEN 'complete'
+              WHEN ss.clocked_out_at IS NOT NULL THEN 'abandoned'
+              ELSE 'incomplete'
+            END AS status,
+            ((vi.photo_front_url          IS NOT NULL)::int
+           + (vi.photo_rear_url           IS NOT NULL)::int
+           + (vi.photo_driver_side_url    IS NOT NULL)::int
+           + (vi.photo_passenger_side_url IS NOT NULL)::int
+           + (vi.photo_odometer_url       IS NOT NULL)::int) AS photo_count
+       FROM vehicle_inspections vi
+       JOIN shift_sessions ss ON ss.id = vi.shift_session_id
+       JOIN sites s ON s.id = ss.site_id
+       LEFT JOIN guards g ON g.id = ss.guard_id
+       LEFT JOIN site_vehicles sv ON sv.id = vi.vehicle_id
+      WHERE ss.site_id = $1
+        ${rangeClauses.join(' ')}
+        ${filters.join(' ')}
+      ORDER BY vi.created_at DESC
+      LIMIT ${LIST_CAP + 1}`,
+    args
+  );
+
+  const truncated = result.rows.length > LIST_CAP;
+  const rows = (truncated ? result.rows.slice(0, LIST_CAP) : result.rows).map((r) => ({
+    ...r,
+    // PHOTO SLOTS ARE DELIBERATELY NULL, and the SELECT above does not read
+    // the columns at all — no stored S3 URL reaches this response even
+    // unsigned. Presigning would be five signatures per row (up to 5000 at
+    // the cap) that expire in 15 minutes (s3.ts:192), so a list built for
+    // browsing would burn almost all of them unviewed. The web renders
+    // `photo_count` on the collapsed row and calls
+    // GET /api/inspections/session/:sessionId on expand, which presigns the
+    // five URLs for that one row at the moment they are actually shown.
+    photo_front_url:          null,
+    photo_rear_url:           null,
+    photo_driver_side_url:    null,
+    photo_passenger_side_url: null,
+    photo_odometer_url:       null,
+  }));
+
+  res.json({ inspections: rows, truncated });
 });
 
 export default router;
