@@ -28,7 +28,7 @@ import {
 } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { computeLateness, isPingStale, PING_STALE_MINUTES } from '../../lib/lateness';
+import { computeLateness, computeLatenessAnchored, isPingStale, PING_STALE_MINUTES } from '../../lib/lateness';
 import { hasUsablePolygon, hasUsableCircle, type LatLng } from '../../lib/siteFence';
 
 export type { LatLng };
@@ -52,6 +52,11 @@ export interface LiveMapGuard {
    *  come from a ping, so the undefined case reads as 'ping'. */
   last_position_at?:     string | null;
   last_position_source?: 'ping' | 'clock_in' | null;
+  /** The SHIFT's scheduled_start — the anchor every ping window hangs off.
+   *  Optional per the stale-API rule, exactly as the page's LiveGuard
+   *  declares it; absent means computeLatenessAnchored renders the bare
+   *  time instead of a wall-clock guess. */
+  scheduled_start?:      string | null;
 }
 
 /** Structural subset of GET /api/sites. Geofence fields are LEFT JOINed
@@ -417,8 +422,11 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
                       {' · '}{ago(positionAt(g))}
                     </span>
                   </Field>
+                  {/* Anchored on the shift's own window grid. Must stay in
+                      step with the table cell in app/admin/live-status —
+                      this popup and that row grade the same ping. */}
                   <Field label="LAST PING">
-                    {computeLateness(g.last_ping_at, [0, 30]).display}
+                    {computeLatenessAnchored(g.last_ping_at, g.scheduled_start).display}
                   </Field>
                   <Field label="ACCURACY">
                     {Number.isFinite(g.last_accuracy_m)

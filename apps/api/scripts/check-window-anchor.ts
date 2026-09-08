@@ -25,16 +25,35 @@
  *
  * ── HOW IT IS WIRED ─────────────────────────────────────────────────────
  *
- * `npm run check:window-anchor` in apps/api, and `pretest`. It needs a
- * database because the SQL half must be executed by Postgres rather than
- * modelled — modelling it in TS would just be a third copy of the same
- * expression and would prove nothing.
+ * `npm run check:window-anchor` in apps/api, and — since this comment was
+ * written — .github/workflows/window-anchor.yml, which runs it against a
+ * throwaway postgres service container on every push and PR.
  *
- * With no DATABASE_URL it exits 0 with a SKIPPED notice: a checkout without
- * a database must not fail, for the same reason check-break-constants.js is
- * lenient about a missing server file. That means the check is DORMANT in a
- * bare checkout and LIVE in CI or locally once a DB is reachable — state
- * which you are in before trusting a green run.
+ * This block previously claimed the script also ran as `pretest`. It never
+ * did: apps/api has no `pretest` script and no `test` script for one to
+ * hook, so there was nothing to hang it off. Removed rather than added,
+ * because the workflow is the real gate.
+ *
+ * It needs a database because the SQL half must be EXECUTED by Postgres
+ * rather than modelled — modelling it in TS would just be a third copy of
+ * the same expression and would prove nothing. It does NOT need a schema:
+ * the query below is a generate_series over bind parameters and touches no
+ * table, so an empty database satisfies it completely. That is why CI can
+ * use a bare container and no secret.
+ *
+ * ── REQUIRE_DB — THE DIFFERENCE BETWEEN A GATE AND A DECORATION ──────────
+ *
+ * With no database this exits 0 and prints SKIPPED, so a bare checkout
+ * does not fail. That leniency is right locally and CATASTROPHIC in CI: a
+ * required check that skips is green forever and verifies nothing, which is
+ * the exact failure this repo has already shipped once (the railway-logs
+ * collector exited 0 while printing its own error, and was logged as a
+ * success — docs/OPS/STATE.md, "Two bugs, not one").
+ *
+ * So CI sets REQUIRE_DB=1, which turns the skip into a hard failure with
+ * the reason printed. Local runs leave it unset and keep the old
+ * behaviour. State which mode you are in before trusting a green run — and
+ * if you are wiring this anywhere new, set REQUIRE_DB=1 or do not bother.
  */
 import { Pool } from 'pg';
 import { PING_WINDOW_MS, completedTrackableWindows } from '../src/services/pingWindows';
@@ -48,9 +67,23 @@ const CASES: Array<{ name: string; start: string; end: string }> = [
   { name: 'DST fall-back night',           start: '2026-11-01T00:00:00Z', end: '2026-11-01T12:00:00Z' },
 ];
 
+/** CI sets this. See the REQUIRE_DB block in the header: without it, a
+ *  required check that cannot reach a database reports success. */
+const REQUIRE_DB = process.env.REQUIRE_DB === '1' || process.argv.includes('--require-db');
+
 async function main(): Promise<number> {
   if (!process.env.DATABASE_URL) {
-    console.warn('[check-window-anchor] SKIPPED: no DATABASE_URL — the SQL half cannot be executed.');
+    if (REQUIRE_DB) {
+      console.error(
+        '[check-window-anchor] FAIL — REQUIRE_DB is set but no connection string is present.\n' +
+        'The SQL half of this check cannot be executed, so the anchors were NOT compared.\n' +
+        'This is a hard failure on purpose: skipping here would make the check green\n' +
+        'while verifying nothing. Provide a database, or unset REQUIRE_DB to allow the\n' +
+        'bare-checkout skip.',
+      );
+      return 1;
+    }
+    console.warn('[check-window-anchor] SKIPPED: no connection string — the SQL half cannot be executed.');
     return 0;
   }
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
