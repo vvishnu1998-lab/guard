@@ -16,6 +16,7 @@ import { clearScheduleDerivedLatches } from '../services/shiftLatches';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
+import { pingIntervalForNewSession } from '../services/pingIntervalGate';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { BREAK_DURATION_MINUTES, normalizeWireBreakType } from '../constants/breakDurations';
 import { getBreakAllowance, breakBlockMessage } from '../services/breakAllowance';
@@ -2149,6 +2150,10 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       guard_id: string | null; shift_status: string;
       scheduled_start: string;
       from_session_id: string | null;
+      /** sites.ping_interval_minutes — the site's configured cadence, read
+       *  here only so the capability gate can decide what to snapshot onto
+       *  the new session. NOT read back out of the session anywhere yet. */
+      ping_interval_minutes: number;
     }>(
       `SELECT ssr.id           AS history_id,
               ssr.from_guard_id,
@@ -2158,7 +2163,12 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
               sh.guard_id,
               sh.status         AS shift_status,
               sh.scheduled_start,
-              si.name           AS site_name
+              si.name           AS site_name,
+              -- schema_v68 snapshot source. sites is ALREADY joined here, so
+              -- this costs no extra round trip. It is deliberately NOT added
+              -- to the FOR UPDATE list below: locking the site row would
+              -- serialise every concurrent handoff at the same site.
+              si.ping_interval_minutes
          FROM shift_swap_requests ssr
          JOIN shifts sh ON sh.id = ssr.shift_id
          JOIN sites  si ON si.id = sh.site_id
@@ -2280,10 +2290,16 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       const shadow = readShadowSignals(req.body, 'handoff-clock-in');
       const inserted = await client.query(
         `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at,
-                                     clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms)
-         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING *`,
+                                     clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms,
+                                     ping_interval_minutes)
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING *`,
         [id, user!.sub, hist.site_id, coords, expiresAtFor('shift_session'),
-         shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs],
+         shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs,
+         // schema_v68 — immutable cadence snapshot. Gated: a handset that
+         // cannot honour a non-30 cadence is stamped 30 regardless of the
+         // site value, or it would be judged on a grid its own countdown
+         // never showed. Every client in the field returns 30 today.
+         pingIntervalForNewSession(req, hist.ping_interval_minutes)],
       );
       newSession = inserted.rows[0];
     } catch (err: any) {
@@ -3512,12 +3528,32 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     logClientIdentity(req, 'clock-in');
     const shadow = readShadowSignals(req.body, 'clock-in');
 
+    // schema_v68 snapshot source, read as its OWN statement rather than
+    // joined into the shift SELECT above. That query carries a bare
+    // FOR UPDATE, which in Postgres locks a row from EVERY table in the
+    // join — pulling sites in would take a row lock on the site and
+    // serialise concurrent clock-ins across every guard posted there. The
+    // handoff route avoids the same trap with FOR UPDATE OF ssr, sh.
+    //
+    // Inside the transaction and after the geofence check, so a rejected
+    // clock-in never runs it. No lock is taken: a plain SELECT.
+    const siteCadence = await client.query<{ ping_interval_minutes: number }>(
+      'SELECT ping_interval_minutes FROM sites WHERE id = $1',
+      [shift.site_id],
+    );
+
     const sessionResult = await client.query(
       `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at,
-                                   clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING *`,
+                                   clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms,
+                                   ping_interval_minutes)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING *`,
       [id, req.user!.sub, shift.site_id, coords, expiresAtFor('shift_session'),
-       shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs]
+       shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs,
+       // Immutable cadence snapshot. Gated on the caller's runtime: a
+       // handset that cannot honour a non-30 cadence is stamped 30 whatever
+       // the site says. Every client in the field returns 30 today, so this
+       // writes 30 for every session until the mobile side ships.
+       pingIntervalForNewSession(req, siteCadence.rows[0]?.ping_interval_minutes)]
     );
 
     // Accepted clock-ins previously logged NOTHING — geofence.reject fires
