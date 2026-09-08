@@ -125,6 +125,14 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
     `SELECT
        g.name,
        ss.clocked_in_at,
+       -- schema_v68 snapshot. Same field, same reason, as GET
+       -- /api/admin/live-guards: the client portal has its own hardcoded
+       -- 35-minute staleness rule (app/client/schedule/page.tsx) that assumes
+       -- a 30-minute cadence, and Phase G replaces it with the shared helper.
+       -- Kept in step with the admin surface deliberately — the two showing a
+       -- guard as stale at different moments is worse than either being
+       -- imperfect, which is the same reasoning as the position fallback below.
+       ss.ping_interval_minutes,
        -- hours_on_duty kept as decimal (2 dp) for back-compat. The
        -- previous ::int / 3600 formulation truncated 5.8h to 5. Replaced
        -- with the 4-field breakdown in the hours object for the new client
