@@ -563,6 +563,44 @@ Design notes for whoever takes it, so the obvious fix does not get written twice
 **Latent, not urgent. Size M, Tier 1** (API read-path plus a new write-path validation; no schema
 change if it is flag-only, one column if the flag is persisted).
 
+**N35. An EXPIRED presigned inspection photo renders as a broken image, not the MISSING tile.**
+verified: YES — reproduced against production 2026-09-08, and the code path confirmed on both
+surfaces that render inspection photos.
+
+S3 answers an expired link with `AccessDenied` / *"Request has expired"*, quoting
+`X-Amz-Expires: 900`, `Expires: 15:46:29Z` against `ServerTime: 17:20:27Z` — 94 minutes past a
+15-minute link — on a key under `inspection/27c4d404-…/2026-08-31/`.
+
+**Why it degrades badly rather than gracefully.** The per-slot render keys the empty state on the
+URL being absent, not on the image failing to load:
+
+- `apps/web/app/admin/sites/[id]/page.tsx:2245,2249` — `const url = inspDetail[key] as string | null;`
+  then `{url ? (<img src={url} …/>) : (…MISSING…)}`
+- `apps/web/app/admin/shifts/[shiftId]/page.tsx:564,568` — the same two lines
+
+An expired URL is still a perfectly good non-empty string, so it takes the truthy branch and lands
+in an `<img>` that 403s. **Neither file has any `onError` handler** (`grep -rn 'onError'` over both
+returns nothing), so the browser's broken-image glyph is the entire feedback. The admin sees the
+same visual for "this photo was never taken" and "your link went stale while the tab was open",
+which are opposite facts — one is a guard compliance gap, the other is nothing at all.
+
+Refreshing the page re-signs and the photos return, so the data is fine and this is purely a
+presentation defect.
+
+**The fix is `onError`, NOT a longer TTL.** The 900s window is the containment property —
+`PRESIGN_GET_TTL_SECONDS = 60 * 15` (`apps/api/src/services/s3.ts:189-192`), whose own comment says
+it is short so *"a screenshot of the URL becomes useless quickly."* Raising it to paper over a
+missing error handler trades a real security property for a cosmetic one. Swap the broken glyph for
+an explicit "Link expired — refresh the page" state, distinct from MISSING.
+
+**Wider than the tab.** Any inspection photo opened in a new tab or pasted to someone else hits the
+same wall, and there the page-refresh remedy is not available — the recipient has only a dead URL
+with no explanation. Same shape applies to every presigned read path, since `urlOrPresign` is shared;
+this item is scoped to inspections because that is where it was reproduced.
+
+**Cosmetic, latent.** No data loss, no wrong number, and the failure is self-healing on reload.
+**Size S, Tier 1.**
+
 
 ---
 
