@@ -217,40 +217,59 @@ export function BREAK_HOURS_ROW_SQL(breakAlias: string, sessionAlias: string): s
  *
  * ── WINDOW ANCHOR IS DEFINED TWICE — SEE services/pingWindows.ts:119 ────
  *
- * The anchor rule (scheduled_start + n * PING_WINDOW_MS) lives in TypeScript
- * there and in SQL here. The CONSTANT is shared by interpolation; the
- * EXPRESSION is not, because a SQL fragment cannot call a TS function.
- * scripts/check-window-anchor.ts asserts the two produce identical boundary
- * lists and fails the build if either side moves. If you change the anchor
- * here, change it there, and the test will tell you if you forgot.
+ * The anchor rule (scheduled_start + n * interval) lives in TypeScript there
+ * and in SQL here. The EXPRESSION is not shared, because a SQL fragment
+ * cannot call a TS function. scripts/check-window-anchor.ts asserts the two
+ * produce identical boundary lists at 15/30/45/60/75/90 and is a required
+ * status check, so a divergence in the ANCHOR RULE fails CI.
  *
- * ── THIS FRAGMENT IS THE LAST HARDCODED GRID — PHASE E ──────────────────
+ * ── BUT THE CHECK DOES NOT EXECUTE THIS FRAGMENT ────────────────────────
  *
- * This block used to say no server-side window read the per-site cadence, and
- * that pingReminder, missedPingCron and this fragment all hardcoded
- * PING_WINDOW_MS. As of 2026-09-08 (PR #23) the first two statements are
- * false: every TypeScript window reader takes its cadence from
- * shift_sessions.ping_interval_minutes (schema_v68), COALESCEd to 30 —
- * missedPingCron, pingReminder, services/email.ts, routes/locations.ts and
- * routes/activityLog.ts. See services/pingWindows.ts.
+ * Know what that guarantee does NOT cover. check-window-anchor.ts compares
+ * the TS grid against a HAND-WRITTEN MIRROR of the anchor rule — its own
+ * generate_series, starting at scheduled_start and bounded by R3. This
+ * fragment starts at the VIOLATION's snapped grid point and is bounded by
+ * effEnd. Different shape, different query, never executed by the check.
  *
- * THIS SQL FRAGMENT STILL HARDCODES PING_WINDOW_MS. It is the one grid that
- * was not threaded, deliberately: it is interpolated into SQL rather than
- * called, so it needs the session's snapshot plumbed in as a COLUMN, not a
- * parameter, and that is a larger change than the rest of the sweep. Phase E
- * owns it.
+ * So the check cannot catch a mistake in how the interval is threaded HERE —
+ * for instance changing WIN and forgetting the grid divisor, which are the
+ * same quantity in two denominations. What covers that is the before/after
+ * capture over every production session recorded in the Phase E commit.
+ * Executing this fragment in CI would need seeded tables in the throwaway
+ * container; it is a real option and it is not what exists today.
  *
- * Nothing diverges TODAY. All **23** production sites read 30 (the "15" this
- * comment previously claimed was already stale; the platform has grown), and
- * every session snapshot written so far is 30 because the mobile capability
- * gate has no capable client to admit. So this fragment and the threaded
- * readers agree by coincidence of data, not by construction.
+ * ── THE CADENCE COMES FROM THE SESSION SNAPSHOT ─────────────────────────
  *
- * The moment one site is set to anything else, violation_hours computed here
- * disagrees with the missed-ping flags, the client email's ratio and the
- * activity log — all of which now follow the session. scripts/check-window-anchor.ts
- * compares this fragment against the TypeScript grid at 15/30/45/60/75/90 and
- * is a required check, so the drift fails CI rather than reaching a client.
+ * This block used to say that this fragment was the last hardcoded grid, and
+ * that it interpolated PING_WINDOW_MS as a constant while every TypeScript
+ * reader had moved to the session snapshot. That was true from PR #23 until
+ * this commit, and it is now false: IVL_MIN below reads
+ * shift_sessions.ping_interval_minutes (schema_v68), COALESCEd to 30, the
+ * same source missedPingCron, pingReminder, services/email.ts,
+ * routes/locations.ts and routes/activityLog.ts use. The grid is defined in
+ * one place for the whole platform. PING_WINDOW_MS survives as the COALESCE
+ * default, not as the cadence.
+ *
+ * WHY THE SNAPSHOT AND NOT sites (D16). This fragment is re-evaluated long
+ * after a session closes — the daily client report renders over an hour past
+ * scheduled_end, and violation_hours is recomputed on every read of the hours
+ * export. A live join to sites would let an admin editing a site at 21:00
+ * retroactively change a guard's off-post hours at 14:00 and move a number
+ * already emailed to a paying client. That is not a display bug; it rewrites
+ * a billed figure after the fact with no record that it changed.
+ *
+ * ── WHAT THIS COMMIT DELIBERATELY DID NOT CHANGE ────────────────────────
+ *
+ * It is a proven no-op. Every one of the 213 production sessions was
+ * evaluated before and after, across all four hours fields and the aggregate
+ * shape, and the results are byte-identical — because all 23 sites read 30
+ * and every snapshot written so far is 30. That property is what made the
+ * change safe to make on a billing number, and it is why NO break waiver was
+ * added here: the fragment counts a window the violation spans in which no
+ * ping landed, INCLUDING windows inside an authorised break. That asymmetry
+ * against the client email's break-aware denominator is real (measured
+ * 2.68 h platform-wide, 0.05 h on STARNET) and is a separate decision with a
+ * separate before/after, because fixing it CHANGES the number.
  *
  * Aliases must be trusted identifiers (never user input).
  */
@@ -258,13 +277,31 @@ export function VIOLATION_HOURS_ROW_SQL(
   violationAlias: string, sessionAlias: string, shiftAlias: string,
 ): string {
   const gv = violationAlias, s = sessionAlias, sh = shiftAlias;
-  const WIN = `(INTERVAL '1 millisecond' * ${PING_WINDOW_MS})`;
+  // THE cadence expression. Everything below derives from this one string, in
+  // two different denominations — see the note under WIN.
+  //
+  // From the SESSION SNAPSHOT (schema_v68), never a live join to sites: this
+  // fragment is re-evaluated on every read of the hours export and every send
+  // of the daily client report, long after the session closed. See D16.
+  //
+  // GREATEST(..., 1) is kept even though schema_v69 now constrains the column
+  // to 5..240. A CHECK cannot retroactively fix a row written before it, and
+  // the failure it guards is not a wrong number: generate_series raises
+  // "step size cannot equal zero" on a zero interval and returns an empty
+  // series on a negative one, so a bad row would THROW inside the client
+  // email and the XLSX export. Defence in depth is cheap on a billing number.
+  const IVL_MIN = `GREATEST(COALESCE(${s}.ping_interval_minutes, ${PING_WINDOW_MS / 60000}), 1)`;
+  // TWO DENOMINATIONS OF ONE QUANTITY. WIN is an INTERVAL; the grid divisor
+  // below is SECONDS. They must move together — changing one and not the
+  // other yields a plausible wrong number rather than an error, on a figure
+  // that has already been emailed to a paying client.
+  const WIN = `(INTERVAL '1 minute' * ${IVL_MIN})`;
   // The instant the violation stops counting: its resolve, or session close.
   const effEnd = `LEAST(COALESCE(${gv}.resolved_at, NOW()), COALESCE(${s}.clocked_out_at, NOW()))`;
   // Snap an instant DOWN onto the window grid anchored at scheduled_start.
   const grid = (t: string) =>
     `${sh}.scheduled_start + (FLOOR(EXTRACT(EPOCH FROM (${t} - ${sh}.scheduled_start))
-       / (${PING_WINDOW_MS} / 1000.0)) * ${WIN})`;
+       / (${IVL_MIN} * 60.0)) * ${WIN})`;
   return `(
     SELECT COALESCE(SUM(
       GREATEST(0, EXTRACT(EPOCH FROM (
