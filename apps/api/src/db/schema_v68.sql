@@ -1,0 +1,31 @@
+-- schema_v68 -- shift_sessions.ping_interval_minutes: the ping cadence a
+-- session is judged by, snapshotted once at clock-in.
+--
+-- WHY A SNAPSHOT AND NOT A LIVE JOIN
+-- ----------------------------------
+-- missedPingCron, pingReminder, services/email.ts and shiftHours.ts's
+-- VIOLATION_HOURS_ROW_SQL all re-derive ping windows from scheduled_start
+-- LONG after a session closes -- the daily client report runs over an hour
+-- after scheduled_end, and violation_hours is recomputed on every read of
+-- the hours export. Joining sites.ping_interval_minutes at read time would
+-- let an admin editing a site at 21:00 retroactively change how many windows
+-- a guard was accountable for at 14:00, and change a number already emailed
+-- to a paying client. A snapshot makes the past immutable.
+--
+-- NULL, NOT 30
+-- ------------
+-- Nullable with no default on purpose. NULL means "session predates this
+-- column" -- 138 existing rows -- and is NOT the same statement as "this
+-- session runs on 30". Readers land in Phase D and will COALESCE(x, 30),
+-- which is a deliberate decision recorded in one place rather than a
+-- backfill that quietly asserts a cadence nobody measured.
+--
+-- NO CHECK YET
+-- ------------
+-- sites.ping_interval_minutes carries CHECK (BETWEEN 5 AND 240)
+-- (schema_v14.sql:39). The matching constraint here belongs with the admin
+-- picker in Phase H, which is what decides the allowed set (15/30/45/60/
+-- 75/90). Adding a CHECK now would fix a range before the product decision
+-- that owns it.
+ALTER TABLE shift_sessions
+  ADD COLUMN IF NOT EXISTS ping_interval_minutes INTEGER;
