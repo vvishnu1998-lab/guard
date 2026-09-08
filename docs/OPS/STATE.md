@@ -53,16 +53,17 @@ only reliable check is
 
 ---
 
-## Railway (API) — verified 2026-09-05 11:00 UTC (Phase 4)
+## Railway (API) — deployment row verified 2026-09-08 07:35 UTC; rest 2026-09-05 11:00 UTC (Phase 4)
 
 | thing | value |
 |---|---|
 | project / env / service | `adorable-courage` / `production` / `guard` (`railway status`) |
-| current deployment id | `087ead46-7087-4c6b-b047-c1d4679b8ae4` |
+| current deployment id | `e47c6396-6fd3-429b-82b9-75ef9d0d505c` |
 | status | **SUCCESS** |
-| deployed at | 2026-09-05 02:14:23 -07:00 |
-| previous deployments | all `REMOVED` (Railway retains one active) |
+| deployed at | 2026-09-08 00:30:39 -07:00 |
+| previous deployments | all `REMOVED` (Railway retains one active) — `22b51990-6fbe-48db-a6b4-c345175e4b77` and `dfe120b8-00fe-4907-b3a1-6fe1f4a8f29a` went `REMOVED` as each successor landed |
 | `/health` live body | `{"status":"ok","db":"connected"}` — HTTP 200 |
+| `/health/crons` live body | `{"status":"ok","jobs":19,"stale":[]}` — HTTP 200 |
 
 **Deployment → commit linkage is INFERRED, not read from Railway.** `railway
 deployment list` does not print a commit sha. The inference: the gitleaks run for
