@@ -31,6 +31,11 @@ interface Site {
   // post-clock-in inspection.
   checkpoints_enabled:         boolean;
   vehicle_inspection_required: boolean;
+  /** schema_v14. The cadence a session at this site SNAPSHOTS at clock-in —
+   *  never the cadence of a session already running. NOT optional: the
+   *  column is NOT NULL DEFAULT 30 and GET /api/sites/:id has always sent
+   *  it via `SELECT s.*`, so there is no stale-API window to guard. */
+  ping_interval_minutes:       number;
 }
 
 interface LiveGuard {
@@ -44,6 +49,11 @@ interface LiveGuard {
   // is NOT NULL and shifts.scheduled_start/end are NOT NULL).
   scheduled_start?: string | null;
   scheduled_end?:   string | null;
+  /** schema_v68 snapshot — what this OPEN session is actually being judged
+   *  on, which can differ from the site's configured value (see the
+   *  divergence line below the picker). Served since PR #27. Optional per
+   *  the stale-API rule: Vercel and Railway are never simultaneous. */
+  ping_interval_minutes?: number | null;
 }
 
 interface Shift {
@@ -502,6 +512,14 @@ function SiteDetailPageInner() {
   // and re-renders from the server's RETURNING row.
   const [toggleSaving, setToggleSaving] = useState<'' | 'checkpoints_enabled' | 'vehicle_inspection_required'>('');
   const [toggleError,  setToggleError]  = useState('');
+  // Separate busy/error state from the toggles: the picker is a different
+  // control on a different endpoint, and a failed cadence save must not
+  // blank an unrelated toggle error (or vice versa).
+  const [intervalSaving, setIntervalSaving] = useState(false);
+  const [intervalError,  setIntervalError]  = useState('');
+  // Cleared on the next save; distinguishes "written" from "already that
+  // value", which the route reports via `changed`.
+  const [intervalNote,   setIntervalNote]   = useState('');
 
   // ── Checkpoints (C4a) ──────────────────────────────────────────────────
   const [checkpoints,  setCheckpoints]  = useState<Checkpoint[]>([]);
@@ -759,6 +777,34 @@ function SiteDetailPageInner() {
       setToggleError(e.message ?? 'Failed to save setting');
     } finally {
       setToggleSaving('');
+    }
+  }
+
+  /**
+   * Mirrors saveToggle above: single-flight guard, adminPatch, echo-merge
+   * the server's returned row rather than trusting the optimistic value,
+   * scoped error, cleared in finally.
+   *
+   * One addition. The route returns `changed`, false when the new value
+   * equalled the current one — in which case it deliberately wrote NO audit
+   * row. Showing "Saved" for a call that wrote nothing would misreport what
+   * happened to the audit trail, so the two cases get different copy.
+   */
+  async function saveInterval(value: number) {
+    if (!site || intervalSaving || value === site.ping_interval_minutes) return;
+    setIntervalSaving(true);
+    setIntervalError('');
+    setIntervalNote('');
+    try {
+      const updated = await adminPatch<{ id: string; ping_interval_minutes: number; changed: boolean }>(
+        `/api/sites/${siteId}/ping-interval`, { ping_interval_minutes: value },
+      );
+      setSite((s) => (s ? { ...s, ping_interval_minutes: updated.ping_interval_minutes } : s));
+      setIntervalNote(updated.changed ? 'Saved.' : 'Already set to that value — nothing changed.');
+    } catch (e: any) {
+      setIntervalError(e.message ?? 'Failed to save ping cadence');
+    } finally {
+      setIntervalSaving(false);
     }
   }
 
@@ -1218,6 +1264,40 @@ function SiteDetailPageInner() {
     return guards.filter((g) => g.site_name === site.name);
   }, [guards, site]);
 
+  /**
+   * What OPEN sessions at this site are actually running on, when it differs
+   * from what the site is configured for.
+   *
+   * The site value is only the SOURCE a session copies at clock-in
+   * (schema_v68). Two things make the running value differ, and an admin can
+   * see neither from this page otherwise:
+   *
+   *   1. The change simply has not reached a session yet — a session that
+   *      started before the edit keeps the cadence it snapshotted.
+   *   2. The capability gate. services/pingIntervalGate.ts stamps 30 for any
+   *      client below MIN_RUNTIME_READING_SESSION_INTERVAL, because a handset
+   *      that cannot honour a non-30 cadence must not be judged on one.
+   *      Nothing in the field is above that threshold today, so a site set to
+   *      45 currently produces sessions stamped 30 — every time, silently.
+   *
+   * Reads presentGuards, which this page already computes from the
+   * /api/admin/live-guards fetch at load. NO new request. NULL means a
+   * session predating schema_v68 and is COALESCEd to 30, exactly as every
+   * server-side reader does it.
+   *
+   * Returns null when there is nothing to say — no open sessions, or they
+   * all match. A line that renders "configured 30, running 30" would be
+   * noise on every site on the platform today.
+   */
+  const runningIntervals = useMemo(() => {
+    if (!site || presentGuards.length === 0) return null;
+    const running = Array.from(
+      new Set(presentGuards.map((g) => g.ping_interval_minutes ?? 30)),
+    ).sort((a, b) => a - b);
+    const diverges = running.some((m) => m !== site.ping_interval_minutes);
+    return diverges ? running : null;
+  }, [presentGuards, site]);
+
   const upcomingShifts = useMemo(() => {
     const now  = new Date();
     const end  = new Date(now); end.setDate(end.getDate() + 7); end.setHours(23, 59, 59, 999);
@@ -1271,6 +1351,55 @@ function SiteDetailPageInner() {
   // Toggle row (schema_v47) — same JSX as before the nesting move, extracted
   // so both rows share one copy. The gated feature block renders directly
   // beneath its row, inside SITE SETTINGS.
+  /**
+   * Ping-cadence picker. Segmented radiogroup rather than a switch, but the
+   * a11y treatment matches renderToggleRow below: an explicit role, an
+   * aria- state per option, an aria-label, and disabled while saving.
+   *
+   * The allowed set is D15 and is enforced server-side too — the route 400s
+   * anything outside it (services/pingIntervalPicker.ts). The column itself
+   * still permits 5..240; the route is deliberately the narrower boundary.
+   */
+  function renderIntervalPicker(value: number) {
+    const OPTIONS = [15, 30, 45];
+    return (
+      <div className="flex items-center justify-between gap-3 pb-3">
+        <div className="min-w-0">
+          <p className="text-gray-200 text-sm tracking-wider">PING CADENCE</p>
+          <p className="text-gray-500 text-xs mt-0.5">
+            How often a guard is asked to submit a location ping at this site.
+          </p>
+        </div>
+        <div
+          role="radiogroup"
+          aria-label="Ping cadence in minutes"
+          className="flex shrink-0 rounded-lg overflow-hidden border border-[#1A3050]"
+        >
+          {OPTIONS.map((m) => {
+            const selected = m === value;
+            return (
+              <button
+                key={m}
+                role="radio"
+                aria-checked={selected}
+                aria-label={`${m} minutes`}
+                disabled={intervalSaving}
+                onClick={() => saveInterval(m)}
+                className={`px-3 py-1.5 text-xs font-mono tracking-wider transition-colors ${
+                  selected
+                    ? 'bg-amber-400/80 text-black font-bold'
+                    : 'bg-[#0F1E35] text-gray-400 hover:text-gray-200'
+                } ${intervalSaving ? 'opacity-50' : ''} disabled:cursor-not-allowed`}
+              >
+                {m}m
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   function renderToggleRow(
     flag: 'checkpoints_enabled' | 'vehicle_inspection_required',
     label: string,
@@ -1460,6 +1589,50 @@ function SiteDetailPageInner() {
           <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-2 mb-3">{toggleError}</div>
         )}
         <div className="border-y border-[#1A3050] divide-y divide-[#1A3050]">
+          <div className="py-3">
+            {renderIntervalPicker(site.ping_interval_minutes)}
+
+            {intervalError && (
+              <div className="bg-red-900/40 border border-red-500 text-red-300 text-xs rounded-lg px-3 py-2 mb-2">{intervalError}</div>
+            )}
+            {intervalNote && !intervalError && (
+              <p className="text-gray-500 text-xs mb-2">{intervalNote}</p>
+            )}
+
+            {/* Mid-shift note — same shape and intent as the one in
+                components/admin/TaskTemplateModal.tsx: conditional on a shift
+                actually being active, informational only, control stays fully
+                editable. A permanent banner would be noise; this one appears
+                exactly when it is true. */}
+            {presentGuards.length > 0 && (
+              <div
+                role="note"
+                className="bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs tracking-wide rounded-lg px-3 py-2 leading-relaxed mb-2"
+              >
+                <span className="font-bold">⚠ </span>
+                A shift is currently active at this site. A new cadence applies
+                from the next clock-in — not the current shift.
+              </div>
+            )}
+
+            {/* DIVERGENCE — rendered ONLY when open sessions are actually
+                running on something else. Silent when they agree, which is
+                every site on the platform today. */}
+            {runningIntervals && (
+              <div
+                role="note"
+                className="bg-[#0F1E35] border border-[#1A3050] text-gray-400 text-xs rounded-lg px-3 py-2 leading-relaxed mb-2"
+              >
+                Configured <span className="text-gray-200 font-mono">{site.ping_interval_minutes}m</span>,
+                but {presentGuards.length === 1 ? 'the open session is' : 'open sessions are'} running{' '}
+                <span className="text-gray-200 font-mono">{runningIntervals.map((m) => `${m}m`).join(' / ')}</span>.
+                {' '}A session keeps the cadence it snapshotted at clock-in, and a
+                cadence other than 30m is only snapshotted once the guard&rsquo;s app
+                can honour it — older apps are recorded at 30m so they are never
+                judged on a grid they do not show.
+              </div>
+            )}
+          </div>
           <div className="py-3">
             {renderToggleRow('checkpoints_enabled', 'CHECKPOINT SCANNING',
               'Guards see the QR scanner and hourly patrol rounds at this site.',
