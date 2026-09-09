@@ -10,7 +10,7 @@
  *   (3) duplicate dates                → 422
  *   (4) 61 dates                       → 422 (over max)
  *   (5) happy path 5 dates             → 201 { ids: [5] }, rows persisted
- *   (6) conflict on date 3 of 5        → 422, 0 rows persisted
+ *   (6) conflict on date 3 of 5        → 409 + conflict object, 0 rows persisted
  *
  * Prereqs:
  *   - apps/api dev server is running on http://localhost:3001
@@ -188,9 +188,14 @@ async function deleteShiftsByIds(ids: string[]): Promise<void> {
 
     try {
       const r = await post(token, { ...base, dates: ds, start_time: '05:00', end_time: '07:00' });
-      if (r.status !== 422) bad(`(6) expected 422, got ${r.status} ${JSON.stringify(r.body)}`);
-      else if (!new RegExp(`Conflict on date ${conflictDate}`).test(r.body?.error ?? '')) {
-        bad(`(6) expected Conflict-on-date message naming ${conflictDate}, got ${JSON.stringify(r.body)}`);
+      // 409, not 422: this path now routes through services/shiftOverlap.ts
+      // so all four admin creation paths emit one shape. Assert the STRUCTURED
+      // field rather than the sentence — body.conflict.shift_id is the part
+      // apps/web deep-links from, and prose rots the next time it is reworded.
+      // The planted row is the expected collision, so its id is checkable.
+      if (r.status !== 409) bad(`(6) expected 409, got ${r.status} ${JSON.stringify(r.body)}`);
+      else if (r.body?.conflict?.shift_id !== plantedId) {
+        bad(`(6) expected conflict.shift_id === ${plantedId}, got ${JSON.stringify(r.body)}`);
       } else {
         // Verify rollback: the only row that should remain among these 5
         // dates is our planted one.
@@ -202,7 +207,7 @@ async function deleteShiftsByIds(ids: string[]): Promise<void> {
           [fixtures.guardId, ds, plantedId],
         );
         if (persisted.rows.length !== 0) bad(`(6) expected 0 new rows, found ${persisted.rows.length}`);
-        else ok('(6) conflict on date 3 → 422, rollback, 0 new rows persisted');
+        else ok('(6) conflict on date 3 → 409 + conflict.shift_id, rollback, 0 new rows persisted');
       }
     } finally {
       await pool.query(`DELETE FROM shifts WHERE id = $1`, [plantedId]);

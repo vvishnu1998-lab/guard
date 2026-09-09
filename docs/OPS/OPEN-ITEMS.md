@@ -997,6 +997,48 @@ if `repeat_days` is ever called with a much larger day set.
 
 ---
 
+**N50. `adminPost` throws a plain `Error`, so apps/web cannot reach the `conflict` object the shift-creation 409 now carries.**
+verified: YES — read directly at `9764e1d`.
+
+`apps/web/lib/adminApi.ts:59-66`:
+
+```js
+export async function adminPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await adminFetch(path, { method: 'POST', body: JSON.stringify(body) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? `Request failed: ${res.status}`);
+  }
+```
+
+Only `.error` survives. Everything else in the body is discarded before the caller sees it.
+
+**`adminPatch` was already upgraded for exactly this reason** (`:68-79`), throwing the local
+`ApiError` that carries `status` and the full parsed `body`. Its docblock at `:29-33` says why,
+naming this precise case:
+
+> *"the 409 from PATCH /api/shifts/:id includes a `conflict` object naming the colliding shift
+> so the UI can link straight to it. Throwing a bare `Error(err.error)` discards that, leaving
+> the admin with a sentence they cannot act on."*
+
+`adminPost` never got the same treatment. So now that all four admin creation paths emit the
+`conflict` object, **`ScheduleShiftModal` still cannot deep-link from any of them** — it renders
+`e.message` at `:291` and the structured field never arrives.
+
+Nothing is broken by this: the sentence is complete and actionable on its own, and the modal
+behaves identically before and after. It is unrealised value, not a regression.
+
+**Why it is its own change.** The fix is one line — swap the `throw` for the `ApiError` shape
+`adminPatch` already uses — but it changes the error TYPE every admin POST in the app throws.
+`ApiError extends Error` and `message` is unchanged, so every existing `catch (e) { e.message }`
+keeps working by construction; still, that is an app-wide blast radius for a one-line diff and it
+deserves its own review rather than riding along inside a route change. `adminGet` (`:50-57`) and
+`adminDelete` (`:81-87`) have the same gap and should move at the same time.
+
+**Size S. Tier 1 (touches the shared admin fetch layer).**
+
+---
+
 ## Carried items
 
 **C1. Build 49: device-position-on-Exit + AD_ID revert, after Build 48 review.**

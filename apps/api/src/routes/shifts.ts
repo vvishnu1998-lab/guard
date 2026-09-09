@@ -258,6 +258,41 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     // Sort to make rollback messages deterministic and conflict checks predictable.
     const sortedDates = [...dateList].sort();
 
+    // Phase C follow-on — the window instants, computed ONCE, in SQL, with the
+    // SAME expression the INSERT below binds. The old inline predicate built
+    // its window in the same statement as the lookup; findOverlappingShift
+    // takes values, not SQL, so the window has to be materialised first.
+    //
+    // WHY NOT COMPUTE IT IN JS: `(date + time) AT TIME ZONE zone` converts a
+    // site-local wall clock to an instant. Reimplementing that in JS needs
+    // IANA offset arithmetic including the DST fall-back hour, and any
+    // divergence would mean the check tests a different window than the one
+    // written — the exact failure this is built to avoid.
+    //
+    // EQUIVALENCE, by substitution against the INSERT at :294-295
+    // (its $3=d, $4=start_time, $5=end_time, $6=overnightInterval, $8=siteTz):
+    //     scheduled_start = ($3::date + $4::time)                AT TIME ZONE $8
+    //     scheduled_end   = ($3::date + $6::interval + $5::time) AT TIME ZONE $8
+    // here ($1[i]=d, $2=start_time, $3=overnightInterval, $4=siteTz, $5=end_time):
+    //     s               = (dt + $2::time)                      AT TIME ZONE $4
+    //     e               = (dt + $3::interval + $5::time)       AT TIME ZONE $4
+    // Identical operands in identical order. AT TIME ZONE is immutable, so
+    // both evaluations yield the same instant — including inside the DST
+    // fall-back hour, which resolves the same way both times.
+    //
+    // to_char rather than dt::text so the key does not depend on DateStyle.
+    const windowByDate = new Map<string, { s: Date; e: Date }>();
+    if (guard_id) {
+      const w = await pool.query<{ d: string; s: Date; e: Date }>(
+        `SELECT to_char(dt, 'YYYY-MM-DD')                    AS d,
+                (dt + $2::time) AT TIME ZONE $4              AS s,
+                (dt + $3::interval + $5::time) AT TIME ZONE $4 AS e
+           FROM unnest($1::date[]) AS dt`,
+        [sortedDates, start_time, overnightInterval, siteTz, end_time],
+      );
+      for (const r of w.rows) windowByDate.set(r.d, { s: r.s, e: r.e });
+    }
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -265,24 +300,24 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       const createdShifts: CreatedShift[] = [];
       for (const d of sortedDates) {
         // Overlap check (assigned shifts only — unassigned can stack).
+        //
+        // Routed through the shared helper so all four admin creation paths
+        // emit one shape. This changes the status from 422 to 409 and the body
+        // from `{error: "Conflict on date <d>"}` to the full sentence plus the
+        // `conflict` object — the same 409 PATCH /:id has emitted since v58.
+        // Still inside this transaction on `client`, still ROLLBACK before
+        // returning, still the FIRST conflicting date, still zero shifts
+        // created. excludeShiftId is null: the row does not exist yet.
         if (guard_id) {
-          const overlap = await client.query(
-            `WITH new_window AS (
-               SELECT
-                 ($1::date + $2::time) AT TIME ZONE $6 AS s,
-                 ($1::date + $4::interval + $3::time) AT TIME ZONE $6 AS e
-             )
-             SELECT 1 FROM shifts, new_window
-              WHERE guard_id = $5
-                AND status IN ('scheduled','active')
-                AND scheduled_start < new_window.e
-                AND scheduled_end   > new_window.s
-              LIMIT 1`,
-            [d, start_time, end_time, overnightInterval, guard_id, siteTz]
-          );
-          if (overlap.rows[0]) {
+          const win = windowByDate.get(d);
+          // Cannot happen — d comes from sortedDates and the window query is
+          // built from that same array — but fail loudly inside the existing
+          // rollback path rather than silently skipping a date's check.
+          if (!win) throw new Error(`overlap window not computed for date ${d}`);
+          const conflict = await findOverlappingShift(guard_id, win.s, win.e, null, client);
+          if (conflict) {
             await client.query('ROLLBACK');
-            return res.status(422).json({ error: `Conflict on date ${d}` });
+            return res.status(409).json(overlapConflictBody(conflict));
           }
         }
         const insert = await client.query(
