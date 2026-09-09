@@ -1039,6 +1039,140 @@ deserves its own review rather than riding along inside a route change. `adminGe
 
 ---
 
+## New from Phase B coverage matching (2026-09-09)
+
+**N51. No `(site_id, scheduled_start)` index for the coverage match join.**
+verified: YES — `pg_indexes` on `shifts` read at `749aa32`.
+
+Phase B matches expanded template slots against shifts on **exact `scheduled_start` equality**,
+scoped by `site_id`. `shifts` carries three indexes and none serves that join:
+
+```
+shifts_pkey                 UNIQUE btree (id)
+idx_shifts_email_pending    btree (scheduled_end) WHERE daily_report_email_sent=false AND status='completed'
+idx_shifts_expires_at       btree (expires_at)    WHERE legal_hold=false
+idx_shifts_guard_scheduled  btree (guard_id, scheduled_start)     -- Phase A
+idx_shifts_scheduled_start  btree (scheduled_start)               -- Phase A
+```
+
+`idx_shifts_scheduled_start` covers the window bound but not the `site_id` equality, so the
+`occupied` CTE filters by site after the range scan. `(site_id, scheduled_start)` is the right
+pair for both the window filter and the match join.
+
+**Not urgent and deliberately not shipped here.** `shifts` is 511 rows in ~11 pages; the planner
+seq-scans this predicate regardless, and Phase A already added two indexes to this table. Adding a
+third in the same arc without a measured plan change would be cargo cult. Revisit when the table
+is large enough for the plan to matter — and note that N47 already proposes
+`(guard_id, scheduled_end)` for the overlap predicate, so the two should be decided together
+rather than bolted on one at a time.
+
+**Size S. Tier 1 (expand-only, `CREATE INDEX CONCURRENTLY` in its own single-statement file — see
+`schema_v72.sql` for why).**
+
+---
+
+**N52. Two DST hazards in the coverage slot expansion — measured, documented in code, NOT fixed.**
+verified: YES — both measured against production Postgres 18.6.
+
+The expansion converts a site-local wall clock to an instant with
+`(date + time)::timestamp AT TIME ZONE tz`, the same round-trip `services/tasks.ts:73` uses and
+the same one `routes/shifts.ts` binds when creating a shift. On a DST transition day that
+conversion is not injective, in both directions:
+
+**1. SPRING FORWARD — a nonexistent local time does not raise; it maps forward.**
+```
+('2027-03-14'::date + '02:30'::time)::timestamp AT TIME ZONE 'America/Los_Angeles'  ->  2027-03-14T10:30Z
+('2027-03-14'::date + '03:30'::time)::timestamp AT TIME ZONE 'America/Los_Angeles'  ->  2027-03-14T10:30Z
+```
+A 02:30 slot and a 03:30 slot **collapse onto the same instant**. Under exact-instant matching one
+shift satisfies both, and `filled` over-counts.
+
+**2. FALL BACK — the ambiguous hour resolves to the LATER (standard-time) instant.**
+```
+('2026-11-01'::date + '01:30'::time)::timestamp AT TIME ZONE 'America/Los_Angeles'  ->  2026-11-01T09:30Z
+```
+PDT 01:30 would be 08:30Z; Postgres returns 09:30Z (PST). A shift genuinely created at the *first*
+01:30 will not match its slot, and that slot reads unfilled.
+
+**When they first bite.** US transitions are **2026-11-01** and **2027-03-14**. The window is 14
+days from today site-local, so the first window containing a transition opens **2026-10-19**.
+Neither fires before then.
+
+**Why not fixed in Phase B.** Both need a decision about what a slot *means* on a transition day —
+does an 02:30 Sunday slot exist at all in the spring, and which 01:30 does a fall-back slot refer
+to? That is a product question, not a formatting one, and answering it wrong is worse than the
+current deterministic behaviour. Both are named in a comment at the expansion in
+`routes/scheduling.ts` so the next reader finds them before a late-October window does.
+
+**Currently unobservable in another sense too:** all 23 sites are `America/Los_Angeles`, so there
+is exactly one transition pair to reason about, not one per zone.
+
+**Size M to decide, S to implement. Tier 1.**
+
+---
+
+**N53. `GET /api/scheduling/coverage-status` applies no `is_active` filter, so deactivated sites appear in the payload.**
+verified: YES — read at `749aa32`, confirmed against production.
+
+`routes/scheduling.ts:355-357`:
+```js
+const siteRows = isVishnu
+  ? await pool.query('SELECT id FROM sites')
+  : await pool.query('SELECT id FROM sites WHERE company_id = $1', [req.user!.company_id]);
+```
+
+No `is_active` predicate. `GET /api/sites` **does** filter — `routes/sites.ts:55-58` documents
+*"Default: hides deactivated sites (is_active = false) for company_admin"* — so the coverage array
+contains rows the consuming page has no card to attach them to.
+
+Production holds exactly one deactivated site: **`6c638a80-a887-4375-9687-bfb6c1acb3bc`**
+("william pen hotel", STARNET SECURITY `27c4d404-8769-49ca-bfd6-93cb9b890067`).
+
+**Harmless today**, on two counts: it has no scheduling profile, so `has_active_profile` is false
+and both surfaces render nothing for it; and the pages key coverage by `site.id` off their own
+site list, so an unmatched entry is simply never looked up. It is wasted payload and a latent
+mismatch, not a bug anyone can see.
+
+Fix is one predicate, but it should match whatever `sites.ts` decides for the vishnu case — that
+role deliberately sees deactivated sites as an audit surface, so the filter is not
+unconditional.
+
+**Size S. Tier 0.**
+
+---
+
+**N54. Both admin surfaces depend on API fields shipped in the same commit, and deploy order is not enforced.**
+verified: YES — by construction; `apps/api/railway.json` and the Vercel project deploy
+independently off the same merge.
+
+Phase B adds `has_slots`, `filled`, `off_template` and `window` to `/coverage-status` and reads
+them in `app/admin/shifts/page.tsx` and `app/admin/sites/page.tsx`. **Nothing sequences the two
+deploys.** Both fire off the same merge to `main`; either can win.
+
+**Vercel ahead of Railway — MITIGATED IN CODE.** The new build would receive the pre-Phase-B shape,
+where the Phase B fields are absent. Treating `has_slots` as falsy would render **"No slots
+configured"** on every profiled site. Both surfaces therefore declare the Phase B fields
+**optional** and branch on `has_slots === undefined` — meaning "old API" — returning the exact
+pre-Phase-B rendering rather than the new one. `!cov.has_slots` is only ever reached after that
+guard. Verified by grep: every `!cov.has_slots` (`shifts/page.tsx:437`, `sites/page.tsx:1155`)
+sits after its guard (`:416`, `:1140`).
+
+**Railway ahead of Vercel — NOT mitigable from this commit, and cosmetic.** The *already deployed*
+web build reads `cov.scheduled`, which the new API no longer sends, with **no nullish fallback** —
+`sites/page.tsx` renders `{cov.scheduled} / {cov.required} scheduled`. During that window the
+sites page shows **"undefined / 24 scheduled"**. It is cosmetic, it self-heals the moment Vercel
+finishes, and it cannot be fixed here because the offending code is what is already live. Recorded
+so it is recognised rather than diagnosed from scratch.
+
+**The general point outlives this phase.** Any API field a web surface reads in the same commit has
+this shape. The convention that makes it safe — optional field, explicit `undefined` branch, never
+truthiness — is the one to apply next time, and the reverse direction is the one nobody can
+retrofit.
+
+**Size S (this instance is handled). Tier 1 as a standing practice.**
+
+---
+
 ## Carried items
 
 **C1. Build 49: device-position-on-Exit + AD_ID revert, after Build 48 review.**
