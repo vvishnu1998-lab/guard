@@ -73,9 +73,11 @@ export function computeLateness(
   }
   const boundaryMs = Math.max(...candidates.filter((b) => b <= actualMs));
   const lateMins   = Math.floor((actualMs - boundaryMs) / 60_000);
-  const time = new Intl.DateTimeFormat('en-GB', {
-    hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
-  }).format(actual);
+  // Was an inline Intl.DateTimeFormat with an option bag byte-identical to
+  // fmtPacificHHMM's. Collapsed here; `actual` and `new Date(actualMs)` are
+  // value-equal, and both forms throw the same RangeError on an unparseable
+  // input, so this is behaviour-preserving including the failure path.
+  const time = fmtPacificHHMM(actualMs);
   return { display: lateMins === 0 ? `${time} (on time)` : `${time} (+${lateMins}m late)` };
 }
 
@@ -153,27 +155,111 @@ export function computeLatenessAnchored(
 }
 
 /**
- * Minutes after which a guard's last ping reads as stale. Wall-clock, and
- * deliberately independent of computeLateness above: that one measures the
- * ping against its SCHEDULE boundary for display, this one measures it
- * against NOW for urgency. A guard who pinged perfectly on time an hour ago
- * is "(on time)" and stale at once, and both statements are correct.
+ * Slack allowed on top of one window before a ping reads as stale.
+ *
+ * GRACE MODELS SUBMISSION LATENCY, NOT A FRACTION OF THE WINDOW. A guard
+ * receives the push, opens the app, captures a photo and uploads it. That is
+ * a fixed cost in the handset and the network; it does not get cheaper
+ * because the window is shorter. So the grace is an absolute 5 minutes, not
+ * a percentage — which is why the formula below adds rather than scales.
+ */
+export const GRACE_MINUTES = 5;
+
+/**
+ * Minutes without a ping after which the guard reads as stale, for a session
+ * on `intervalMinutes` cadence: one full window, plus grace.
+ *
+ * The min() clamp keeps grace from exceeding a third of the window. It
+ * computes EXACTLY 5 at 15, 30 and 45 — the entire picker set (D15) — so
+ * every threshold in production is unchanged by this function's arrival:
+ *
+ *     15 -> 20     30 -> 35 (today's value)     45 -> 50
+ *
+ * The clamp only bites below 15 (at 5 it gives 5 + 1.67 = 6.67), which the
+ * picker cannot reach and only direct SQL can. It exists so an out-of-band
+ * value degrades to something proportionate instead of a grace longer than
+ * the window it follows.
+ */
+export function pingStaleMinutes(intervalMinutes: number): number {
+  if (!(intervalMinutes > 0)) return 30 + GRACE_MINUTES;
+  return intervalMinutes + Math.min(GRACE_MINUTES, intervalMinutes / 3);
+}
+
+/**
+ * @deprecated Use pingStaleMinutes(interval) — this constant assumes a
+ * 30-minute cadence. Kept exported so nothing breaks in the commit that
+ * introduces the per-session form; it is exactly pingStaleMinutes(30).
  */
 export const PING_STALE_MINUTES = 35;
 
 /**
- * The stale-ping urgency rule, lifted verbatim out of
- * app/admin/live-status/page.tsx so the table cell and the map pin cannot
- * drift apart. Behaviour is unchanged from the inline form it replaces —
- * the added Number.isFinite guard only makes explicit what an unparseable
- * date already did (NaN >= 35 is false).
+ * The stale-ping urgency rule — shared so the table cell, the map pin and
+ * the client portal cannot drift apart. (The client portal previously had
+ * its own hardcoded 35, importing nothing from here.)
+ *
+ * Deliberately independent of computeLatenessAnchored: that one measures the
+ * ping against ITS OWN WINDOW, this one measures it against NOW. A guard who
+ * pinged perfectly on time 48 minutes ago is both "(on time)" and stale, and
+ * both statements are true — see pingCellDisplay for why they must not be
+ * rendered in the same breath.
+ *
+ * `intervalMs` is a trailing default parameter, the same seam shape
+ * computeLatenessAnchored uses: an API that predates the field yields
+ * undefined, the caller COALESCEs to 30, and the threshold is today's 35.
  */
 export function isPingStale(
   lastPingISO: string | null | undefined,
   nowMs: number = Date.now(),
+  intervalMs: number = DEFAULT_PING_INTERVAL_MS,
 ): boolean {
   if (!lastPingISO) return false;
   const t = Date.parse(lastPingISO);
   if (!Number.isFinite(t)) return false;
-  return (nowMs - t) / 60_000 >= PING_STALE_MINUTES;
+  return (nowMs - t) / 60_000 >= pingStaleMinutes(intervalMs / 60_000);
+}
+
+/**
+ * The LAST PING cell's text — ONE cell, ONE assertion.
+ *
+ * ── THE BUG THIS FIXES, SEEN LIVE ───────────────────────────────────────
+ *
+ * The cell used to render computeLatenessAnchored's output and colour it red
+ * with a pulsing "!" when isPingStale said so. On 2026-09-08 a real row read
+ *
+ *     16:00 (on time)  !          (red)
+ *
+ * for GRD0012 — scheduled_start 21:00:00Z, ping 23:00:26Z, genuinely 26
+ * seconds into its window and genuinely 48 minutes ago. BOTH HALVES WERE
+ * CORRECT. The text answered "was this ping late for its window"; the red
+ * and the "!" answered "how long since any ping". One cell asserting two
+ * different things reads to an admin as a contradiction, and the resolution
+ * is not to fix either half — it is to stop asking one cell both questions.
+ *
+ * So: while the ping is FRESH the useful fact is where it sat in its window;
+ * once it is STALE the useful fact is how long it has been. The red already
+ * means "stale", and now the text agrees with it instead of arguing.
+ *
+ * This DOES change rendered copy for every stale row, not only the "(on
+ * time)" ones — that is intended. A stale row's window position is history;
+ * the actionable number is the elapsed time. The map popup still shows both
+ * facts, in separate fields, where they do not collide.
+ */
+export function pingCellDisplay(
+  lastPingISO:       string | null | undefined,
+  scheduledStartISO: string | null | undefined,
+  nowMs:             number = Date.now(),
+  intervalMs:        number = DEFAULT_PING_INTERVAL_MS,
+): { display: string; stale: boolean } {
+  const stale = isPingStale(lastPingISO, nowMs, intervalMs);
+  if (!lastPingISO) return { display: '—', stale };
+  const t = Date.parse(lastPingISO);
+  if (!Number.isFinite(t)) return { display: '—', stale };
+  if (!stale) {
+    return { display: computeLatenessAnchored(lastPingISO, scheduledStartISO, intervalMs).display, stale };
+  }
+  const mins = Math.floor((nowMs - t) / 60_000);
+  const elapsed = mins < 60
+    ? `${mins}m ago`
+    : `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m ago`;
+  return { display: `${fmtPacificHHMM(t)} · ${elapsed}`, stale };
 }

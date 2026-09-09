@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { clientGet } from '../../../lib/clientApi';
 import { formatHoursHHMM, formatOffPostHours, formatScheduledHours } from '../../../lib/formatHours';
+import { isPingStale } from '../../../lib/lateness';
 
 interface ShiftHours {
   scheduled_hours: number;
@@ -26,6 +27,9 @@ interface GuardOnDuty {
   last_lat:       number | null;
   last_lng:       number | null;
   last_ping_at:   string | null;
+  /** The SESSION's cadence snapshot (schema_v68), served since PR #27.
+   *  Optional per the stale-API rule; absent or NULL falls back to 30. */
+  ping_interval_minutes?: number | null;
 }
 
 function elapsed(iso: string): string {
@@ -34,10 +38,23 @@ function elapsed(iso: string): string {
   return `${Math.floor(mins / 60)}h ${mins % 60}m`;
 }
 
-function lastPingLabel(iso: string | null): { text: string; stale: boolean } {
+/**
+ * Staleness now comes from lib/lateness.ts, the same rule the admin
+ * live-status table and the map pin use.
+ *
+ * This function previously hardcoded `mins >= 35`, importing nothing — a
+ * THIRD copy of the threshold, on the surface the paying customer looks at.
+ * Two of the three assumed a 30-minute cadence; with a per-site interval the
+ * client portal and the admin map would have called the same guard stale at
+ * different moments, which is worse than either being imperfect.
+ *
+ * The TEXT is deliberately unchanged: this card already renders elapsed time
+ * only ("48m ago"), never a window-position claim, so it never had the
+ * one-cell-two-assertions problem the admin table did.
+ */
+function lastPingLabel(iso: string | null, intervalMs: number): { text: string; stale: boolean } {
   if (!iso) return { text: 'No ping yet', stale: true };
-  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-  return { text: `${elapsed(iso)} ago`, stale: mins >= 35 };
+  return { text: `${elapsed(iso)} ago`, stale: isPingStale(iso, Date.now(), intervalMs) };
 }
 
 export default function SchedulePage() {
@@ -96,7 +113,9 @@ export default function SchedulePage() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {guards.map((g, i) => {
-          const ping = lastPingLabel(g.last_ping_at);
+          // Cadence from the SESSION SNAPSHOT, served on this payload since
+          // PR #27. Optional per the stale-API rule; absent or NULL -> 30.
+          const ping = lastPingLabel(g.last_ping_at, (g.ping_interval_minutes ?? 30) * 60_000);
           // Phase 2 Q3: trust the 4-field object. When absent, pass null
           // to the D2 helpers so each cell renders "—" (unknown) rather
           // than silently reading 0 as "0h 00m".
