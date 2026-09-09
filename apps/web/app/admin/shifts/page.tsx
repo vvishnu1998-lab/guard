@@ -46,13 +46,35 @@ interface Shift {
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean; photo_url?: string | null; }
 interface Site  { id: string; name: string; address?: string; company_name?: string }
 
-// Session S6 — coverage-status snapshot per site (rolling 14-day window).
+// Coverage snapshot per site. Window is today 00:00 SITE-LOCAL through
+// +14 days — the server expands the active profile into dated slots and
+// matches shifts against them, so `filled` counts slots that actually have a
+// shift starting at their instant, not raw shift rows.
 interface CoverageStatus {
   site_id:            string;
   has_active_profile: boolean;
   required:           number;
-  scheduled:          number;
   gaps:               number;
+
+  // ── Phase B fields — OPTIONAL, and the optionality is load-bearing ──────
+  // Vercel and Railway deploy independently off the same merge, so the web
+  // build can be live while the API still returns the pre-Phase-B shape. In
+  // that gap these arrive `undefined`. `has_slots === undefined` therefore
+  // means "old API", NOT "no slots configured" — treating it as false would
+  // render "No slots configured" on every profiled site until Railway
+  // catches up. Distinguish the two explicitly; never test `!cov.has_slots`.
+  /** False when the active profile has no active slot rows — "no slots
+   *  configured", which is NOT the same as fully covered. */
+  has_slots?:         boolean;
+  filled?:            number;
+  /** In-window shifts occupying a post whose start matches no slot. Without
+   *  this, a site scheduled entirely off-template reads as 0 filled with no
+   *  explanation of where its shifts went. */
+  off_template?:      number;
+  window?:            { from: string; to: string } | null;
+
+  /** Pre-Phase-B only. Read solely by the legacy fallback branch. */
+  scheduled?:         number;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -381,19 +403,58 @@ function ShiftsPageInner() {
                   {inWindow.length > 0 && (
                     <p className="text-gray-500 text-xs mt-1">{formatHoursHHMM(totalHours)} scheduled</p>
                   )}
-                  {/* Session S6 — gap pill. Only rendered when the site has
-                      an active scheduling profile; silent otherwise. */}
+                  {/* Coverage pill. Only rendered when the site has an active
+                      scheduling profile; silent otherwise. Wording is kept
+                      identical to /admin/sites — the two surfaces render the
+                      same numbers and previously described them differently
+                      ("gaps" here, "shifts unassigned" there, same value). */}
                   {(() => {
                     const cov = coverage[site.id];
                     if (!cov?.has_active_profile) return null;
-                    return cov.gaps > 0 ? (
-                      <p className="text-red-400 text-[11px] tracking-widest mt-1 bg-red-500/10 border border-red-500/40 px-2 py-0.5 rounded inline-block">
-                        ⚠ {cov.gaps} gap{cov.gaps === 1 ? '' : 's'} in next 2 weeks
+                    // Old API (no has_slots): render exactly what this pill
+                    // rendered before Phase B. Nothing new, nothing wrong.
+                    if (cov.has_slots === undefined) {
+                      return cov.gaps > 0 ? (
+                        <p className="text-red-400 text-[11px] tracking-widest mt-1 bg-red-500/10 border border-red-500/40 px-2 py-0.5 rounded inline-block">
+                          ⚠ {cov.gaps} gap{cov.gaps === 1 ? '' : 's'} in next 2 weeks
+                        </p>
+                      ) : (
+                        <p className="text-green-400 text-[11px] tracking-widest mt-1 bg-green-500/10 border border-green-500/40 px-2 py-0.5 rounded inline-block">
+                          ✓ Fully covered
+                        </p>
+                      );
+                    }
+                    const offTemplate = cov.off_template ?? 0;
+                    // The off-template badge renders in EVERY state, including
+                    // alongside the green pill — a fully covered site can still
+                    // hold shifts that match no slot, and that is worth seeing.
+                    // Both surfaces show this field under identical conditions.
+                    const offBadge = offTemplate > 0 ? (
+                      <p className="text-amber-400 text-[11px] tracking-widest mt-1 ml-2 bg-amber-500/10 border border-amber-500/40 px-2 py-0.5 rounded inline-block">
+                        {offTemplate} off-template
                       </p>
+                    ) : null;
+                    return !cov.has_slots ? (
+                      <>
+                        <p className="text-gray-400 text-[11px] tracking-widest mt-1 bg-gray-500/10 border border-gray-500/40 px-2 py-0.5 rounded inline-block">
+                          No slots configured
+                        </p>
+                        {offBadge}
+                      </>
+                    ) : cov.gaps > 0 ? (
+                      <>
+                        <p className="text-red-400 text-[11px] tracking-widest mt-1 bg-red-500/10 border border-red-500/40 px-2 py-0.5 rounded inline-block">
+                          ⚠ {cov.filled ?? 0} of {cov.required} template slots filled
+                        </p>
+                        {offBadge}
+                      </>
                     ) : (
-                      <p className="text-green-400 text-[11px] tracking-widest mt-1 bg-green-500/10 border border-green-500/40 px-2 py-0.5 rounded inline-block">
-                        ✓ Fully covered
-                      </p>
+                      <>
+                        <p className="text-green-400 text-[11px] tracking-widest mt-1 bg-green-500/10 border border-green-500/40 px-2 py-0.5 rounded inline-block">
+                          ✓ Fully covered
+                        </p>
+                        {offBadge}
+                      </>
                     );
                   })()}
                 </Link>

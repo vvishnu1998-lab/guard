@@ -84,12 +84,25 @@ interface Profile {
   shifts:        ProfileShift[];
 }
 
+// Mirrors the shape in app/admin/shifts/page.tsx — both surfaces render the
+// same numbers and must describe them identically.
 interface CoverageStatus {
   site_id:            string;
   has_active_profile: boolean;
   required:           number;
-  scheduled:          number;
   gaps:               number;
+
+  // Phase B fields are OPTIONAL: Vercel and Railway deploy independently, so
+  // this build can be live while the API still returns the old shape.
+  // `has_slots === undefined` means "old API", not "no slots configured".
+  /** False when the active profile has no active slot rows. */
+  has_slots?:         boolean;
+  filled?:            number;
+  off_template?:      number;
+  window?:            { from: string; to: string } | null;
+
+  /** Pre-Phase-B only. Read solely by the legacy fallback branch. */
+  scheduled?:         number;
 }
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -1042,7 +1055,6 @@ export default function SitesPage() {
                     {(() => {
                       const list = profilesPerSite[site.id];
                       if (list === undefined) return <p className="text-gray-600 text-xs">Loading…</p>;
-                      const activeProfile = list.find((p) => p.is_active);
                       const cov = coveragePerSite[site.id];
                       if (list.length === 0) {
                         return (
@@ -1117,17 +1129,48 @@ export default function SitesPage() {
                           >
                             + CREATE PROFILE
                           </button>
-                          {activeProfile && cov && (
+                          {/* Gated on the API's has_active_profile, not on a
+                              client-side find over the separately fetched
+                              profiles list. The two could disagree, and this
+                              file declared has_active_profile without ever
+                              reading it. */}
+                          {cov?.has_active_profile && (
                             <div className="mt-2 flex items-center gap-3 flex-wrap text-xs">
                               <span className="text-gray-500 tracking-widest">COVERAGE NEXT 2 WEEKS</span>
-                              <span className="text-gray-300 font-mono">{cov.scheduled} / {cov.required} scheduled</span>
-                              {cov.gaps > 0 ? (
+                              {cov.has_slots === undefined ? (
+                                /* Old API: render exactly what this row
+                                   rendered before Phase B. */
+                                <>
+                                  <span className="text-gray-300 font-mono">{cov.scheduled ?? 0} / {cov.required} scheduled</span>
+                                  {cov.gaps > 0 ? (
+                                    <span className="text-red-400 tracking-widest text-[11px] bg-red-500/10 border border-red-500/40 px-2 py-0.5 rounded">
+                                      ⚠ {cov.gaps} shift{cov.gaps === 1 ? '' : 's'} unassigned
+                                    </span>
+                                  ) : (
+                                    <span className="text-green-400 tracking-widest text-[11px] bg-green-500/10 border border-green-500/40 px-2 py-0.5 rounded">
+                                      ✓ Fully covered
+                                    </span>
+                                  )}
+                                </>
+                              ) : !cov.has_slots ? (
+                                <span className="text-gray-400 tracking-widest text-[11px] bg-gray-500/10 border border-gray-500/40 px-2 py-0.5 rounded">
+                                  No slots configured
+                                </span>
+                              ) : cov.gaps > 0 ? (
                                 <span className="text-red-400 tracking-widest text-[11px] bg-red-500/10 border border-red-500/40 px-2 py-0.5 rounded">
-                                  ⚠ {cov.gaps} shift{cov.gaps === 1 ? '' : 's'} unassigned
+                                  ⚠ {cov.filled ?? 0} of {cov.required} template slots filled
                                 </span>
                               ) : (
                                 <span className="text-green-400 tracking-widest text-[11px] bg-green-500/10 border border-green-500/40 px-2 py-0.5 rounded">
                                   ✓ Fully covered
+                                </span>
+                              )}
+                              {/* Renders in every state, matching the shifts
+                                  page. Absent on the old API, where
+                                  off_template is undefined. */}
+                              {(cov.off_template ?? 0) > 0 && (
+                                <span className="text-amber-400 tracking-widest text-[11px] bg-amber-500/10 border border-amber-500/40 px-2 py-0.5 rounded">
+                                  {cov.off_template} off-template
                                 </span>
                               )}
                             </div>
