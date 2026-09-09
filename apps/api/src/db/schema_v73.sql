@@ -1,0 +1,75 @@
+-- schema_v73 — index on scheduled_start for window scans (2026-09-09)
+--
+-- ┌───────────────────────────────────────────────────────────────────────┐
+-- │ THIS FILE MUST CONTAIN EXACTLY ONE STATEMENT. DO NOT ADD A SECOND.    │
+-- └───────────────────────────────────────────────────────────────────────┘
+--
+-- See schema_v72.sql for the full reasoning. In short: db/migrate.ts:14 runs
+-- each file as one simple-protocol `client.query(sql)`, Postgres wraps a
+-- multi-statement simple query in an implicit transaction, and CREATE INDEX
+-- CONCURRENTLY fails inside one with SQLSTATE 25001. That is why this index
+-- is a separate file from v72 rather than a second statement beside it, and
+-- why there is no `SET LOCAL lock_timeout` line here.
+--
+-- ── Why this index ───────────────────────────────────────────────────────
+--
+-- Several hot paths window on scheduled_start across ALL guards rather than
+-- for one guard, so v72's (guard_id, scheduled_start) is a poor fit for them.
+--
+-- FOUR callers can actually use this index. Each references scheduled_start
+-- as a BARE column, which is what makes the predicate sargable:
+--
+--   routes/scheduling.ts:318-319   computeCoverage —
+--       s.scheduled_start >= NOW() AND s.scheduled_start <= NOW() + '14 days'
+--   jobs/preShiftReminder.ts:54    s.scheduled_start BETWEEN NOW() + '55 min'
+--                                                        AND NOW() + '65 min'
+--   jobs/shiftStartReminder.ts:54-55  s.scheduled_start <= NOW()
+--                                     AND s.scheduled_start > NOW() - '5 min'
+--   jobs/lateClockInReminder.ts:160   s.scheduled_start <= NOW() - '10 min'
+--
+-- TWO callers that look like beneficiaries CANNOT use it, and are listed here
+-- explicitly so nobody re-adds them as justification:
+--
+--   jobs/autoCompleteShifts.ts:248  filters `s.scheduled_end + INTERVAL
+--       '30 minutes' <= NOW()` — a DIFFERENT COLUMN, and expression-wrapped.
+--       Neither this index nor v72 helps it; it stays a sequential scan.
+--   jobs/missedShiftAlert.ts:28     filters `scheduled_start + INTERVAL
+--       '10 minutes' <= NOW()` — the column is wrapped in an expression, so a
+--       plain btree on scheduled_start is not usable. Only an expression
+--       index, or rewriting the predicate to `scheduled_start <= NOW() -
+--       INTERVAL '10 minutes'` (as lateClockInReminder.ts:160 already does),
+--       would make it sargable. That rewrite is NOT part of this phase.
+--
+-- ── Honest sizing: this index does not pay off yet ───────────────────────
+--
+-- shifts is 511 rows in 11 pages (~88 KB) as of 2026-09-09. At that size the
+-- planner will usually prefer a sequential scan over any of the predicates
+-- above, especially the coverage window and the `<= NOW() - 10 min` filter,
+-- which match a large fraction of the table. This index is a scale hedge, in
+-- the same spirit as schema_v25.sql:8-10 ("a scale hedge, not a current
+-- hot-path optimisation"), not a fix for a measured problem. Do not expect a
+-- plan change today; do expect one as shifts grows.
+--
+-- Note also that PostgreSQL 18 (prod runs 18.6) added B-tree SKIP SCAN, so
+-- v72's (guard_id, scheduled_start) can in principle serve some
+-- scheduled_start-only predicates by skipping over the 46 distinct guard_id
+-- values. That narrows this index's marginal value further, and is the honest
+-- counter-argument to creating it. It is created anyway because skip scan
+-- degrades as guard count grows, whereas a leading-column index does not.
+--
+-- Deliberately NOT partial and NOT covering. The four usable predicates differ
+-- (>= NOW(), <= NOW() + 14d, BETWEEN, <= NOW() - 10min), and a partial index
+-- tuned to any one of them serves none of the others.
+--
+-- ── CONCURRENTLY, and the invalid-index trap ─────────────────────────────
+--
+-- Same as v72: CONCURRENTLY to avoid ACCESS EXCLUSIVE on a live table, and
+-- IF NOT EXISTS for idempotency under migrate.ts's full replay. The same trap
+-- applies — a half-built CONCURRENTLY index is left INVALID and IF NOT EXISTS
+-- will skip it forever after. Verify indisvalid after applying:
+--
+--     SELECT indexrelid::regclass, indisvalid FROM pg_index
+--      WHERE indrelid = 'shifts'::regclass;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_shifts_scheduled_start
+  ON shifts (scheduled_start);

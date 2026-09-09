@@ -775,6 +775,58 @@ locked as D15.**
 
 ---
 
+## New from Phase A schema work (2026-09-09)
+
+**N43. `migrate.ts` has been unrunnable end-to-end since 2026-08-29 — a full replay dies at file 6 of 74.**
+verified: YES — mechanism read at `7de9e0c` and both halves confirmed against production.
+
+`npm run db:migrate` replays every file in the `migrate.ts` array from `schema.sql` onward. It
+now **aborts at `schema_v5.sql`** and applies nothing after it.
+
+**Mechanism.** `apps/api/src/db/schema_v5.sql:10-12` is an **unguarded** re-add:
+
+```sql
+ALTER TABLE break_sessions
+  ADD CONSTRAINT break_sessions_break_type_check
+  CHECK (break_type IN ('meal', 'rest', 'other'));
+```
+
+`schema_v61.sql:89-90` (`UPDATE break_sessions SET break_type = 'break' WHERE break_type <> 'break'`,
+landed in `0931d87`, **2026-08-29**) relabelled the domain, and `schema_v62.sql` narrowed it to
+`CHECK (break_type = 'break')`. v5's preceding `DROP CONSTRAINT IF EXISTS` (`:7-8`) is therefore a
+no-op — that constraint no longer exists — so the `ADD CONSTRAINT` runs, **validates against live
+data**, and raises **SQLSTATE 23514**.
+
+Production confirms both halves:
+- `SELECT break_type, COUNT(*) FROM break_sessions GROUP BY 1` → **31 rows, all `'break'`**.
+- CHECK constraints on `break_sessions` today: `chk_break_sessions_break_type`
+  (`CHECK (break_type = 'break')`) and `chk_break_sessions_ended_by`.
+  **`break_sessions_break_type_check` is absent.**
+
+`'break'` is not in `('meal','rest','other')`, so the constraint cannot validate.
+
+**Why it takes the whole run down.** `migrate.ts:11-15` loops with **no per-file `try/catch`** (the
+`try` has only a `finally`), and `migrate.ts:23-26` does `process.exit(1)` on the first rejection.
+So the failure at file 6 of 74 means **every migration from `schema_v6.sql` onward is unreachable**
+by this path — including any future file appended to the array.
+
+**Consequence already absorbed.** `schema_v71/v72/v73` (Phase A) were applied **by hand via psql**,
+not through `migrate.ts`. Their array entries exist and are correct, but the array was not the
+mechanism of application. Any future migration must assume the same until this is fixed.
+
+**Not fixed here, deliberately.** This is pre-existing and predates the Phase A work; repairing a
+historical migration is its own decision with its own blast radius (the fix is either guarding v5's
+`ADD CONSTRAINT` in a DO block, or aligning its CHECK with the post-v62 domain — and either edits a
+file that has already been applied to every environment). Do **not** fold it into a feature phase.
+
+**Related:** the same class of latent defect is why `schema_v71.sql`'s DO-block guards are qualified
+with `AND conrelid = 'shifts'::regclass` (following `schema_v8.sql:31-34`) rather than matching on
+`conname` alone.
+
+**Size S to fix, M to re-validate the whole chain. Tier 1 (touches an applied migration).**
+
+---
+
 ## Carried items
 
 **C1. Build 49: device-position-on-Exit + AD_ID revert, after Build 48 review.**
