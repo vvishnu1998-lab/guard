@@ -1,0 +1,79 @@
+-- schema_v72 — index on (guard_id, scheduled_start) for overlap checks (2026-09-09)
+--
+-- ┌───────────────────────────────────────────────────────────────────────┐
+-- │ THIS FILE MUST CONTAIN EXACTLY ONE STATEMENT. DO NOT ADD A SECOND.    │
+-- └───────────────────────────────────────────────────────────────────────┘
+--
+-- db/migrate.ts:14 executes each file as a single `client.query(sql)` with no
+-- parameters. That is the SIMPLE QUERY PROTOCOL, and Postgres wraps a
+-- multi-statement simple query in an IMPLICIT TRANSACTION BLOCK. CREATE INDEX
+-- CONCURRENTLY refuses to run inside one and fails with SQLSTATE 25001.
+--
+-- So a second statement here — including a `SET LOCAL lock_timeout`, which
+-- every other migration in this repo opens with — would break this file.
+-- Comments are free; statements are not. This is why the two new indexes live
+-- in two files (v72, v73) rather than one: two CONCURRENTLY statements
+-- together are already multi-statement and would fail identically.
+--
+-- The repo has established this three times independently:
+--   schema_v9.sql:14-15  — the only other CONCURRENTLY file, single-statement
+--                          by construction, and it says so.
+--   schema_v25.sql:12-17 — "migrate.ts wraps its multi-statement queries in an
+--                          implicit transaction ... split these two CREATEs
+--                          into a separate one-statement file."
+--   schema_v49.sql:43-46 — same finding, same words.
+--
+-- ── Why this index ───────────────────────────────────────────────────────
+--
+-- Verified against prod at 7de9e0c: `shifts` carries exactly THREE indexes —
+-- shifts_pkey, idx_shifts_email_pending (partial, on scheduled_end) and
+-- idx_shifts_expires_at (partial, on expires_at). There is NO index on
+-- guard_id and none on scheduled_start.
+--
+-- Every guard-overlap check in the API is therefore a sequential scan. There
+-- are eight of them, all in routes/shifts.ts (:277, :560, :721, :1201, :1504,
+-- :1583, :1746, :1917), and all eight share the shape
+--
+--     WHERE guard_id = $1 AND status IN ('scheduled','active')
+--       AND scheduled_start < $end AND scheduled_end > $start
+--
+-- (guard_id, scheduled_start) is the correct leading pair: equality on
+-- guard_id then a range on scheduled_start. The scheduled_end predicate stays
+-- a heap recheck, which is fine — guard_id alone is selective enough at 46
+-- guards over 511 rows, and it gets more selective as the table grows.
+--
+-- Not partial on status. The status filter differs across the eight call
+-- sites and a later phase is expected to widen it (today all eight consider
+-- only 'scheduled'/'active', while the CHECK admits six values). A partial
+-- index pinned to today's status list would silently stop being usable the
+-- moment that changes, which is the exact trap schema_v49.sql:37-41 documents
+-- for its own predicate.
+--
+-- ── CONCURRENTLY, and the invalid-index trap ─────────────────────────────
+--
+-- CONCURRENTLY so the build never takes ACCESS EXCLUSIVE on a table the
+-- clock-in path writes to. At 511 rows a blocking build would be
+-- milliseconds, so this is a habit rather than a necessity today — but the
+-- habit is the point, and CONCURRENTLY costs nothing here.
+--
+-- IF NOT EXISTS makes it idempotent under re-run, whether that is migrate.ts's
+-- array replay or a by-hand psql apply. (As of 2026-09-09 the array replay
+-- cannot in fact reach this file: schema_v5.sql:10-12 unguardedly re-adds
+-- break_sessions_break_type_check CHECK (break_type IN ('meal','rest','other'))
+-- while all 31 production break_sessions rows now hold break_type='break', so
+-- a full `npm run db:migrate` aborts with SQLSTATE 23514 at file 6 of 74.
+-- That is a pre-existing defect in v5, not in this file — but it means the
+-- by-hand route is currently the only one that reaches v71/v72/v73.)
+--
+-- NOTE THE TRAP IF NOT EXISTS CREATES HERE: if a CONCURRENTLY build fails partway it
+-- leaves behind an INVALID index, and IF NOT EXISTS will then skip it
+-- silently on every future run. After applying, verify
+--
+--     SELECT indexrelid::regclass, indisvalid FROM pg_index
+--      WHERE indrelid = 'shifts'::regclass;
+--
+-- and if indisvalid is false, DROP INDEX CONCURRENTLY and re-run. Do not
+-- assume a green migration means a usable index.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_shifts_guard_scheduled
+  ON shifts (guard_id, scheduled_start);

@@ -285,17 +285,21 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
           }
         }
         const insert = await client.query(
-          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at)
+          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
+                               created_by, created_by_role, source)
            VALUES (
              $1,
              $2,
              ($3::date + $4::time) AT TIME ZONE $8,
              ($3::date + $6::interval + $5::time) AT TIME ZONE $8,
              $7,
-             $9
+             $9,
+             $10,
+             $11,
+             $12
            ) RETURNING id, guard_id, site_id, scheduled_start, scheduled_end`,
           [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status, siteTz,
-           expiresAtFor('shift')]
+           expiresAtFor('shift'), req.user!.sub, req.user!.role, 'manual']
         );
         const row = insert.rows[0];
         ids.push(row.id);
@@ -394,9 +398,11 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     const created: Array<Record<string, unknown>> = [];
     for (const p of pending) {
       const r = await pool.query(
-        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status, expiresAtFor('shift')]
+        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
+                             created_by, created_by_role, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status, expiresAtFor('shift'),
+         req.user!.sub, req.user!.role, 'manual']
       );
       created.push(r.rows[0]);
     }
@@ -429,9 +435,11 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   }
 
   const result = await pool.query(
-    `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [guard_id || null, site_id, scheduled_start, scheduled_end, status, expiresAtFor('shift')]
+    `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
+                         created_by, created_by_role, source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+    [guard_id || null, site_id, scheduled_start, scheduled_end, status, expiresAtFor('shift'),
+     req.user!.sub, req.user!.role, 'manual']
   );
   res.status(201).json(result.rows[0]);
   // Aggregated per-guard push, fire-and-forget after response.
