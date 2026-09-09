@@ -144,6 +144,12 @@ function ShiftsPageInner() {
   const router       = useRouter();
   const searchParams = useSearchParams();
   const view: 'site' | 'guard' = searchParams?.get('view') === 'guard' ? 'guard' : 'site';
+  // Site-grid filter, URL-driven for the same reasons `view` is: a filtered
+  // view is a shareable link, Back steps through it, and it survives the
+  // query-string rewrite the schedule modal performs on close (see the
+  // newShift/siteId effect below). Same shape as the `inc=1` chip on
+  // /admin/sites/[id]:576 — absent key means off, never `=0`.
+  const unassignedOnly = searchParams?.get('unassigned') === '1';
 
   const [shifts,  setShifts]  = useState<Shift[]>([]);
   const [guards,  setGuards]  = useState<Guard[]>([]);
@@ -214,6 +220,19 @@ function ShiftsPageInner() {
     router.replace(`/admin/shifts?${params.toString()}`, { scroll: false });
   }
 
+  /** Patch searchParams in place. null/'' removes the key, so the default
+   *  state produces a clean URL instead of ?unassigned=. Same convention as
+   *  /admin/sites/[id]:581-589. */
+  function setParams(patch: Record<string, string | null>) {
+    const p = new URLSearchParams(searchParams?.toString() ?? '');
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null || v === '') p.delete(k);
+      else p.set(k, v);
+    }
+    const qs = p.toString();
+    router.replace(qs ? `/admin/shifts?${qs}` : '/admin/shifts', { scroll: false });
+  }
+
   function openScheduleModal(opts?: { siteId?: string; guardId?: string }) {
     setModalPrefilledSite(opts?.siteId);
     setModalPrefilledGuard(opts?.guardId);
@@ -275,6 +294,28 @@ function ShiftsPageInner() {
   // a company-wide total.
   const unassignedCount = shifts.filter((s) => s.status === 'unassigned').length;
   const activeGuards    = guards.filter((g) => g.is_active !== false);
+
+  // Per-site unassigned counts for the banner filter.
+  //
+  // PREDICATE IS THE CARD'S, NOT THE BANNER'S — deliberately. The banner
+  // counts `status === 'unassigned'`; each card counts non-cancelled rows with
+  // `guard_id === null`. Nothing enforces that those agree — routes/shifts.ts:
+  // 622-624 says so outright ("nothing enforces that agreement") — and they
+  // currently do (8 and 8 in prod, zero divergent either way).
+  //
+  // Filtering on the CARD's predicate makes the filter and the surviving cards
+  // consistent by construction. If the invariant ever breaks, the banner's
+  // number and the sum of the surviving cards' counts will disagree. That is
+  // the honest failure: better a visible mismatch than a card silently hidden
+  // while it holds a shift with nobody on it.
+  const unassignedBySite = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of shifts) {
+      if (s.status === 'cancelled' || s.guard_id !== null) continue;
+      m.set(s.site_id, (m.get(s.site_id) ?? 0) + 1);
+    }
+    return m;
+  }, [shifts]);
 
   // Vishnu multi-company label — same conditional pattern as guards page.
   const showCompanyLabel = useMemo(() => {
@@ -341,26 +382,80 @@ function ShiftsPageInner() {
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
-      {/* Unassigned alert — surfaced on both views */}
+      {/* Unassigned alert — surfaced on both views. On the site view it is a
+          toggle that filters the grid in place; on the guard view there is no
+          grid to filter, so it stays the inert <div> it has always been.
+          The sentence is identical in both states — the affordance is appended
+          to it, never substituted for it, so this never reads as a label. */}
       {unassignedCount > 0 && (
-        <div className="bg-amber-400/10 border border-amber-400/40 rounded-lg px-4 py-3 flex items-center gap-3">
-          <span className="text-amber-400 text-lg">⚠</span>
-          <span className="text-amber-300 text-sm">
-            <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard
-            {' '}between {windowFrom} and {windowTo}.
-          </span>
-        </div>
+        view === 'site' ? (
+          <button
+            type="button"
+            aria-pressed={unassignedOnly}
+            onClick={() => setParams({ unassigned: unassignedOnly ? null : '1' })}
+            className={`w-full text-left rounded-lg px-4 py-3 flex items-center gap-3 border transition-colors ${
+              unassignedOnly
+                ? 'bg-amber-400/20 border-amber-400'
+                : 'bg-amber-400/10 border-amber-400/40 hover:border-amber-400'
+            }`}
+          >
+            <span className="text-amber-400 text-lg">⚠</span>
+            <span className="text-amber-300 text-sm">
+              <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard
+              {' '}between {windowFrom} and {windowTo}.
+              {unassignedOnly ? (
+                <>
+                  {' '}Showing only the sites that hold them —{' '}
+                  <span className="underline">show all sites</span>.
+                </>
+              ) : (
+                <>
+                  {' '}<span className="underline">Show only the sites that hold them</span>.
+                </>
+              )}
+            </span>
+          </button>
+        ) : (
+          <div className="bg-amber-400/10 border border-amber-400/40 rounded-lg px-4 py-3 flex items-center gap-3">
+            <span className="text-amber-400 text-lg">⚠</span>
+            <span className="text-amber-300 text-sm">
+              <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard
+              {' '}between {windowFrom} and {windowTo}.
+            </span>
+          </div>
+        )
       )}
 
       {/* ── Site view ──────────────────────────────────────────────────── */}
-      {view === 'site' && (
+      {view === 'site' && (() => {
+        const visibleSites = [...sites]
+          .filter((site) => !unassignedOnly || (unassignedBySite.get(site.id) ?? 0) > 0)
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+        return (
         loading ? (
           <div className="text-gray-500 text-sm py-12 text-center">Loading…</div>
         ) : sites.length === 0 ? (
           <div className="text-gray-500 text-sm py-12 text-center">No sites configured yet.</div>
+        ) : visibleSites.length === 0 ? (
+          /* Filtered to nothing. "No sites configured yet." would be FALSE
+             here and would send someone hunting a bug that isn't there, so
+             this says what actually happened and clears itself in the same
+             breath. Reachable from a stale ?unassigned=1 URL after the last
+             unassigned shift is assigned away. */
+          <div className="text-gray-500 text-sm py-12 text-center">
+            No sites have unassigned shifts between {windowFrom} and {windowTo}.{' '}
+            <button
+              type="button"
+              onClick={() => setParams({ unassigned: null })}
+              className="text-amber-400 underline hover:text-amber-300 transition-colors"
+            >
+              Show all sites
+            </button>
+            .
+          </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {[...sites].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map((site) => {
+            {visibleSites.map((site) => {
               // No date predicate: the payload IS the window (windowFrom..
               // windowTo), already anchored per-site by the server.
               const inWindow = shifts.filter((s) =>
@@ -462,7 +557,8 @@ function ShiftsPageInner() {
             })}
           </div>
         )
-      )}
+        );
+      })()}
 
       {/* ── Guard view (preserved from previous UI) ────────────────────── */}
       {view === 'guard' && (

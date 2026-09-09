@@ -1173,6 +1173,74 @@ retrofit.
 
 ---
 
+## New from the unassigned-banner filter (2026-09-09)
+
+**N55. ISO vs US date format split across the admin app — the same string reads as two different days.**
+verified: YES — both halves read at `fd3cf50`, counts re-derived rather than estimated.
+
+`/admin/shifts` renders its date range in **ISO** while every date picker one click away renders
+in the **browser's locale**. For a US admin the same underlying value appears as `2026-10-09` in
+one place and `10/09/2026` in another.
+
+**`10/09/2026` and `2026-10-09` denote DIFFERENT DAYS** — 9 October versus 10 September. This is a
+misreading risk, not an aesthetic one: an admin comparing a header range against a picker they
+just set has no way to tell which convention either is using.
+
+**ISO side** — `apps/web/app/admin/shifts/page.tsx`:
+```
+:363  {windowFrom} — {windowTo}                              header range
+:405  {' '}between {windowFrom} and {windowTo}.              banner (site view)
+:423  {' '}between {windowFrom} and {windowTo}.              banner (guard view)
+:446  No sites have unassigned shifts between {windowFrom} and {windowTo}.
+```
+All four resolve from `apps/web/lib/shiftFormat.ts:117-124`:
+```js
+export function dayOffsetInZone(offsetDays: number, tz?: string): string {
+  ...
+  return d.toISOString().slice(0, 10);      // ISO by construction
+}
+```
+`toISOString().slice(0, 10)` cannot produce anything but `YYYY-MM-DD`.
+
+**Locale side** — `apps/web/components/admin/ScheduleShiftModal.tsx:372`:
+```jsx
+<input type="date" value={singleDate} min={todayInputMin} onChange={...} />
+```
+`<input type="date">` **holds** an ISO value (`value` is always `YYYY-MM-DD` per spec) but
+**renders** in the browser's locale. Nothing in this repo chooses that format and nothing can
+override it without replacing the native control.
+
+**THE SPLIT IS APP-WIDE, NOT LOCAL TO THIS PAGE.** `<input type="date">` appears **21 times across
+9 admin files** — `admin/sites/page.tsx`, `admin/sites/[id]/page.tsx`,
+`admin/shifts/[shiftId]/page.tsx`, `admin/live-status/page.tsx`, `admin/billing/page.tsx`,
+`admin/guards/page.tsx`, `components/admin/ExportPanel.tsx`,
+`components/admin/ScheduleShiftModal.tsx`, `components/ActivityLogTable.tsx` — plus 4 more in the
+client portal. Every one of them renders in browser locale beside ISO text somewhere on the same
+screen.
+
+**Why this is not a one-line fix.** Three options, each a decision about the whole admin app:
+
+1. **Render ISO everywhere.** Requires replacing every native `<input type="date">` with a custom
+   control, losing the platform date picker, its keyboard handling and its mobile UX.
+2. **Render locale everywhere.** Requires formatting all four ISO display sites (and every other
+   ISO date string in the admin app) through `Intl.DateTimeFormat`, and accepting that a shared
+   link renders differently for a colleague in another locale — which matters now that
+   `?unassigned=1` and the `/admin/sites/[id]` filters make filtered views shareable.
+3. **Force one locale for the whole admin app** (e.g. `en-CA`, which is ISO), making both sides
+   agree at the cost of ignoring the user's own setting.
+
+There is no correct answer available from inside one page, which is why this is filed rather than
+fixed. Whoever takes it should decide the convention first and apply it in one pass; a partial fix
+makes the inconsistency harder to spot, not easier.
+
+**Note on a correction:** an earlier pass estimated "twelve other date inputs" from reading grep
+output. The counted figure is 21 admin + 4 client = **25**. Recorded so the smaller number is not
+carried forward.
+
+**Size S to decide, M to apply. Tier 1 (display convention, whole admin app).**
+
+---
+
 ## Carried items
 
 **C1. Build 49: device-position-on-Exit + AD_ID revert, after Build 48 review.**
