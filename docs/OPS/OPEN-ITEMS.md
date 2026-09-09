@@ -827,6 +827,176 @@ with `AND conrelid = 'shifts'::regclass` (following `schema_v8.sql:31-34`) rathe
 
 ---
 
+## New from Phase C overlap block (2026-09-09)
+
+All six were found or deliberately deferred while adding overlap checks to the three
+unguarded write paths. None is fixed by that work.
+
+**N44. `repeat_days` has no transaction — a mid-loop INSERT failure commits a partial series and returns 500.**
+verified: YES — read directly at `b7490c8`.
+
+`apps/api/src/routes/shifts.ts:400-409` inserts one row per generated window in a bare
+`for` loop of `pool.query` calls. There is **no `BEGIN`/`COMMIT`**. Each insert is its own
+autocommit transaction, so a failure at iteration *k* leaves iterations 1..*k*-1 **already
+committed** and the handler throws — the admin sees a 500 and a partially created series
+with no indication of how much landed.
+
+`specific_dates` does not have this problem: `:263` opens a transaction and `:283`
+rolls the whole batch back on conflict.
+
+**Phase C did NOT fix this.** It added a pre-loop batch overlap check
+(`:398-...`) so that *conflict* creates zero shifts, which closes the common case. It does
+not help a mid-loop failure from any other cause — a constraint violation, a dropped
+connection, a statement timeout.
+
+Fix is to wrap the loop in a transaction the way `specific_dates` already does. Deliberately
+out of scope for Phase C: it changes a transaction boundary on a live write path, which
+deserves its own diff and its own review.
+
+**Size S. Tier 1.**
+
+---
+
+**N45. Every overlap check is check-then-act under READ COMMITTED — none locks the candidate guard's rows.**
+verified: YES — all call sites read at `b7490c8`.
+
+There are now eleven guard-overlap checks in `routes/shifts.ts` (eight pre-existing, three
+added in Phase C). **Not one of them locks the candidate guard's other shift rows.** Where a
+lock exists it is `FOR UPDATE OF sh` / `FOR UPDATE OF ssr, sh` on the row being *mutated*,
+which is a different row from the one that would collide.
+
+Postgres runs READ COMMITTED here and there is no advisory lock anywhere in the file. So two
+concurrent requests can both run the check, both see no conflict, and both write — producing
+exactly the double-booking the checks exist to prevent. The window is small and the observed
+production rate is zero, but the guarantee is not there.
+
+A real guarantee needs one of:
+- `SELECT … FOR UPDATE` over the overlapping rows inside each transaction — which does not
+  work for the two paths that have no transaction (`single`, `repeat_days`), or
+- a GiST **exclusion constraint** on `tstzrange(scheduled_start, scheduled_end)` partitioned
+  by `guard_id`. **`btree_gist` is not installed** (`pg_extension` carries only `plpgsql` and
+  `uuid-ossp`), and the constraint would have to tolerate the 31 historical overlapping pairs
+  already in production — so it needs a `NOT VALID` add plus a decision about the existing rows.
+
+`services/shiftOverlap.ts` says this in its docblock so nobody mistakes the helper for a
+guarantee.
+
+**Size M–L. Tier 1 (contract-phase migration if the exclusion constraint route is taken).**
+
+---
+
+**N46. `notifications.tsx` swallows any 409 on swap-response / handoff-response and substitutes the wrong sentence.**
+verified: YES — `apps/mobile/app/(tabs)/notifications.tsx:214-232` read directly.
+
+```
+if (err.status === 409) {
+  return `This ${kind} was already responded to, or it expired. Pull down to refresh.`;
+}
+```
+
+Every 409 from those two routes is discarded and replaced with that fixed string. **This is
+already wrong today**, before any Phase C change: `swap-response` emits 409 at
+`shifts.ts:1745` (stale/reassigned) **and** at `:1761` (the incoming guard now has an
+overlapping shift); `handoff-response` emits 409 at `:1903` and `:1932`. A guard told the
+invite "expired" pulls to refresh, sees it still there, and retries — the message is not
+merely unhelpful, it is false.
+
+The comment at `:206-208` justifying the status-based branch claims *"for these two routes
+each status maps to exactly one situation class."* That is not true and was not true when it
+was written.
+
+**Fix order matters.** The server must emit a machine `code` in the 409 body and the mobile
+client must branch on it — and **the mobile change has to ship first, by OTA, before any API
+change to those two routes**, or the window between deploys makes the wrong copy more likely,
+not less.
+
+⚠ **Nandu is OTA-unreachable** — iOS build 44, runtime 1.0.14, below the 1.0.17 floor that
+carries an update client. Any device on that build keeps the current behaviour regardless of
+what is published.
+
+Phase C did **not** touch these two routes, precisely because of this.
+
+**Size S on each side, M to sequence. Tier 1 (mobile OTA, then API).**
+
+---
+
+**N47. `idx_shifts_guard_scheduled` is the wrong column pair for the canonical predicate.**
+verified: YES — measured against production.
+
+Phase A shipped `idx_shifts_guard_scheduled (guard_id, scheduled_start)`. The canonical
+overlap predicate is `guard_id = $1 AND scheduled_start < $end AND scheduled_end > $start`.
+`guard_id` equality uses the index; `scheduled_start < $end` is open-ended downward and so
+barely narrows anything; `scheduled_end > $start` is not in the index at all and lands as a
+heap filter.
+
+Measured on the three heaviest guards — index range candidates vs rows surviving the filter:
+
+| guard_id | badge | shifts | index candidates | after filter |
+|---|---|---|---|---|
+| `9a92092e-b393-4003-9f7e-8c7b607a5d9b` | GRD0001 | 72 | **72** | 12 |
+| `e8274964-c274-4fde-ad4d-82bb1e128bc2` | GRD0002 | 40 | **40** | 0 |
+| `2945918a-d8bd-4309-9a39-30abeee836e7` | GRD0009 | 29 | **29** | 7 |
+
+The index returns **every one of that guard's shifts** and discards 80%+ in the heap.
+`(guard_id, scheduled_end)` is the better pair — it bounds the side that actually excludes.
+
+**Not urgent.** `shifts` is 511 rows in 11 pages; the planner currently chooses a sequential
+scan for this predicate regardless, and will keep doing so for a long time. Revisit when the
+table is large enough for the plan to matter — and if the N45 exclusion constraint lands
+first, it supplies a usable GiST index and this becomes moot.
+
+**Size S. Tier 1 (expand-only, `CREATE INDEX CONCURRENTLY` in its own single-statement file
+— see `schema_v72.sql` for why).**
+
+---
+
+**N48. `repeat_days` stamps time-of-day with server-local `setHours`, and skips the site `is_active` check.**
+verified: YES — read directly.
+
+Two independent defects on the same path:
+
+1. **`shifts.ts:373` resolves day-of-week in SITE tz** (`dowInTimeZone(cur, siteTz)`) and then
+   **`:376` stamps time-of-day with a SERVER-local `setHours`**. The container runs UTC, so the
+   series preserves the UTC wall clock rather than the site's, and drifts by an hour across a
+   DST transition inside its own 28-day horizon. `specific_dates` does not have this — it binds
+   `AT TIME ZONE $8` from `sites.timezone` (`:293-294`).
+2. **`:352-397` never checks `sites.is_active`.** `specific_dates` returns 409
+   *"Site is deactivated. Reactivate it before scheduling shifts."* at `:236-238`; the
+   `repeat_days` and `single` paths select only `id, timezone` (`:334`) and will happily create
+   shifts at a deactivated site.
+
+⚠ **COUPLING — read before fixing (1).** Phase C's pre-loop overlap check deliberately compares
+**the same drifted `Date` objects the INSERT binds** (`pending[].start/.end` → `toISOString()`
+at `:405`). That is correct today: the check tests exactly what gets written. **Whoever fixes
+the `setHours` defect must fix both together.** Change the window construction without changing
+the check and the check starts testing a different series than the one created — which is worse
+than the drift itself, because it silently reintroduces the double-booking Phase C closed.
+
+Currently unobservable in production: all 23 sites are `America/Los_Angeles`.
+
+**Size S each. Tier 1.**
+
+---
+
+**N49. `repeat_days` runs N pre-loop overlap queries where one `unnest` would do.**
+verified: YES — by construction.
+
+Phase C's batch check issues **one query per generated window** — up to **29** at the 28-day
+horizon with all seven days selected (`while (cur <= horizon)` iterates 29 times). One query
+that `unnest`s the window arrays and joins against `shifts` would make it O(1) round trips.
+
+Accepted for now because the handler **already** performs one INSERT round trip per window in
+the loop below (`:400-409`), so the check does not change the route's complexity class — it
+doubles a count that was already O(N), on a route that is already unbatched.
+
+Doing it requires a second exported function on `services/shiftOverlap.ts` (the single-window
+`findOverlappingShift` cannot express it). **Worth doing if the 4-week horizon ever grows**, or
+if `repeat_days` is ever called with a much larger day set.
+
+**Size S. Tier 0.**
+
+---
+
 ## Carried items
 
 **C1. Build 49: device-position-on-Exit + AD_ID revert, after Build 48 review.**

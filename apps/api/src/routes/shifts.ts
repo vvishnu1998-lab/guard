@@ -13,6 +13,7 @@ import { getActivePushTokens, getActivePushToken } from '../services/deviceRegis
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { clearScheduleDerivedLatches } from '../services/shiftLatches';
+import { findOverlappingShift, overlapConflictBody } from '../services/shiftOverlap';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
@@ -393,6 +394,66 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       if (offending) {
         return res.status(422).json({ error: offending.message });
       }
+
+      // Phase C — this path had NO overlap check, and unlike `single` it
+      // creates up to 29 rows in a loop. The whole batch is checked BEFORE
+      // the first INSERT so a conflict creates zero shifts, which preserves
+      // the all-or-nothing behaviour specific_dates already provides. This
+      // deliberately does NOT add a transaction; the loop's lack of one is a
+      // separate defect, filed rather than fixed here.
+      //
+      // WHAT IS ACTUALLY BEING COMPARED. pending[].start/.end are the exact
+      // Date instants the INSERT below binds via toISOString(). They were
+      // built by resolving the day-of-week in SITE tz (:373) and then
+      // stamping time-of-day with a SERVER-local setHours (:376), so the
+      // intended site wall-clock can drift by an hour across a DST boundary
+      // inside the 28-day horizon. That drift is already baked into the
+      // values that get persisted — so checking these same objects checks
+      // precisely what will be written. The check is exactly as correct as
+      // the INSERT: it neither repairs that defect nor is fooled by it.
+      // Filed separately.
+
+      // (a) The series against ITSELF. Free, in memory, and runs first so an
+      // internally inconsistent request never costs a round trip. A series
+      // self-overlaps when the shift outlasts the gap between two selected
+      // days — e.g. a 30-hour shift on consecutive days. Half-open, matching
+      // every other predicate: back-to-back windows do not collide.
+      for (let i = 0; i < pending.length; i++) {
+        for (let j = i + 1; j < pending.length; j++) {
+          const a = pending[i];
+          const b = pending[j];
+          if (a.start < b.end && b.start < a.end) {
+            // No existing row to name, so no `conflict` object: apps/web
+            // deep-links on conflict.shift_id and inventing one would be
+            // worse than omitting it. The message names both offending
+            // windows in the site's zone, which is what an admin needs to
+            // fix the request.
+            const fmt = (d: Date) => new Intl.DateTimeFormat('en-US', {
+              month: 'short', day: 'numeric',
+              hour: 'numeric', minute: '2-digit',
+              timeZone: siteTz,
+            }).format(d);
+            return res.status(409).json({
+              error:
+                `This repeat series overlaps itself: ${fmt(a.start)} – ${fmt(a.end)} ` +
+                `and ${fmt(b.start)} – ${fmt(b.end)}. ` +
+                `Shorten the shift or select fewer days.`,
+            });
+          }
+        }
+      }
+
+      // (b) The series against shifts that already exist. One query per
+      // window — up to 29 for a 28-day horizon with all seven days selected.
+      // The handler already performs one INSERT round trip per window below,
+      // so this is the same order of round trips the path already pays.
+      // excludeShiftId is null: none of these rows exists yet.
+      for (const p of pending) {
+        const conflict = await findOverlappingShift(guard_id, p.start, p.end, null);
+        if (conflict) {
+          return res.status(409).json(overlapConflictBody(conflict));
+        }
+      }
     }
 
     const created: Array<Record<string, unknown>> = [];
@@ -431,6 +492,24 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     const elig = await checkShiftEligibility(guard_id, site_id, d);
     if (!elig.ok) {
       return res.status(422).json({ error: eligibilityError(elig, d) });
+    }
+
+    // Phase C — this path had NO overlap check at all, so an admin could
+    // double-book a guard here freely while the same request through
+    // specific_dates was rejected. Gated on guard_id for the same reason
+    // the eligibility check above is: an unassigned shift occupies nobody.
+    //
+    // Plain scheduling question, so the window is the candidate shift's own
+    // [scheduled_start, scheduled_end) — NOT the NOW()-forward remainder the
+    // handoff paths ask for. excludeShiftId is null: the row does not exist
+    // yet. No transaction here (this path has none and Phase C does not add
+    // one), so this is check-then-act — see the docblock in
+    // services/shiftOverlap.ts.
+    const conflict = await findOverlappingShift(
+      guard_id, scheduled_start, scheduled_end, null,
+    );
+    if (conflict) {
+      return res.status(409).json(overlapConflictBody(conflict));
     }
   }
 
@@ -2157,6 +2236,10 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       shift_id: string; site_id: string; site_name: string;
       guard_id: string | null; shift_status: string;
       scheduled_start: string;
+      /** Phase C — the end of the window B is taking over. Selected from `sh`,
+       *  which is ALREADY joined and ALREADY in the FOR UPDATE list below, so
+       *  this adds no round trip and changes no locking. */
+      scheduled_end: string;
       from_session_id: string | null;
       /** sites.ping_interval_minutes — the site's configured cadence, read
        *  here only so the capability gate can decide what to snapshot onto
@@ -2171,6 +2254,7 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
               sh.guard_id,
               sh.status         AS shift_status,
               sh.scheduled_start,
+              sh.scheduled_end,
               si.name           AS site_name,
               -- schema_v68 snapshot source. sites is ALREADY joined here, so
               -- this costs no extra round trip. It is deliberately NOT added
@@ -2212,6 +2296,37 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
     if (!elig.ok) {
       await client.query('ROLLBACK');
       return res.status(422).json({ error: eligibilityError(elig, shiftDate) });
+    }
+
+    // Phase C — this path rewrites shifts.guard_id (below) with no overlap
+    // check at all, so a guard could take over a handoff that collides with
+    // a shift they already hold.
+    //
+    // WINDOW IS [NOW, shift.scheduled_end), NOT the full shift. B is clocking
+    // in to work the REMAINDER of a shift already underway; those are the only
+    // hours they will actually be on post. Checking from scheduled_start would
+    // disqualify a guard whose own earlier shift ended before the handoff
+    // point — precisely the case the handoff-response rationale at :1906-1908
+    // exists to permit — and would make clock-in STRICTER than the
+    // handoff-response check that already approved this pairing. A guard
+    // approved at accept time and then blocked at clock-in is stranded
+    // mid-wizard with the outgoing guard already leaving, which is a worse
+    // outcome than the double-booking this guards against.
+    //
+    // excludeShiftId is the shift being handed over. It cannot collide today
+    // — its guard_id is still the OUTGOING guard's until the rotation below —
+    // but excluding it is free and keeps the check correct if that write ever
+    // moves earlier, or on an idempotent replay that re-enters after it.
+    //
+    // Runs inside the existing transaction on `client`, under the FOR UPDATE
+    // OF ssr, sh taken above. That lock covers this shift and the swap row;
+    // it does NOT cover B's other shifts, so this remains check-then-act.
+    const conflict = await findOverlappingShift(
+      user!.sub, new Date(), hist.scheduled_end, id, client,
+    );
+    if (conflict) {
+      await client.query('ROLLBACK');
+      return res.status(409).json(overlapConflictBody(conflict));
     }
 
     // Geofence — same helper as regular clock-in.
