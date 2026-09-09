@@ -28,7 +28,7 @@ import {
 } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { computeLateness, computeLatenessAnchored, isPingStale, PING_STALE_MINUTES } from '../../lib/lateness';
+import { computeLateness, computeLatenessAnchored, isPingStale, pingStaleMinutes } from '../../lib/lateness';
 import { hasUsablePolygon, hasUsableCircle, type LatLng } from '../../lib/siteFence';
 
 export type { LatLng };
@@ -57,6 +57,10 @@ export interface LiveMapGuard {
    *  declares it; absent means computeLatenessAnchored renders the bare
    *  time instead of a wall-clock guess. */
   scheduled_start?:      string | null;
+  /** The SESSION's cadence snapshot (schema_v68). Optional per the stale-API
+   *  rule, exactly as the page's LiveGuard declares it; absent or NULL falls
+   *  back to 30. */
+  ping_interval_minutes?: number | null;
 }
 
 /** Structural subset of GET /api/sites. Geofence fields are LEFT JOINed
@@ -135,12 +139,37 @@ function isClockInPin(g: LiveMapGuard): boolean {
   return g.last_position_source === 'clock_in';
 }
 
-/** Staleness now measures the POSITION, not the ping: a clock-in-only guard
- *  goes gold 35 minutes in, which is the honest reading — nothing has
- *  confirmed their whereabouts since. */
+/** Per-session cadence (schema_v68). Optional on the wire; absent or NULL
+ *  falls back to 30, which is today's behaviour. */
+function intervalMsOf(g: LiveMapGuard): number {
+  return (g.ping_interval_minutes ?? 30) * 60_000;
+}
+
+/** The legend's threshold, derived from the guards actually on screen.
+ *
+ *  A single number is only honest while every visible guard shares a cadence.
+ *  With mixed cadences it renders a range ("20-50M"), because the pins are
+ *  genuinely turning gold at different ages and one figure would misdescribe
+ *  most of them. Empty list falls back to the 30-minute default. */
+function staleLegend(gs: LiveMapGuard[]): string {
+  const mins = Array.from(new Set(
+    (gs.length ? gs : [{} as LiveMapGuard]).map((g) => pingStaleMinutes(intervalMsOf(g) / 60_000)),
+  )).sort((a, b) => a - b);
+  const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+  return mins.length === 1 ? `${fmt(mins[0])}M` : `${fmt(mins[0])}-${fmt(mins[mins.length - 1])}M`;
+}
+
+/** Staleness here measures the POSITION, not the ping: a clock-in-only guard
+ *  goes gold one window + grace in, which is the honest reading — nothing has
+ *  confirmed their whereabouts since.
+ *
+ *  The threshold is still derived from the ping cadence, and that is
+ *  deliberate: a post's ping interval is how often we EXPECT to hear from a
+ *  guard, so it is the right yardstick for "we have not heard in a while"
+ *  even when the last thing we heard was a clock-in rather than a ping. */
 function pinColour(g: LiveMapGuard): string {
   if (g.has_violation) return PIN_VIOLATION;
-  if (isPingStale(positionAt(g))) return PIN_STALE;
+  if (isPingStale(positionAt(g), Date.now(), intervalMsOf(g))) return PIN_STALE;
   return PIN_OK;
 }
 
@@ -418,7 +447,7 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
                     <span className={isClockInPin(g) ? 'text-amber-300' : 'text-gray-300'}>
                       {isClockInPin(g) ? 'clock-in' : 'ping'} {clockTime(positionAt(g))}
                     </span>
-                    <span className={isPingStale(positionAt(g)) ? 'text-amber-400' : 'text-gray-500'}>
+                    <span className={isPingStale(positionAt(g), Date.now(), intervalMsOf(g)) ? 'text-amber-400' : 'text-gray-500'}>
                       {' · '}{ago(positionAt(g))}
                     </span>
                   </Field>
@@ -426,7 +455,7 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
                       step with the table cell in app/admin/live-status —
                       this popup and that row grade the same ping. */}
                   <Field label="LAST PING">
-                    {computeLatenessAnchored(g.last_ping_at, g.scheduled_start).display}
+                    {computeLatenessAnchored(g.last_ping_at, g.scheduled_start, intervalMsOf(g)).display}
                   </Field>
                   <Field label="ACCURACY">
                     {Number.isFinite(g.last_accuracy_m)
@@ -471,7 +500,16 @@ export default function LiveMap({ guards, sites, breaches, focus, onGuardSelect,
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full" style={{ background: PIN_STALE }} />
-            PING &gt; {PING_STALE_MINUTES}M
+            {/* INDEPENDENT CORRECTION, not part of the interval work.
+                This said "PING > 35M" while pinColour() colours by
+                positionAt(g) — the POSITION, which a clock-in satisfies just
+                as well as a ping. The legend named the wrong signal, so a
+                clock-in-only guard went gold under a label claiming their
+                PING was late. "NO FIX" is what the colour actually means.
+                The number is now derived rather than hardcoded, and is a
+                RANGE when the guards on screen sit on different cadences —
+                a single figure would be a lie the moment two sites differ. */}
+            NO FIX &gt; {staleLegend(guards)}
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full" style={{ background: PIN_VIOLATION }} />BREACH

@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { useSearchParams } from 'next/navigation';
 import { adminDownload, adminGet } from '../../../lib/adminApi';
-import { computeLateness, computeLatenessAnchored, isPingStale } from '../../../lib/lateness';
+import { computeLateness, pingCellDisplay } from '../../../lib/lateness';
 
 // Leaflet touches `window` on import, so the map panel must never be part
 // of the server bundle. Same contract GeofenceMapEditor is loaded under
@@ -67,6 +67,11 @@ interface LiveGuard {
    *  computeLatenessAnchored then renders the bare time rather than a
    *  wall-clock guess. */
   scheduled_start?: string | null;
+  /** The SESSION's cadence snapshot (schema_v68). Served by GET
+   *  /api/admin/live-guards since PR #27. Optional per the stale-API rule —
+   *  Vercel and Railway are never simultaneous — and NULL for a session that
+   *  predates the column; both COALESCE to 30, which is today's behaviour. */
+  ping_interval_minutes?: number | null;
 }
 
 interface Breach {
@@ -473,17 +478,25 @@ export default function LiveMapPage() {
               // :00/:30 and was wrong in BOTH directions on any shift that
               // does not start there — see lib/lateness.ts's header for the
               // measured 375 Shopping Complex case.
-              const ping   = computeLatenessAnchored(g.last_ping_at, g.scheduled_start);
+              // Cadence from the SESSION SNAPSHOT (schema_v68), served on
+              // this payload since PR #27. Optional per the stale-API rule,
+              // so an API that predates it yields undefined and the helpers
+              // fall back to 30 — today's behaviour exactly.
+              const intervalMs = (g.ping_interval_minutes ?? 30) * 60_000;
+              // ONE CELL, ONE ASSERTION. This used to be
+              // computeLatenessAnchored's output coloured red when stale,
+              // which rendered "16:00 (on time)" in red with a "!" — both
+              // halves true, read together as a contradiction. pingCellDisplay
+              // answers the window question while fresh and the elapsed
+              // question once stale. See its docblock.
+              const ping   = pingCellDisplay(g.last_ping_at, g.scheduled_start, Date.now(), intervalMs);
               // UNCHANGED and correct: the hourly activity-report leg really
               // does fire on a wall-clock top-of-hour cadence (R5,
               // apps/api/src/jobs/pingReminder.ts:344-354).
               const report = computeLateness(g.last_report_at, [0]);
-              // Stale-ping urgency signal: unchanged from prior behavior —
-              // colors the LAST PING cell red when the last ping is older
-              // than 35 min from wall-clock (independent of the lateness
-              // display text, which measures against the schedule boundary).
-              // Now lib/lateness.ts so the map pin reads the same rule.
-              const pingStale = isPingStale(g.last_ping_at);
+              // Same staleness verdict the cell text is built from, reused
+              // for the colour so the two can never disagree.
+              const pingStale = ping.stale;
               const locatable = Number.isFinite(g.last_lat) && Number.isFinite(g.last_lng);
               return (
                 <tr
