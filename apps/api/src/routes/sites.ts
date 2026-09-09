@@ -6,6 +6,7 @@ import { uploadBufferToS3, urlOrPresign } from '../services/s3';
 import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
+import { validatePingInterval, normalizeReason } from '../services/pingIntervalPicker';
 
 /**
  * Common gate: 409 if the target site has been deactivated. Used on every
@@ -227,6 +228,114 @@ router.patch('/:id/toggles', requireAuth('company_admin'), async (req, res) => {
   );
   if (!result.rows[0]) return res.status(404).json({ error: 'Site not found' });
   res.json(result.rows[0]);
+});
+
+// PATCH /api/sites/:id/ping-interval — the per-site ping cadence (Phase H).
+//
+// TWO PATTERNS, DELIBERATELY. This matches PATCH /:id/toggles above on auth,
+// field validation with a named 400, assertSiteActive, a tenant-scoped
+// UPDATE and echoing the persisted row. It does NOT match it on transaction
+// structure: /toggles uses pool.query directly and has no transaction, so it
+// could not host an atomic second write. The BEGIN/COMMIT shape here is
+// routes/shifts.ts's schedule-edit handler, because the audit row and the
+// UPDATE must commit together or not at all. An UPDATE that lands while its
+// audit row is lost is worse than no audit, since the table would then imply
+// a completeness it does not have.
+//
+// STRICTER THAN THE COLUMN, ON PURPOSE. The validator admits only
+// {15, 30, 45} (D15) while sites.ping_interval_minutes permits 5..240.
+// Precedent for exactly this asymmetry is 40 lines up: PUT /:id rejects any
+// timezone outside ALLOWED_TIMEZONES (sites.ts:172) while the column is bare
+// text. The schema stays permissive because this column is the SOURCE the
+// clock-in snapshot copies verbatim into shift_sessions — narrowing the
+// column would make that INSERT throw for an out-of-band value, and that
+// INSERT is inside the clock-in transaction, so the failure mode is a guard
+// who cannot start their shift. See services/pingIntervalPicker.ts.
+//
+// THIS DOES NOT CHANGE ANY OPEN SESSION. The value is read at clock-in and
+// snapshotted; a session already running keeps the cadence it started with.
+//
+// NO-OP WRITES NO AUDIT ROW. Setting 30 on a site already at 30 returns 200
+// with the unchanged row and writes NOTHING to site_config_audit. An audit
+// table full of no-change rows is noise, and it would make "how many times
+// was this site's cadence changed" unanswerable by COUNT(*) — which is the
+// first question anyone asks of an audit table.
+router.patch('/:id/ping-interval', requireAuth('company_admin'), async (req, res) => {
+  const check = validatePingInterval((req.body as { ping_interval_minutes?: unknown })?.ping_interval_minutes);
+  if (!check.ok) return res.status(400).json({ error: check.error });
+  const reason = normalizeReason((req.body as { reason?: unknown })?.reason);
+
+  const gate = await assertSiteActive(req.params.id, req.user!.company_id!);
+  if (!gate.ok) return res.status(gate.status).json(gate.body);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Read the CURRENT value inside the transaction, under FOR UPDATE, so
+    // `before` is the real prior value rather than anything the client sent,
+    // and a concurrent PATCH cannot interleave between the read and the
+    // write. Tenant-scoped here as well as on the UPDATE.
+    //
+    // is_active is selected too, and re-checked below. assertSiteActive
+    // already ran before BEGIN and stays there as the cheap path — it
+    // rejects the common case without paying for a connection or a row
+    // lock. But it is a read-then-write: a site deactivated in the window
+    // between that gate and this transaction would still take a cadence
+    // write. The row is locked from here, so re-reading the flag under the
+    // same lock as the UPDATE closes that window. Same read-then-write
+    // shape is filed against PUT /:id as N43; this route does not inherit it.
+    const current = await client.query<{ ping_interval_minutes: number; is_active: boolean }>(
+      'SELECT ping_interval_minutes, is_active FROM sites WHERE id = $1 AND company_id = $2 FOR UPDATE',
+      [req.params.id, req.user!.company_id],
+    );
+    if (!current.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Site not found' });
+    }
+    if (!current.rows[0].is_active) {
+      // Byte-identical status and message to assertSiteActive's 409, on
+      // purpose: a caller must not be able to tell which of the two gates
+      // refused them, or the pair becomes two behaviours instead of one.
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Site is deactivated. Reactivate it before making changes.' });
+    }
+    const before = current.rows[0].ping_interval_minutes;
+
+    // No-op: commit the (empty) transaction and return the row unchanged.
+    if (before === check.value) {
+      await client.query('COMMIT');
+      return res.json({ id: req.params.id, ping_interval_minutes: before, changed: false });
+    }
+
+    const updated = await client.query<{ id: string; ping_interval_minutes: number }>(
+      `UPDATE sites SET ping_interval_minutes = $1
+        WHERE id = $2 AND company_id = $3
+        RETURNING id, ping_interval_minutes`,
+      [check.value, req.params.id, req.user!.company_id],
+    );
+
+    // Narrow before/after — the mutated column only, never a whole-row
+    // snapshot. schema_v70's header has the reasoning.
+    await client.query(
+      `INSERT INTO site_config_audit
+         (site_id, action, changed_by, changed_by_role, reason, before, after)
+       VALUES ($1, 'site_ping_interval_changed', $2, $3, $4, $5, $6)`,
+      [
+        req.params.id, req.user!.sub, req.user!.role, reason,
+        JSON.stringify({ ping_interval_minutes: before }),
+        JSON.stringify({ ping_interval_minutes: check.value }),
+      ],
+    );
+
+    await client.query('COMMIT');
+    res.json({ ...updated.rows[0], changed: true });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => { /* connection already broken */ });
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 // POST /api/sites/:id/instructions — server-side PDF upload with magic bytes validation
