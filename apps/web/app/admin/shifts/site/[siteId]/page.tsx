@@ -21,6 +21,7 @@ import { adminGet } from '../../../../../lib/adminApi';
 import InactiveSiteBadge from '../../../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../../../components/admin/ScheduleShiftModal';
 import AssignGuardModal, { AssignableShift } from '../../../../../components/admin/AssignGuardModal';
+import SlotAssignPanel from '../../../../../components/admin/SlotAssignPanel';
 import { dayOffsetInZone, fmtDateShort, fmtDuration, fmtTime } from '../../../../../lib/shiftFormat';
 
 interface Site {
@@ -158,6 +159,12 @@ export default function SiteShiftsPage() {
       </div>
 
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
+
+      {/* Template slots — renders nothing when the site has no active
+          scheduling profile, so a site that does not use them is unchanged.
+          Its window (14d) differs from the shift table's (-1d..+90d) and it
+          names its own dates in its heading for that reason. */}
+      {siteId && <SlotAssignPanel siteId={siteId} onAssigned={load} />}
 
       {/* Shifts table */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
