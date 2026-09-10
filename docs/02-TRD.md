@@ -381,9 +381,15 @@ Both classes manifest the same way for **disaster recovery from a Railway backup
 
 **Why this matters**: the bug shipped to production was not the schema — it was the assumption that the production environment auto-runs migrations. It does not. Every schema change is one manual operator step away from causing a partial outage.
 
-**Permanent fix**: change [apps/api/package.json](apps/api/package.json) start script to `"start": "npm run db:migrate && node dist/index.js"`. This makes every deploy idempotent — re-deploying applies any pending migrations before the API serves requests; deploys with no new migrations are no-ops on the migration step.
+**Permanent fix — BLOCKED. DO NOT APPLY YET. See N43.**
 
-**Severity**: Operational. Goes into Implementation Plan's Immediate Backlog with red urgency.
+> ⚠️ **The premise was false.** This entry previously read: *"This makes every deploy idempotent — re-deploying applies any pending migrations before the API serves requests; deploys with no new migrations are no-ops on the migration step."* A re-run is **not** a no-op. `schema_v5.sql:10-12` is a bare `ADD CONSTRAINT break_sessions_break_type_check CHECK (break_type IN ('meal','rest','other'))` with no guard, and `schema_v61`/`schema_v62` relabelled every `break_sessions` row to `break_type = 'break'`. Replaying it raises **SQLSTATE 23514**. `db/migrate.ts` has no per-file `try/catch` and calls `process.exit(1)`, so it aborts at **file 6 of the chain** and nothing after it applies.
+>
+> Chaining `db:migrate` into `start` **today** means every Railway deploy fails on the migration step and the API never boots. The paragraph as originally written reads as a safe one-line change; applied as written it is a single-line outage.
+
+The change itself — `"start": "node dist/index.js"` → `"start": "npm run db:migrate && node dist/index.js"` — remains the correct end state, and the reasoning about deploy-time idempotency is sound *once the chain is actually idempotent*. It becomes safe only after the chain replays clean end-to-end against an empty database and diffs zero against production. Tracked as **N43** in `docs/OPS/OPEN-ITEMS.md`.
+
+**Severity**: Operational. Goes into Implementation Plan's Immediate Backlog with red urgency — **behind N43**, which is its prerequisite rather than a parallel item.
 
 **Owner**: Single-file change. Can ship in a focused commit.
 
