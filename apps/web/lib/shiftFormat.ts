@@ -23,10 +23,96 @@ export function fmtDuration(start: string, end: string): string {
   return `${h.toFixed(1)}h`;
 }
 
+/**
+ * A Date -> "10 Sept 2026", rendered from the Date's own zone.
+ *
+ * N55: was `dd/mm/yyyy`. A numeric date has a reading order and 10/09/2026
+ * and 09/10/2026 denote different days, so beside an <input type="date">
+ * showing the browser's locale order it was a misreading risk rather than an
+ * inconsistency. A month NAME has no reading order and cannot be misread,
+ * which is why the picker and the label are allowed to disagree in FORM as
+ * long as the label names the month.
+ *
+ * Signature unchanged, and it still renders the Date in whatever zone the
+ * Date was built in, so every call site is fixed without touching one.
+ */
 export function fmtDate(d: Date): string {
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  return `${dd}/${mm}/${d.getFullYear()}`;
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+// ── Bare calendar dates ─────────────────────────────────────────────────
+//
+// `YYYY-MM-DD` with no time and no zone: an assignment window bound, a
+// fetch window bound, a picked day. These are NOT instants and must never be
+// treated as one.
+//
+// ⚠ DO NOT "SIMPLIFY" fmtCalDate INTO `new Date(ymd)`. THAT MOVES THE DAY.
+//
+//   new Date('2026-09-10')                  -> 2026-09-10T00:00:00Z
+//   ...rendered in America/Los_Angeles      -> "09 Sept 2026"   ← WRONG
+//
+// A bare date string parses as UTC MIDNIGHT, so every browser west of UTC
+// renders the day before. The inverse mistake — building local midnight and
+// round-tripping through toISOString().slice(0,10) — breaks in the other
+// direction, for every zone east of UTC.
+//
+// This is not hypothetical for these values. guard_site_assignments'
+// assigned_from / assigned_until are DATE columns, and the same values are
+// what services/guardAssignments.ts:checkShiftEligibility compares
+// server-side. Shifting them by a day in the UI is a semantics change wearing
+// a formatting change's clothes.
+//
+// So these two functions work on the STRING and never construct a Date.
+// scripts/check-date-format.ts enforces that under zones on both sides of
+// UTC and fails if anyone reintroduces the parse.
+
+const MONTH_SHORT_EN_GB = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sept', 'Oct', 'Nov', 'Dec',
+];
+
+/** Split a bare `YYYY-MM-DD`. Returns null when it is not one — callers show
+ *  the raw value rather than inventing a date. */
+function calParts(ymd: string): { d: string; m: number; y: string } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd).slice(0, 10));
+  if (!m) return null;
+  const month = Number(m[2]);
+  if (month < 1 || month > 12) return null;
+  return { d: m[3], m: month, y: m[1] };
+}
+
+/**
+ * Bare `YYYY-MM-DD` -> "10 Sept 2026". Zone-invariant by construction: no
+ * Date is built, so there is nothing for a zone to shift.
+ *
+ * 'Sept' rather than 'Sep' because that is what en-GB renders and what the
+ * shift tables (fmtDateShort) have always shown. September is the only month
+ * where en-GB and en-US differ.
+ *
+ * Returns the input unchanged if it is not a bare date, so a malformed value
+ * is visible rather than silently becoming "Invalid Date".
+ */
+export function fmtCalDate(ymd: string): string {
+  const p = calParts(ymd);
+  if (!p) return String(ymd);
+  return `${p.d} ${MONTH_SHORT_EN_GB[p.m - 1]} ${p.y}`;
+}
+
+/**
+ * Two bare dates -> "10 Sept – 24 Oct 2026", collapsing a repeated year.
+ * Same year and month collapses further, to "10 – 24 Oct 2026".
+ *
+ * Falls back to `from – to` verbatim if either side is not a bare date.
+ */
+export function fmtCalRange(from: string, to: string): string {
+  const a = calParts(from);
+  const b = calParts(to);
+  if (!a || !b) return `${String(from)} – ${String(to)}`;
+  const monthA = MONTH_SHORT_EN_GB[a.m - 1];
+  const monthB = MONTH_SHORT_EN_GB[b.m - 1];
+  if (a.y !== b.y) return `${a.d} ${monthA} ${a.y} – ${b.d} ${monthB} ${b.y}`;
+  if (a.m !== b.m) return `${a.d} ${monthA} – ${b.d} ${monthB} ${b.y}`;
+  return `${a.d} – ${b.d} ${monthB} ${b.y}`;
 }
 
 // ── Site-zone wall-clock conversion ─────────────────────────────────────

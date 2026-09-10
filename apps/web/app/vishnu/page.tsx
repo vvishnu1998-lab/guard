@@ -152,7 +152,7 @@ export default function VishnuOverview() {
                   </button>
                 </td>
                 <td className="p-4 text-gray-600 text-xs">
-                  {new Date(c.created_at).toLocaleDateString('en-GB')}
+                  {new Date(c.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
                 </td>
               </tr>
             ))}

@@ -23,7 +23,7 @@ import ScheduleShiftModal from '../../../../../components/admin/ScheduleShiftMod
 import AssignGuardModal, { AssignableShift } from '../../../../../components/admin/AssignGuardModal';
 import SlotAssignPanel from '../../../../../components/admin/SlotAssignPanel';
 import ShiftBulkReassign, { ReassignableShift } from '../../../../../components/admin/ShiftBulkReassign';
-import { dayOffsetInZone, fmtDateShort, fmtDuration, fmtTime } from '../../../../../lib/shiftFormat';
+import { dayOffsetInZone, fmtCalRange, fmtDateShort, fmtDuration, fmtTime } from '../../../../../lib/shiftFormat';
 
 interface Site {
   id:             string;
@@ -219,7 +219,7 @@ export default function SiteShiftsPage() {
           <div className="p-10 text-center text-gray-500 text-sm">Loading…</div>
         ) : siteShifts.length === 0 ? (
           <div className="p-10 text-center text-gray-500 text-sm">
-            No shifts at this site{windowFrom && windowTo ? ` between ${windowFrom} and ${windowTo}` : ''}.
+            No shifts at this site{windowFrom && windowTo ? ` between ${fmtCalRange(windowFrom, windowTo)}` : ''}.
           </div>
         ) : (
           <div className="overflow-x-auto">
