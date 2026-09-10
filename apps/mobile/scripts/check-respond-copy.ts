@@ -21,7 +21,7 @@
  * or in CI via `npm run check:respond-copy`.
  */
 import { ApiError, NetworkError } from '../lib/errors';
-import { respondConflictCopy, RespondKind } from '../lib/respondErrorCopy';
+import { respondConflictCopy, respondReasonCode, RespondKind } from '../lib/respondErrorCopy';
 
 /** Sentinel for "this version fell through to guardMessage()". */
 const FALLTHROUGH = '<<FALLTHROUGH>>';
@@ -95,34 +95,78 @@ for (const c of CASES) {
 }
 console.log(`[check-respond-copy] today's API: ${CASES.length} cases, ${mismatches} mismatch(es)`);
 
-// The other half. A check that only proved sameness would also pass on a
-// no-op change, so assert the new copy DOES differ once codes arrive.
-const WITH_CODE: { label: string; kind: RespondKind; err: ApiError }[] = [
-  { label: 'SWAP_STALE_REASSIGNED  (code+error)',  kind: 'swap',
-    err: new ApiError(409, { code: 'SWAP_STALE_REASSIGNED', error: 'SWAP_STALE_REASSIGNED', message: 'prose' }) },
-  { label: 'RECIPIENT_OVERLAP      (code+error)',  kind: 'swap',
-    err: new ApiError(409, { code: 'RECIPIENT_OVERLAP', error: 'RECIPIENT_OVERLAP', message: 'prose' }) },
-  { label: 'OPEN_SESSION_EXISTS    (details only)', kind: 'handoff',
-    err: new ApiError(409, { code: 'OPEN_SESSION_EXISTS', error: 'prose sentence', message: 'prose sentence' }) },
-  { label: 'SWAP_NOT_PENDING       (must NOT change)', kind: 'swap',
-    err: new ApiError(409, { code: 'SWAP_NOT_PENDING', error: 'SWAP_NOT_PENDING', message: 'prose' }) },
+// ── THE OTHER HALF: the eight bodies the API emits AFTER N46 Phase 3. ──────
+//
+// Transcribed from routes/shifts.ts at the ref this check ships with. A test
+// that only proved sameness would also pass on a change that did nothing, so
+// this half asserts the codes actually resolve: every one of the eight must
+// be recognised as an ENUM (not fall through to the status fallback), and the
+// six that were mis-messaged must now read differently from the old blanket
+// sentence while the two that were already right must NOT change.
+const POST_N46: { label: string; kind: RespondKind; err: ApiError; expectSameAsOld: boolean }[] = [
+  { label: 'swap :1777 SWAP_NOT_PENDING', kind: 'swap', expectSameAsOld: true,
+    err: new ApiError(409, { code: 'SWAP_NOT_PENDING', error: 'SWAP_NOT_PENDING',
+      message: 'Swap request is already expired.', swap_status: 'expired' }) },
+  { label: 'swap :1829 SHIFT_NOT_SCHEDULED', kind: 'swap', expectSameAsOld: false,
+    err: new ApiError(409, { code: 'SHIFT_NOT_SCHEDULED', error: 'SHIFT_NOT_SCHEDULED',
+      message: 'Shift is no longer scheduled (current: cancelled).', shift_status: 'cancelled' }) },
+  { label: 'swap :1834 SWAP_STALE_REASSIGNED', kind: 'swap', expectSameAsOld: false,
+    err: new ApiError(409, { code: 'SWAP_STALE_REASSIGNED', error: 'SWAP_STALE_REASSIGNED',
+      message: 'Shift has been reassigned by an admin; swap is stale.' }) },
+  { label: 'swap :1850 RECIPIENT_OVERLAP', kind: 'swap', expectSameAsOld: false,
+    err: new ApiError(409, { code: 'RECIPIENT_OVERLAP', error: 'RECIPIENT_OVERLAP',
+      message: 'You now have an overlapping shift; swap is no longer possible.',
+      conflict: { shift_id: 'b2afb11f-4861-436e-a8c9-5f6ec2961082', guard_name: 'Raja',
+                  site_name: '375 Shopping Complex',
+                  scheduled_start: '2026-10-05T21:00:00.000Z',
+                  scheduled_end: '2026-10-06T07:00:00.000Z' } }) },
+  { label: 'hand :2111 HANDOFF_NOT_PENDING', kind: 'handoff', expectSameAsOld: true,
+    err: new ApiError(409, { code: 'HANDOFF_NOT_PENDING', error: 'HANDOFF_NOT_PENDING',
+      message: 'Handoff is already cancelled.', handoff_status: 'cancelled' }) },
+  { label: 'hand :2155 SHIFT_NOT_ACTIVE', kind: 'handoff', expectSameAsOld: false,
+    err: new ApiError(409, { code: 'SHIFT_NOT_ACTIVE', error: 'SHIFT_NOT_ACTIVE',
+      message: 'Shift is no longer active (current: completed).', shift_status: 'completed' }) },
+  { label: 'hand :2160 HANDOFF_STALE_REASSIGNED', kind: 'handoff', expectSameAsOld: false,
+    err: new ApiError(409, { code: 'HANDOFF_STALE_REASSIGNED', error: 'HANDOFF_STALE_REASSIGNED',
+      message: 'Shift has been reassigned by an admin; handoff is stale.' }) },
+  // openSessionConflictBody spread, with `error` overridden to the enum.
+  { label: 'hand :2170 OPEN_SESSION_EXISTS', kind: 'handoff', expectSameAsOld: false,
+    err: new ApiError(409, { code: 'OPEN_SESSION_EXISTS', error: 'OPEN_SESSION_EXISTS',
+      message: "You're already clocked in at 375 Shopping Complex since 1:57 PM PT.",
+      open_session: { shift_id: 'e1707b96-1d46-41a7-a2de-b32f9a4c2e1b',
+                      site_id: 'ab450901-c434-417c-b5b6-292b4d09e80c',
+                      site_name: '375 Shopping Complex',
+                      clocked_in_at: '2026-09-09T20:57:56.683Z' } }) },
 ];
-let differing = 0;
-for (const c of WITH_CODE) {
+
+let unresolved = 0;
+let wrongDirection = 0;
+console.log('[check-respond-copy] post-N46 API: the eight 409 bodies');
+for (const c of POST_N46) {
+  const code = respondReasonCode(c.err);
   const o = OLD(c.err, c.kind);
   const n = NEW(c.err, c.kind);
-  const changed = o !== n;
-  if (changed) differing++;
-  console.log(`  ${changed ? 'CHANGED' : 'same   '}  ${c.label}`);
-  if (changed) console.log(`      -> ${JSON.stringify(n)}`);
+  const same = o === n;
+  if (code === null) { unresolved++; console.error(`  UNRESOLVED  ${c.label} - fell through to the status fallback`); continue; }
+  if (same !== c.expectSameAsOld) {
+    wrongDirection++;
+    console.error(`  WRONG       ${c.label} - expected ${c.expectSameAsOld ? 'unchanged' : 'changed'}, got ${same ? 'unchanged' : 'changed'}`);
+    continue;
+  }
+  console.log(`  ${same ? 'same   ' : 'CHANGED'}  ${code}`);
+  if (!same) console.log(`      -> ${JSON.stringify(n)}`);
 }
 
 if (mismatches > 0) {
-  console.error('[check-respond-copy] FAIL - the mobile half is NOT a no-op against today API.');
+  console.error('[check-respond-copy] FAIL - the mobile half is NOT a no-op against a pre-N46 API.');
   process.exit(1);
 }
-if (differing !== 3) {
-  console.error(`[check-respond-copy] FAIL - expected 3 of 4 coded cases to change, got ${differing}.`);
+if (unresolved > 0) {
+  console.error(`[check-respond-copy] FAIL - ${unresolved} of ${POST_N46.length} post-N46 bodies did not resolve to an enum.`);
   process.exit(1);
 }
-console.log('[check-respond-copy] PASS - identical against today API; distinct once codes arrive.');
+if (wrongDirection > 0) {
+  console.error(`[check-respond-copy] FAIL - ${wrongDirection} body/bodies changed in the wrong direction.`);
+  process.exit(1);
+}
+console.log(`[check-respond-copy] PASS - ${CASES.length}/${CASES.length} identical against a pre-N46 API; ${POST_N46.length}/${POST_N46.length} resolve by enum after it.`);

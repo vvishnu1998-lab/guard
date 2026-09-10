@@ -1883,3 +1883,159 @@ Fix for diffing is a convention, now recorded in the verification protocol at
 **Size S. Tier 0.**
 
 ---
+
+---
+
+## New from N46 swap/handoff 409 codes (2026-09-10)
+
+**N71. The 1.0.16 tail: nine active devices no 1.0.17 OTA reaches. DECIDED - ask guards to update.**
+verified: YES - `guard_devices` and Sentry release tags both read at this ref.
+
+`app.json` sets `runtimeVersion: { policy: 'appVersion' }` with `version: 1.0.17`, so an update
+published from this tree is offered only to binaries whose embedded runtime is exactly `1.0.17`.
+Of 23 active devices:
+
+| runtime | active | guards |
+|---|---|---|
+| **1.0.17** | **14** | Ahmad GRD0010, deepak naik GRD0004, Hari Nayak GRD0026, Jagdish GRD0012, kartikeya GRD0009, manju GRD0023, Parameshwari GRD0011, Prakash GRD0019, Raja GRD0015, Rajendar GRD0024, reddy GRD0001, Shiva GRD0020, Siddu GRD0010, Svineah GRD0008 |
+| 1.0.16 | 5 | Anil GRD0007 (iOS), Charan GRD0013, Nikith Reddy GRD0005, Satish GRD0015, Shiva GRD0012 |
+| no client string | 4 | Bhanu GRD0001, **Nandu GRD0002**, Naveen Yatakari GRD0009, vamshi krishna GRD0006 |
+
+**The tail is 1.0.16, not a 1.0.14 straggler.** The N46 brief assumed Nandu was stranded on build 44
+/ runtime 1.0.14. Sentry shows he *was* - `com.netraops.guard@1.0.14+44`, 2026-08-19 to 2026-08-20 -
+and then moved to `1.0.16+46` on 2026-08-29. **No device anywhere has reported from 1.0.14 since
+2026-08-20T11:08:47.** The four with no client string are a reporting artifact, not a fifth cohort;
+see N73.
+
+**DECISION (Vishnu, 2026-09-10): accept the tail. Ask guards to update rather than pin a publish.**
+Not a gap missed. What closing it would have taken:
+
+- a second OTA published from a tree pinned to `version: 1.0.16`, so the bundle carries a matching
+  runtime - two bundles to maintain and two to roll back; or
+- a new binary through TestFlight / Play internal, which is a store round-trip and does not help
+  anyone who declines the update either.
+
+The cost of NOT closing it is bounded and was measured before deciding: these nine keep **today's**
+behaviour, which is unchanged rather than worse. The N46 API change is additive - an unadopted
+client ignores `code`, `message` and the extra fields and branches on status exactly as it does now
+(proved by `apps/mobile/scripts/check-respond-copy.ts`, 29/29 cases identical against a pre-N46
+API). So the tail is a quality gap, never a breakage.
+
+Revisit at the next binary release, when it closes for free. **Size S. Tier 1.**
+
+---
+
+**N72. `isOpenSessionConflict` is not wired into notifications.tsx, and now the server emits the code.**
+verified: YES - `apps/mobile/lib/openSession.ts` and `(tabs)/notifications.tsx` read at this ref.
+
+Since N46 Phase 3, `POST /shifts/:id/handoff-response` at `shifts.ts:2170` returns
+`OPEN_SESSION_EXISTS` via `openSessionConflictBody`. Mobile has handled that code since the Aug 18
+incident: `lib/openSession.ts` exports `isOpenSessionConflict` (which reads `details.code`, not
+`err.code` - see the trap it documents at `:42-56`) plus a handler that refetches
+`GET /shifts/active-session`, rehydrates `shiftStore`, and routes the guard home so they land on
+their real on-shift state instead of a dead screen.
+
+`notifications.tsx` does **not** call it. N46 gave that case accurate copy - "You're clocked in to
+another shift right now. Clock out of it before accepting this handoff." - and stopped there.
+
+**Deliberate. A navigation change does not ride into a copy fix.** Wiring the handler would move the
+guard out of the notifications tab mid-flow, which is a different decision with a different failure
+mode, and at the time the mobile half was written the server did not emit the code so it could not
+have been exercised end to end. It can be now.
+
+The open question is whether being bounced to the home screen is the right outcome when a guard taps
+Accept on a handoff they cannot take. It is right on the clock-in wizard, where the screen is a dead
+end. On the notifications list the screen is *not* dead - the card is still there and still valid,
+and the guard may want to decline it, or answer a different invite. Plausibly the copy alone is
+correct here and the handler is not wanted at all.
+
+Fix is a product decision first, then roughly five lines. **Size S. Tier 0.**
+
+---
+
+**N73. `guard_devices.client` under-reports runtime for any device whose token claim predates the header.**
+verified: YES - traced through `authStore.ts`, `apiClient.ts`, `auth.ts` and `deviceRegistry.ts` at this ref.
+
+`guard_devices.client` is written only by `claimDevice`, and `services/deviceRegistry.ts:115` upserts
+it as `client = COALESCE($4, client)` - a NULL argument **preserves whatever was there before**.
+There are two claim sites:
+
+- `routes/auth.ts:201`, guard **login**. `apps/mobile/store/authStore.ts:311-315` sends only
+  `Content-Type`, so login carries **no** `X-NetraOps-Client` header. The claim therefore passes
+  `null`, `COALESCE` keeps the stale value, and the adjacent log line at `auth.ts:224` prints
+  `client="absent"`. This is **C20**, still true.
+- `routes/auth.ts:307`, `POST /auth/guard/fcm-token`, called from `_layout.tsx:100` through
+  `apiClient` - which **does** send the header (`apiClient.ts:82`). This is the only path that
+  refreshes the value.
+
+So a device that claimed its token before the header existed and has not re-registered since reads
+`client = NULL` forever, regardless of what it is actually running. Four active devices are in that
+state: Bhanu GRD0001, Nandu GRD0002, Naveen Yatakari GRD0009, vamshi krishna GRD0006. Nandu is the
+proof - his row is NULL while Sentry has him on `1.0.16+46` since 2026-08-29.
+
+**The comment at `auth.ts:208-224` is wrong about its own premise.** It says login "carries
+platform/version/build/runtime/update in a single greppable line" and is "the one moment that always
+precedes a test run". It carries nothing, for the reason above. Do not grep `guard_client` at login
+to confirm a bundle; the standing rule (take the reading after a **clock-in**, never a login) is
+correct and this is why.
+
+**The two sources and what each is authoritative for:**
+
+| question | source | why |
+|---|---|---|
+| which **binary** / runtime is this device on | **Sentry** `release` = `com.netraops.guard@<version>+<nativeBuild>` | present on every event, no sampling (`sentry.ts:69` `sampleRate: 1.0`), refreshed on every error |
+| which **OTA bundle** is it running | **`guard_devices.client`** `update/<id>` | Sentry cannot answer it - an OTA changes neither `version` nor `nativeBuild`, so `release` and `dist` are identical before and after |
+
+Neither is a substitute for the other, and the second is only as fresh as the device's last
+`fcm-token` registration.
+
+Fix is either to send the header from `authStore._request` (closing C20, which makes the login log
+real) or to backfill on any authenticated request. **Size S. Tier 0.**
+
+---
+
+**N74. A content-match edit in `routes/shifts.ts` is unsafe without a uniqueness assertion.**
+verified: YES - hit while editing, and the assertion is what stopped it.
+
+`routes/shifts.ts` is ~3,900 lines carrying several routes that do structurally similar things, so
+its guard-facing prose **repeats across routes**. The concrete case:
+
+```
+:2160  handoff-response    return res.status(409).json({ error: 'Shift has been reassigned by an admin; handoff is stale.' });
+:2298  handoff-clock-in    return res.status(409).json({ error: 'Shift has been reassigned by an admin; handoff is stale.' });
+```
+
+Byte-identical, in **two different routes**. N46 scoped `handoff-response` only; `handoff-clock-in`
+was never audited. A scripted `replace(old, new)` - or a `sed -i` - would have edited the wrong one,
+or both, and the diff would have looked plausible because the replacement is the same shape as the
+target.
+
+It was caught because the edit script asserted `s.count(old) == 1` before every replacement and
+aborted the whole run on the second occurrence, **before writing anything**. The fix was to widen
+the anchor to include the preceding comment, which differs (`// Admin reassign got there first.`
+versus `// Admin reassign in-between.`).
+
+**The rule: never content-match into this file without asserting the anchor is unique, and prefer an
+anchor that includes a neighbouring line.** Line numbers are not a safe substitute - they move (the
+N46 brief cited `:1745`/`:1761`/`:1903`/`:1932` from an earlier audit and all four had shifted, one
+of them into a different route entirely). Same class as [feedback_display_output_is_not_source] and
+[feedback_verify_the_edit_target_exists]: the anchor has to be verified against the file, not
+assumed from a previous reading.
+
+Other duplicated prose in this file that would bite the same way has **not** been enumerated.
+**UNVERIFIED** how many other strings repeat across routes.
+
+Fix is a convention. **Size XS. Tier 0.**
+
+---
+
+**SETTLED - the `:1903` / `:1932` citation.** The N46 brief cited two 409s on `handoff-response`
+as "already in progress" and "not eligible". The Phase 0 audit could not find them there and guessed
+they might be `swap-response`'s 422; **that guess was also wrong**. They are `handoff-REQUEST`, a
+third route, at `:2021` ("A handoff for this shift is already in progress.") and `:2050`
+("Selected guard is not eligible (already clocked in, has an overlapping shift, inactive, or wrong
+company).") at this ref. `handoff-response` never calls `checkShiftEligibility` and emits no 422.
+Recorded so it is not re-litigated a third time. `handoff-request`'s four 409s carry no machine code
+and were deliberately left out of N46's scope.
+
+---

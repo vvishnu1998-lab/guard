@@ -1774,7 +1774,16 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
     }
     if (hist.status !== 'pending') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Swap request is already ${hist.status}.` });
+      return res.status(409).json({
+        // N46: the enum goes in BOTH `code` and `error`. ApiError on mobile
+        // derives .code from `error` (lib/errors.ts:72) while
+        // lib/openSession.ts reads details.code — putting it in both means
+        // either consumer matches, and `message` keeps the prose.
+        code:        'SWAP_NOT_PENDING',
+        error:       'SWAP_NOT_PENDING',
+        message:     `Swap request is already ${hist.status}.`,
+        swap_status: hist.status,
+      });
     }
 
     const shiftRes = await client.query<{
@@ -1826,28 +1835,48 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
     // Accept path — re-verify preconditions inside the txn.
     if (shift.status !== 'scheduled') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Shift is no longer scheduled (current: ${shift.status}).` });
+      return res.status(409).json({
+        code:         'SHIFT_NOT_SCHEDULED',
+        error:        'SHIFT_NOT_SCHEDULED',
+        message:      `Shift is no longer scheduled (current: ${shift.status}).`,
+        shift_status: shift.status,
+      });
     }
     if (shift.guard_id !== hist.from_guard_id) {
       // Someone else (admin reassign) moved the shift underneath us.
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Shift has been reassigned by an admin; swap is stale.' });
+      return res.status(409).json({
+        code:    'SWAP_STALE_REASSIGNED',
+        error:   'SWAP_STALE_REASSIGNED',
+        message: 'Shift has been reassigned by an admin; swap is stale.',
+      });
     }
     // Re-check overlap for B — a shift may have landed on them since the
     // invitation was sent.
-    const overlap = await client.query(
-      `SELECT 1 FROM shifts osh
-        WHERE osh.guard_id = $1
-          AND osh.status IN ('scheduled','active')
-          AND osh.id != $2
-          AND osh.scheduled_start < $3::timestamptz
-          AND osh.scheduled_end   > $4::timestamptz
-        LIMIT 1`,
-      [hist.to_guard_id, shift.id, shift.scheduled_end, shift.scheduled_start],
+    //
+    // N46: this was an inline `SELECT 1` with the overlap predicate spelled
+    // out a ninth time. It now goes through findOverlappingShift, which is
+    // built from overlapPredicateSql — the one spelling of half-open
+    // [start, end) cross-site overlap. Same window, same exclusion, same
+    // statuses; the arguments map one-for-one onto the parameters that were
+    // bound here before.
+    const conflict = await findOverlappingShift(
+      hist.to_guard_id, shift.scheduled_start, shift.scheduled_end, shift.id, client,
     );
-    if (overlap.rows[0]) {
+    if (conflict) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'You now have an overlapping shift; swap is no longer possible.' });
+      // `conflict` comes from overlapConflictBody so the client gets the
+      // colliding shift, not just a sentence. Its `error` prose is NOT
+      // reused: that helper writes for an ADMIN reading someone else's roster
+      // ("These hours overlap <name>'s shift at ..."), and here the reader IS
+      // that guard. Shape reused, voice not — same split as the deactivation
+      // path in routes/guards.ts.
+      return res.status(409).json({
+        code:     'RECIPIENT_OVERLAP',
+        error:    'RECIPIENT_OVERLAP',
+        message:  'You now have an overlapping shift; swap is no longer possible.',
+        conflict: overlapConflictBody(conflict).conflict,
+      });
     }
 
     // Finding #6: recipient must have a covering guard_site_assignments
@@ -2108,7 +2137,12 @@ router.post('/:id/handoff-response', requireAuth('guard'), async (req, res) => {
     }
     if (hist.status !== 'pending') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Handoff is already ${hist.status}.` });
+      return res.status(409).json({
+        code:           'HANDOFF_NOT_PENDING',
+        error:          'HANDOFF_NOT_PENDING',
+        message:        `Handoff is already ${hist.status}.`,
+        handoff_status: hist.status,
+      });
     }
 
     const shiftRes = await client.query<{
@@ -2152,22 +2186,42 @@ router.post('/:id/handoff-response', requireAuth('guard'), async (req, res) => {
     // Accept path — re-verify preconditions.
     if (shift.status !== 'active') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Shift is no longer active (current: ${shift.status}).` });
+      return res.status(409).json({
+        code:         'SHIFT_NOT_ACTIVE',
+        error:        'SHIFT_NOT_ACTIVE',
+        message:      `Shift is no longer active (current: ${shift.status}).`,
+        shift_status: shift.status,
+      });
     }
     if (shift.guard_id !== hist.from_guard_id) {
       // Admin reassign got there first.
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Shift has been reassigned by an admin; handoff is stale.' });
+      return res.status(409).json({
+        code:    'HANDOFF_STALE_REASSIGNED',
+        error:   'HANDOFF_STALE_REASSIGNED',
+        message: 'Shift has been reassigned by an admin; handoff is stale.',
+      });
     }
     // Re-check B: still not clocked in elsewhere.
-    const busy = await client.query(
-      `SELECT 1 FROM shift_sessions
-        WHERE guard_id = $1 AND clocked_out_at IS NULL LIMIT 1`,
-      [hist.to_guard_id],
-    );
-    if (busy.rows[0]) {
+    //
+    // N46: this predicate was another copy of "does this guard hold an open
+    // session". It now uses findOpenSession — the same lookup
+    // openSessionConflictBody is built on — so the answer here and on the
+    // clock-in paths cannot drift.
+    const busy = await findOpenSession(hist.to_guard_id, client);
+    if (busy) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'You are already clocked in to another shift.' });
+      // Reuses openSessionConflictBody wholesale, prose included. That prose
+      // is second-person guard copy and is therefore correct HERE — the
+      // reader is the clocked-in guard. Only `error` is overridden, to carry
+      // the enum per the hybrid shape; the two clock-in call sites keep the
+      // helper's own envelope and are untouched.
+      //
+      // This is the one of the eight that arrives with a client-side handler
+      // already written: lib/openSession.ts's isOpenSessionConflict has read
+      // details.code since the Aug 18 incident.
+      const body = await openSessionConflictBody(hist.to_guard_id);
+      return res.status(409).json({ ...body, error: 'OPEN_SESSION_EXISTS' });
     }
 
     await client.query(
