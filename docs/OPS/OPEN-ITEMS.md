@@ -2039,3 +2039,108 @@ Recorded so it is not re-litigated a third time. `handoff-request`'s four 409s c
 and were deliberately left out of N46's scope.
 
 ---
+
+---
+
+## New from N55 month-name dates (2026-09-10)
+
+**N75. The shifts page resolves its window in the BROWSER's zone; the site drill-in resolves it in the SITE's.**
+verified: YES - both call sites read at this ref.
+
+```
+app/admin/shifts/page.tsx:193-194     dayOffsetInZone(-30)            <- no tz argument
+                                      dayOffsetInZone(90)
+app/admin/shifts/site/[siteId]/page.tsx:100-101
+                                      dayOffsetInZone(-1, siteData.timezone)
+                                      dayOffsetInZone(90, siteData.timezone)
+```
+
+`dayOffsetInZone(offsetDays, tz?)` resolves "today" in `tz`, or in the browser's zone when `tz` is
+omitted. So the two shifts surfaces disagree about which calendar day the window starts on, and the
+disagreement is invisible: both render a plausible date.
+
+For an admin in Pacific - all of them today - the two agree and nothing is wrong. For an admin east
+of the site, the browser's "today" is a day ahead, so `/admin/shifts` can name a window that is not
+the window it fetched. The header, the unassigned banner and the empty state all print
+`windowFrom`/`windowTo`, which are the same values sent as `?from=&to=`, so the label is honest
+about the request - the request itself is anchored to the wrong day.
+
+`dayOffsetInZone`'s own docblock (`lib/shiftFormat.ts:203-215`) already says what to do: *"Pass the
+site's zone wherever the page knows it."* The site drill-in does. The list page does not, and cannot
+trivially - it spans MANY sites, so there is no single zone to pass. That is why this is a design
+question rather than a missing argument: the window for a multi-site page has to be anchored to
+something, and the candidates (company zone, each site's own zone, UTC) are a product decision.
+
+**Deliberately not fixed in N55.** N55 changed how these dates are RENDERED. Changing which day they
+name is a semantics change, and folding it into a formatting commit would make the diff lie about
+its own blast radius - the same reason `fmtDateRange` stayed string-based. Filed so the two are not
+confused later.
+
+Fix is a decision, then a one-line change if the answer is "company zone". **Size S. Tier 1.**
+
+---
+
+**N76. Mobile prints three dates in device-locale numeric form, and one of them is burned into evidence photos.**
+verified: YES - all three read at this ref.
+
+| file:line | call | context |
+|---|---|---|
+| `app/(tabs)/reports.tsx:104` | `date.toLocaleDateString()` | report list rows |
+| `app/violation/[violationId].tsx:201` | `new Date().toLocaleString()` | on-screen timestamp |
+| `components/CameraCapture.tsx:482` | `new Date().toLocaleString()` | **photo watermark** |
+
+All three pass NO locale and NO options, so they render in the device's locale - `9/10/2026` on a US
+handset. That is the exact ambiguity N55 removed from the admin app: `10/09/2026` and `09/10/2026`
+denote different days and a guard reading one has no way to tell which.
+
+Everything else on mobile is already month-name and mostly zone-aware (`fmtInTz` in
+`notifications.tsx`, `shifts/[id]`, `HandoffRequestModal`, `RequestSwapModal`; `lib/shiftTime.ts`,
+`lib/pingSchedule.ts`, `profile.tsx`, `schedule.tsx`). These three are the outliers, not the norm.
+
+**Two reasons this is not a copy of the N55 change.**
+
+`CameraCapture.tsx:482` is a **watermark composited into the stored image**. Changing its format
+changes what appears on evidence photos from that build forward, so photos taken before and after
+carry different date formats for the same kind of record. That is a records decision - whether the
+watermark format may change at all, and whether the change needs noting wherever those photos are
+read - not a formatting one. It should not be decided by whoever happens to fix the other two.
+
+And mobile ships by **OTA**, which is its own gate: runtime 1.0.17 only, inheriting the 1.0.16 tail
+recorded in N71 (5 devices on 1.0.16 plus 4 with stale client rows). A web-only change has none of
+that.
+
+`reports.tsx:104` is the one with a live guard-facing ambiguity and the cleanest fix; it does not
+need the other two to move with it.
+
+**Size S. Tier 1** (OTA).
+
+---
+
+**N77. `{day:'2-digit', month:'short', year:'numeric'}` is hand-written in five places.**
+verified: YES - all five read at this ref, and they currently AGREE.
+
+```
+lib/shiftFormat.ts:14              fmtDateShort
+app/admin/sites/page.tsx:818       local fmtDate
+app/admin/billing/page.tsx:251     inline
+app/vishnu/companies/page.tsx:59   local fmtDate
+app/vishnu/compliance/page.tsx:50  local fmtDate
+```
+
+Five copies of one option bag, all rendering `10 Sept 2026`, all with the same locale. Nothing is
+broken and nothing renders differently today.
+
+**Filing it so it is not discovered as a bug later.** The failure mode is not that a copy is wrong
+now - it is that the next person to adjust the house date format changes `fmtDateShort`, sees the
+shift tables update, and reasonably concludes the job is done. Four surfaces would keep the old
+shape, and the difference would be small enough to survive review. That is the shape of drift this
+codebase has hit before (`completedTrackableWindows` in A1, the ping-staleness threshold in the
+client portal).
+
+Collapsing them onto `fmtDateShort` is a mechanical change with no behaviour delta - which is also
+why it was left out of N55, whose diff needed to stay auditable as "format changes only, at the
+sites the audit inventoried".
+
+Fix is tidying. **Size XS. Tier 0.**
+
+---

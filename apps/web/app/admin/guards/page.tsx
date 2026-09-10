@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { adminGet, adminPost, adminPatch, adminFetch, adminDelete } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
+import { fmtCalDate } from '../../../lib/shiftFormat';
 import GuardDeactivateDialog from '../../../components/admin/GuardDeactivateDialog';
 
 interface Assignment {
@@ -53,9 +54,17 @@ function pacificTodayStr(): string {
   }).format(new Date());
 }
 
+// N55: renders "From 10 Sept 2026 to 24 Oct 2026" instead of the raw ISO.
+//
+// STILL STRING-ONLY. assigned_from / assigned_until are DATE columns with no
+// time and no zone, and fmtCalDate formats them without constructing a Date
+// precisely so this stays zone-neutral. Parsing them would render the day
+// before in any browser west of UTC — and these are the same values
+// checkShiftEligibility compares server-side, so that is a semantics change,
+// not a formatting one.
 function fmtDateRange(from: string, until: string | null): string {
-  const f = String(from).slice(0, 10);
-  return until ? `From ${f} to ${String(until).slice(0, 10)}` : `From ${f} (open)`;
+  const f = fmtCalDate(String(from));
+  return until ? `From ${f} to ${fmtCalDate(String(until))}` : `From ${f} (open)`;
 }
 
 // Avatar: deterministic color from a stable string hash, so a given guard

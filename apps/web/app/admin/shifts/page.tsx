@@ -24,7 +24,7 @@ import { adminGet } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../components/admin/ScheduleShiftModal';
 import AssignGuardModal, { AssignableShift } from '../../../components/admin/AssignGuardModal';
-import { dayOffsetInZone, fmtDateShort, fmtDuration, fmtTime } from '../../../lib/shiftFormat';
+import { dayOffsetInZone, fmtCalRange, fmtDateShort, fmtDuration, fmtTime } from '../../../lib/shiftFormat';
 import { formatHoursHHMM } from '../../../lib/formatHours';
 
 interface Shift {
@@ -114,8 +114,11 @@ function getWeekBounds(referenceDate: Date) {
   const end   = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23, 59, 59, 999);
   return { start, end };
 }
+// N55: was `YYYY-MM-DD` built from local getters. `d` is already a
+// browser-zone Date (getWeekBounds uses local setters), so rendering it in
+// the same zone is a pure format change — the day named cannot move.
 function isoWeek(d: Date) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
 }
 
 function GuardAvatar({ name, photoUrl, size = 'md' }: { name: string; photoUrl?: string | null; size?: 'sm' | 'md' | 'lg' }) {
@@ -360,7 +363,7 @@ function ShiftsPageInner() {
               guard view keeps the ± week navigator */}
           {view === 'site' ? (
             <div className="bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-1.5 text-gray-400 text-xs tracking-widest whitespace-nowrap">
-              {windowFrom} — {windowTo}
+              {fmtCalRange(windowFrom, windowTo)}
             </div>
           ) : (
             <div className="flex items-center gap-2 bg-[#0F1E35] border border-[#1A3050] rounded-lg px-3 py-1.5">
@@ -402,7 +405,7 @@ function ShiftsPageInner() {
             <span className="text-amber-400 text-lg">⚠</span>
             <span className="text-amber-300 text-sm">
               <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard
-              {' '}between {windowFrom} and {windowTo}.
+              {' '}between {fmtCalRange(windowFrom, windowTo)}.
               {unassignedOnly ? (
                 <>
                   {' '}Showing only the sites that hold them —{' '}
@@ -420,7 +423,7 @@ function ShiftsPageInner() {
             <span className="text-amber-400 text-lg">⚠</span>
             <span className="text-amber-300 text-sm">
               <strong>{unassignedCount}</strong> shift{unassignedCount > 1 ? 's' : ''} without an assigned guard
-              {' '}between {windowFrom} and {windowTo}.
+              {' '}between {fmtCalRange(windowFrom, windowTo)}.
             </span>
           </div>
         )
@@ -443,7 +446,7 @@ function ShiftsPageInner() {
              breath. Reachable from a stale ?unassigned=1 URL after the last
              unassigned shift is assigned away. */
           <div className="text-gray-500 text-sm py-12 text-center">
-            No sites have unassigned shifts between {windowFrom} and {windowTo}.{' '}
+            No sites have unassigned shifts between {fmtCalRange(windowFrom, windowTo)}.{' '}
             <button
               type="button"
               onClick={() => setParams({ unassigned: null })}

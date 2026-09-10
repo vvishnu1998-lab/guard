@@ -1,0 +1,15 @@
+{
+  "//": "Standalone config for the check scripts. Deliberately does NOT extend apps/web/tsconfig.json: that one targets the Next bundler (moduleResolution 'bundler' + customConditions), which conflicts with the CommonJS module ts-node needs to run a script directly (TS5095 / TS5098). These scripts import only pure modules from lib/, so they need none of the Next config.",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "es2020",
+    "lib": ["es2021"],
+    "types": ["node"],
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true
+  },
+  "include": ["./**/*.ts", "../lib/shiftFormat.ts"]
+}
