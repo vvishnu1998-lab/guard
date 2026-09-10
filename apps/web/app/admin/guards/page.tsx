@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { adminGet, adminPost, adminPatch, adminFetch, adminDelete } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
+import GuardDeactivateDialog from '../../../components/admin/GuardDeactivateDialog';
 
 interface Assignment {
   id:              string;
@@ -104,6 +105,10 @@ export default function GuardsPage() {
   const [search,       setSearch]       = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
+  // Deactivation is a dialog, not a confirm(). Held by uuid + name only —
+  // badge_number is never an identifier here (six badges collide across
+  // tenants, including two GRD0011s).
+  const [deactivateTarget, setDeactivateTarget] = useState<{ id: string; name: string } | null>(null);
 
   // ── Phase B modal state ────────────────────────────────────────────────
   // editAssignment: target row + the guard it belongs to + the in-flight
@@ -145,12 +150,6 @@ export default function GuardsPage() {
       await load();
     } catch (e: any) { setFormError(e.message); }
     finally { setSaving(false); }
-  }
-
-  async function deactivate(id: string) {
-    if (!confirm('Deactivate this guard? They will no longer be able to log in.')) return;
-    try { await adminFetch(`/api/guards/${id}/deactivate`, { method: 'PATCH' }); await load(); }
-    catch (e: any) { setError(e.message); }
   }
 
   async function reactivate(id: string) {
@@ -433,7 +432,7 @@ export default function GuardsPage() {
                     </button>
                   )}
                   {g.is_active ? (
-                    <button onClick={() => deactivate(g.id)} className="text-xs text-red-400 tracking-widest hover:underline">DEACTIVATE</button>
+                    <button onClick={() => setDeactivateTarget({ id: g.id, name: g.name })} className="text-xs text-red-400 tracking-widest hover:underline">DEACTIVATE</button>
                   ) : (
                     <button onClick={() => reactivate(g.id)} className="text-xs text-green-400 tracking-widest hover:underline">REACTIVATE</button>
                   )}
@@ -554,7 +553,7 @@ export default function GuardsPage() {
                   </button>
                 )}
                 {g.is_active ? (
-                  <button onClick={() => deactivate(g.id)}
+                  <button onClick={() => setDeactivateTarget({ id: g.id, name: g.name })}
                     className="flex-1 text-xs text-red-400 tracking-widest border border-red-400/30 rounded-lg py-2 hover:bg-red-400/10 transition-colors">
                     DEACTIVATE
                   </button>
@@ -569,6 +568,17 @@ export default function GuardsPage() {
           );
         })}
       </div>
+
+      {/* Deactivation — one dialog, reached from BOTH list renderings. The
+          desktop grid and the mobile cards each carry their own DEACTIVATE
+          button; if only one had been rewired the other would have kept the
+          window.confirm and the bug with it. */}
+      <GuardDeactivateDialog
+        guard={deactivateTarget}
+        guards={guards}
+        onClose={() => setDeactivateTarget(null)}
+        onDone={load}
+      />
 
       {/* Add Guard Modal */}
       {showAdd && (

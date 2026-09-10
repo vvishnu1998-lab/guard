@@ -22,6 +22,7 @@ import InactiveSiteBadge from '../../../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../../../components/admin/ScheduleShiftModal';
 import AssignGuardModal, { AssignableShift } from '../../../../../components/admin/AssignGuardModal';
 import SlotAssignPanel from '../../../../../components/admin/SlotAssignPanel';
+import ShiftBulkReassign, { ReassignableShift } from '../../../../../components/admin/ShiftBulkReassign';
 import { dayOffsetInZone, fmtDateShort, fmtDuration, fmtTime } from '../../../../../lib/shiftFormat';
 
 interface Site {
@@ -76,6 +77,7 @@ export default function SiteShiftsPage() {
 
   const [showModal,   setShowModal]   = useState(false);
   const [assignShift, setAssignShift] = useState<Shift | null>(null);
+  const [showReassign, setShowReassign] = useState(false);
 
   // The window this page asks the server for, and the only one it shows.
   // There is no client-side date filter any more: the server returns exactly
@@ -123,6 +125,28 @@ export default function SiteShiftsPage() {
       .sort((a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime());
   }, [shifts, siteId]);
 
+  // Shifts this site could reassign: assigned to somebody, still ahead, not
+  // cancelled. Deliberately the SAME read set as GET /guards/:id/
+  // deactivation-impact, which the guard dialog reads — both surfaces must
+  // agree on what "upcoming" means, or an
+  // admin gets two different answers to one question. `scheduled_end`, not
+  // `scheduled_start`: a shift that has started with nobody on it is exactly
+  // the row worth moving.
+  const reassignPool: ReassignableShift[] = useMemo(() => {
+    const now = Date.now();
+    return siteShifts
+      .filter((s) => s.guard_id && new Date(s.scheduled_end).getTime() > now)
+      .map((s) => ({
+        id:              s.id,
+        site_id:         s.site_id,
+        site_name:       s.site_name,
+        scheduled_start: s.scheduled_start,
+        scheduled_end:   s.scheduled_end,
+        status:          s.status,
+        guard_name:      s.guard_name,
+      }));
+  }, [siteShifts]);
+
   return (
     <div className="space-y-6">
       {/* Header + back */}
@@ -165,6 +189,29 @@ export default function SiteShiftsPage() {
           Its window (14d) differs from the shift table's (-1d..+90d) and it
           names its own dates in its heading for that reason. */}
       {siteId && <SlotAssignPanel siteId={siteId} onAssigned={load} />}
+
+      {/* Bulk reassign — the SECOND of the two surfaces that carry it, the
+          other being the deactivation dialog on /admin/guards. Collapsed by
+          default: this page's job is still to show the schedule. */}
+      {reassignPool.length > 0 && (
+        <div className="space-y-3">
+          <button
+            onClick={() => setShowReassign((v) => !v)}
+            aria-expanded={showReassign}
+            className="text-xs tracking-widest text-gray-400 border border-[#1A3050] rounded-lg px-3 py-2 hover:border-gray-500 hover:text-gray-200 transition-colors"
+          >
+            {showReassign ? 'HIDE REASSIGN' : `REASSIGN SHIFTS (${reassignPool.length})`}
+          </button>
+          {showReassign && (
+            <ShiftBulkReassign
+              shifts={reassignPool}
+              guards={guards}
+              title="MOVE SHIFTS AT THIS SITE"
+              onDone={load}
+            />
+          )}
+        </div>
+      )}
 
       {/* Shifts table */}
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">

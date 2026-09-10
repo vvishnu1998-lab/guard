@@ -137,6 +137,56 @@ export type ShiftEligibility =
   | { ok: false; reason: 'before_start';  siteName: string; assignedFrom:  string }
   | { ok: false; reason: 'after_end';     siteName: string; assignedUntil: string };
 
+/**
+ * THE assignment-window predicate, as composable SQL.
+ *
+ * checkShiftEligibility below is the scalar form and stays the only thing any
+ * write path calls: it answers one (guard, site, date) and returns a typed
+ * reason. Reading a dropdown is a different shape — routes/guards.ts's
+ * shift-candidates asks this for every guard against every selected shift,
+ * and the scalar form costs two round-trips per cell (16 guards x 25 shifts =
+ * 800 queries for one dropdown).
+ *
+ * ── The window is CLOSED, on CALENDAR DATES, site-local ─────────────────
+ *
+ * `assigned_from <= d AND (assigned_until IS NULL OR assigned_until >= d)`.
+ * An assignment ending 2026-09-20 DOES cover a shift on 2026-09-20 — hence
+ * `<=` and `>=`, both inclusive. `d` is the shift's SITE-LOCAL calendar day,
+ * never a UTC day.
+ *
+ * That is the SECOND of the two interval semantics this codebase runs, and it
+ * is deliberately unlike the first. Overlap
+ * (services/shiftOverlap.ts:overlapPredicateSql) is HALF-OPEN on INSTANTS:
+ * strict `<` and `>`, so a shift ending 16:00 and one starting 16:00 do not
+ * collide. Neither is reconciled into the other and neither should be — one
+ * asks "was this guard posted to this site that day", the other asks "can one
+ * body be in two places at one moment". routes/scheduling.ts:552-566 states
+ * the same pair for slot-candidates; this is the same rule, keyed on a shift
+ * instead of a slot.
+ *
+ * ── Why no to_char here, when the scalar form has it ────────────────────
+ *
+ * checkShiftEligibility casts both sides to 'YYYY-MM-DD' strings and compares
+ * lexicographically. That is a CLIENT-PARSING workaround, not a semantic
+ * choice: node-pg deserialises DATE to a JS Date at UTC midnight, which is a
+ * well-known off-by-one for us. Inside SQL the values never leave the server,
+ * so a native date comparison is exact and identical in meaning. The two
+ * forms agree; only the marshalling differs.
+ *
+ * Arguments are SQL EXPRESSIONS spliced into the query. Never pass user input.
+ */
+export function assignmentCoversDateSql(o: {
+  /** Alias of the guard_site_assignments row, e.g. `gsa`. */
+  gsaAlias: string;
+  /** Expression yielding the site-local calendar date, e.g.
+   *  `(sel.scheduled_start AT TIME ZONE sel.site_tz)::date`. */
+  dateExpr: string;
+}): string {
+  return `${o.gsaAlias}.assigned_from <= ${o.dateExpr}
+             AND (${o.gsaAlias}.assigned_until IS NULL
+                  OR ${o.gsaAlias}.assigned_until >= ${o.dateExpr})`;
+}
+
 export async function checkShiftEligibility(
   guardId: string,
   siteId: string,
