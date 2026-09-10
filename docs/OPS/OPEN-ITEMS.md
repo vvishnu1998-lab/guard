@@ -1241,6 +1241,101 @@ carried forward.
 
 ---
 
+## New from Phase D slot assign (2026-09-09)
+
+**N56. `shiftPush.ts:4-5` claims one caller; there are five.**
+verified: YES — counted at this ref, not estimated.
+
+`apps/api/src/services/shiftPush.ts:4-5`:
+```
+ * Called post-commit from POST /shifts (all three modes: single,
+ * specific_dates, repeat_days) with the set of shift rows just created.
+```
+
+`grep -rn "pushShiftAssignments(" apps/api/src` excluding the definition returns **five**:
+
+```
+routes/shifts.ts:347      POST /shifts          specific_dates
+routes/shifts.ts:507      POST /shifts          repeat_days
+routes/shifts.ts:561      POST /shifts          single
+routes/shifts.ts:734      PATCH /:id/assign-guard      ← not "POST /shifts"
+routes/scheduling.ts:961  POST /site/:siteId/assign-slots   ← added by Phase D
+```
+
+The docblock was already wrong before Phase D: `PATCH /:id/assign-guard` has called it since the
+assign-guard overlap work, and that is not a creation path at all — it pushes for an *assignment*
+transition, which is why Phase D's PATCH branch pushes too.
+
+**Reported in the Phase 0 audit and never filed.** Recording it now so the next person reading
+that docblock to answer "who calls this?" does not get a wrong answer for a third time. Also worth
+noting the substantive risk the comment hides: anyone reasoning about push volume or dedup from
+"only POST /shifts calls this" will be wrong by two call sites, one of which fires per bulk
+assignment.
+
+Fix is a comment. **Size XS. Tier 0.**
+
+---
+
+**N57. No unique constraint on `(profile_id, day_of_week, shift_start_time)`.**
+verified: YES — `pg_constraint` and `pg_indexes` on `site_profile_shifts` read at this ref.
+
+`site_profile_shifts` carries a PK on `id`, an FK to `site_scheduling_profiles`, three CHECKs
+(`day_of_week` 0-6, `shift_length_hours` 0-24, `guards_needed` 1-10) and one non-unique index
+`idx_profile_shifts_profile (profile_id, day_of_week)`. **Nothing prevents two rows describing the
+same profile, day and start time.**
+
+Production has none — `GROUP BY profile_id, day_of_week, shift_start_time HAVING COUNT(*) > 1`
+returns zero rows — and that absence is doing real work.
+
+**What it protects.** Phase B and D group expanded slots by `(site_id, slot_start)` with
+`guards_needed` **summed**, because summing is the only reading consistent with `required`, which
+sums every row. But `slot_end` has no equivalent: when duplicates differ in LENGTH the merge has no
+correct answer, and `services/slotExpansion.ts` takes `MAX(shift_length_hours)` — the post is
+occupied until the last guard leaves. That is documented in the code as **a merge artifact, not a
+correct answer**, and it is currently unreachable *only* because no duplicate exists.
+
+**It also protects Phase D's slot identity.** `(site_id, slot_start)` is the key the slot list, the
+eligibility query and the bulk-assign action all use. Two template rows at one instant are two
+staffing intents collapsed into one addressable slot — the identity still works, but what it
+identifies stops being a single template row.
+
+Adding the constraint would make the ambiguity unreachable by construction rather than by luck.
+Note it must be added `NOT VALID` or after a duplicate check, and `PATCH /profile/:profileId`
+DELETEs and re-INSERTs the whole set (`scheduling.ts:250-259`) so the insert loop would need to
+reject a duplicate payload with a 422 rather than a 23505.
+
+**Size S. Tier 1 (expand-only migration).**
+
+---
+
+**N58. The blocked-reason inside a `<select>` option is unverified and may not be readable.**
+verified: NO — this is a rendering question and nothing was rendered.
+
+`components/admin/SlotAssignPanel.tsx` renders every candidate guard as an `<option>`, greyed via
+`disabled` when `free_count === 0`, with the reason in the label:
+
+```
+Ravi Kumar (GRD0009) — free for 17 of 22 — Busy elsewhere: Media towers Wed 09:00
+```
+
+That is the locked behaviour — unavailable guards greyed **with the reason**, never hidden — and
+the enum-to-label mapping is right. What is unknown is whether a string that long is legible inside
+a native option list at this control's width. Native `<option>` cannot be styled, does not wrap,
+and truncates differently per browser and platform; on a narrow viewport the reason may be the part
+that disappears, which would leave a greyed name with no explanation — the exact failure the
+greying was chosen to avoid.
+
+**If it reads badly the fix is a different CONTROL, not different wording.** A listbox of real
+elements (a button + a popover list) can wrap, can put the reason on its own line in a muted style,
+and can keep the name visible while the reason truncates. Shortening the sentence to fit a native
+option would trade the information away to keep the widget.
+
+Decide it on a rendered screen at a real width, not in review.
+
+**Size S to confirm, M if it needs the different control. Tier 0.**
+
+---
+
 ## Carried items
 
 **C1. Build 49: device-position-on-Exit + AD_ID revert, after Build 48 review.**
