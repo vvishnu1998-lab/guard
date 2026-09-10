@@ -10,6 +10,7 @@
     "build:ios": "eas build --platform ios",
     "build:android": "eas build --platform android",
     "check:break-constants": "node scripts/check-break-constants.js",
+    "check:respond-copy": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-respond-copy.ts",
     "postinstall": "node scripts/check-break-constants.js"
   },
   "dependencies": {
