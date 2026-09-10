@@ -90,7 +90,13 @@ The five docs-surfaced findings plus operator-side launch tasks. Each item has a
 
 **The incident**: On 2026-05-16, a production deploy of `main` shipped code referencing `sites.ping_interval_minutes` before the migration that added it ran. Railway's start command is `npm start`, which does not invoke `db:migrate`. Mobile showed "No scheduled shift" for an active James Vince shift while the admin portal showed it as active. Resolution: manually running `railway run npm run db:migrate` from the developer machine.
 
-**Permanent fix**: edit [apps/api/package.json](apps/api/package.json) — change `"start": "node dist/index.js"` to `"start": "npm run db:migrate && node dist/index.js"`. This makes every deploy idempotent. Migrations that have already run are no-ops (every migration file is `IF NOT EXISTS`).
+**Permanent fix — BLOCKED. DO NOT APPLY YET. See N43.**
+
+> ⚠️ **The premise this recommendation rested on was false.** It read: *"This makes every deploy idempotent. Migrations that have already run are no-ops (every migration file is `IF NOT EXISTS`)."* **Not every migration file is `IF NOT EXISTS`.** `schema_v5.sql:10-12` is a bare `ALTER TABLE ... ADD CONSTRAINT break_sessions_break_type_check CHECK (break_type IN ('meal','rest','other'))`, and `schema_v61`/`schema_v62` relabelled the whole `break_type` domain to `'break'`. Replaying v5 against production data raises **SQLSTATE 23514** on all 31 `break_sessions` rows. `db/migrate.ts` has no per-file `try/catch` and calls `process.exit(1)`, so it aborts at **file 6 of the chain**.
+>
+> Chaining `db:migrate` into `start` **today** therefore means the API never boots — every Railway deploy dies on the migration step. This paragraph previously read as a safe one-line change; applied as written it is a single-line outage.
+
+The intended change is still `"start": "node dist/index.js"` → `"start": "npm run db:migrate && node dist/index.js"`, and it is still the right end state. It becomes safe only after the chain replays clean end-to-end against an empty database. Tracked as **N43** in `docs/OPS/OPEN-ITEMS.md`.
 
 **Trigger**: **before the next deploy.** Single-file change.
 **Verification**: deploy a change-of-no-consequence to `main`, watch Railway logs for `Running migrations... → schema.sql → ... → schema_v14.sql → All migrations complete.` before the API boot line.
@@ -102,14 +108,30 @@ The five docs-surfaced findings plus operator-side launch tasks. Each item has a
 - 1 dead-schema-orphan table: `password_reset_tokens` (included for production parity, not because anything depends on it)
 - 1 live CHECK widening: `shifts.status` — add `'unassigned'` (live writer at [apps/api/src/routes/shifts.ts:33](apps/api/src/routes/shifts.ts:33)) and `'cancelled'` (web scaffolding) to the enum
 
-**Why this is one migration**: all five surfaced from the same root cause — hand-modified production schema not committed back. The remediation discipline is identical (`psql \d+` reconstruction since local `pg_dump 14` can't read PG 18.3) and verification is one operation (fresh local Postgres → `npm run db:migrate` → app boots end-to-end with `/health` returning ok + admin creates an unassigned shift without 23514).
+**Why this is one migration**: all five surfaced from the same root cause — hand-modified production schema not committed back. The remediation discipline is identical (`psql \d+` reconstruction since local `pg_dump 14` can't read PG 18.3).
+
+> ⚠️ **Status correction.** `schema_v15.sql` was never written as specified here — that number was taken by the shift-reassignment audit table. The pieces landed piecemeal instead: `chat_rooms` and `chat_messages` in `schema_v13.sql`, `monthly_hours_reports` in `schema_v45.sql`. **`password_reset_tokens` and the `shifts.status` widening were never captured at all**, and neither was the related `shifts.guard_id` `NOT NULL` drop. They are addressed in `schema_v75.sql` (N43). The "verification is one operation" claim below was also wrong twice over — see the protocol note.
 
 **Header comment on the migration file** (per TRD §10.1):
 > "These items existed in production as of 2026-05-16 but had no committed migration counterpart. Captured via `psql` against Railway production. Fresh-deploy reproduction depends on this file. The original timestamps and any historical rows for these tables are NOT in this migration — this file reproduces the schema, not the data. Data restoration is via Railway snapshots."
 
 **Trigger**: **before disaster recovery is needed**. The current state is "if the Railway snapshot restore happens today, the chat surface, monthly-hours cron, forgot-password (silently — table is dead), and admin shift creation all break until a developer hand-runs the missing schema."
 
-**Verification protocol**: Docker `postgres:18-alpine` container locally → `DATABASE_URL` pointed at it → `npm run db:migrate` runs cleanly → `npm start` → curl `/health` returns ok → via admin web, create a shift without a guard (expects `status='unassigned'` insert without 23514) → via mobile or psql, confirm chat tables exist and the chat route returns 200 (not 500) for a guard with an existing room. If all six checks pass, the migration is good.
+**Verification protocol** (re-specified — the original failed for two independent reasons):
+
+> ⚠️ **Why the original protocol could not pass.** It read: *fresh local Postgres → `npm run db:migrate` runs cleanly → ... → create a shift without a guard (expects `status='unassigned'` insert without 23514)*.
+> 1. `npm run db:migrate` does **not** run cleanly — it aborts at `schema_v5.sql` with 23514 (see §3.1).
+> 2. Even with v5 fixed, that final check **still fails**, for a different reason. `schema.sql` declares `shifts.guard_id UUID NOT NULL` and inlines `CHECK (status IN ('scheduled','active','completed','missed'))`. Production is nullable-with-NULLs and admits six statuses. A clean build therefore rejects the very insert this protocol uses as its success signal — with a 23502 *and* a 23514.
+>
+> A green replay was never sufficient. The chain can complete successfully and still produce a schema the product cannot run on, which is why the protocol now diffs against production rather than smoke-testing one insert.
+
+1. Local Postgres **18.6** (must match production's major version), throwaway database, never production.
+2. Run the full chain in `migrate.ts` array order. It must complete with no error.
+3. Diff the result against production in **both** directions: tables, columns, `NOT NULL` sets, CHECK constraints, indexes, foreign keys. **Zero divergence is the pass condition** — not "the app boots".
+4. Read columns via **`pg_attribute`, never `information_schema`**. Under the `claude_readonly` role `information_schema.columns` filters by column privilege and silently under-reports (it returned `guards` with 9 columns instead of 11, hiding `password_hash` and `tokens_not_before`).
+5. Drop the throwaway database.
+
+Application smoke tests (`/health`, chat route, unassigned-shift insert) are still worth running, but they are a secondary check. The schema diff is the acceptance criterion.
 
 ### 3.3 Task-completion magic-byte coverage gap
 
@@ -231,7 +253,7 @@ What could derail the roadmap, ordered by urgency.
 
 1. **`schema_v15.sql` delay = next Railway DB recovery is undefined behavior.** Until the migration ships, restoring from any Railway snapshot to a fresh Postgres instance leaves the platform partially broken (chat, monthly-hours cron, admin shift creation, dead `password_reset_tokens` parity). Operational recovery becomes a developer-led firefight rather than a runbook execution. **Mitigation**: §3.2 — ship within 2 weeks; rehearse the restore in staging.
 
-2. **Migration runner gap is one deploy away from a repeat incident.** Until [apps/api/package.json:8](apps/api/package.json:8) is fixed to chain `db:migrate`, any future schema change has the same May-16-incident risk: code referencing a column the production DB doesn't have yet. **Mitigation**: §3.1 — single-line fix, ship today.
+2. **Migration runner gap is one deploy away from a repeat incident — and the obvious fix is currently an outage.** Until [apps/api/package.json:8](apps/api/package.json:8) is fixed to chain `db:migrate`, any future schema change carries the May-16-incident risk: code referencing a column the production DB doesn't have yet. **But the fix is blocked, and this entry previously said "single-line fix, ship today" — that was wrong.** `migrate.ts` aborts at `schema_v5.sql` (23514) and `process.exit(1)`s, so chaining it into `start` today means the API never boots on any deploy. **Mitigation**: land N43 first — the chain must replay clean end-to-end against an empty database and diff zero against production. Only then is §3.1 a single-line change.
 
 3. **Task-completion magic-byte gap is a security regression hole.** Active attack surface for any guard with a valid JWT. Risk is low today (single customer in onboarding, no known abuse) but grows linearly with customer count. **Mitigation**: §3.3 — ship before customer #2.
 

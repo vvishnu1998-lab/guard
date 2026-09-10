@@ -1627,3 +1627,259 @@ overlapping shifts at one site, so it is reachable there.
 Fix is a client-side check on the selection. **Size S. Tier 0.**
 
 ---
+
+---
+
+## New from N43 migration-chain repair (2026-09-09)
+
+**N65. `information_schema.columns` silently under-reports for `claude_readonly` — it filters by column privilege.**
+verified: YES — reproduced against prod at this ref, both views compared side by side.
+
+`information_schema` views are defined to show only objects the current user has some privilege on, and
+for `columns` that filter is **per column**, not per table. `claude_readonly` holds column-level grants
+that exclude the secret columns, so the view omits them **without any error, warning or row count
+signal**. A query that looks complete comes back redacted.
+
+Concretely, `information_schema.columns` returned `guards` with **9 columns**:
+
+```
+badge_number, company_id, created_at, email, id, is_active, must_change_password, name, phone_number
+```
+
+`pg_attribute` returns **11** for the same table — the two it hid are **`password_hash`** and
+**`tokens_not_before`**. The same redaction applies elsewhere: `clients` and `company_admins` lose
+`password_hash` + `tokens_not_before`, `guard_devices` loses `push_token`, `login_attempts` loses
+`otp_hash`, `password_reset_tokens` loses `token`, `revoked_tokens` loses `jti`, and `vishnu_state`
+loses `tokens_not_before`.
+
+**Why this matters beyond tidiness.** `tokens_not_before` is the session-revocation gate
+(N61). An audit that inventoried `guards` through `information_schema` would conclude the column
+does not exist and that revocation is unimplemented — the opposite of the truth, which is that it
+exists, is enforced on every request (`middleware/auth.ts:101,122`), and is simply never written.
+The N43 audit hit exactly this and caught it only because the column count contradicted a number
+established in an earlier phase.
+
+**The rule: for column inventory under a read-only role, use `pg_attribute`, never
+`information_schema`.**
+
+```sql
+SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+ WHERE c.relkind = 'r';
+```
+
+`pg_catalog` does not filter by privilege — it is readable metadata about objects you may not be able
+to SELECT from. The re-specified verification protocol in `docs/06-IMPLEMENTATION-PLAN.md` now states
+this as a numbered step.
+
+Fix is a habit, not code. Worth a grep of prior audits for `information_schema.columns` to see which
+conclusions were drawn from a redacted view. **Size S. Tier 0.**
+
+---
+
+**N66. A constraint NAME tells you nothing about which era's predicate it holds.**
+verified: YES — two migrations in one week nearly shipped a guard that would have done nothing.
+
+`schema.sql` declares CHECKs **inline inside `CREATE TABLE`**. Postgres auto-names those
+`<table>_<column>_check`. Later migrations then add explicit constraints, sometimes with the *same*
+auto-style name and a *different* predicate. So `conname` is not a version marker, and the house
+idempotency idiom —
+
+```sql
+IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '...') THEN ALTER TABLE ... ADD CONSTRAINT ...
+```
+
+— which is correct at `schema_v71.sql:124-149`, is **wrong wherever two eras share a name**. It fails
+in *both* directions, and N43 hit one of each:
+
+**Existence guard evaluates TRUE when it should skip** — `schema_v5.sql`. The constraint
+`break_sessions_break_type_check` does **not** exist in production; `schema_v61` dropped it and never
+restored that name. An existence guard therefore fires the `ADD`, which validates
+`break_type IN ('meal','rest','other')` against 31 rows all holding `'break'`, and the replay dies
+with 23514 exactly as it did unguarded. The guard would have looked like a fix and changed nothing.
+
+**Existence guard evaluates FALSE when it should fire** — `schema_v75.sql`, the mirror. `schema.sql:7-8`
+inlines `CHECK (status IN ('scheduled','active','completed','missed'))` on `shifts.status`, auto-named
+`shifts_status_check`. On an **empty** database that name already exists by the time v75 runs, carrying
+the four-value predicate — so an existence guard skips, and the six-value widening this file exists to
+apply never happens. It would also skip on prod, where the name exists too. It would do nothing,
+anywhere, forever.
+
+**The test is `pg_get_constraintdef(oid)`, not `conname`.** Pick a token that can only appear in one
+era's predicate and search the rendered definition:
+
+```sql
+SELECT pg_get_constraintdef(oid) INTO cur FROM pg_constraint
+ WHERE conname = 'shifts_status_check' AND conrelid = 'shifts'::regclass;
+IF cur IS NOT NULL AND position('unassigned' in cur) > 0 THEN ... skip ... END IF;
+```
+
+`schema_v62.sql:76-92` established this on `break_sessions` — it and `schema_v61` deliberately share
+`chk_break_sessions_break_type` so `\d break_sessions` stays the single pre/post tell, and it
+discriminates on `position('meal' in cur)`. That precedent should have been the default read and was
+not. Where the constraint name is genuinely unique to one migration (`chk_shifts_source`,
+`chk_shift_reassignments_direction`) the existence idiom remains correct and is still used.
+
+Fix is a convention. **Size S. Tier 0.**
+
+---
+
+**N67. `schema_v41.sql`'s backfill CASE has no `'break'` branch and no `ELSE`.**
+verified: YES — `apps/api/src/db/schema_v41.sql:38-48` read at this ref.
+
+```sql
+UPDATE break_sessions
+   SET planned_duration_minutes = CASE break_type
+     WHEN 'meal'  THEN 30
+     WHEN 'rest'  THEN 15
+     WHEN 'other' THEN 10
+   END
+ WHERE planned_duration_minutes IS NULL;
+
+ALTER TABLE break_sessions ALTER COLUMN planned_duration_minutes SET NOT NULL;
+```
+
+`schema_v61` later relabelled every row to `break_type = 'break'`. A CASE with no matching WHEN and no
+ELSE evaluates to **NULL**, so post-v61 this statement would write NULL into every row it touched —
+and the `SET NOT NULL` three lines below would then raise **23502**.
+
+It is inert today, for two reasons that are both accidents of current state rather than design: the
+`WHERE planned_duration_minutes IS NULL` predicate matches **zero rows** in production, and the column
+is already `NOT NULL` so no new NULLs can appear. Verified: prod has 31 `break_sessions` rows, 0 with a
+NULL `planned_duration_minutes`. The replay confirms it too — the chain now runs clean end-to-end
+through this file.
+
+The file's own header at `:34` states **"All operations idempotent; safe to re-run."** That claim is
+now false in substance. It is true only because nothing can currently reach the broken branch; if
+`planned_duration_minutes` were ever made nullable again, or a row were inserted with it NULL, this
+becomes a live 23502 at file 42 of 76.
+
+Not fixed in N43 because fixing it means choosing a duration for a `'break'` row, which is a product
+question (v62's comment says allowance now derives from scheduled shift length, not from the type),
+and because touching a file that currently works to fix a path nothing takes is how new breakage gets
+introduced. The minimum honest change is to correct the header claim; the real fix is an `ELSE 30` or
+an explicit `WHEN 'break'`.
+
+**Size XS. Tier 0.**
+
+---
+
+**N68. `guards.fcm_token` survives a replay only because `schema_auth.sql` re-adds it at file 2.**
+verified: YES — traced statically, then confirmed by the Phase 3 replay completing with no 42703.
+
+`schema_v64.sql` drops `guards.fcm_token`; it is the **only column the entire 76-file chain ever
+drops**. Three statements in `schema_v63.sql` reference it in **static** SQL — the
+`guard_devices_sync_mirror()` trigger function body, the backfill `INSERT ... SELECT g.fcm_token ...`,
+and a `COMMENT ON COLUMN`.
+
+Static SQL is parsed before it is executed. If the column were absent when v63 ran, the backfill would
+raise **42703 undefined_column at parse time**, and its `AND NOT EXISTS (SELECT 1 FROM guard_devices)`
+guard would **not** save it — a guard in the WHERE clause cannot prevent a parse failure. The file
+would abort at position 64 of 76.
+
+It does not, because `schema_auth.sql` (**file 2**) contains:
+
+```sql
+ALTER TABLE guards ADD COLUMN IF NOT EXISTS ... , ADD COLUMN IF NOT EXISTS fcm_token TEXT;
+```
+
+So a replay **resurrects** the column at file 2, v63 parses and runs against it (all-NULL, so the
+backfill inserts nothing and v64's pre-flight computes 0 mismatches / 0 orphans), and v64 drops it
+again at file 65. The final schema has no `fcm_token`, matching production — verified in the Phase 3
+replay, which reports `guards.fcm_token present? | 0`.
+
+**This is load-bearing and looks like dead weight.** Anyone tidying `schema_auth.sql` — removing an
+`ADD COLUMN` for a column the current schema does not have, which is exactly the sort of cleanup that
+reads as obviously safe — breaks the chain at file 64. `schema_v64.sql`'s own pre-flight is written
+defensively (`has_col` + `EXECUTE` for every reference) and would survive; v63 would not.
+
+Fix is either a comment in `schema_auth.sql` saying why the column must stay, or converting v63's
+three static references to dynamic `EXECUTE` guarded on column existence, as v64 already does. The
+comment is cheaper and sufficient. **Size XS. Tier 0.**
+
+---
+
+**N69. `migrate.ts` has no ledger, does not name the failing file on stderr, and discards `err.position`.**
+verified: YES — `apps/api/src/db/migrate.ts` read in full at this ref; it is 26 lines.
+
+```ts
+    for (const file of files) {
+      const sql = readFileSync(join(__dirname, file), 'utf8');
+      console.log(`  → ${file}`);
+      await client.query(sql);
+    }
+```
+```ts
+migrate().catch((err) => {
+  console.error('Migration failed:', err);
+  process.exit(1);
+});
+```
+
+Four separate gaps, all visible above:
+
+1. **No ledger.** There is no `schema_migrations` table — confirmed across all 50 tables. Nothing
+   records which files have been applied. The chain's only idempotency mechanism is that every
+   statement happens to be re-runnable, which is precisely the property `schema_v5.sql` broke for
+   eleven days. After an abort there is no way to ask the database where it got to.
+2. **The failing file is not on stderr.** The `→ filename` line goes to **stdout**; the error goes to
+   **stderr**. Any log capture that keeps only stderr — which is the common CI default — loses the
+   location entirely and reports a bare driver error.
+3. **`err.position` is discarded.** Because each file is one `client.query`, a 385-statement chain can
+   only ever report the failing *file*, never the failing statement. The driver supplies a byte offset
+   within the file in `err.position`, plus `detail`, `hint` and `where`; `console.error('Migration
+   failed:', err)` renders whatever `util.inspect` chooses and none of it is addressed deliberately.
+4. **Per-file atomicity is accidental, not stated.** A multi-statement simple query gets an implicit
+   transaction, so each file is atomic — but that is Postgres's behaviour, not an invariant this file
+   declares, and there are already exceptions: `schema_v24.sql` opens its own `BEGIN;`/`COMMIT;`, and
+   `schema_v72`/`v73` are deliberately single-statement so `CREATE INDEX CONCURRENTLY` runs *outside*
+   a transaction.
+
+**DO NOT ADD PER-FILE `try/catch`.** It is the obvious-looking fix and it is wrong. Every file after
+the failure point assumes its predecessors applied; swallowing an error and continuing means the rest
+of the chain runs against a database whose state nobody checked, and the run reports success. Stopping
+hard with a non-zero exit is the correct default. **The problem is not that it stops — it is that
+stopping tells you nothing about where you now are.**
+
+The N43 replay harness (not committed; it lived in scratch) demonstrated the diagnostics cheaply: it
+printed `file`, `sqlstate`, `message`, `detail`, `hint`, `position` and `where` on failure, and parsed
+the file list out of `migrate.ts` so the two could not drift. That is roughly fifteen lines. A ledger
+is a larger decision and should be taken deliberately rather than bolted on.
+
+**Size M. Tier 1.**
+
+---
+
+**N70. A text `ORDER BY` sorts differently on macOS than on Debian despite identical reported collation.**
+verified: YES — measured during the N43 replay diff, on 161 index definitions.
+
+Both databases report `datcollate = en_US.UTF-8`, `datctype = en_US.UTF-8`, `datlocprovider = c`
+(libc). They nonetheless order the same strings differently, because the libc collation
+*implementation* differs — Debian glibc in Railway's container versus macOS libc locally.
+
+**The concrete case.** Comparing the replay database against production, all 50 per-table index
+checksums matched, but the **global** index checksum did not. The two aggregates were built with
+`string_agg(indexdef, '|' ORDER BY indexdef)` over the same **161 index definitions with identical
+content**. Only the sort order differed, and that was enough to change the concatenation and therefore
+the md5. Re-run as `ORDER BY indexdef COLLATE "C"`, both sides produced
+`b3b95410019f34ecb596e54e6d14d91b`.
+
+This cost real time and looked exactly like a schema divergence. It reported as one.
+
+**The rule: any prod-vs-local catalog diff must order under `COLLATE "C"`,** or it will report a
+phantom mismatch that then has to be chased. Per-object comparison masks it (small sets often sort the
+same either way), which makes it worse — the diff appears clean until it is aggregated.
+
+**Wider than diffing, and not investigated here:** the same divergence applies to any application
+query with a text `ORDER BY` and no explicit collation. A list ordered by name, badge, email or label
+can come back in a different order on a developer machine than in production. Whether any such
+ordering is user-visible or load-bearing (pagination cursors, "first match wins" logic) is
+**UNVERIFIED** — nothing was checked beyond the catalog diff that surfaced it.
+
+Fix for diffing is a convention, now recorded in the verification protocol at
+`docs/06-IMPLEMENTATION-PLAN.md`. Fix for the application question is a separate audit.
+**Size S. Tier 0.**
+
+---
