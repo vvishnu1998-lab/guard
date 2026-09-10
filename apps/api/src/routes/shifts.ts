@@ -14,6 +14,7 @@ import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../s
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { clearScheduleDerivedLatches } from '../services/shiftLatches';
 import { findOverlappingShift, overlapConflictBody } from '../services/shiftOverlap';
+import { findOpenSession, clockedInAtPacific, OpenSessionConflictBody } from '../services/openSession';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
@@ -100,53 +101,27 @@ function buildInstructionsUrl(
  * The open session can vanish between the 23505 and this read (clock-out
  * race) — fall back to a generic body rather than 500ing a conflict reply.
  */
-async function openSessionConflictBody(guardId: string): Promise<{
-  code: 'OPEN_SESSION_EXISTS';
-  error: string;
-  message: string;
-  open_session: {
-    shift_id: string;
-    site_id: string;
-    site_name: string;
-    clocked_in_at: string;
-  } | null;
-}> {
-  try {
-    const open = await pool.query<{
-      shift_id: string;
-      site_id: string;
-      site_name: string;
-      clocked_in_at: Date;
-    }>(
-      `SELECT ss.shift_id, ss.site_id, s.name AS site_name, ss.clocked_in_at
-         FROM shift_sessions ss
-         JOIN sites s ON s.id = ss.site_id
-        WHERE ss.guard_id = $1 AND ss.clocked_out_at IS NULL
-        LIMIT 1`,
-      [guardId],
-    );
-    const row = open.rows[0];
-    if (row) {
-      const sincePt = new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/Los_Angeles',
-        hour: 'numeric',
-        minute: '2-digit',
-      }).format(row.clocked_in_at);
-      const message = `You're already clocked in at ${row.site_name} since ${sincePt} PT.`;
-      return {
-        code: 'OPEN_SESSION_EXISTS',
-        error: message,
-        message,
-        open_session: {
-          shift_id: row.shift_id,
-          site_id: row.site_id,
-          site_name: row.site_name,
-          clocked_in_at: row.clocked_in_at.toISOString(),
-        },
-      };
-    }
-  } catch (err) {
-    console.error('openSessionConflictBody lookup failed:', err);
+async function openSessionConflictBody(guardId: string): Promise<OpenSessionConflictBody> {
+  // Predicate + LIMIT 1 rationale live in services/openSession.ts, which is
+  // also what routes/guards.ts's deactivation gate reads. findOpenSession
+  // swallows its own lookup failure and returns null, which is the same
+  // fall-through this function has always had: a generic body beats 500ing a
+  // conflict reply when the session vanished in a clock-out race.
+  const row = await findOpenSession(guardId);
+  if (row) {
+    const sincePt = clockedInAtPacific(row.clocked_in_at);
+    const message = `You're already clocked in at ${row.site_name} since ${sincePt} PT.`;
+    return {
+      code: 'OPEN_SESSION_EXISTS',
+      error: message,
+      message,
+      open_session: {
+        shift_id: row.shift_id,
+        site_id: row.site_id,
+        site_name: row.site_name,
+        clocked_in_at: row.clocked_in_at.toISOString(),
+      },
+    };
   }
   const message = "You're already clocked in. Clock out first.";
   return { code: 'OPEN_SESSION_EXISTS', error: message, message, open_session: null };

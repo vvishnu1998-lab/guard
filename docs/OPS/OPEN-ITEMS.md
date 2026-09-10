@@ -1425,3 +1425,205 @@ verified: PARTIAL — the duplicate accounts are real: `Star Guard` (`b7c7d32d-a
 
 **C24. `batch/mobile-15` commit subject says "(NOT APPLIED)" — false.**
 verified: YES — `origin/batch/mobile-15` tip is `777f273 feat(db): schema_v64 — drop the guards.fcm_token mirror (NOT APPLIED)`, and `1252051 feat(db): schema_v63 — guard_devices table, expand half (NOT APPLIED)` carries the same claim. Both **are** applied: `schema_v63.sql` and `schema_v64.sql` are in the `migrate.ts` chain (which runs to v66), the `guard_devices` table exists in prod with columns `id, guard_id, push_token, platform, client, claimed_at, last_seen_at, revoked_at`, and `guards.fcm_token` **no longer exists** (a `pg_attribute` sweep for `%token%` on `guards` returns only `tokens_not_before`). Both subjects are false and misleading on replay.
+
+---
+
+## New from Phase E guard deactivation (2026-09-09)
+
+**N59. No guard delete route exists — and `shifts_guard_id_fkey` is `ON DELETE CASCADE`.**
+verified: YES — routes and catalog both read at this ref.
+
+`apps/api/src/routes/guards.ts` declares exactly one `router.delete`, at `:1041`, and it deletes a
+`guard_site_assignments` row, not a guard. `grep -rn "DELETE FROM guards" apps/api/src` returns
+**zero**. `guards` has no `deleted_at` and no soft-delete flag. There is today no way to remove a
+guard through the API at all.
+
+That absence is currently the only thing standing between this schema and silent evidence loss:
+
+```
+shifts_guard_id_fkey             FOREIGN KEY (guard_id) REFERENCES guards(id) ON DELETE CASCADE
+shift_reassignments_shift_id_fkey FOREIGN KEY (shift_id) REFERENCES shifts(id) ON DELETE CASCADE
+```
+
+Deleting one guard row would therefore cascade away **every shift they have ever held** — including
+`completed` ones, which are the audit trail for work that was performed and billed — and then
+cascade again into `shift_reassignments`. No warning, no count, no returned rows. The 511-row
+`shifts` table is the system of record for what happened; a `DELETE FROM guards WHERE id = …` is a
+one-line way to remove an arbitrary slice of it.
+
+The two guard-referencing FKs on `shift_reassignments` (`old_guard_id`, `new_guard_id`) are
+`NO ACTION`, which makes the ordering non-obvious rather than safe: whether a delete is blocked by
+those or succeeds after the shift cascade has already removed the referencing rows depends on
+cascade order, not on intent.
+
+**The decision, stated so the next person does not have to rediscover it:** if a delete route is
+ever added, the guard against future shifts must be added *in the same commit*, and the FK's
+cascade semantics revisited at the same time — `ON DELETE RESTRICT`, or a soft delete, is almost
+certainly what is wanted rather than a route that refuses while the FK stays armed. Phase E
+deliberately did **not** add a route whose only job is to 403, because a route that exists only to
+refuse invites someone to "fix" it.
+
+Fix is a decision plus, if taken, a migration. **Size M. Tier 1.**
+
+---
+
+**N60. `missedShiftAlert` goes silent on `unassigned` rows — and nobody has decided whether that is right.**
+verified: YES — `apps/api/src/jobs/missedShiftAlert.ts:25-30` read at this ref.
+
+```sql
+SELECT id FROM shifts
+ WHERE status = 'scheduled'
+   AND scheduled_start + INTERVAL '10 minutes' <= NOW()
+   AND missed_alert_sent_at IS NULL
+```
+
+`status = 'scheduled'` is exact. Phase E's deactivation override sets
+`status = 'unassigned', guard_id = NULL`, so from that moment the row is invisible to this job. The
+same is true of the other three latch crons (`preShiftReminder.ts:53`, `shiftStartReminder.ts:53`,
+`lateClockInReminder.ts:159`), but those three are unambiguously correct — there is nobody to
+remind. **This one is not.**
+
+The two readings, both defensible, neither chosen:
+
+- **Silence is correct.** A missed-shift alert means "somebody was expected and did not turn up."
+  After an unassign nobody was expected, so firing would be a false alarm, and the gap is already
+  visible on the schedule and in the unassigned banner.
+- **Silence is the exact failure this phase exists to prevent.** An override nobody backfilled
+  passes its start time with an empty post and no alarm anywhere. The admin who unassigned 17
+  shifts and then forgot is precisely the person this alert would have caught — and the original
+  incident is that a post at 375 Shopping Complex went unattended without anyone noticing.
+
+Related but separate, and worth fixing whichever way this goes: the predicate wraps the column
+(`scheduled_start + INTERVAL '10 minutes' <= NOW()`), so it cannot use `idx_shifts_scheduled_start`
+(v73). Rewriting it as `scheduled_start <= NOW() - INTERVAL '10 minutes'`, the form
+`lateClockInReminder.ts:160` already uses, makes it sargable. `schema_v73.sql:38-42` calls this out
+explicitly and states the rewrite was not in that phase's scope.
+
+Fix is a product decision, then either nothing or a widened predicate plus a distinct alert body —
+an "unfilled post" alert is not the same email as a "guard did not show up" alert.
+**Size S. Tier 1.**
+
+---
+
+**N61. Deactivating a guard does not revoke their session — `guards.tokens_not_before` is never written.**
+verified: YES — every reference in `apps/api/src` read at this ref.
+
+The revocation mechanism exists and is **enforced**: `middleware/auth.ts:101` selects
+`is_active, tokens_not_before` on every guard-authenticated request, and `:122-123` rejects a token
+minted before that timestamp. The clients table gets the same treatment at `:142-153`.
+
+**Nothing anywhere writes the guard column.** Every one of the ten hits is a read. So the gate is
+armed and permanently unarmed at once: the check runs on every request and can never fire, because
+the value is always NULL.
+
+The consequence is narrower than it first looks, and worth stating precisely so nobody over- or
+under-reacts. `middleware/auth.ts:101` also selects `is_active`, and a deactivated guard is
+rejected on that basis — so deactivation *does* end API access at the next request. What
+`tokens_not_before` would additionally cover is the case `is_active` cannot: a guard who stays
+active but whose credentials should stop working (a password change, a lost device, a
+resend-welcome that mints a new temp password while the old session keeps running). Phase E's
+route is the natural place to *also* write it, and did not, because widening deactivation into
+session management was not in scope.
+
+So: **"deactivate" does not currently mean "logged out" as a general property** — it means "will
+be refused at the next request because `is_active` is false." Those coincide today. They stop
+coinciding the moment anything wants to revoke a session without deactivating the account.
+
+Fix is one `UPDATE guards SET tokens_not_before = NOW()` at each revocation point, plus deciding
+which points those are. **Size S. Tier 1.**
+
+---
+
+**N62. Four of five deactivated guards still hold open `guard_site_assignments`.**
+verified: YES — queried at this ref, resolved by uuid.
+
+| guard_id | badge | name | company_id | open assignments |
+|---|---|---|---|---|
+| `faf47dd5-9686-44a1-8623-994e8a26fcb3` | GRD0014 | Supriya | `27c4d404-…` STARNET | **2** |
+| `7b79fc50-b91a-465c-9b7c-cabf10ab1f9a` | GRD0011 | Anoop | `27c4d404-…` STARNET | **1** |
+| `09017296-3676-4ed6-805d-8be537608c74` | GRD0006 | Nikith Reddy | `b7c7d32d-…` Star Guard | **1** |
+| `a532b077-39ba-43f1-93bd-176752fb6e21` | GRD0004 | deepak naik | `b7c7d32d-…` Star Guard | **1** |
+| `c1f2c8a5-fe03-46e6-8cdc-457d061eee01` | GRD0003 | Nikith | `27c4d404-…` STARNET | 0 |
+
+Five open assignments across four inactive guards — an open assignment being one with
+`assigned_until IS NULL`, i.e. no end date at all. Every one of these says "this guard is posted to
+this site indefinitely" about somebody who cannot log in.
+
+This is the same finding the Phase 0 audit recorded and it is unchanged. Phase E deliberately does
+**not** close assignments on deactivate: an assignment is a posting relationship, deactivation is
+an account state, and conflating them would make reactivation lossy — a guard brought back would
+silently have lost their posts. The open question is whether the *list* should surface it, since an
+admin reading `/admin/guards` sees "2 sites" against an inactive guard with no indication that the
+combination is contradictory.
+
+Note for anyone querying this: badges collide. There are two GRD0004s, two GRD0003s and two
+GRD0011s across tenants. Resolve by uuid.
+
+Fix is a display decision, not a data change. **Size S. Tier 0.**
+
+---
+
+**N63. `vishnu` can read `deactivation-impact` but cannot deactivate.**
+verified: YES — both route declarations read at this ref.
+
+```
+routes/guards.ts  GET  /:guardId/deactivation-impact   requireAuth('company_admin', 'vishnu')
+routes/guards.ts  PATCH /:id/deactivate                requireAuth('company_admin')
+routes/guards.ts  PATCH /:id/reactivate                requireAuth('company_admin')
+```
+
+The read matches its sibling `GET /:guardId/assignments/:id/impact`, which has been
+`('company_admin', 'vishnu')` since it was written. The write matches what `/deactivate` and
+`/reactivate` have always been. Both halves are individually consistent with their neighbours, and
+together they produce a super-admin who can see the full blast radius of a deactivation and cannot
+act on it.
+
+Phase E did **not** widen the write, on the principle that a phase should not change the auth
+surface of a route it was not scoped to change — the rewrite there was about gates and a
+transaction, not about who may call it. Widening `/deactivate` to `vishnu` is defensible and
+probably wanted, but it is a security-surface decision and belongs in a commit whose subject says
+so.
+
+Note `guardBelongsToCaller` (`routes/guards.ts:~490`) already handles the vishnu case explicitly —
+it returns `null`, meaning "no company scope" — so the tenant plumbing for a widened write already
+exists and would not need to change.
+
+Fix is one argument, plus a deliberate decision. **Size XS. Tier 1.**
+
+---
+
+**N64. Two selected shifts that overlap *each other* both read as free in `shift-candidates`.**
+verified: YES — by construction; the predicate is in `routes/guards.ts` shift-candidates at this ref.
+
+The overlap cell excludes only the shift being evaluated:
+
+```sql
+WHERE sh2.id <> s.id
+  AND <overlapPredicateSql: guard, status IN ('scheduled','active'), half-open instants>
+```
+
+That is deliberately identical to `findOverlappingShift`'s `excludeShiftId` contract — "the row
+being mutated, so it cannot conflict with itself". It answers *"is this guard free at this
+moment, given the shifts they already hold?"* correctly.
+
+It does not answer *"can this guard take this whole selection?"* when the selection contains rows
+that collide with one another. Select shifts A and B that overlap, pick one guard, and both cells
+report free; the first `PATCH /api/shifts/:id/reassign` succeeds, and the second is refused with a
+409 naming A as the conflict. The admin sees one failure and a correct reason, which is a much
+milder failure than the offered-then-rejected problem this endpoint was built to fix — but it is
+still a case where the pre-evaluation over-promises.
+
+**Why it is not closed here.** Evaluating the selection against *itself* is a different question
+from "is this guard free" — it is an interval-packing check over the selected set, independent of
+which guard is chosen, and it belongs in the UI as a warning on the selection ("these two shifts
+overlap; one guard cannot take both") rather than as a per-guard reason code. Folding it into the
+candidates query would make `free_count` mean two different things at once.
+
+Not reachable through either shipped surface today without deliberate effort: the deactivation
+dialog lists one guard's shifts, and one guard's own shifts cannot overlap each other (the write
+paths that created them all enforce the overlap check). The site page can surface two guards'
+overlapping shifts at one site, so it is reachable there.
+
+Fix is a client-side check on the selection. **Size S. Tier 0.**
+
+---

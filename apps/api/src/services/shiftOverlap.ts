@@ -64,6 +64,45 @@ import { pool } from '../db/pool';
 
 type Querier = Pick<PoolClient, 'query'>;
 
+/**
+ * THE predicate, as composable SQL.
+ *
+ * findOverlappingShift below answers this question for ONE guard against ONE
+ * window, which is all any write path needs. Reading a whole dropdown is a
+ * different shape: routes/guards.ts's shift-candidates evaluates every guard
+ * in the company against every selected shift, and doing that by calling the
+ * scalar helper in a nested loop is 16 guards x 25 shifts = 400 round-trips
+ * for one dropdown, and 5,600 at the 200-shift cap.
+ *
+ * So the batch caller composes this fragment instead of writing the
+ * comparison out a second time. The strict `<` / `>` and the status list live
+ * here, once, and findOverlappingShift itself is built from them — so the
+ * scalar and batch forms cannot drift. Same device as
+ * services/slotExpansion.ts's exported CTE, for the same reason.
+ *
+ * Every argument is a SQL EXPRESSION spliced into the query — a column
+ * reference like `sh.scheduled_start`, or a placeholder like `$3`. NEVER pass
+ * user input here; values belong in bound parameters, and every caller in
+ * this repo passes literals it wrote itself.
+ */
+export function overlapPredicateSql(o: {
+  /** Columns on the shift row being tested for occupancy. */
+  guardCol:  string;
+  statusCol: string;
+  startCol:  string;
+  endCol:    string;
+  /** The candidate guard. */
+  guardExpr: string;
+  /** The window, half-open [winStart, winEnd). */
+  winStart:  string;
+  winEnd:    string;
+}): string {
+  return `${o.guardCol} = ${o.guardExpr}
+        AND ${o.statusCol} IN ('scheduled','active')
+        AND ${o.startCol} < ${o.winEnd}
+        AND ${o.endCol}   > ${o.winStart}`;
+}
+
 /** The offending shift, resolved far enough to name the collision. */
 export interface OverlapConflict {
   shift_id:        string;
@@ -103,11 +142,12 @@ export async function findOverlappingShift(
        FROM shifts s
        JOIN sites si ON si.id = s.site_id
        LEFT JOIN guards g ON g.id = s.guard_id
-      WHERE s.guard_id = $1
-        AND ($4::uuid IS NULL OR s.id != $4)
-        AND s.status IN ('scheduled','active')
-        AND s.scheduled_start < $3
-        AND s.scheduled_end   > $2
+      WHERE ($4::uuid IS NULL OR s.id != $4)
+        AND ${overlapPredicateSql({
+          guardCol: 's.guard_id', statusCol: 's.status',
+          startCol: 's.scheduled_start', endCol: 's.scheduled_end',
+          guardExpr: '$1', winStart: '$2', winEnd: '$3',
+        })}
       ORDER BY s.scheduled_start
       LIMIT 1`,
     [guardId, windowStart, windowEnd, excludeShiftId],
