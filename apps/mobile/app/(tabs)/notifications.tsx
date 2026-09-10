@@ -50,7 +50,7 @@ import {
 import { useFocusEffect, router } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import { apiClient } from '../../lib/apiClient';
-import { ApiError } from '../../lib/errors';
+import { respondConflictCopy, RespondKind } from '../../lib/respondErrorCopy';
 import { navigateForNotification } from '../../lib/navigateForNotification';
 import { useUnreadStore } from '../../store/unreadStore';
 import { visibleNotifications, groupNotifications } from '../../lib/notificationSections';
@@ -195,35 +195,35 @@ function fmtInTz(iso: string, tz: string | null, opts: Intl.DateTimeFormatOption
 }
 
 /**
- * Guard-facing copy for a failed accept/decline, keyed on HTTP STATUS.
+ * Guard-facing copy for a failed accept/decline.
  *
- * WHY STATUS AND NOT `code`: errors.ts says branch on `.code`, and that is
- * right for routes that emit an enum. swap-response and handoff-response do
- * not — every failure is `{ error: '<English sentence>' }` with no `message`
- * and no enum, so ApiError.code is set to that same prose (errors.ts:72).
- * Branching on it would be branching on prose, which is what breaks the
- * moment someone rewords a server string. Aligning those two routes onto
- * real error codes is a separate API follow-up; until then status is the
- * only stable signal, and for these two routes each status maps to exactly
- * one situation class.
+ * The decision lives in lib/respondErrorCopy.ts so it can be run by
+ * `npm run check:respond-copy`, which proves it is byte-identical to the
+ * pre-N46 status-only version for every body today's API actually emits.
+ * This wrapper only supplies the guardMessage fallback, which needs Sentry
+ * and therefore cannot live in a pure module.
  *
- * 422 is deliberately passed through: it is the eligibility explanation
- * (rest-hours, overlap, site assignment) and the server's sentence is the
- * only place that detail exists.
+ * WHAT THE PREVIOUS COMMENT HERE GOT WRONG. It said: "for these two routes
+ * each status maps to exactly one situation class". That was false when it
+ * was written. 409 maps to FOUR situations on each route and only one of the
+ * eight is "already responded to, or it expired" — see the table in
+ * lib/respondErrorCopy.ts. 404 maps to two ("request not found" and "shift
+ * not found"). Only 403 is genuinely one-to-one.
+ *
+ * The rest of that comment was right and still holds: ApiError.code is
+ * derived from the body's `error` field (errors.ts:72), so for a route that
+ * puts prose there, branching on `.code` is branching on prose. The fix was
+ * not to abandon codes but to make the API emit them in BOTH `code` and
+ * `error`, and to read both here.
+ *
+ * 422 is still deliberately passed through: it is swap-response's
+ * eligibility explanation and the server's sentence is the only place that
+ * detail exists.
  */
 function respondErrorCopy(err: unknown, accept: boolean, isHandoff: boolean): string {
-  const kind = isHandoff ? 'handoff' : 'swap';
-  if (err instanceof ApiError) {
-    if (err.status === 409) {
-      return `This ${kind} was already responded to, or it expired. Pull down to refresh.`;
-    }
-    if (err.status === 403) {
-      return `This ${kind} request isn't addressed to you.`;
-    }
-    if (err.status === 404) {
-      return `This ${kind} request no longer exists. Pull down to refresh.`;
-    }
-  }
+  const kind: RespondKind = isHandoff ? 'handoff' : 'swap';
+  const specific = respondConflictCopy(err, kind);
+  if (specific !== null) return specific;
   return guardMessage(
     err,
     `Could not ${accept ? 'accept' : 'decline'} this ${kind}. Try again, or tell your supervisor.`,
@@ -376,10 +376,15 @@ export default function NotificationsScreen() {
       Sentry.captureException(err, {
         extra: { where: 'notifications.performRespond', is_handoff: isHandoff, accept },
       });
-      // The list is refetched on failure too: 409 almost always means the row
-      // moved underneath us (expired by the 15-minute cron, or answered on
-      // another device), and leaving a dead card on screen invites a retry
-      // that cannot succeed.
+      // The list is refetched on failure too. The previous comment here said
+      // "409 almost always means the row moved underneath us (expired by the
+      // 15-minute cron, or answered on another device)" — that is true of
+      // exactly TWO of the eight 409s these routes emit. The other six leave
+      // the row 'pending', so the refetch brings the same card back. That is
+      // correct and worth keeping: the card SHOULD still be there when the
+      // invite is still live. What was wrong was telling the guard it had
+      // expired, which turned an accurate screen into an invitation to retry.
+      // Fixed by respondErrorCopy below; the refetch stays as it was.
       await fetchInbound();
       refresh();
       Alert.alert(
