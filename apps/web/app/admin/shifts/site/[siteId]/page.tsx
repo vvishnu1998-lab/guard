@@ -125,17 +125,31 @@ export default function SiteShiftsPage() {
       .sort((a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime());
   }, [shifts, siteId]);
 
-  // Shifts this site could reassign: assigned to somebody, still ahead, not
-  // cancelled. Deliberately the SAME read set as GET /guards/:id/
-  // deactivation-impact, which the guard dialog reads — both surfaces must
-  // agree on what "upcoming" means, or an
-  // admin gets two different answers to one question. `scheduled_end`, not
-  // `scheduled_start`: a shift that has started with nobody on it is exactly
-  // the row worth moving.
-  const reassignPool: ReassignableShift[] = useMemo(() => {
+  // Every upcoming, non-cancelled shift at this site — the pool the bulk
+  // surface acts on, for EITHER verb. Per-verb admissibility is decided by
+  // admits() inside ShiftBulkReassign and must not be pre-filtered here: the
+  // two verbs admit different statuses and neither set contains the other.
+  //
+  // NO guard_id FILTER — deliberate, and it used to be here. Cancel admits
+  // status='unassigned' (see PATCH /api/shifts/:id/cancel), and those rows
+  // have guard_id null, so filtering on guard_id removed them from the list
+  // before the component could offer them. Widening isCancellable alone would
+  // NOT have fixed that; this line was the actual gate.
+  //
+  // "Upcoming" still means what GET /guards/:id/deactivation-impact means by
+  // it — `scheduled_end > now`, not cancelled — so the two surfaces still give
+  // the same answer to the question an admin can ask in both places. What
+  // differs is only that this one is not guard-scoped, because it is not about
+  // one guard. `scheduled_end`, not `scheduled_start`: a shift that has
+  // started with nobody on it is exactly the row worth acting on.
+  //
+  // Rows the active verb cannot take are still SHOWN, greyed and labelled, by
+  // the component. Widening this pool widens what is DISPLAYED, never what is
+  // actionable.
+  const bulkPool: ReassignableShift[] = useMemo(() => {
     const now = Date.now();
     return siteShifts
-      .filter((s) => s.guard_id && new Date(s.scheduled_end).getTime() > now)
+      .filter((s) => new Date(s.scheduled_end).getTime() > now)
       .map((s) => ({
         id:              s.id,
         site_id:         s.site_id,
@@ -193,18 +207,18 @@ export default function SiteShiftsPage() {
       {/* Bulk reassign — the SECOND of the two surfaces that carry it, the
           other being the deactivation dialog on /admin/guards. Collapsed by
           default: this page's job is still to show the schedule. */}
-      {reassignPool.length > 0 && (
+      {bulkPool.length > 0 && (
         <div className="space-y-3">
           <button
             onClick={() => setShowReassign((v) => !v)}
             aria-expanded={showReassign}
             className="text-xs tracking-widest text-gray-400 border border-[#1A3050] rounded-lg px-3 py-2 hover:border-gray-500 hover:text-gray-200 transition-colors"
           >
-            {showReassign ? 'HIDE REASSIGN' : `REASSIGN SHIFTS (${reassignPool.length})`}
+            {showReassign ? 'HIDE BULK ACTIONS' : `BULK ACTIONS (${bulkPool.length})`}
           </button>
           {showReassign && (
             <ShiftBulkReassign
-              shifts={reassignPool}
+              shifts={bulkPool}
               guards={guards}
               title="SHIFTS AT THIS SITE"
               onDone={load}

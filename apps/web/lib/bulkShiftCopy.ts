@@ -24,17 +24,21 @@ export function isReassignable(status: string): boolean {
 /** The two verbs admit DIFFERENT statuses, and that is the whole reason row
  *  selectability is verb-aware rather than fixed.
  *
- *  PATCH /shifts/:id/cancel admits 'scheduled' and NOTHING else — 'active'
- *  is refused (a guard is on post; see the route's own note on why it
- *  refuses rather than auto-closing), and so are completed/missed/cancelled/
- *  unassigned. Reassign additionally admits 'active', because an admin may
- *  legitimately move a shift that is in progress.
+ *  PATCH /shifts/:id/cancel admits 'scheduled' and 'unassigned' and nothing
+ *  else — 'active' is refused (a guard is on post; see the route's own note
+ *  on why it refuses rather than auto-closing), and so are completed/missed/
+ *  cancelled. Reassign runs the other way: it additionally admits 'active',
+ *  because an admin may legitimately move a shift that is in progress, but it
+ *  REFUSES 'unassigned' because there is no guard to move.
+ *
+ *  So neither verb's set contains the other's. That is why this is two
+ *  predicates and not one with a flag.
  *
  *  If selectability stayed fixed on isReassignable, every cancel batch
  *  containing an 'active' row would carry a guaranteed 409 the UI could have
  *  prevented. That is the defect this split exists to avoid. */
 export function isCancellable(status: string): boolean {
-  return status === 'scheduled';
+  return status === 'scheduled' || status === 'unassigned';
 }
 
 export type BulkVerb = 'reassign' | 'cancel';

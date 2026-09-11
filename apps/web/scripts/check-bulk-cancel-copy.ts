@@ -31,7 +31,7 @@ const fail = (m: string) => { failures++; console.error(`  FAIL  ${m}`); };
 const STATUSES = ['unassigned', 'scheduled', 'active', 'completed', 'missed', 'cancelled'];
 const EXPECT: Record<BulkVerb, Record<string, boolean>> = {
   reassign: { unassigned: false, scheduled: true, active: true,  completed: false, missed: false, cancelled: false },
-  cancel:   { unassigned: false, scheduled: true, active: false, completed: false, missed: false, cancelled: false },
+  cancel:   { unassigned: true,  scheduled: true, active: false, completed: false, missed: false, cancelled: false },
 };
 console.log('[check-bulk-cancel-copy] selectability');
 for (const verb of ['reassign', 'cancel'] as BulkVerb[]) {
@@ -43,9 +43,14 @@ for (const verb of ['reassign', 'cancel'] as BulkVerb[]) {
   });
   console.log(`  ${verb.padEnd(8)} ${row.join('  ')}`);
 }
-// The one that matters, called out so a future edit cannot quietly flip it.
+// The ones that matter, called out so a future edit cannot quietly flip them.
+// NEITHER VERB'S SET CONTAINS THE OTHER'S, which is the whole reason these are
+// two predicates rather than one with a flag. Each verb admits exactly one
+// status the other refuses:
 if (admits('reassign', 'active') !== true)  fail("reassign must admit 'active'");
 if (admits('cancel', 'active')   !== false) fail("cancel must NOT admit 'active' - the route 409s it");
+if (admits('cancel', 'unassigned')   !== true)  fail("cancel must admit 'unassigned' - the route accepts it");
+if (admits('reassign', 'unassigned') !== false) fail("reassign must NOT admit 'unassigned' - no guard to move");
 
 // ── 2. copy map, both halves ──────────────────────────────────────────────
 const mk = (status: number, body: Record<string, unknown>) =>
@@ -61,7 +66,15 @@ const BEFORE: { label: string; err: ApiError; prose: string }[] = [
     err: mk(409, { error: 'This shift was already marked missed.' }) },
   { label: 'cancelled', prose: 'This shift is already cancelled.',
     err: mk(409, { error: 'This shift is already cancelled.' }) },
-  { label: 'default',   prose: "Shift status 'unassigned' cannot be cancelled.",
+  // HISTORICAL, and deliberately kept. The route no longer emits this: the
+  // switch now ADMITS 'unassigned', so this sentence is unreachable for that
+  // status and the `default` branch it came from is unreachable for every
+  // status shifts_status_check allows. The fixture stays because what it
+  // proves is the no-`code` path — an old body must still echo verbatim —
+  // and that path is exercised by any 409 predating the codes. Do not
+  // re-label it as current behaviour.
+  { label: 'default (historical - route now admits unassigned)',
+    prose: "Shift status 'unassigned' cannot be cancelled.",
     err: mk(409, { error: "Shift status 'unassigned' cannot be cancelled." }) },
   { label: '400 reason too long', prose: 'reason must be at most 200 characters',
     err: mk(400, { error: 'reason must be at most 200 characters' }) },
