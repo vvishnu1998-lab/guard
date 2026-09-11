@@ -40,7 +40,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { adminGet, adminPatch } from '../../lib/adminApi';
 import { fmtDateShort } from '../../lib/shiftFormat';
-import ShiftBulkReassign, { ReassignableShift, isReassignable } from './ShiftBulkReassign';
+import ShiftBulkReassign, { ReassignableShift, isAssignable } from './ShiftBulkReassign';
 
 interface ImpactShift {
   id:              string;
@@ -129,7 +129,19 @@ export default function GuardDeactivateDialog({ guard, guards, onClose, onDone }
       status:          sh.status,
     })));
 
-  const movableCount = flatShifts.filter((s) => isReassignable(s.status)).length;
+  // isAssignable now admits 'unassigned' (the bulk surface gained an ASSIGN
+  // verb that fills empty posts as well as moving filled ones). THAT WIDENING
+  // IS DELIBERATELY INERT HERE and this count cannot change: flatShifts comes
+  // from GET /guards/:id/deactivation-impact, whose predicate is
+  // `s.guard_id = $1 AND s.scheduled_end > NOW() AND s.status <> 'cancelled'`
+  // — guard-scoped, so guard_id is never null, so no row reaching this dialog
+  // can be 'unassigned'.
+  //
+  // Inert TODAY. Nothing enforces that status and guard_id agree (see
+  // routes/shifts.ts on the same point), so if they ever diverged this count
+  // would move silently. Named here rather than defended with a second
+  // predicate, because a local override would drift from the shared one.
+  const movableCount = flatShifts.filter((s) => isAssignable(s.status)).length;
   const notMovableCount = flatShifts.length - movableCount;
 
   async function commit(unassign: boolean) {

@@ -13,39 +13,58 @@
  */
 import { ApiError } from './adminApi';
 
-/** Only these two statuses can move. Mirrors PATCH /:id/reassign, which
- *  refuses 'completed' and 'missed' with a 400, and mirrors the write set of
- *  PATCH /guards/:id/deactivate. A row outside this set is shown, greyed and
- *  labelled, never silently dropped. */
-export function isReassignable(status: string): boolean {
-  return status === 'scheduled' || status === 'active';
+/** Can a guard be put on this shift — by moving one, or by filling an empty
+ *  post. ONE verb covers both: the admin is picking a guard either way, and
+ *  the reassign/assign split is the system's distinction, not theirs.
+ *
+ *  'unassigned' is admitted because filling an empty post is exactly what an
+ *  admin looking at one wants to do. It used to be refused, which left four
+ *  production rows greyed out reading "nobody is on this shift to move" —
+ *  true, and useless.
+ *
+ *  Refused: 'completed' and 'missed' (PATCH /:id/reassign 400s both) and
+ *  'cancelled' (a cancelled shift is not work any more). A row outside this
+ *  set is shown, greyed and labelled, never silently dropped.
+ *
+ *  WHICH ENDPOINT a row goes to is decided at submit time on this same
+ *  status — see ShiftBulkReassign's run(). This predicate only decides
+ *  whether the row may be ticked. */
+export function isAssignable(status: string): boolean {
+  return status === 'scheduled' || status === 'active' || status === 'unassigned';
 }
 
-/** The two verbs admit DIFFERENT statuses, and that is the whole reason row
- *  selectability is verb-aware rather than fixed.
+/** The two verbs admit DIFFERENT statuses, which is why row selectability is
+ *  verb-aware rather than fixed.
  *
- *  PATCH /shifts/:id/cancel admits 'scheduled' and 'unassigned' and nothing
- *  else — 'active' is refused (a guard is on post; see the route's own note
- *  on why it refuses rather than auto-closing), and so are completed/missed/
- *  cancelled. Reassign runs the other way: it additionally admits 'active',
- *  because an admin may legitimately move a shift that is in progress, but it
- *  REFUSES 'unassigned' because there is no guard to move.
+ *  CANCEL is now a strict SUBSET of ASSIGN — {scheduled, unassigned} inside
+ *  {scheduled, active, unassigned}. It was not always: before the ASSIGN verb
+ *  the two sets were disjoint-ish and this docblock claimed "neither verb's
+ *  set contains the other's", which is no longer true and is recorded here so
+ *  nobody re-derives the old shape from a stale sentence.
  *
- *  So neither verb's set contains the other's. That is why this is two
- *  predicates and not one with a flag.
+ *  WHAT IS ACTUALLY TRUE: 'active' is ASSIGNABLE and NOT CANCELLABLE, and it
+ *  is the only status the two verbs disagree on. An admin may legitimately
+ *  move a shift that is in progress — the guard on post changes. Cancelling
+ *  one is refused outright, because a guard is clocked in and the route will
+ *  not silently decide their paid hours (see the cancel route's REFUSE, NOT
+ *  AUTO-CLOSE note).
  *
- *  If selectability stayed fixed on isReassignable, every cancel batch
- *  containing an 'active' row would carry a guaranteed 409 the UI could have
- *  prevented. That is the defect this split exists to avoid. */
+ *  Subset or not, these stay TWO predicates rather than one with a flag. The
+ *  reasons differ per status and the callers read differently; collapsing
+ *  them would mean encoding "except active" at every call site.
+ *
+ *  If selectability were fixed on isAssignable, every cancel batch containing
+ *  an 'active' row would carry a guaranteed 409 the UI could have prevented.
+ *  That is the defect this split exists to avoid. */
 export function isCancellable(status: string): boolean {
   return status === 'scheduled' || status === 'unassigned';
 }
 
-export type BulkVerb = 'reassign' | 'cancel';
+export type BulkVerb = 'assign' | 'cancel';
 
 /** The single place that decides whether a row can take a given verb. */
 export function admits(verb: BulkVerb, status: string): boolean {
-  return verb === 'cancel' ? isCancellable(status) : isReassignable(status);
+  return verb === 'cancel' ? isCancellable(status) : isAssignable(status);
 }
 
 /** Guard-facing copy per machine reason. Branch on the ENUM, never on prose.
@@ -53,7 +72,10 @@ export function admits(verb: BulkVerb, status: string): boolean {
  *  are this endpoint's, `slot_full`/`template_changed` have no analogue on a
  *  shift and are absent rather than carried over dead. */
 export const REASON_LABEL: Record<string, string> = {
-  // Reassign — lowercase, from POST /api/guards/shift-candidates.
+  // Assign — lowercase, from POST /api/guards/shift-candidates. These are
+  // PRE-FLIGHT reasons shown in the dropdown, not write failures; neither
+  // assign route emits a machine code today (filed as N83), so a failed
+  // assign falls back to the server's prose.
   guard_inactive:       'Inactive',
   not_reassignable:     'Already completed or missed',
   already_on_shift:     'Already on this shift',

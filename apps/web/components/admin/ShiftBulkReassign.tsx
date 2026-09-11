@@ -1,6 +1,18 @@
 'use client';
 /**
- * Bulk reassign — move N shifts to one guard.
+ * Bulk actions on a site's shifts — ASSIGN N shifts to one guard, or CANCEL
+ * them.
+ *
+ * ASSIGN COVERS TWO WRITES AND ONE IDEA. A shift that has a guard gets MOVED;
+ * one that has nobody gets FILLED. The admin is picking a guard either way, so
+ * they see one verb. Underneath, run() routes per row on `status`:
+ *
+ *   status === 'unassigned'  ->  PATCH /api/shifts/:id/assign-guard  { guard_id }
+ *   everything else          ->  PATCH /api/shifts/:id/reassign      { new_guard_id }
+ *
+ * The branch is on that status and NOTHING else. Sending an assigned row to
+ * assign-guard 409s ("This shift already has a guard"), and the two routes
+ * differ in ways neither is a superset of - see N82.
  *
  * ── This is NOT a reuse of SlotAssignPanel ──────────────────────────────
  *
@@ -12,7 +24,7 @@
  *
  * This selects SHIFTS, keyed on `shift_id`, which is a real primary key. There
  * is no slot arithmetic, no staleness triple to send back, no capacity check,
- * and the endpoint is PATCH /api/shifts/:id/reassign rather than a bulk POST.
+ * and the writes are per-shift PATCHes rather than a bulk POST.
  * Change the key from slot_start to shift_id and nothing inside that component
  * survives — not the types, not the payload, not the reason codes.
  *
@@ -34,7 +46,7 @@
  * orphan bug.
  *
  * So: sequential, one request per shift, no shared transaction. Sequential
- * rather than Promise.all because two reassignments to the same guard in
+ * rather than Promise.all because two assignments to the same guard in
  * overlapping windows must be able to see each other — fired in parallel they
  * would both pass the overlap check and double-book.
  *
@@ -77,8 +89,8 @@ import { fmtDateShort, fmtTime } from '../../lib/shiftFormat';
 // Re-exported so existing importers keep working unchanged — the decision
 // moved to lib/bulkShiftCopy.ts so a check could EXECUTE it, not because the
 // consumers should have to know that. GuardDeactivateDialog imports
-// isReassignable from here.
-export { isReassignable, isCancellable, admits } from '../../lib/bulkShiftCopy';
+// isAssignable from here.
+export { isAssignable, isCancellable, admits } from '../../lib/bulkShiftCopy';
 export type { BulkVerb } from '../../lib/bulkShiftCopy';
 
 export interface ReassignableShift {
@@ -162,10 +174,10 @@ export default function ShiftBulkReassign({
   const [candidates,  setCandidates]  = useState<Candidate[] | null>(null);
   const [candLoading, setCandLoading] = useState(false);
   const [candUnavailable, setCandUnavailable] = useState(false);
-  const [verbState, setVerb] = useState<BulkVerb>('reassign');
+  const [verbState, setVerb] = useState<BulkVerb>('assign');
   // Derived, not just hidden: with cancel gated off there is no state a stale
   // 'cancel' could survive in, so the verb cannot be reached by any path.
-  const verb: BulkVerb = allowCancel ? verbState : 'reassign';
+  const verb: BulkVerb = allowCancel ? verbState : 'assign';
   // Cancel is one-way and there is no un-cancel path anywhere in the API, so
   // it never fires straight off the action bar. See the confirm panel below.
   const [confirming, setConfirming] = useState(false);
@@ -197,8 +209,10 @@ export default function ShiftBulkReassign({
   }, []);
 
   useEffect(() => {
-    // Candidates are a REASSIGN concept. Under cancel there is no guard to
-    // pick, so the request is not made at all rather than made and ignored.
+    // Candidates are an ASSIGN concept - they answer "which guard could take
+    // these rows", for both the move and the fill. Under cancel there is no
+    // guard to pick, so the request is not made at all rather than made and
+    // ignored.
     if (verb === 'cancel') { setCandidates(null); setCandUnavailable(false); return; }
     const ids = selectionKey ? selectionKey.split(',') : [];
     loadCandidates(ids);
@@ -255,7 +269,7 @@ export default function ShiftBulkReassign({
    *  for cancel so progress is reportable and the two read identically. */
   async function run() {
     if (selected.size === 0) return;
-    if (verb === 'reassign' && !guardId) return;
+    if (verb === 'assign' && !guardId) return;
     if (verb === 'cancel' && !confirming) { setConfirming(true); return; }
     setBusy(true);
     setFailures(new Map());
@@ -268,6 +282,10 @@ export default function ShiftBulkReassign({
     // shift rather than whichever happened to be enumerated second.
     const order = new Map(shifts.map((s, i) => [s.id, i]));
     ids.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+    // Status by id, for the per-row endpoint choice below. Built from the
+    // same `shifts` prop the rows were rendered from, so the route a row
+    // takes matches the row the admin actually ticked.
+    const shiftById = new Map(shifts.map((s) => [s.id, s]));
 
     const failed = new Map<string, string>();
     let moved = 0;
@@ -283,7 +301,21 @@ export default function ShiftBulkReassign({
           // from ad-hoc ones later, which is the one thing the column was
           // ever wanted for.
           await adminPatch(`/api/shifts/${id}/cancel`, { reason: 'admin_bulk_cancelled' });
+        } else if (shiftById.get(id)?.status === 'unassigned') {
+          // FILL an empty post. The branch is on status and NOTHING else:
+          // assign-guard admits only status='unassigned' AND guard_id IS NULL
+          // and 409s anything else, so a mis-branch is a guaranteed failure
+          // the UI could have prevented.
+          //
+          // Different body key, deliberately not normalised on the server:
+          // guard_id here, new_guard_id on reassign. Renaming either is an
+          // API change and does not belong in a UI verb rename.
+          await adminPatch(`/api/shifts/${id}/assign-guard`, {
+            guard_id: guardId,
+            ...(reason ? { reason } : {}),
+          });
         } else {
+          // MOVE a shift that already has somebody on it.
           await adminPatch(`/api/shifts/${id}/reassign`, {
             new_guard_id: guardId,
             ...(reason ? { reason } : {}),
@@ -291,9 +323,12 @@ export default function ShiftBulkReassign({
         }
         moved++;
       } catch (e: any) {
+        // Cancel resolves on the machine enum; assign has none on either
+        // route yet (N83), so it renders the server's prose as reassign
+        // always has.
         failed.set(id, verb === 'cancel'
           ? cancelFailureLabel(e)
-          : (e?.message ?? 'Could not reassign'));
+          : (e?.message ?? 'Could not assign'));
       }
       setProgress({ done: i + 1, total: ids.length });
     }
@@ -323,7 +358,7 @@ export default function ShiftBulkReassign({
               written. */}
           {allowCancel && (
           <div role="group" aria-label="Bulk action" className="flex rounded-lg overflow-hidden border border-[#1A3050]">
-            {(['reassign', 'cancel'] as BulkVerb[]).map((v) => (
+            {(['assign', 'cancel'] as BulkVerb[]).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -338,7 +373,7 @@ export default function ShiftBulkReassign({
                     : 'text-gray-500 hover:text-gray-300'
                 }`}
               >
-                {v === 'cancel' ? 'CANCEL' : 'REASSIGN'}
+                {v === 'cancel' ? 'CANCEL' : 'ASSIGN'}
               </button>
             ))}
           </div>
@@ -354,7 +389,7 @@ export default function ShiftBulkReassign({
           {movedLast > 0 && (
             <p className="text-green-400">
               {movedLast} shift{movedLast === 1 ? '' : 's'}{' '}
-              {verb === 'cancel' ? 'cancelled.' : 'reassigned.'}
+              {verb === 'cancel' ? 'cancelled.' : 'assigned.'}
             </p>
           )}
           {failures.size > 0 && (
@@ -437,11 +472,11 @@ export default function ShiftBulkReassign({
         </div>
       )}
 
-      {/* Assign bar. Only once something is ticked, and only under reassign. */}
-      {verb === 'reassign' && selected.size > 0 && (
+      {/* Assign bar. Only once something is ticked, and only under assign. */}
+      {verb === 'assign' && selected.size > 0 && (
         <div className="px-4 py-3 border-b border-[#1A3050] bg-[#0B1526] flex items-center gap-3 flex-wrap">
           <label htmlFor="bulk-reassign-guard" className="text-gray-500 text-[11px] tracking-widest">
-            REASSIGN TO
+            ASSIGN TO
           </label>
           <select
             id="bulk-reassign-guard"
@@ -485,7 +520,7 @@ export default function ShiftBulkReassign({
           {candUnavailable && (
             <span className="text-amber-400/80 text-[11px] w-full">
               Availability could not be checked — every active guard is listed, and an
-              unavailable one will be refused when you reassign.
+              unavailable one will be refused when you assign.
             </span>
           )}
           <button
@@ -493,7 +528,7 @@ export default function ShiftBulkReassign({
             disabled={busy || !guardId}
             className="bg-amber-400 text-gray-900 font-bold rounded-lg px-4 py-2 text-xs tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors"
           >
-            {progress ? `MOVING ${progress.done}/${progress.total}…` : 'REASSIGN'}
+            {progress ? `ASSIGNING ${progress.done}/${progress.total}…` : 'ASSIGN'}
           </button>
         </div>
       )}
@@ -507,7 +542,7 @@ export default function ShiftBulkReassign({
                   type="checkbox"
                   aria-label={verb === 'cancel'
                     ? 'Select all cancellable shifts'
-                    : 'Select all reassignable shifts'}
+                    : 'Select all assignable shifts'}
                   checked={allSelected}
                   onChange={toggleAll}
                   disabled={busy || eligible.length === 0}
@@ -556,19 +591,18 @@ export default function ShiftBulkReassign({
                         the untouchable part marked. */}
                     {!movableRow && (
                       <span className="block text-gray-600 text-[11px] mt-0.5">
-                        {/* "already X" only reads correctly when X is something
-                            the shift FINISHED being — completed, missed,
-                            cancelled. 'unassigned' is a STATE it is currently
-                            in, and "already unassigned" is wrong prose for it,
-                            so it gets its own sentence. It can only appear
-                            under the reassign verb: cancel admits it. */}
+                        {/* Both verbs now admit 'unassigned', so the only
+                            statuses that reach here are completed, missed and
+                            cancelled — plus 'active' under cancel, which has
+                            its own sentence because a clocked-in guard is a
+                            different reason from a finished shift. "already X"
+                            reads correctly for all of them: each is something
+                            the shift FINISHED being. */}
                         {verb === 'cancel'
                           ? (s.status === 'active'
                               ? 'Not cancellable — a guard is clocked in.'
                               : `Not cancellable — already ${s.status}.`)
-                          : s.status === 'unassigned'
-                            ? 'Not reassignable — nobody is on this shift to move.'
-                            : `Not reassignable — already ${s.status}.`}
+                          : `Not assignable — already ${s.status}.`}
                       </span>
                     )}
                     {/* Before the attempt: why the CHOSEN guard cannot take
@@ -595,7 +629,7 @@ export default function ShiftBulkReassign({
       {blockedRows.length > 0 && (
         <div className="px-4 py-2 border-t border-[#1A3050] text-gray-600 text-[11px]">
           {blockedRows.length} shift{blockedRows.length === 1 ? '' : 's'} listed but not{' '}
-          {verb === 'cancel' ? 'cancellable' : 'reassignable'}.
+          {verb === 'cancel' ? 'cancellable' : 'assignable'}.
         </div>
       )}
     </div>

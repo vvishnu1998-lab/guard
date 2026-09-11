@@ -601,8 +601,19 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
       await client.query('ROLLBACK');
       const alreadyAssigned = shift.guard_id !== null;
       return res.status(409).json({
+        // DO NOT NAME A UI CONTROL HERE. This used to read "Use Reassign
+        // Guard to change who is on it", naming a button that no longer
+        // exists: the bulk surface collapsed REASSIGN and ASSIGN into one
+        // ASSIGN verb that routes to this route or to PATCH /:id/reassign on
+        // the row's status. An error that tells an admin to press something
+        // they cannot find is worse than one that just says what is wrong.
+        //
+        // The web caller reaching this 409 has mis-routed — it branches on
+        // status === 'unassigned' and this row is not that — so the message
+        // is aimed at whoever is reading the log, not at a recoverable
+        // operator action.
         error: alreadyAssigned
-          ? 'This shift already has a guard. Use Reassign Guard to change who is on it.'
+          ? 'This shift already has a guard. Changing who is on it goes through the reassign route.'
           : `Shift status '${shift.status}' cannot be assigned a guard.`,
       });
     }
@@ -621,7 +632,11 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
       );
       await client.query('ROLLBACK');
       return res.status(409).json({
-        error: 'A guard has already clocked in on this shift. It cannot be reassigned here.',
+        // Said "cannot be reassigned here" on the route that ASSIGNS. The
+        // session is the reason, not the verb: somebody is already working
+        // this shift, so changing who it belongs to would strand their open
+        // session (see the cancel route's note on why that is unrecoverable).
+        error: 'A guard has already clocked in on this shift. It can no longer be assigned.',
       });
     }
 

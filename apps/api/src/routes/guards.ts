@@ -298,7 +298,27 @@ router.post('/shift-candidates', requireAuth('company_admin', 'vishnu'), async (
                 -- Listed by the dialog, not movable by the write path. Named
                 -- rather than dropped, so the count the admin sees and the
                 -- count this endpoint scores are the same number.
-                WHEN s.status NOT IN ('scheduled','active') THEN 'not_reassignable'
+                --
+                -- 'unassigned' IS ADMITTED. The bulk surface has ONE verb,
+                -- ASSIGN, covering both cases: a shift with a guard gets
+                -- moved (PATCH /shifts/:id/reassign), one without gets
+                -- filled (PATCH /shifts/:id/assign-guard). The admin is
+                -- picking a guard either way, so this endpoint has to score
+                -- both or the dropdown would report every guard blocked for
+                -- exactly the rows the admin most needs to fill.
+                --
+                -- The label stays accurate: after this widening the statuses
+                -- this branch still catches are completed, missed and
+                -- cancelled, which is what 'not_reassignable' has always
+                -- meant to a reader.
+                WHEN s.status NOT IN ('scheduled','active','unassigned') THEN 'not_reassignable'
+                -- NULL-SAFE ON PURPOSE, no change needed for unassigned rows.
+                -- s.guard_id = c.id evaluates to NULL when the shift has no
+                -- guard, which is falsy, so this never fires on the rows
+                -- admitted above. The overlap LATERAL below is likewise
+                -- indifferent: it matches sh2.guard_id against the CANDIDATE
+                -- (c.id), and the row under evaluation contributes only its
+                -- time window.
                 WHEN s.guard_id = c.id THEN 'already_on_shift'
                 WHEN NOT EXISTS (
                   SELECT 1 FROM guard_site_assignments gsa
