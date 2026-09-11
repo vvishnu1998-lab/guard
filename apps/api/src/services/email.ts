@@ -951,6 +951,212 @@ export function renderMissedShiftAlert(row: {
   return { subject, html };
 }
 
+// ── Email Type 6c — Unstaffed Post Warning (T-1h, admin-directed) ───────────
+
+/**
+ * One shift with no guard on it, starting within the hour.
+ *
+ * Shaped by the caller (jobs/unstaffedPostWarning.ts) rather than SELECTed
+ * here, because that job has to group rows by company to send ONE email per
+ * company and would otherwise query the same rows twice.
+ */
+export interface UnstaffedPostRow {
+  id:              string;
+  site_id:         string;
+  site_name:       string;
+  site_address:    string;
+  site_tz:         string | null;
+  scheduled_start: Date | string;
+  scheduled_end:   Date | string;
+}
+
+/**
+ * Pure renderer for the unstaffed-post warning. Exported for the same reason
+ * renderMissedShiftAlert is: a script can exercise the template against real
+ * production rows without invoking SendGrid or touching a latch.
+ *
+ * ─── THIS IS NOT THE MISSED-SHIFT ALERT, AND MUST NOT LOOK LIKE IT ─────
+ *
+ * renderMissedShiftAlert is a RED (#7F1D1D) report that something already
+ * went wrong: a named guard did not turn up, N minutes ago. This is an AMBER
+ * warning that something is about to, and can still be prevented — which is
+ * the entire reason the window is T-1h and not T+10. If the two render alike
+ * an admin cannot tell at a glance which one needs them now.
+ *
+ * Nothing in here says "missed". There is no guard to have missed anything.
+ *
+ * Every guard-centric field of the missed-shift body is absent because none
+ * of it exists: no name, no badge, no phone to call, no last-login, no
+ * minutes-late. What is left is what an admin needs to act on in the next
+ * hour — which post, where, when, and how long the gap is.
+ *
+ * `now` is injectable so a test can render a fixed "starts in N minutes"
+ * rather than one that depends on when the suite ran.
+ */
+export function renderUnstaffedPostWarning(
+  rows: UnstaffedPostRow[],
+  now: Date = new Date(),
+): { subject: string; html: string } {
+  const n  = rows.length;
+  const s_ = n === 1 ? '' : 's';
+
+  // Site-local rendering ONLY. The SELECTION that produced these rows is
+  // zone-free instant arithmetic (see constants/preShiftWindow.ts); the zone
+  // matters here and nowhere else. Each row carries its OWN site's zone —
+  // one email can span sites in different zones, so this cannot be hoisted.
+  // COLLAPSE IDENTICAL POSTS. The multi-row case in production is not N
+  // different posts — it is ONE post needing N guards: eight shifts share a
+  // single (site_id, scheduled_start) today. Rendering those as eight
+  // identical blocks would move the noise out of eight emails and into one
+  // email, which is not the fix. Group by the post, say how many of its
+  // shifts are unfilled, and link the surface that can fill them.
+  const groups = new Map<string, UnstaffedPostRow[]>();
+  for (const r of rows) {
+    const key = `${r.site_id}|${new Date(r.scheduled_start).toISOString()}`
+              + `|${new Date(r.scheduled_end).toISOString()}`;
+    const bucket = groups.get(key) ?? [];
+    bucket.push(r);
+    groups.set(key, bucket);
+  }
+  const postCount = groups.size;
+  const p_ = postCount === 1 ? '' : 's';
+
+  const blocks = Array.from(groups.values()).map((g) => {
+    const r  = g[0];
+    const tz = r.site_tz ?? PACIFIC;
+
+    // Same-day collapse, identical to the missed-shift template: drop the
+    // redundant end-date unless the shift crosses midnight in site-local
+    // time. Compared on the site-local date string so DST and UTC offset
+    // cannot mis-group it.
+    const sameDay = fmtDateSite(r.scheduled_start, tz) === fmtDateSite(r.scheduled_end, tz);
+    const when = sameDay
+      ? `${fmtDTSite(r.scheduled_start, tz)} → ${fmtTimeSite(r.scheduled_end, tz)}`
+      : `${fmtDTSite(r.scheduled_start, tz)} → ${fmtDTSite(r.scheduled_end, tz)}`;
+
+    const startsInMin = Math.max(0, Math.round(
+      (new Date(r.scheduled_start).getTime() - now.getTime()) / 60_000));
+    const hours = Math.round(
+      (new Date(r.scheduled_end).getTime() - new Date(r.scheduled_start).getTime()) / 360_000) / 10;
+
+    return `
+      <div style="border:1px solid #E5E7EB;border-left:3px solid #D97706;border-radius:6px;padding:14px 16px;margin:0 0 12px 0">
+        <div style="font-size:15px;font-weight:600;color:#0B1526">${r.site_name}</div>
+        <div style="font-size:13px;color:#888;margin-top:2px">${r.site_address}</div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;color:#333;margin-top:10px">
+          <tr><td style="padding:4px 0;color:#888;width:110px">Scheduled</td><td style="padding:4px 0">${when}</td></tr>
+          <tr><td style="padding:4px 0;color:#888">Starts in</td><td style="padding:4px 0;color:#92400E;font-weight:600">${startsInMin} min</td></tr>
+          <tr><td style="padding:4px 0;color:#888">Gap length</td><td style="padding:4px 0">${hours} h with nobody on post</td></tr>
+          <tr><td style="padding:4px 0;color:#888">Unfilled</td><td style="padding:4px 0">${g.length === 1 ? '1 shift' : `${g.length} shifts at this post`} &nbsp;·&nbsp; ${g.length === 1
+            ? `<a href="${WEB_BASE}/admin/shifts/${r.id}" style="color:#0B1526">Open this shift</a>`
+            : `<a href="${WEB_BASE}/admin/shifts/site/${r.site_id}" style="color:#0B1526">Open this site&#39;s schedule</a>`}</td></tr>
+        </table>
+      </div>`;
+  }).join('');
+
+  // One post → straight to it. Several → the list, because there is no one
+  // shift to land on.
+  //
+  // POSTS AND SHIFTS ARE COUNTED SEPARATELY AND CAN DIFFER. One post needing
+  // three guards is "1 post" and "3 shifts"; both numbers are true. The
+  // headline counts posts because that is how many places need covering.
+  const ctaUrl   = postCount === 1 ? `${WEB_BASE}/admin/shifts/${rows[0].id}` : `${WEB_BASE}/admin/shifts`;
+  const ctaLabel = postCount === 1 ? 'Assign a Guard' : 'Open Admin Dashboard';
+
+  const headline = postCount === 1
+    ? `${rows[0].site_name} starts within the hour with no guard assigned`
+    : `${postCount} posts start within the hour with no guard assigned`;
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    <div class="hdr" style="background:#78350F">
+      <div class="brand" style="color:#FCD34D">NETRAOPS · WARNING</div>
+      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">No Guard Assigned</h1>
+      <p style="color:#FCD34D;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headline}</p>
+    </div>
+    <div class="body">
+      <p style="font-size:15px;color:#92400E;font-weight:600;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
+        ⚠️ ${n} shift${s_} start${n === 1 ? 's' : ''} within the hour with nobody assigned. There is still time to cover ${n === 1 ? 'it' : 'them'}.
+      </p>
+
+      ${blocks}
+
+      <p style="color:#555;font-size:13px;margin:22px 0 0 0">
+        Assign a guard, or cancel the shift${s_} if the post${p_} ${postCount === 1 ? 'is' : 'are'} genuinely not needed.
+      </p>
+
+      <div style="text-align:center;margin-top:24px">
+        <a class="btn" href="${ctaUrl}">${ctaLabel}</a>
+      </div>
+    </div>
+    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in each site's local time zone.<br/>
+      Each shift is warned about once, about an hour before it starts.<br/>
+      NetraOps · Automated warning
+    </div>
+  </div>`;
+
+  const subject = postCount === 1
+    ? `⚠️ NO GUARD ASSIGNED — ${rows[0].site_name} starts in 1 hour`
+    : `⚠️ NO GUARD ASSIGNED — ${postCount} posts start within the hour`;
+
+  return { subject, html };
+}
+
+/**
+ * Send ONE warning to every active admin of one company, covering every
+ * unstaffed shift that company has in the current window.
+ *
+ * ─── WHY ONE EMAIL PER COMPANY AND NOT PER SHIFT ──────────────────────
+ *
+ * Measured on production: EIGHT shifts share a single
+ * (site_id, scheduled_start), and 56 distinct instants hold more than one
+ * shift, across 220 rows. Per-shift mail would therefore send eight
+ * near-identical messages inside one ten-minute window — same site, same
+ * time, differing only by shift id — with no unusual data required. That is
+ * how people learn to filter an alert, and a filtered warning is worth less
+ * than none. Precedent for N-rows-one-notification is
+ * services/shiftPush.ts pushShiftAssignments, which groups by guard.
+ *
+ * ─── DOES NOT TOUCH THE LATCH ─────────────────────────────────────────
+ *
+ * Unlike sendMissedShiftAlert, which stamps missed_alert_sent_at itself,
+ * this writes nothing. The caller claims the rows BEFORE calling and
+ * releases them if this reports zero successes — the claim has to happen
+ * before the send to be a claim at all. Returning the counts rather than
+ * throwing is what lets the caller make that decision per company.
+ */
+export async function sendUnstaffedPostWarning(
+  companyId: string,
+  rows: UnstaffedPostRow[],
+): Promise<{ succeeded: number; failed: number; admins: number }> {
+  if (rows.length === 0) return { succeeded: 0, failed: 0, admins: 0 };
+
+  const admins = await getActiveAdminEmails(companyId);
+  if (admins.length === 0) {
+    // Same posture as sendMissedShiftAlert: a tenant with no active admin is
+    // a configuration problem, not a bug here, and it is reported once per
+    // occurrence rather than swallowed.
+    Sentry.captureMessage('sendUnstaffedPostWarning: no active admins for tenant', {
+      level: 'warning',
+      tags:  { service: 'sendgrid', flow: 'unstaffed_post_warning' },
+      extra: { company_id: companyId, shift_ids: rows.map((r) => r.id) },
+    });
+    return { succeeded: 0, failed: 0, admins: 0 };
+  }
+
+  const { subject, html } = renderUnstaffedPostWarning(rows);
+
+  const { succeeded, failed } = await sendToAdmins(
+    admins,
+    { from: FROM, subject, html },
+    'unstaffed_post_warning',
+    { company_id: companyId, shift_count: rows.length },
+  );
+
+  return { succeeded, failed, admins: admins.length };
+}
+
 // ── Email Type 6b — Temporary Password (forgot-password flow) ────────────────
 
 /**

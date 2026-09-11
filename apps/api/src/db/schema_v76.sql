@@ -1,0 +1,102 @@
+-- schema_v76 — shifts.unstaffed_warning_sent_at (N60, 2026-09-11)
+--
+-- NUMBERING: v75 is the highest entry in migrate.ts and the highest file on
+-- disk; both were re-read at HEAD (d5af3f4) immediately before writing this.
+-- v76 is free. Read the chain off migrate.ts, never from a brief — it has
+-- four recorded collisions (v46 -> v50, v51 -> v52, v54 taken overnight, and
+-- v15, reserved in docs/06-IMPLEMENTATION-PLAN.md and taken by the
+-- shift-reassignment audit table instead).
+--
+-- STATEMENT COUNT: three (SET LOCAL, ALTER TABLE, COMMENT ON COLUMN), and
+-- that is fine. The one-statement-per-file rule (schema_v72, schema_v73)
+-- exists ONLY for CREATE INDEX CONCURRENTLY, which cannot run inside the
+-- implicit transaction that db/migrate.ts:14's simple-protocol
+-- client.query(sql) wraps around a multi-statement file.
+-- CONFIRMED: THIS FILE CREATES NO INDEX AT ALL. See "NO INDEX" below.
+--
+-- APPLYING BY HAND: `psql -1`. SET LOCAL through piped psql in autocommit is
+-- a silent no-op (learned applying v54).
+--
+-- IDEMPOTENT, AND THAT IS STRUCTURAL RATHER THAN POLITE. There is no
+-- migration tracking table in this schema — db/migrate.ts re-runs EVERY file
+-- on EVERY invocation — so a non-idempotent file breaks the chain for good.
+-- ADD COLUMN IF NOT EXISTS is a no-op where the column exists; COMMENT ON
+-- COLUMN overwrites rather than erroring. Safe on prod and on an empty
+-- database alike: `shifts` is created by schema.sql, which migrate.ts runs
+-- first, and v17/v37/v75 already ALTER it later in the same chain.
+--
+-- VERIFIED AGAINST PROD AT THIS REF: `shifts` has 21 columns, attnum 1..21
+-- contiguous, and no unstaffed_warning_sent_at.
+SET LOCAL lock_timeout = '3s';
+
+-- ── Why this column exists ──────────────────────────────────────────────
+--
+-- N60. A shift with no guard passes its start time with an empty post and no
+-- alarm anywhere, and the silence is DOUBLE:
+--
+--   1. jobs/missedShiftAlert.ts:27 selects `status = 'scheduled'`. A row with
+--      nobody on it is status='unassigned' and never matches.
+--   2. services/email.ts:816 INNER JOINs guards on sh.guard_id. Even if (1)
+--      were widened, a null guard_id yields zero rows and :822 returns
+--      silently — no email, and no error either.
+--
+-- So the fix is a NEW alert, not a widened predicate, and this is its latch.
+-- The new job warns ONE HOUR BEFORE the shift starts rather than at or after
+-- the start: a post about to go unstaffed is actionable, one already
+-- unstaffed is a report. It is a WARNING and is named as one everywhere.
+--
+-- ── Why not reuse missed_alert_sent_at ──────────────────────────────────
+--
+-- That column is owned by jobs/missedShiftAlert.ts and is read by a third
+-- party: routes/admin.ts:1314-1315 surfaces a no-show in the admin feed for
+-- any shift stamped within the last 24 hours. Writing it from a second job
+-- would put "guard did not turn up" rows in that feed for shifts that never
+-- had a guard to turn up. Each latch stays owned by exactly one sender.
+--
+-- ── NO BACKFILL — and do not "fix" this ─────────────────────────────────
+--
+-- NULL means "never warned", which is the correct and desired state for all
+-- 527 existing rows. The instinct to stamp existing rows NOW() to avoid a
+-- burst on first deploy is WRONG HERE and would cause the exact failure this
+-- item exists to prevent: it would permanently silence the four unassigned
+-- shifts at STARNET SECURITY's Bethel AME Church on 2026-09-14..17, which are
+-- upcoming, real, and the reason this ships.
+--
+-- No burst is possible anyway. The job selects only rows whose scheduled_start
+-- is 55-65 minutes AHEAD, so the five unassigned rows already in the past fall
+-- outside the band and produce nothing on deploy.
+--
+-- ── NO INDEX, deliberately ──────────────────────────────────────────────
+--
+-- idx_shifts_scheduled_start (v73) already serves the job's range scan, and
+-- the predicate is sargable because it does not wrap the column — unlike
+-- missedShiftAlert's `scheduled_start + INTERVAL '10 minutes' <= NOW()`,
+-- which is why that one cannot use it. The band is ten minutes wide against
+-- 527 rows; a dedicated index would be noise.
+--
+-- If it is ever needed, the precedent is idx_shifts_email_pending: a PARTIAL
+-- index (`WHERE daily_report_email_sent = false AND status = 'completed'`),
+-- whose analogue here is `WHERE unstaffed_warning_sent_at IS NULL AND status
+-- = 'unassigned'`. Note that CREATE INDEX CONCURRENTLY needs its OWN
+-- single-statement file — see STATEMENT COUNT above.
+
+ALTER TABLE shifts
+  ADD COLUMN IF NOT EXISTS unstaffed_warning_sent_at TIMESTAMPTZ;
+
+COMMENT ON COLUMN shifts.unstaffed_warning_sent_at IS
+  'One-shot latch for the unstaffed-post warning (jobs/unstaffedPostWarning.ts): set when admins were warned that this shift starts within the hour with no guard assigned. NULL = not yet warned; never backfilled. Schedule-derived, so clearScheduleDerivedLatches (services/shiftLatches.ts) clears it on reassign or reschedule.';
+
+-- ── THIS MIGRATION IS NOT FINISHED WITHOUT THE CODE HALF ────────────────
+--
+-- services/shiftLatches.ts states the rule in its own docblock: a one-shot
+-- stamp keyed on scheduled_start is not done until the column appears in its
+-- LATCH_COLUMNS array. That file exists because this exact step was missed
+-- twice — v17 added two latches and v37 added three more, and the reassign
+-- route that was supposed to clear them was not revisited either time, so it
+-- cleared 1 of 6 and had been wrong for two migrations.
+--
+-- A latch left set across a schedule change is PERMANENT SILENCE, with no
+-- error and no log line: the row no longer matches the window when it is
+-- checked, and by the time the new window arrives the IS NULL guard already
+-- fails. Add 'unstaffed_warning_sent_at' to LATCH_COLUMNS in the same commit
+-- that ships the job.

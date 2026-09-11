@@ -2183,3 +2183,42 @@ Recommend the first, in its own commit, with the grep for `error === ` branches 
 **Size XS. Tier 0.**
 
 ---
+
+## New from N60 unstaffed-post warning (2026-09-11)
+
+**N79. Every email template interpolates operator-supplied text into HTML unescaped.**
+verified: YES — `apps/api/src/services/email.ts` read in full at `d5af3f4`.
+
+Eleven templates build HTML with template literals, and 30 distinct
+`${row.*}` / `${data.*}` interpolations put database text straight into the
+markup. None is escaped. Examples, all site or company text an admin can type:
+
+```
+${row.site_name}      ${row.site_address}     ${row.guard_name}
+${r.site_name}        ${r.site_address}       ${row.badge_number}
+```
+
+**This is pre-existing and is NOT introduced by the unstaffed-post warning,
+which deliberately matches the surrounding convention.** That was a choice:
+escaping in one template only would make the other ten look safe by contrast,
+and a reader comparing two adjacent renderers would reasonably conclude the
+unescaped ones had been considered and cleared. They have not been.
+
+**Why it is Tier 2 and not Tier 0.** The inputs are not attacker-controlled in
+the usual sense — `sites.name`, `sites.address` and `guards.name` are written
+by authenticated company admins for their own tenant, and the output goes to
+that same tenant's admins by email, not to a browser session. There is no
+cookie to steal and no same-origin context. The realistic damage is a broken
+layout from a stray `<` or `&`, or an admin pasting a site name containing
+markup and confusing the recipient.
+
+**Why it is still worth closing.** Mail clients render HTML, `sites.name` has
+no character CHECK, and the blast radius grows every time a template is added
+— this phase added the eleventh. An `escapeHtml` helper applied across all of
+them in one commit is a contained change; applied to one template it is worse
+than nothing.
+
+Fix: one `escapeHtml(s: string): string` in `services/email.ts`, applied to
+every `${...}` that carries database text, in a single commit that touches all
+eleven templates. Do not do it piecemeal.
+**Size S. Tier 2.**
