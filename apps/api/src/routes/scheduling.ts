@@ -768,6 +768,13 @@ router.post('/site/:siteId/assign-slots', requireAuth('company_admin', 'vishnu')
   }>(
     `WITH ${SLOT_EXPANSION_CTE}
      SELECT sl.slot_start, sl.slot_end, sl.guards_needed,
+            -- The PATCH target. CANCEL CAN DESTROY IT: PATCH /shifts/:id/cancel
+            -- admits status='unassigned', and a cancelled row no longer matches
+            -- here, so the slot falls to the INSERT branch below and a fresh
+            -- row is created instead of this one being reused. Nothing breaks -
+            -- capacity counting excludes cancelled rows either way - but the
+            -- shift id for that slot changes. The cancel route's docblock
+            -- carries the full note.
             (SELECT sh.id FROM shifts sh
               WHERE sh.site_id = sl.site_id
                 AND sh.scheduled_start = sl.slot_start
@@ -920,11 +927,30 @@ router.post('/site/:siteId/assign-slots', requireAuth('company_admin', 'vishnu')
         client.release();
       }
     } else {
+      // source = 'profile', and this is the ONLY writer of that value.
+      //
+      // The row exists because the PROFILE says a slot exists here: slot_start
+      // comes out of SLOT_EXPANSION_CTE over site_profile_shifts, not out of
+      // anything a person typed. The other three INSERT sites (routes/shifts.ts
+      // :300, :473, :528) are an admin filling in a form and stay 'manual'.
+      //
+      // THE PATCH BRANCH ABOVE DELIBERATELY DOES NOT TOUCH source. It reuses a
+      // pre-existing status='unassigned' row that something else created, and
+      // assigning a guard to a row does not change who created it. Rewriting
+      // source there would be a backfill by another name — and backfill is
+      // exactly what this column cannot support: template edits DELETE and
+      // re-INSERT site_profile_shifts with no versioning (see the PATCH at
+      // :257) and nothing audits them, so a row's historical provenance is
+      // unrecoverable. Provenance is written once, by whoever creates.
+      //
+      // Nothing READS source yet. It was added by schema_v71 for this moment;
+      // every one of the 527 production rows says 'manual' today, 512 of them
+      // because that is the column DEFAULT rather than because anyone chose it.
       const ins = await pool.query<{ id: string; guard_id: string; site_id: string;
         scheduled_start: Date; scheduled_end: Date }>(
         `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
                              created_by, created_by_role, source)
-         SELECT $1, $2, $3::timestamptz, $4::timestamptz, 'scheduled', $5, $6, $7, 'manual'
+         SELECT $1, $2, $3::timestamptz, $4::timestamptz, 'scheduled', $5, $6, $7, 'profile'
           WHERE (SELECT COUNT(*) FROM shifts x
                   WHERE x.site_id = $2 AND x.scheduled_start = $3::timestamptz
                     AND x.status NOT IN ('cancelled','unassigned')) < $8

@@ -556,11 +556,19 @@ export default function ShiftBulkReassign({
                         the untouchable part marked. */}
                     {!movableRow && (
                       <span className="block text-gray-600 text-[11px] mt-0.5">
+                        {/* "already X" only reads correctly when X is something
+                            the shift FINISHED being — completed, missed,
+                            cancelled. 'unassigned' is a STATE it is currently
+                            in, and "already unassigned" is wrong prose for it,
+                            so it gets its own sentence. It can only appear
+                            under the reassign verb: cancel admits it. */}
                         {verb === 'cancel'
                           ? (s.status === 'active'
                               ? 'Not cancellable — a guard is clocked in.'
                               : `Not cancellable — already ${s.status}.`)
-                          : `Not reassignable — already ${s.status}.`}
+                          : s.status === 'unassigned'
+                            ? 'Not reassignable — nobody is on this shift to move.'
+                            : `Not reassignable — already ${s.status}.`}
                       </span>
                     )}
                     {/* Before the attempt: why the CHOSEN guard cannot take

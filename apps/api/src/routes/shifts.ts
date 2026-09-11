@@ -911,10 +911,49 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 
 // PATCH /api/shifts/:id/cancel — admin cancels an accidentally-scheduled shift.
 //
-// Gate: an OPEN shift_session blocks the cancel outright; after that, only
-// status='scheduled' is cancellable. Everything else 409s with a specific
-// reason so the operator understands why. Unassigned scheduled shifts are
-// cancellable too (no guard to notify, push is skipped).
+// Gate: an OPEN shift_session blocks the cancel outright; after that, exactly
+// two statuses are cancellable - 'scheduled' and 'unassigned'. Everything else
+// 409s with a specific reason so the operator understands why.
+//
+// WHY 'unassigned' IS ADMITTED. A shift with no guard has nobody to notify, no
+// session, no possible overlap and no push to send - it is strictly safer to
+// cancel than a 'scheduled' one. That is the same argument PATCH /:id (the
+// edit route below) already makes for admitting it, and cancel writes strictly
+// less than edit does.
+//
+// This header used to read "Unassigned scheduled shifts are cancellable too
+// (no guard to notify, push is skipped)" while the switch below 409'd every
+// status='unassigned' row. Both were defensible readings of "unassigned" -
+// status='scheduled' AND guard_id IS NULL genuinely does pass the switch - but
+// that set is EMPTY in production (guard_id IS NULL and status='unassigned'
+// agree on all 9 rows, zero divergent either way), so the sentence was true of
+// nothing and false of everything an admin would point at. If this comment,
+// the switch, and the `default` note below ever disagree again: the switch is
+// the fact, the prose is the bug.
+//
+// WHAT CANCELLING AN 'unassigned' ROW DOES NOT DO - and the one place that
+// surprises. Cancel removes the shift ROW. At a site backed by a scheduling
+// profile it does NOT remove the slot DEMAND, because demand is expanded from
+// site_profile_shifts by services/slotExpansion.ts, not read off the shifts
+// table. So the slot keeps asking for a guard, and GET .../slots keeps showing
+// it unfilled - identical to how it looked before the cancel, since
+// OCCUPIED_CTE excludes 'cancelled' and 'unassigned' alike. The admin's model
+// ("I cancelled it, the gap is gone") is wrong there; to remove the demand you
+// edit the profile.
+//
+// It also destroys a PATCH TARGET. POST /scheduling/site/:siteId/assign-slots
+// reuses an existing status='unassigned' row at a slot instead of inserting a
+// second one (routes/scheduling.ts, the UPDATE guarded on status='unassigned').
+// Once cancelled, that row no longer matches, so a later assign to the same
+// slot takes the INSERT branch and creates a fresh row. Capacity counting
+// excludes the cancelled tombstone either way, so nothing double-books and
+// nothing is wrong - but the row identity changes, and that is worth knowing
+// before someone tracks a slot by shift id.
+//
+// ZERO INSTANCES TODAY: of the 9 unassigned production rows, the 4 inside any
+// 14-day slot window are at a site with no profile, and the 4 at a
+// profile-backed site are all in the past. This is written down because the
+// first person to hit it should find it, not derive it.
 //
 // WHY THE OPEN-SESSION CHECK IS SEPARATE FROM THE STATUS SWITCH.
 //
@@ -1081,7 +1120,14 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
     // Status gate — only 'scheduled' cancellable, everything else gets a
     // specific 409 so the admin knows why.
     switch (shift.status) {
+      // Co-admitted on DIFFERENT grounds - 'scheduled' has a guard who must be
+      // told (the push after COMMIT), 'unassigned' has nobody. Fallthrough
+      // rather than two bodies because the gate is the same; the difference is
+      // handled once, by the `if (shift.guard_id)` around the push.
+      // Same shape as PATCH /:id's switch below, which already says it matches
+      // this one.
       case 'scheduled':
+      case 'unassigned':
         break;
       case 'active':
         await client.query('ROLLBACK');
@@ -1122,11 +1168,18 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
       default:
         await client.query('ROLLBACK');
         return res.status(409).json({
-          // Reached by 'unassigned' today. Same code as the other
-          // wrong-status branches: the caller's next move is identical, and the
-          // row already shows its own status. Widening the switch to ADMIT
-          // 'unassigned' is a separate, deliberate change (filed) - it is a
-          // semantics change to a one-way destructive route.
+          // UNREACHABLE TODAY, and kept anyway. shifts_status_check admits
+          // exactly six values (unassigned, scheduled, active, completed,
+          // missed, cancelled) and all six now have an explicit case above, so
+          // nothing can fall through here while that constraint holds.
+          //
+          // It survives as the guard against a SEVENTH status being added to
+          // the CHECK without anyone revisiting this route: an unknown status
+          // is then REFUSED rather than silently cancelled, which is the safe
+          // direction for a one-way destructive write.
+          //
+          // It was previously reached by 'unassigned'. That is now an admitted
+          // case, not a default.
           code:         'SHIFT_NOT_SCHEDULED',
           error:        `Shift status '${shift.status}' cannot be cancelled.`,
           message:      `Shift status '${shift.status}' cannot be cancelled.`,
