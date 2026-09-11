@@ -22,7 +22,8 @@ import InactiveSiteBadge from '../../../../../components/InactiveSiteBadge';
 import ScheduleShiftModal from '../../../../../components/admin/ScheduleShiftModal';
 import AssignGuardModal, { AssignableShift } from '../../../../../components/admin/AssignGuardModal';
 import SlotAssignPanel from '../../../../../components/admin/SlotAssignPanel';
-import ShiftBulkReassign, { ReassignableShift } from '../../../../../components/admin/ShiftBulkReassign';
+import BulkShiftActions, { BulkShiftRow } from '../../../../../components/admin/BulkShiftActions';
+import { blockedLabel, REASON_LABEL } from '../../../../../lib/bulkShiftCopy';
 import { dayOffsetInZone, fmtCalRange, fmtDateShort, fmtDuration, fmtTime } from '../../../../../lib/shiftFormat';
 
 interface Site {
@@ -77,7 +78,6 @@ export default function SiteShiftsPage() {
 
   const [showModal,   setShowModal]   = useState(false);
   const [assignShift, setAssignShift] = useState<Shift | null>(null);
-  const [showReassign, setShowReassign] = useState(false);
 
   // The window this page asks the server for, and the only one it shows.
   // There is no client-side date filter any more: the server returns exactly
@@ -125,9 +125,17 @@ export default function SiteShiftsPage() {
       .sort((a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime());
   }, [shifts, siteId]);
 
-  // Every upcoming, non-cancelled shift at this site — the pool the bulk
-  // surface acts on, for EITHER verb. Per-verb admissibility is decided by
-  // admits() inside ShiftBulkReassign and must not be pre-filtered here: the
+  // Every upcoming, non-cancelled shift at this site — the SELECTABLE POOL,
+  // which is narrower than what the table below RENDERS.
+  //
+  // The table shows the whole -1d..+90d window; this pool is the future half.
+  // A past row is rendered with a disabled checkbox rather than hidden,
+  // because the table is the schedule first and the picker second. Measured
+  // before merging: past rows are 16% of the largest site's 67 and a minority
+  // everywhere, so the window does NOT need narrowing to make selection work.
+  //
+  // Per-verb admissibility is decided by admits() inside BulkShiftActions and
+  // must not be pre-filtered here: the
   // two verbs admit different statuses and neither set contains the other.
   //
   // NO guard_id FILTER — deliberate, and it used to be here. Cancel admits
@@ -146,7 +154,7 @@ export default function SiteShiftsPage() {
   // Rows the active verb cannot take are still SHOWN, greyed and labelled, by
   // the component. Widening this pool widens what is DISPLAYED, never what is
   // actionable.
-  const bulkPool: ReassignableShift[] = useMemo(() => {
+  const bulkPool: BulkShiftRow[] = useMemo(() => {
     const now = Date.now();
     return siteShifts
       .filter((s) => new Date(s.scheduled_end).getTime() > now)
@@ -204,30 +212,25 @@ export default function SiteShiftsPage() {
           names its own dates in its heading for that reason. */}
       {siteId && <SlotAssignPanel siteId={siteId} onAssigned={load} />}
 
-      {/* Bulk reassign — the SECOND of the two surfaces that carry it, the
-          other being the deactivation dialog on /admin/guards. Collapsed by
-          default: this page's job is still to show the schedule. */}
-      {bulkPool.length > 0 && (
-        <div className="space-y-3">
-          <button
-            onClick={() => setShowReassign((v) => !v)}
-            aria-expanded={showReassign}
-            className="text-xs tracking-widest text-gray-400 border border-[#1A3050] rounded-lg px-3 py-2 hover:border-gray-500 hover:text-gray-200 transition-colors"
-          >
-            {showReassign ? 'HIDE BULK ACTIONS' : `BULK ACTIONS (${bulkPool.length})`}
-          </button>
-          {showReassign && (
-            <ShiftBulkReassign
-              shifts={bulkPool}
-              guards={guards}
-              title="SHIFTS AT THIS SITE"
-              onDone={load}
-            />
-          )}
-        </div>
-      )}
-
-      {/* Shifts table */}
+      {/* ONE table, not two.
+          This page used to render a separate bulk PICKER above the schedule
+          table — same rows, fewer columns. The picker had DATE, TIME, SITE
+          and STATUS; the schedule had DATE, TIME, GUARD, duration, a status
+          PILL and the inspection badge. So the surface for CHOOSING shifts
+          lacked the column that matters most while choosing, which is who is
+          on the shift, and carried a SITE column that on a single-site page
+          says nothing.
+          They are merged. BulkShiftActions supplies the header, the verb
+          switcher, the guard dropdown and the confirm step; the table below
+          is this page's own and now carries the checkboxes. */}
+      <BulkShiftActions
+        shifts={bulkPool}
+        guards={guards}
+        title="SHIFTS AT THIS SITE"
+        onDone={load}
+      >
+        {({ verb, selected, canSelect, toggle, toggleAll, allSelected,
+            eligibleCount, busy, failures, chosenBlocked }) => (
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
         {loading ? (
           <div className="p-10 text-center text-gray-500 text-sm">Loading…</div>
@@ -240,6 +243,18 @@ export default function SiteShiftsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-gray-500 text-xs tracking-widest border-b border-[#1A3050]">
+                  <th className="p-4 w-10 text-left">
+                    <input
+                      type="checkbox"
+                      aria-label={verb === 'cancel'
+                        ? 'Select all cancellable shifts'
+                        : 'Select all assignable shifts'}
+                      checked={allSelected}
+                      onChange={toggleAll}
+                      disabled={busy || eligibleCount === 0}
+                      className="accent-amber-400"
+                    />
+                  </th>
                   <th className="text-left p-4">DATE</th>
                   <th className="text-left p-4">TIME</th>
                   <th className="text-left p-4">ASSIGNED GUARD</th>
@@ -249,30 +264,62 @@ export default function SiteShiftsPage() {
               </thead>
               <tbody>
                 {siteShifts.map((s) => (
-                  // Rows navigate to shift detail, matching the guard view
-                  // (app/admin/shifts/page.tsx). Without this the by-site
-                  // path was a dead end: an admin could assign an
-                  // unassigned guard but could never reach the page that
-                  // carries EDIT SCHEDULE, REASSIGN and CANCEL.
+                  // THE ROW IS NO LONGER A LINK, and that is load-bearing.
                   //
-                  // tabIndex + onKeyDown because a clickable <tr> is not
-                  // otherwise reachable by keyboard. The guard view omits
-                  // this; it is a gap there too, not a divergence here.
+                  // It used to be role="link" + tabIndex={0} + an onKeyDown
+                  // that preventDefault()ed Enter AND Space. Space is exactly
+                  // the key that toggles a focused checkbox, and a keydown on
+                  // the checkbox BUBBLES to the row — so once this table
+                  // carried checkboxes, that handler cancelled the toggle.
+                  //
+                  // Measured in a browser against a control checkbox with no
+                  // ancestor handler, same real keypress: the control toggled,
+                  // the in-row checkbox did not, AND the row navigated away.
+                  // Pressing Space to pick a shift lost the page you were
+                  // picking on. SlotAssignPanel's docblock predicted this and
+                  // is why the slot list was built as a separate table.
+                  //
+                  // Guarding around it (stopPropagation on the checkbox)
+                  // would fix the symptom. Deleting the handler removes the
+                  // cause. Navigation moves to a real <Link> in the DATE cell,
+                  // which is REQUIRED, not cosmetic: removing tabIndex and
+                  // onKeyDown removes the row's only keyboard path.
+                  //
+                  // The ARIA fix rides along — a role="link" containing a
+                  // checkbox and a button is invalid nesting — but it is not
+                  // why this changed. Both controls stayed reachable; the
+                  // stolen keypress is the defect.
+                  //
+                  // onClick stays for mouse convenience, with a target test so
+                  // a click on the checkbox, its label, or ASSIGN GUARD does
+                  // not also navigate.
                   <tr
                     key={s.id}
-                    onClick={() => router.push(`/admin/shifts/${s.id}`)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        router.push(`/admin/shifts/${s.id}`);
-                      }
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest('input,button,a')) return;
+                      router.push(`/admin/shifts/${s.id}`);
                     }}
-                    tabIndex={0}
-                    role="link"
-                    aria-label={`Open shift detail for ${fmtDateShort(s.scheduled_start)}`}
-                    className="border-b border-[#1A3050] last:border-b-0 hover:bg-[#0B1526] transition-colors cursor-pointer focus:outline-none focus:bg-[#0B1526] focus:ring-1 focus:ring-inset focus:ring-[#00C8FF]/50"
+                    className="border-b border-[#1A3050] last:border-b-0 hover:bg-[#0B1526] transition-colors cursor-pointer"
                   >
-                    <td className="p-4 text-gray-300 text-xs font-mono whitespace-nowrap">{fmtDateShort(s.scheduled_start)}</td>
+                    <td className="p-4 align-top">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select shift on ${fmtDateShort(s.scheduled_start)}`}
+                        checked={selected.has(s.id)}
+                        onChange={() => toggle(s.id)}
+                        disabled={busy || !canSelect(s.id)}
+                        className="accent-amber-400"
+                      />
+                    </td>
+                    <td className="p-4 text-gray-300 text-xs font-mono whitespace-nowrap">
+                      {/* The keyboard path. Was the row; is now this. */}
+                      <Link
+                        href={`/admin/shifts/${s.id}`}
+                        className="hover:text-amber-400 focus:outline-none focus:ring-1 focus:ring-[#00C8FF]/50 rounded"
+                      >
+                        {fmtDateShort(s.scheduled_start)}
+                      </Link>
+                    </td>
                     <td className="p-4 text-gray-400 text-xs font-mono whitespace-nowrap">
                       {fmtTime(s.scheduled_start)} → {fmtTime(s.scheduled_end)}
                       <span className="text-gray-600 ml-2">({fmtDuration(s.scheduled_start, s.scheduled_end)})</span>
@@ -297,7 +344,29 @@ export default function SiteShiftsPage() {
                         </span>
                       )}
                     </td>
-                    <td className="p-4 text-right">
+                    <td className="p-4 text-right align-top">
+                      {/* Why this row cannot take the active verb, or what the
+                          server said when it refused. Same sentences as the
+                          dialog's table, from lib/bulkShiftCopy — an admin
+                          must not meet two wordings for one reason. */}
+                      {!canSelect(s.id) && bulkPool.some((b) => b.id === s.id) && (
+                        <span className="block text-gray-600 text-[11px] mb-1 text-left">
+                          {blockedLabel(verb, s.status)}
+                        </span>
+                      )}
+                      {canSelect(s.id) && !failures.get(s.id) && chosenBlocked.has(s.id) && (
+                        <span className="block text-amber-400/80 text-[11px] mb-1 text-left">
+                          {REASON_LABEL[chosenBlocked.get(s.id)!.reason] ?? 'Unavailable'}
+                          {chosenBlocked.get(s.id)!.conflict && (
+                            <> — {chosenBlocked.get(s.id)!.conflict!.site_name}</>
+                          )}
+                        </span>
+                      )}
+                      {failures.get(s.id) && (
+                        <span className="block text-red-400 text-[11px] mb-1 text-left">
+                          {failures.get(s.id)}
+                        </span>
+                      )}
                       {!s.guard_id && (
                         <button
                           // stopPropagation, or this also fires the row's
@@ -317,6 +386,8 @@ export default function SiteShiftsPage() {
           </div>
         )}
       </div>
+        )}
+      </BulkShiftActions>
 
       {/* Shared modals — Schedule modal is pre-filled + limited to this site */}
       <ScheduleShiftModal
