@@ -2,7 +2,11 @@
  * Pre-shift push reminder — runs every 5 minutes.
  *
  * Fires a "Shift in 1 hour" push to the assigned guard for any scheduled
- * shift whose scheduled_start falls in the 55-65 min ahead window. The
+ * shift whose scheduled_start falls in the band defined by
+ * constants/preShiftWindow.ts (55-65 min ahead). That band is SHARED with
+ * jobs/unstaffedPostWarning.ts, which covers the complementary case - the
+ * same window, for shifts with NO guard on them. Do not inline the bounds
+ * here again; if the two drifted, a shift could fall in neither.
  * 10-min-wide window means each shift sees up to 2 ticks of opportunity;
  * a `pre_shift_reminder_sent_at` stamp prevents the second tick from
  * re-pushing once the first succeeds.
@@ -23,6 +27,7 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
+import { preShiftWindowSql } from '../constants/preShiftWindow';
 
 interface CandidateRow {
   shift_id: string;
@@ -51,7 +56,7 @@ runJob('preShiftReminder', '*/5 * * * *', async () => {
        JOIN sites  st ON st.id = s.site_id
        LEFT JOIN guards g ON g.id = s.guard_id
        WHERE s.status = 'scheduled'
-         AND s.scheduled_start BETWEEN NOW() + INTERVAL '55 minutes' AND NOW() + INTERVAL '65 minutes'
+         AND ${preShiftWindowSql('s.scheduled_start')}
          AND s.pre_shift_reminder_sent_at IS NULL`,
     );
 

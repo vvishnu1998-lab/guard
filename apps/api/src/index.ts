@@ -43,6 +43,7 @@ import './jobs/monthlyHoursReport';
 import './jobs/chatRetention';
 import './jobs/pingReminder';
 import './jobs/preShiftReminder';
+import './jobs/unstaffedPostWarning';
 import './jobs/shiftStartReminder';
 import './jobs/expireSwapRequests';
 import './jobs/handoffNudge';
