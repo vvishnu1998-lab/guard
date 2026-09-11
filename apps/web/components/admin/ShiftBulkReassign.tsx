@@ -68,7 +68,18 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { adminPatch, adminPost } from '../../lib/adminApi';
+import {
+  admits, cancelFailureLabel, REASON_LABEL,
+} from '../../lib/bulkShiftCopy';
+import type { BulkVerb } from '../../lib/bulkShiftCopy';
 import { fmtDateShort, fmtTime } from '../../lib/shiftFormat';
+
+// Re-exported so existing importers keep working unchanged — the decision
+// moved to lib/bulkShiftCopy.ts so a check could EXECUTE it, not because the
+// consumers should have to know that. GuardDeactivateDialog imports
+// isReassignable from here.
+export { isReassignable, isCancellable, admits } from '../../lib/bulkShiftCopy';
+export type { BulkVerb } from '../../lib/bulkShiftCopy';
 
 export interface ReassignableShift {
   id:              string;
@@ -81,14 +92,6 @@ export interface ReassignableShift {
 }
 
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean }
-
-/** Only these two statuses can move. Mirrors PATCH /:id/reassign, which
- *  refuses 'completed' and 'missed' with a 400, and mirrors the write set of
- *  PATCH /guards/:id/deactivate. A row outside this set is shown, greyed and
- *  labelled, never silently dropped. */
-export function isReassignable(status: string): boolean {
-  return status === 'scheduled' || status === 'active';
-}
 
 interface BlockedEntry {
   shift_id: string;
@@ -109,17 +112,7 @@ interface Candidate {
   blocked:      BlockedEntry[];
 }
 
-/** Guard-facing copy per machine reason. Branch on the ENUM, never on prose.
- *  Mirrors SlotAssignPanel's map; `already_on_shift` and `not_reassignable`
- *  are this endpoint's, `slot_full`/`template_changed` have no analogue on a
- *  shift and are absent rather than carried over dead. */
-const REASON_LABEL: Record<string, string> = {
-  guard_inactive:       'Inactive',
-  not_reassignable:     'Already completed or missed',
-  already_on_shift:     'Already on this shift',
-  not_assigned_to_site: 'Not assigned to this site',
-  overlap:              'Busy elsewhere',
-};
+
 
 interface Props {
   shifts:   ReassignableShift[];
@@ -133,10 +126,32 @@ interface Props {
   onDone:   (movedCount: number) => void;
   /** Rendered above the list. */
   title?:   string;
+  /**
+   * Whether the CANCEL verb is offered at all. Default true.
+   *
+   * WHY THE TWO CALL SITES DIFFER - do not "complete" this by turning it on
+   * everywhere. /admin/shifts/site/[siteId] gets cancel: an admin looking at
+   * a site's schedule is in the right place to remove work from it.
+   *
+   * GuardDeactivateDialog passes false. That dialog exists to MOVE a
+   * departing guard's work, and Phase E locked it to exactly two outcomes -
+   * reassign (the post stays covered) or unassign (the post stays, as a gap).
+   * Cancel is a third, IRREVERSIBLE outcome that deletes the requirement
+   * itself, and an admin midway through deactivating someone is the worst
+   * moment to be offered it: the shifts on screen are there because they
+   * belong to the guard being removed, not because anyone decided the posts
+   * were unnecessary. Offering cancel there invites a one-way action taken
+   * for the wrong reason.
+   *
+   * If that is ever revisited it is a change to Phase E's decision, not to
+   * this component's.
+   */
+  allowCancel?: boolean;
 }
 
 export default function ShiftBulkReassign({
-  shifts, guards, excludeGuardId, reason, onDone, title = 'REASSIGN SHIFTS',
+  shifts, guards, excludeGuardId, reason, onDone,
+  title = 'BULK ACTIONS', allowCancel = true,
 }: Props) {
   const [selected,  setSelected]  = useState<Set<string>>(new Set());
   const [guardId,   setGuardId]   = useState('');
@@ -147,8 +162,19 @@ export default function ShiftBulkReassign({
   const [candidates,  setCandidates]  = useState<Candidate[] | null>(null);
   const [candLoading, setCandLoading] = useState(false);
   const [candUnavailable, setCandUnavailable] = useState(false);
+  const [verbState, setVerb] = useState<BulkVerb>('reassign');
+  // Derived, not just hidden: with cancel gated off there is no state a stale
+  // 'cancel' could survive in, so the verb cannot be reached by any path.
+  const verb: BulkVerb = allowCancel ? verbState : 'reassign';
+  // Cancel is one-way and there is no un-cancel path anywhere in the API, so
+  // it never fires straight off the action bar. See the confirm panel below.
+  const [confirming, setConfirming] = useState(false);
 
-  const movable = useMemo(() => shifts.filter((s) => isReassignable(s.status)), [shifts]);
+  // Eligible rows depend on the VERB, not on a fixed predicate. This is the
+  // part that reaches the table body: the same row is selectable under
+  // reassign and not under cancel.
+  const eligible = useMemo(
+    () => shifts.filter((s) => admits(verb, s.status)), [shifts, verb]);
 
   // Stable key so the effect re-runs on WHAT is selected, not on the Set
   // identity — toggling two shifts on and off again must not refetch.
@@ -171,17 +197,44 @@ export default function ShiftBulkReassign({
   }, []);
 
   useEffect(() => {
+    // Candidates are a REASSIGN concept. Under cancel there is no guard to
+    // pick, so the request is not made at all rather than made and ignored.
+    if (verb === 'cancel') { setCandidates(null); setCandUnavailable(false); return; }
     const ids = selectionKey ? selectionKey.split(',') : [];
     loadCandidates(ids);
-  }, [selectionKey, loadCandidates]);
+  }, [verb, selectionKey, loadCandidates]);
+
+  // Switching verb narrows what is selectable, so a row ticked under reassign
+  // can become ineligible under cancel. Drop those rather than carrying a
+  // selection the new verb cannot act on — otherwise the batch would contain
+  // a guaranteed failure the UI already knows about.
+  useEffect(() => {
+    const ok = new Set(shifts.filter((s) => admits(verb, s.status)).map((s) => s.id));
+    setSelected((prev) => {
+      const next = new Set(Array.from(prev).filter((id) => ok.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    setConfirming(false);
+    setFailures(new Map());
+    setMovedLast(0);
+  }, [verb, shifts]);
 
   // Blocked reasons for the guard currently chosen, keyed by shift.
   const chosenBlocked = useMemo(() => {
     const c = candidates?.find((x) => x.guard_id === guardId);
     return new Map((c?.blocked ?? []).map((b) => [b.shift_id, b]));
   }, [candidates, guardId]);
-  const blockedRows = useMemo(() => shifts.filter((s) => !isReassignable(s.status)), [shifts]);
-  const allSelected = movable.length > 0 && selected.size === movable.length;
+  const blockedRows = useMemo(
+    () => shifts.filter((s) => !admits(verb, s.status)), [shifts, verb]);
+  const allSelected = eligible.length > 0 && selected.size === eligible.length;
+
+  // Sites covered by the current selection — the confirm panel names them,
+  // because "cancel 12 shifts" without a site is not a reviewable sentence.
+  const selectedSites = useMemo(() => {
+    const names = new Set(
+      shifts.filter((s) => selected.has(s.id)).map((s) => s.site_name));
+    return Array.from(names);
+  }, [shifts, selected]);
 
   function toggle(id: string) {
     setSelected((prev) => {
@@ -193,11 +246,17 @@ export default function ShiftBulkReassign({
 
   function toggleAll() {
     setSelected((prev) =>
-      prev.size === movable.length ? new Set() : new Set(movable.map((s) => s.id)));
+      prev.size === eligible.length ? new Set() : new Set(eligible.map((s) => s.id)));
   }
 
+  /** Sequential, one request per shift, partial results — the shape both
+   *  verbs share. Sequential rather than Promise.all for reassign because two
+   *  moves to the same guard in overlapping windows must see each other; kept
+   *  for cancel so progress is reportable and the two read identically. */
   async function run() {
-    if (!guardId || selected.size === 0) return;
+    if (selected.size === 0) return;
+    if (verb === 'reassign' && !guardId) return;
+    if (verb === 'cancel' && !confirming) { setConfirming(true); return; }
     setBusy(true);
     setFailures(new Map());
     setMovedLast(0);
@@ -217,13 +276,24 @@ export default function ShiftBulkReassign({
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       try {
-        await adminPatch(`/api/shifts/${id}/reassign`, {
-          new_guard_id: guardId,
-          ...(reason ? { reason } : {}),
-        });
+        if (verb === 'cancel') {
+          // Fixed reason, never a prompt. shifts.cancellation_reason has ZERO
+          // readers anywhere in api/web/mobile, so a free-text field would be
+          // write-only; a fixed value at least keeps bulk cancels separable
+          // from ad-hoc ones later, which is the one thing the column was
+          // ever wanted for.
+          await adminPatch(`/api/shifts/${id}/cancel`, { reason: 'admin_bulk_cancelled' });
+        } else {
+          await adminPatch(`/api/shifts/${id}/reassign`, {
+            new_guard_id: guardId,
+            ...(reason ? { reason } : {}),
+          });
+        }
         moved++;
       } catch (e: any) {
-        failed.set(id, e?.message ?? 'Could not reassign');
+        failed.set(id, verb === 'cancel'
+          ? cancelFailureLabel(e)
+          : (e?.message ?? 'Could not reassign'));
       }
       setProgress({ done: i + 1, total: ids.length });
     }
@@ -234,6 +304,7 @@ export default function ShiftBulkReassign({
     setSelected(new Set(failed.keys()));
     setMovedLast(moved);
     setGuardId('');
+    setConfirming(false);
     setProgress(null);
     setBusy(false);
     if (moved > 0) onDone(moved);
@@ -245,28 +316,129 @@ export default function ShiftBulkReassign({
     <div className="border border-[#1A3050] rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-[#1A3050] flex items-center justify-between flex-wrap gap-2">
         <h3 className="text-gray-300 text-xs tracking-widest font-bold">{title}</h3>
-        {selected.size > 0 && (
-          <span className="text-amber-400 text-[11px] tracking-widest">{selected.size} selected</span>
-        )}
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Verb switcher. NOT two peer buttons that both act — picking a
+              verb only changes what is selectable and what the action bar
+              offers. Cancel still needs its own confirm before anything is
+              written. */}
+          {allowCancel && (
+          <div role="group" aria-label="Bulk action" className="flex rounded-lg overflow-hidden border border-[#1A3050]">
+            {(['reassign', 'cancel'] as BulkVerb[]).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setVerb(v)}
+                disabled={busy}
+                aria-pressed={verb === v}
+                className={`px-3 py-1 text-[11px] tracking-widest transition-colors disabled:opacity-40 ${
+                  verb === v
+                    ? (v === 'cancel'
+                        ? 'bg-red-500/20 text-red-300'
+                        : 'bg-amber-400/20 text-amber-300')
+                    : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {v === 'cancel' ? 'CANCEL' : 'REASSIGN'}
+              </button>
+            ))}
+          </div>
+          )}
+          {selected.size > 0 && (
+            <span className="text-amber-400 text-[11px] tracking-widest">{selected.size} selected</span>
+          )}
+        </div>
       </div>
 
       {(movedLast > 0 || failures.size > 0) && (
         <div className="px-4 py-2 border-b border-[#1A3050] bg-[#0B1526] text-xs">
           {movedLast > 0 && (
             <p className="text-green-400">
-              {movedLast} shift{movedLast === 1 ? '' : 's'} reassigned.
+              {movedLast} shift{movedLast === 1 ? '' : 's'}{' '}
+              {verb === 'cancel' ? 'cancelled.' : 'reassigned.'}
             </p>
           )}
           {failures.size > 0 && (
             <p className="text-red-400">
-              {failures.size} could not be moved — still selected, with the reason on each row.
+              {failures.size} could not be {verb === 'cancel' ? 'cancelled' : 'moved'} —
+              {' '}still selected, with the reason on each row.
             </p>
           )}
         </div>
       )}
 
-      {/* Assign bar. Only once something is ticked. */}
-      {selected.size > 0 && (
+      {/* Cancel confirm. Cancel is ONE-WAY: no route or job anywhere in the
+          API moves a shift out of 'cancelled', `shifts` has no updated_at, and
+          recovery means hand-written SQL against prod. So it never fires off
+          the action bar — this panel names the count and the site first.
+
+          Deliberately the COMPLEMENT of GuardDeactivateDialog's unassign
+          panel rather than a new pattern: that one says the shift stays and
+          the requirement remains, this one says both go. */}
+      {verb === 'cancel' && selected.size > 0 && confirming && (
+        <div className="px-4 py-3 border-b border-[#1A3050] bg-red-900/25">
+          <p className="text-red-300 text-sm font-medium mb-2">
+            Cancel {selected.size} shift{selected.size === 1 ? '' : 's'}
+            {selectedSites.length === 1
+              ? <> at {selectedSites[0]}</>
+              : <> across {selectedSites.length} sites</>}?
+          </p>
+          <ul className="text-gray-400 text-xs space-y-1 list-disc list-inside mb-3">
+            <li>
+              {selected.size === 1 ? 'The shift leaves' : 'Each shift leaves'} the schedule.
+              The requirement disappears with it — nothing shows as a gap, and nobody
+              will be asked to fill it.
+            </li>
+            <li>This is not the same as unassigning. Unassigning keeps the post; this removes it.</li>
+            <li>
+              <strong className="text-red-300">This cannot be undone.</strong> There is no
+              un-cancel — restoring these would mean editing the database by hand.
+            </li>
+            {selectedSites.length > 1 && (
+              <li>Sites affected: {selectedSites.join(', ')}.</li>
+            )}
+          </ul>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={busy}
+              className="border border-[#1A3050] text-gray-400 rounded-lg px-4 py-2 text-xs tracking-widest hover:border-gray-500 disabled:opacity-40 transition-colors"
+            >
+              KEEP THEM
+            </button>
+            <button
+              type="button"
+              onClick={run}
+              disabled={busy}
+              className="bg-red-500 text-white font-bold rounded-lg px-4 py-2 text-xs tracking-widest hover:bg-red-400 disabled:opacity-40 transition-colors"
+            >
+              {progress
+                ? `CANCELLING ${progress.done}/${progress.total}…`
+                : `CANCEL ${selected.size} SHIFT${selected.size === 1 ? '' : 'S'}`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel action bar — opens the confirm, never writes. */}
+      {verb === 'cancel' && selected.size > 0 && !confirming && (
+        <div className="px-4 py-3 border-b border-[#1A3050] bg-[#0B1526] flex items-center gap-3 flex-wrap">
+          <span className="text-gray-500 text-[11px] tracking-widest">
+            {selected.size} shift{selected.size === 1 ? '' : 's'} selected
+          </span>
+          <button
+            type="button"
+            onClick={run}
+            disabled={busy}
+            className="border border-red-400/40 text-red-400 rounded-lg px-4 py-2 text-xs tracking-widest hover:bg-red-400/10 disabled:opacity-40 transition-colors"
+          >
+            CANCEL SHIFTS…
+          </button>
+        </div>
+      )}
+
+      {/* Assign bar. Only once something is ticked, and only under reassign. */}
+      {verb === 'reassign' && selected.size > 0 && (
         <div className="px-4 py-3 border-b border-[#1A3050] bg-[#0B1526] flex items-center gap-3 flex-wrap">
           <label htmlFor="bulk-reassign-guard" className="text-gray-500 text-[11px] tracking-widest">
             REASSIGN TO
@@ -333,10 +505,12 @@ export default function ShiftBulkReassign({
               <th className="p-3 w-10 text-left">
                 <input
                   type="checkbox"
-                  aria-label="Select all reassignable shifts"
+                  aria-label={verb === 'cancel'
+                    ? 'Select all cancellable shifts'
+                    : 'Select all reassignable shifts'}
                   checked={allSelected}
                   onChange={toggleAll}
-                  disabled={busy || movable.length === 0}
+                  disabled={busy || eligible.length === 0}
                   className="accent-amber-400"
                 />
               </th>
@@ -348,7 +522,10 @@ export default function ShiftBulkReassign({
           </thead>
           <tbody>
             {shifts.map((s) => {
-              const movableRow = isReassignable(s.status);
+              // Verb-aware. Under cancel an 'active' row is NOT selectable,
+              // because the route refuses it — the UI must not offer a batch
+              // that is guaranteed to fail on that row.
+              const movableRow = admits(verb, s.status);
               const failure = failures.get(s.id);
               return (
                 <tr
@@ -379,7 +556,11 @@ export default function ShiftBulkReassign({
                         the untouchable part marked. */}
                     {!movableRow && (
                       <span className="block text-gray-600 text-[11px] mt-0.5">
-                        Not reassignable — already {s.status}.
+                        {verb === 'cancel'
+                          ? (s.status === 'active'
+                              ? 'Not cancellable — a guard is clocked in.'
+                              : `Not cancellable — already ${s.status}.`)
+                          : `Not reassignable — already ${s.status}.`}
                       </span>
                     )}
                     {/* Before the attempt: why the CHOSEN guard cannot take
@@ -405,7 +586,8 @@ export default function ShiftBulkReassign({
 
       {blockedRows.length > 0 && (
         <div className="px-4 py-2 border-t border-[#1A3050] text-gray-600 text-[11px]">
-          {blockedRows.length} shift{blockedRows.length === 1 ? '' : 's'} listed but not reassignable.
+          {blockedRows.length} shift{blockedRows.length === 1 ? '' : 's'} listed but not{' '}
+          {verb === 'cancel' ? 'cancellable' : 'reassignable'}.
         </div>
       )}
     </div>

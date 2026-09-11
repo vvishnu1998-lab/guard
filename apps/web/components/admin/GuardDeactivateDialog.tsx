@@ -304,7 +304,13 @@ export default function GuardDeactivateDialog({ guard, guards, onClose, onDone }
                   guards={guards}
                   excludeGuardId={guardId}
                   reason="guard_deactivated"
-                  title="MOVE SHIFTS TO ANOTHER GUARD"
+                  // Phase E locked this dialog to two outcomes: reassign (the
+                  // post stays covered) or unassign (the post stays, as a
+                  // gap). Cancel deletes the requirement itself and cannot be
+                  // undone - not a verb to offer mid-deactivation. See the
+                  // prop's docblock.
+                  allowCancel={false}
+                  title="THIS GUARD'S UPCOMING SHIFTS"
                   onDone={() => { load(); }}
                 />
                 <p className="text-gray-500 text-xs mt-3 mb-4">
