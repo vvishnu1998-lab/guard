@@ -968,6 +968,38 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 // unassigned). shift_sessions is READ (open-session gate) but never
 // written; reports, task_completions, geofence_violations and
 // clock_in_verifications are never referenced.
+//
+// ── ERROR SHAPE: WHY THIS ROUTE IS NOT SHAPED LIKE swap/handoff-response ──
+//
+// Every 409 below carries `code` (a machine enum) with the guard-facing prose
+// left in BOTH `error` and `message`. swap-response and handoff-response put
+// the enum in `error` AS WELL. That difference is deliberate. Do not "fix" it.
+//
+// The rule is not "put the enum in both fields". It is: PUT THE ENUM WHERE
+// THE CONSUMER CAN READ IT — and which fields those are depends on which
+// client calls the route.
+//
+//   MOBILE (lib/errors.ts:72) derives ApiError.code from the body's `error`
+//   field and has no other path to it, so a route mobile calls MUST put the
+//   enum in `error` or `err.code` never matches. That is why N46 shaped the
+//   swap/handoff 409s the way it did.
+//
+//   WEB (lib/adminApi.ts:38-47) has NO `code` field on ApiError at all. It
+//   keeps the whole parsed body on `.body`, so a web caller reads
+//   `err.body.code` directly — and adminApi.ts:73 puts `body.error` straight
+//   into ApiError.message, which admin screens render verbatim
+//   (app/admin/shifts/[shiftId]/page.tsx:363 is one).
+//
+// This route is WEB-ONLY: requireAuth('company_admin','vishnu'), and mobile
+// has no cancel path (its only `cancel` is /handoff-cancel, a different
+// route). So putting the enum in `error` here would buy nothing that
+// `err.body.code` does not already give, and would cost the copy — an admin
+// would read the literal string SHIFT_NOT_SCHEDULED where a sentence used to
+// be. Keeping the prose makes this change PURELY ADDITIVE: every field an
+// existing consumer already read is byte-identical to what it was before.
+//
+// If mobile ever gains a cancel path, the enum has to move into `error` and
+// the copy has to move somewhere the admin UI reads instead.
 router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const { user } = req;
   const { id }   = req.params;
@@ -1028,7 +1060,18 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
         `shift_status=${shift.status}`,
       );
       return res.status(409).json({
-        error: 'SHIFT_HAS_OPEN_SESSION',
+        // `code` is the only new field. `error` already carried this enum at
+        // HEAD and is left exactly as it was, so the wire shape is unchanged
+        // for every existing reader.
+        //
+        // NOTE, not a thing to "tidy": this branch puts the enum in `error`
+        // and the five below put prose there. That asymmetry is INHERITED
+        // from HEAD, not introduced here, and it is why an admin already sees
+        // the raw string SHIFT_HAS_OPEN_SESSION on this one branch today
+        // (adminApi.ts:73 renders body.error). Fixing that is a copy change
+        // with its own blast radius; it is not part of adding codes.
+        code:    'SHIFT_HAS_OPEN_SESSION',
+        error:   'SHIFT_HAS_OPEN_SESSION',
         message:
           'A guard is still clocked in on this shift. They must clock out ' +
           '(or the shift must reach its scheduled end) before it can be cancelled.',
@@ -1043,27 +1086,51 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
       case 'active':
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'This shift is in progress (guard clocked in). Cancel is not allowed.',
+          code:         'SHIFT_NOT_SCHEDULED',
+          error:        'This shift is in progress (guard clocked in). Cancel is not allowed.',
+          message:      'This shift is in progress (guard clocked in). Cancel is not allowed.',
+          shift_status: shift.status,
         });
       case 'completed':
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'This shift has already completed and cannot be cancelled.',
+          code:         'SHIFT_NOT_SCHEDULED',
+          error:        'This shift has already completed and cannot be cancelled.',
+          message:      'This shift has already completed and cannot be cancelled.',
+          shift_status: shift.status,
         });
       case 'missed':
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'This shift was already marked missed.',
+          code:         'SHIFT_NOT_SCHEDULED',
+          error:        'This shift was already marked missed.',
+          message:      'This shift was already marked missed.',
+          shift_status: shift.status,
         });
       case 'cancelled':
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'This shift is already cancelled.',
+          // Deliberately NOT SHIFT_NOT_SCHEDULED. This is the benign outcome -
+          // somebody else got there first and the shift is already in the state
+          // the caller wanted. A batch should read it as "nothing to do", not
+          // as a failure.
+          code:         'ALREADY_CANCELLED',
+          error:        'This shift is already cancelled.',
+          message:      'This shift is already cancelled.',
+          shift_status: shift.status,
         });
       default:
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: `Shift status '${shift.status}' cannot be cancelled.`,
+          // Reached by 'unassigned' today. Same code as the other
+          // wrong-status branches: the caller's next move is identical, and the
+          // row already shows its own status. Widening the switch to ADMIT
+          // 'unassigned' is a separate, deliberate change (filed) - it is a
+          // semantics change to a one-way destructive route.
+          code:         'SHIFT_NOT_SCHEDULED',
+          error:        `Shift status '${shift.status}' cannot be cancelled.`,
+          message:      `Shift status '${shift.status}' cannot be cancelled.`,
+          shift_status: shift.status,
         });
     }
 

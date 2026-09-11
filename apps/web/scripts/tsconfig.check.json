@@ -4,12 +4,12 @@
     "module": "commonjs",
     "moduleResolution": "node",
     "target": "es2020",
-    "lib": ["es2021"],
+    "lib": ["es2021", "dom"],
     "types": ["node"],
     "esModuleInterop": true,
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true
   },
-  "include": ["./**/*.ts", "../lib/shiftFormat.ts"]
+  "include": ["./**/*.ts", "../lib/shiftFormat.ts", "../lib/bulkShiftCopy.ts", "../lib/adminApi.ts"]
 }

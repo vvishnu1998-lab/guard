@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "check:date-format": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-date-format.ts"
+    "check:date-format": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-date-format.ts",
+    "check:bulk-cancel-copy": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-bulk-cancel-copy.ts"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",

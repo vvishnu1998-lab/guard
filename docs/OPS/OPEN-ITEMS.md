@@ -2144,3 +2144,42 @@ sites the audit inventoried".
 Fix is tidying. **Size XS. Tier 0.**
 
 ---
+
+---
+
+## New from batch cancel (2026-09-11)
+
+**N78. The cancel route's open-session 409 shows an admin a raw enum, and always has.**
+verified: YES - traced end to end at this ref.
+
+`PATCH /api/shifts/:id/cancel`'s open-session branch returns
+`{ code, error: 'SHIFT_HAS_OPEN_SESSION', message: 'A guard is still clocked in on this shift...' }`.
+`error` has carried the enum since that branch was written; only `code` is new.
+
+`apps/web/lib/adminApi.ts:73` constructs `ApiError` with `body.error` as the message, and
+`app/admin/shifts/[shiftId]/page.tsx:363` does `setCancelErr(String(e?.message ...))` straight onto
+the screen. So an admin who tries to cancel a shift a guard is clocked in on reads the literal
+string **`SHIFT_HAS_OPEN_SESSION`** - not the sentence sitting unused in `message` two lines below
+it in the same body.
+
+**Pre-existing. Not introduced by the batch-cancel work**, which deliberately left every `error`
+value byte-identical (proven by diffing the route's error values against HEAD). It is called out in
+the route docblock so the asymmetry is not "tidied" by someone who assumes it was an oversight.
+
+The five sibling 409s do not have this problem - they keep prose in `error` precisely because web
+renders that field. This one branch predates that reasoning.
+
+**Two ways to close it, and they are not equivalent:**
+
+- Move the prose into `error` and let `code` carry the enum, matching the other five. Cheapest, and
+  makes the route internally consistent. Risk: anything branching on
+  `error === 'SHIFT_HAS_OPEN_SESSION'` stops matching. Nothing does today -
+  `jobs/autoCompleteShifts.ts:50` mentions it in a COMMENT only, and the new
+  `lib/bulkShiftCopy.ts` reads `body.code`, not `body.error`.
+- Leave the route alone and fix the consumer to prefer `body.message`. Narrower blast radius on the
+  API, but every future consumer of this route inherits the same trap.
+
+Recommend the first, in its own commit, with the grep for `error === ` branches run first.
+**Size XS. Tier 0.**
+
+---

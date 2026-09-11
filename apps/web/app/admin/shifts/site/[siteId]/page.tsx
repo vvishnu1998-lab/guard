@@ -206,7 +206,7 @@ export default function SiteShiftsPage() {
             <ShiftBulkReassign
               shifts={reassignPool}
               guards={guards}
-              title="MOVE SHIFTS AT THIS SITE"
+              title="SHIFTS AT THIS SITE"
               onDone={load}
             />
           )}
