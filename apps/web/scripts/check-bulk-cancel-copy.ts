@@ -30,11 +30,11 @@ const fail = (m: string) => { failures++; console.error(`  FAIL  ${m}`); };
 // ── 1. selectability ──────────────────────────────────────────────────────
 const STATUSES = ['unassigned', 'scheduled', 'active', 'completed', 'missed', 'cancelled'];
 const EXPECT: Record<BulkVerb, Record<string, boolean>> = {
-  reassign: { unassigned: false, scheduled: true, active: true,  completed: false, missed: false, cancelled: false },
-  cancel:   { unassigned: true,  scheduled: true, active: false, completed: false, missed: false, cancelled: false },
+  assign: { unassigned: true, scheduled: true, active: true,  completed: false, missed: false, cancelled: false },
+  cancel: { unassigned: true, scheduled: true, active: false, completed: false, missed: false, cancelled: false },
 };
 console.log('[check-bulk-cancel-copy] selectability');
-for (const verb of ['reassign', 'cancel'] as BulkVerb[]) {
+for (const verb of ['assign', 'cancel'] as BulkVerb[]) {
   const row = STATUSES.map((st) => {
     const got = admits(verb, st);
     const want = EXPECT[verb][st];
@@ -43,14 +43,29 @@ for (const verb of ['reassign', 'cancel'] as BulkVerb[]) {
   });
   console.log(`  ${verb.padEnd(8)} ${row.join('  ')}`);
 }
-// The ones that matter, called out so a future edit cannot quietly flip them.
-// NEITHER VERB'S SET CONTAINS THE OTHER'S, which is the whole reason these are
-// two predicates rather than one with a flag. Each verb admits exactly one
-// status the other refuses:
-if (admits('reassign', 'active') !== true)  fail("reassign must admit 'active'");
-if (admits('cancel', 'active')   !== false) fail("cancel must NOT admit 'active' - the route 409s it");
-if (admits('cancel', 'unassigned')   !== true)  fail("cancel must admit 'unassigned' - the route accepts it");
-if (admits('reassign', 'unassigned') !== false) fail("reassign must NOT admit 'unassigned' - no guard to move");
+// The one that matters, called out so a future edit cannot quietly flip it.
+//
+// CANCEL IS A STRICT SUBSET OF ASSIGN, and 'active' is the single status they
+// disagree on. That is the whole content of the distinction now: an in-progress
+// shift can have its guard changed, and cannot be cancelled while somebody is
+// clocked in on it.
+//
+// This callout previously read "reassign must NOT admit 'unassigned' - no
+// guard to move". That was correct when the verb was REASSIGN and is exactly
+// the case the ASSIGN verb exists to enable, so it is rewritten rather than
+// flipped - a check whose rationale has expired is worse than no check,
+// because the message is what the next reader believes.
+if (admits('assign', 'active') !== true)  fail("assign must admit 'active' - an in-progress shift can change hands");
+if (admits('cancel', 'active') !== false) fail("cancel must NOT admit 'active' - the route 409s it");
+
+// The subset relation itself, asserted rather than assumed: every status
+// cancel admits, assign must admit too. If that stops holding, the per-row
+// routing and the selection pruning on verb switch both need revisiting.
+for (const st of STATUSES) {
+  if (admits('cancel', st) && !admits('assign', st)) {
+    fail(`cancel admits '${st}' but assign does not - subset relation broken`);
+  }
+}
 
 // ── 2. copy map, both halves ──────────────────────────────────────────────
 const mk = (status: number, body: Record<string, unknown>) =>

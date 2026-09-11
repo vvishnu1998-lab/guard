@@ -2222,3 +2222,160 @@ Fix: one `escapeHtml(s: string): string` in `services/email.ts`, applied to
 every `${...}` that carries database text, in a single commit that touches all
 eleven templates. Do not do it piecemeal.
 **Size S. Tier 2.**
+
+## New from the ASSIGN verb (2026-09-11)
+
+**N80. `PATCH /shifts/:id/reassign` has NEVER pushed the outgoing guard — Map read with bracket syntax.**
+verified: YES — `apps/api/src/routes/shifts.ts:872-899` and
+`apps/api/src/services/deviceRegistry.ts:322-324` read at `28bc3a2`.
+
+`getActivePushTokens` returns `Promise<Map<string, string>>`. Two lines read it,
+and only one reads it correctly:
+
+```js
+const newToken = tokenByGuardId.get(new_guard_id);                              // :882  Map.get — works
+const oldToken = shift.old_guard_id ? tokenByGuardId[shift.old_guard_id] : ...; // :892  property access on a Map — ALWAYS undefined
+```
+
+So `oldToken` is always `undefined`, the `if (oldToken && …)` never enters, and
+**"Your {date} shift at {site} has been reassigned. You no longer need to cover
+it." has never been delivered to anybody.** A guard whose shift is taken away
+is told nothing: no push, and no Alerts row either (see N81).
+
+It fails silently in the worst way — no throw, no log line, no Sentry event,
+and the block is wrapped in the kind of `.catch()` that makes it look handled.
+The comment directly above it describes pushing both guards and explains why
+each is wrapped, so the code reads as working.
+
+**Not fixed alongside the ASSIGN verb rename, deliberately.** A change to what
+guards receive on their phones does not belong inside a UI relabelling, and it
+wants its own verification on a real device.
+
+Fix: `tokenByGuardId.get(shift.old_guard_id)`. One character class. Verify by
+reassigning a shift away from a guard with an active `guard_devices` row and
+confirming delivery, not by reading the diff.
+**Size XS. Tier 1.**
+
+---
+
+**N81. `reassign` writes no `insertNotification` — the incoming guard gets a push and no Alerts row.**
+verified: YES — no `insertNotification` call exists anywhere in
+`apps/api/src/routes/shifts.ts:731-912`.
+
+Every other notification path in the codebase treats the Alerts-tab row as the
+source of truth and the push as best-effort — `preShiftReminder`,
+`shiftStartReminder`, `lateClockInReminder` and `breakExpiryCron` all write the
+row FIRST and push second, explicitly so a guard with no `fcm_token` still sees
+it. `services/shiftPush.ts pushShiftAssignments` does the same.
+
+`reassign` calls `sendPushNotification` directly and writes nothing. So a guard
+newly put on a shift sees it in the Alerts tab if the admin used
+`assign-guard`, and does NOT if the admin used `reassign` — the same
+user-visible action with two different outcomes on the phone, decided by which
+route the UI happened to call.
+
+The ASSIGN verb makes this sharper, not worse: one button will now reach both
+routes, so the inconsistency becomes a coin flip on the row's prior status.
+
+Fix: `insertNotification({ type: 'shift_assigned', … })` before the push, same
+ordering as the four crons. Check `routes/notifications.ts` scope filters admit
+the type — `late_clock_in` needed a special case there for having no session.
+**Size S. Tier 1.**
+
+---
+
+**N82. `assign-guard` has no site-active check; `reassign` does.**
+verified: YES — `shifts.ts:773` refuses a deactivated site in `reassign`; no
+equivalent exists anywhere in `assign-guard` (`:546-726`).
+
+```js
+if (!shift.site_is_active) {            // reassign only
+  return res.status(409).json({ error: 'Site is deactivated. Reactivate it before reassigning shifts.' });
+}
+```
+
+Once the bulk surface routes between the two, this becomes visible: at a
+deactivated site an admin can FILL an empty shift but cannot MOVE an assigned
+one. Same surface, same button, opposite answers, for a reason nothing on
+screen explains.
+
+Neither route is a superset of the other — `assign-guard` has a session gate
+that `reassign` lacks, and `reassign` has this. They should converge.
+
+**Zero instances today**: prod has 1 deactivated site with 0 unassigned shifts
+and 0 upcoming shifts of any status. This is reachable the moment a site is
+deactivated while holding future work.
+
+Fix: add the same check to `assign-guard`, selecting `si.is_active` in the
+existing shift lookup. Deactivated sites cannot accept new work and filling an
+empty post is new work — the same argument `reassign` already makes.
+**Size XS. Tier 2.**
+
+---
+
+**N83. Neither assign route carries machine codes; the bulk surface renders two registers side by side.**
+verified: YES — every `res.status(409)` in `assign-guard` and `reassign` emits
+a bare `{ error: '<prose>' }`. PR #42 added `code` to the six cancel 409s only.
+
+`lib/bulkShiftCopy.ts REASON_LABEL` resolves failures on the enum and carries
+two namespaces — lowercase `shift-candidates` reasons, UPPERCASE cancel codes.
+The assign verb has neither, so its failures fall through to
+`e?.message ?? '…'` and render raw server prose while a cancel failure in the
+same batch renders a mapped label. A mixed batch shows both registers at once.
+
+Codes wanted, mirroring the cancel route's hybrid `{ code, error, message }`:
+`SHIFT_ALREADY_ASSIGNED`, `SHIFT_HAS_OPEN_SESSION` (reuse — same meaning),
+`GUARD_OVERLAP`, `GUARD_NOT_ELIGIBLE`, `GUARD_NOT_FOUND`, `SITE_DEACTIVATED`,
+`SHIFT_NOT_ASSIGNABLE`.
+
+**Put the enum where the consumer can read it**: web's `ApiError` has no `code`
+field and reads `err.body.code` while rendering `body.error` on screen, so
+`error` must keep its prose. Mobile derives `ApiError.code` from `body.error`
+and does not call these routes. See the cancel route's own docblock.
+
+Deferred from the ASSIGN verb change, which ships with raw prose exactly as
+`reassign` does today.
+**Size S. Tier 2.**
+
+---
+
+**N84. The shift detail page could always fill an unassigned shift — only the bulk surface refused.**
+verified: YES — `apps/web/app/admin/shifts/[shiftId]/page.tsx:237` and `:376`
+read at `28bc3a2`, before the ASSIGN verb landed.
+
+```js
+const canReassign = !!shift && shift.status !== 'completed' && shift.status !== 'missed';   // :237
+const body: { new_guard_id: string; reason?: string } = { new_guard_id: pickGuardId };      // :376
+```
+
+That gate mirrors `PATCH /shifts/:id/reassign` exactly, and that route refuses
+only `completed`/`missed` — so an `unassigned` row has ALWAYS had an enabled
+`REASSIGN GUARD` button on its detail page, and pressing it succeeds: the route
+sets `guard_id`, flips status to `'scheduled'`, and writes a
+`shift_reassignments` row with `old_guard_id = NULL`, which is exactly what
+`assign-guard` does.
+
+**So the capability existed the whole time, one click away, on another page.**
+The bulk surface was the only thing refusing — four STARNET rows greyed out
+reading "nobody is on this shift to move" while the same four rows were
+fillable individually. Worth recording because the ASSIGN verb was scoped as
+adding a capability, and it did not: it added REACH to one that was already
+there.
+
+**What is now inconsistent.** The same action reads **ASSIGN** on the bulk
+surface and **REASSIGN GUARD** on the detail page, and the two hit different
+routes for an unassigned row — bulk sends it to `assign-guard`, the detail page
+to `reassign`. Neither route is a superset of the other (N82), and they differ
+in what the guard receives (N81). An admin doing the same thing in two places
+gets two different audit shapes and two different notification outcomes.
+
+**A rename here reaches beyond the page.** `services/email.ts`'s missed-shift
+alert links to this page with the text "Reassign Guard", and the page's own
+docblock cites that link as its reason for existing. Renaming the control means
+touching the email too, and the email's link is correct for its own context — a
+missed shift always HAS a guard, so "reassign" is the accurate word there.
+
+Fix is a product decision before it is a code change: either leave the detail
+page alone and accept the two labels, or converge both on ASSIGN and reword the
+email link. Deliberately NOT done inside the bulk-surface rename.
+**Size S. Tier 2.**
