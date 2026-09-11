@@ -2379,3 +2379,45 @@ Fix is a product decision before it is a code change: either leave the detail
 page alone and accept the two labels, or converge both on ASSIGN and reword the
 email link. Deliberately NOT done inside the bulk-surface rename.
 **Size S. Tier 2.**
+
+---
+
+**N85. A rejected CORS origin is a 500, and Sentry captures every one as an exception.**
+verified: YES — `apps/api/src/index.ts:112-118` and `:214` read at `2f6b640`;
+no 4-arg error middleware exists anywhere in `apps/api/src`.
+
+```js
+return cb(new Error(`CORS: origin ${origin} not allowed`));   // :117
+```
+
+The `cors` package forwards that to `next(err)`. Nothing in the API handles it
+— there is no CORS-aware error middleware — so it reaches Express's default
+handler and becomes a **500**. A browser preflight from a disallowed origin
+therefore gets a 5xx instead of a response missing
+`Access-Control-Allow-Origin`, which is what a decline looks like.
+
+Fail-closed was the right intent and stays. The `cors` API expresses "decline"
+as `cb(null, false)`; `cb(new Error(...))` expresses "this server broke". A
+rejected origin is a routine, expected, client-side condition.
+
+**THE 500 IS THE SMALLER HALF.** `Sentry.setupExpressErrorHandler(app)` (`:214`)
+sees an error with no status, treats it as 5xx, and **captures it**. So every
+blocked origin — every scanner, every stray embed, every misconfigured client —
+becomes a Sentry exception, unbounded and forever.
+
+That is the same defect class as the SendGrid retry storm (N27/N28): an
+expected, correlated, indefinitely repeating condition reported as individual
+events, which exhausted the monthly quota in ~10 hours and blinded error
+monitoring for a further 94. It has not fired yet only because nothing is
+currently hammering the API cross-origin. It needs no attacker — a search
+crawler hitting an embedded URL would do it.
+
+Found while trying to run apps/web locally against production's API: the
+preflight on `POST /api/auth/admin/login` from `http://localhost:3000` returned
+500 rather than a clean rejection.
+
+Fix: `cb(null, false)`. One line. **Its own commit and its own verification** —
+it is a production write-path behaviour change, and "the browser still blocks
+it, and Sentry no longer sees it" is two assertions to prove, not one to assume.
+Confirm `ALLOWED_ORIGINS` on Railway is unchanged while doing it.
+**Size XS. Tier 1.**

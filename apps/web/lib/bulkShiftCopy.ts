@@ -67,6 +67,28 @@ export function admits(verb: BulkVerb, status: string): boolean {
   return verb === 'cancel' ? isCancellable(status) : isAssignable(status);
 }
 
+/** Why a listed row cannot take the active verb.
+ *
+ *  TWO tables render this now — the merged schedule table on
+ *  /admin/shifts/site/[siteId] and ShiftBulkReassign's own table in the
+ *  deactivation dialog — so the sentence lives here rather than in either of
+ *  them. It is the one thing about a blocked row that must not differ between
+ *  the two surfaces: an admin who sees "already completed" in one place and
+ *  something else in the other has to work out whether they mean the same.
+ *
+ *  'active' gets its own sentence under CANCEL because a clocked-in guard is a
+ *  different reason from a finished shift, and it is the only status the two
+ *  verbs disagree on. Every other status that reaches here is something the
+ *  shift FINISHED being, so "already X" reads correctly. */
+export function blockedLabel(verb: BulkVerb, status: string): string {
+  if (verb === 'cancel') {
+    return status === 'active'
+      ? 'Not cancellable — a guard is clocked in.'
+      : `Not cancellable — already ${status}.`;
+  }
+  return `Not assignable — already ${status}.`;
+}
+
 /** Guard-facing copy per machine reason. Branch on the ENUM, never on prose.
  *  Mirrors SlotAssignPanel's map; `already_on_shift` and `not_reassignable`
  *  are this endpoint's, `slot_full`/`template_changed` have no analogue on a

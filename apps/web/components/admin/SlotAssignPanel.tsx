@@ -7,22 +7,55 @@
  * filled or not — and lets an admin tick several and assign one guard to all
  * of them in a single action.
  *
- * ── This is the app's FIRST multi-select. It is built plainly. ────────────
+ * ── This was the app's FIRST multi-select. It is built plainly. ──────────
  *
  * A Set<string> of slot_start values, a header checkbox, and a per-row
- * checkbox. No selection framework, no generic <DataTable>, no context. When
- * a second multi-select surface appears, THAT is the moment to extract a
- * shared one — with two real call sites to design against rather than one
- * imagined pair.
+ * checkbox. No selection framework, no generic <DataTable>, no context.
+ *
+ * This paragraph used to end "when a second multi-select surface appears,
+ * THAT is the moment to extract a shared one". Two more have appeared and the
+ * decision went the other way, deliberately — so here is what was decided and
+ * why, rather than an instruction nobody followed.
+ *
+ * THERE ARE NOW THREE, AND THEY ANSWER DIFFERENT QUESTIONS:
+ *
+ *   this panel        "which SLOTS does the template say are unfilled" —
+ *                     keyed on slot_start, because a slot is not a database
+ *                     row and has no id;
+ *   the shift table   "what is happening at this POST over the next 90 days" —
+ *                     keyed on shift id, and it is a schedule first;
+ *   the dialog        "what does this GUARD hold, across sites" — keyed on
+ *                     shift id, in a modal, spanning sites.
+ *
+ * A generic extracted across those would serve consistency rather than any of
+ * them: the key differs, the columns differ, one navigates and two do not, and
+ * only one has a verb switcher. What IS shared is the write loop, and that is
+ * extracted — components/admin/BulkShiftActions.tsx owns selection, the verb,
+ * the confirm step and run() for the latter two. The TABLES stay separate on
+ * purpose. If a fourth appears, re-read this before assuming otherwise.
  *
  * ── Why a separate table from the shift table below ──────────────────────
  *
- * A slot is not a row in the database; it has no detail page. The shift
- * table's <tr> is a role="link" with an onKeyDown that preventDefault()s
- * Space — which is exactly the key that toggles a focused checkbox — so
- * putting checkboxes in THAT table would mean fighting its own keyboard
- * handler on every row. This table navigates nowhere, so it carries no
- * role="link", no tabIndex on the row, and inherits none of that.
+ * A slot is not a row in the database; it has no detail page, so this table
+ * navigates nowhere and needs no link affordance at all.
+ *
+ * THE HAZARD THIS PARAGRAPH USED TO DESCRIBE HAS BEEN FIXED AT THE SOURCE.
+ * It read: the shift table's <tr> is a role="link" with an onKeyDown that
+ * preventDefault()s Space — exactly the key that toggles a focused checkbox —
+ * so putting checkboxes in THAT table would mean fighting its own keyboard
+ * handler on every row. That was true, and it was measured before it was
+ * changed: with a control checkbox outside the row as a reference, the same
+ * real keypress toggled the control, did NOT toggle a checkbox inside the
+ * row, and navigated away as well.
+ *
+ * The shift table now carries checkboxes because the row stopped being a
+ * link. role="link", tabIndex and onKeyDown are gone from it; navigation is a
+ * real <Link> in its DATE cell, and the row keeps onClick for mouse only,
+ * behind a target test. So there is no keyboard handler left to fight.
+ *
+ * Which means the reason this table is still separate is the one above — a
+ * slot is not a shift — and NOT the keyboard hazard. Do not restore the
+ * hazard as a justification; it no longer exists.
  *
  * ── Two windows, stated in the heading ───────────────────────────────────
  *
