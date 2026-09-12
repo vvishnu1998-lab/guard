@@ -32,10 +32,23 @@
  *            POST /ping). ENTER-only endpoints would just duplicate
  *            that path.
  *
- * The old inside/outside SecureStore state machine is gone — native
- * geofencing IS the state machine. Only the active session id + access
- * token are read from SecureStore now, both stamped by _layout.tsx
- * before startGeofencingAsync is called.
+ * State:
+ *   An inside/outside record IS kept again, in SecureStore under
+ *   `geofence_state` (lib/geofenceState.ts), scoped to the session id.
+ *
+ *   Build 34 removed it on the reasoning that "native geofencing IS the
+ *   state machine". That was wrong, and the 2026-09-12 audit is the
+ *   receipt: expo-location synthesises an ENTER on every registration
+ *   where the device is already inside the region — Android via
+ *   INITIAL_TRIGGER_ENTER (GeofencingTaskConsumer.kt:168), iOS via a
+ *   per-registration regionStates dictionary seeded to Unknown and then
+ *   compared against Inside (EXGeofencingTaskConsumer.m:89,158). The app
+ *   re-registers on every cold start, and iOS re-arms at process start
+ *   with no JS involved, so every relaunch on an active shift fired
+ *   "Back on post" at a guard who had not moved.
+ *
+ *   The native layer reports EVENTS, not TRANSITIONS. Telling the two
+ *   apart needs prior state, so prior state is back.
  */
 import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
@@ -44,6 +57,39 @@ import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
 import { isPastShiftExpiry, SHIFT_EXPIRY_GRACE_MS } from '../lib/shiftExpiry';
 import { isBreakActive } from '../lib/breakState';
+import {
+  GEOFENCE_STATE_KEY,
+  decideTransition,
+  readStoredState,
+  serializeGeofenceState,
+  PostState,
+} from '../lib/geofenceState';
+
+/** Matches every other SecureStore write in the app (authStore, breakState,
+ *  refreshManager, _layout). AFTER_FIRST_UNLOCK is load-bearing here: this
+ *  task runs while the handset is locked in a guard's pocket, and the default
+ *  WHEN_UNLOCKED throws "User interaction not allowed" on both read and
+ *  write — see the Build 37 note on the read block below. */
+const KEYCHAIN_OPTS = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
+
+/** Persist the post state. Never throws — a failed write degrades to the
+ *  'unknown' branch on the next event, which suppresses. */
+async function persistGeofenceState(sessionId: string, state: PostState): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(
+      GEOFENCE_STATE_KEY,
+      serializeGeofenceState(sessionId, state),
+      KEYCHAIN_OPTS,
+    );
+  } catch (err) {
+    Sentry.addBreadcrumb({
+      category: 'geofence',
+      message:  'state persist failed',
+      level:    'warning',
+      data:     { state, error: String(err) },
+    });
+  }
+}
 
 export const GEOFENCE_TASK = 'GUARD_GEOFENCE';
 
@@ -80,11 +126,17 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
   let sessionId: string | null;
   let accessToken: string | null;
   let shiftEnd: string | null;
+  let storedStateRaw: string | null;
   try {
-    [sessionId, accessToken, shiftEnd] = await Promise.all([
+    // geofence_state joins this block rather than getting its own read: the
+    // locked-keychain throw guarded here applies to it identically, and a
+    // separate unguarded getItemAsync would reintroduce exactly the
+    // unhandled rejection Build 37 fixed.
+    [sessionId, accessToken, shiftEnd, storedStateRaw] = await Promise.all([
       SecureStore.getItemAsync('active_session_id'),
       SecureStore.getItemAsync('guard_access_token'),
       SecureStore.getItemAsync('active_shift_end'),
+      SecureStore.getItemAsync(GEOFENCE_STATE_KEY),
     ]);
   } catch (err) {
     Sentry.captureException(err, {
@@ -135,6 +187,13 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
   // stale-open break can't mute a genuine post-break breach, and any read
   // failure reports false — fail toward enforcement.
   const onBreak = await isBreakActive();
+
+  // Is this event a real transition, or the artefact of a re-registration?
+  // Decided before either branch so both record where the guard now is, and
+  // so the Enter branch has something to suppress on. See lib/geofenceState.
+  const stored   = readStoredState(storedStateRaw, sessionId);
+  const decision = decideTransition(isExit ? 'exit' : 'enter', stored);
+  await persistGeofenceState(sessionId, decision.nextState);
 
   if (isExit) {
     if (onBreak) {
@@ -196,6 +255,10 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
         await Promise.all([
           SecureStore.deleteItemAsync('active_session_id').catch(() => {}),
           SecureStore.deleteItemAsync('active_shift_end').catch(() => {}),
+          // Dies with the session it describes, exactly like the two above.
+          // An 'outside' left behind here would make the FIRST enter of the
+          // next shift notify, which is the bug in miniature.
+          SecureStore.deleteItemAsync(GEOFENCE_STATE_KEY).catch(() => {}),
         ]);
       } else if (res.ok) {
         // Break-quiet: the server answers 200 {code:'ON_BREAK'} when it
@@ -232,6 +295,27 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
       });
       return;
     }
+    // BUG 2 gate. Without prior state every re-registration looked like a
+    // return to post; with it, only an ENTER that follows a recorded EXIT
+    // notifies. `stored` is per-session, so a previous shift's record reads
+    // as 'unknown' and suppresses too.
+    if (!decision.notify) {
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message:  `geofence enter suppressed (stored=${stored})`,
+        level:    'info',
+        data:     { session_id: sessionId, stored, reason: decision.reason },
+      });
+      return;
+    }
+    // Previously unlogged: a fired "Back on post" left no trace, so the
+    // spurious ones could not be counted or correlated with a registration.
+    Sentry.addBreadcrumb({
+      category: 'geofence',
+      message:  'enter notified — genuine re-entry',
+      level:    'info',
+      data:     { session_id: sessionId, stored, reason: decision.reason },
+    });
     await Notifications.scheduleNotificationAsync({
       content: {
         title: 'Back on post',
