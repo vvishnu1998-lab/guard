@@ -41,6 +41,7 @@ import { expiresAtFor } from '../services/retention';
 // (services/email.ts) counts expected windows with the SAME code that
 // decides whether a missed_pings row is written here.
 import { completedTrackableWindows, breakOverlapsWindow } from '../services/pingWindows';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 interface SessionRow {
   session_id: string;
@@ -173,7 +174,7 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
           windowEnd:    w.windowEnd.toISOString(),
         };
 
-        await insertNotification({
+        const notifId = await insertNotification({
           guardId:        s.guard_id,
           type:           'missed_ping',
           title,
@@ -195,6 +196,9 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
                 windowStart:  w.windowStart.toISOString(),
                 windowEnd:    w.windowEnd.toISOString(),
               },
+              notificationId: notifId,
+              channelId:      channelForType('missed_ping'),
+              collapseId:     collapseIdFor('missed_ping', { missedPingId: mpId }),
             });
           } catch (err) {
             console.error(`[missedPingCron] FCM push failed for session ${s.session_id}:`, err);

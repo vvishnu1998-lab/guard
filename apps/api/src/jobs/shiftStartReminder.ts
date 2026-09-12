@@ -22,6 +22,7 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 interface CandidateRow {
   shift_id: string;
@@ -71,7 +72,7 @@ runJob('shiftStartReminder', '*/5 * * * *', async () => {
 
         // 1. Always write the Alerts-tab row first — source of truth for
         //    the guard even when their fcm_token is null.
-        await insertNotification({
+        const notifId = await insertNotification({
           guardId:        row.guard_id,
           type:           'shift_start_reminder',
           title,
@@ -92,6 +93,9 @@ runJob('shiftStartReminder', '*/5 * * * *', async () => {
               title,
               body,
               data:  { shift_id: row.shift_id, type: 'shift_start_reminder' },
+              notificationId: notifId,
+              channelId:      channelForType('shift_start_reminder'),
+              collapseId:     collapseIdFor('shift_start_reminder', { shift_id: row.shift_id }),
             });
             successes += 1;
           } catch (err) {

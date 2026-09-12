@@ -50,6 +50,46 @@ function initFirebase() {
 initFirebase();
 
 /**
+ * Build the Expo Push API message body.
+ *
+ * Extracted and exported purely so _pushChannels.test.ts can assert the
+ * shape without mocking fetch — the fields below are only observable at the
+ * wire boundary, and every one of them fails SILENTLY when wrong: Expo drops
+ * keys it does not recognise, so a typo'd field name is indistinguishable
+ * from not setting it.
+ *
+ * `tag` vs `collapseId`, both set to the same value deliberately:
+ *   collapseId — Android + iOS. Coalesces messages still IN TRANSIT, so a
+ *                guard who was offline gets the latest rather than a pile.
+ *   tag        — Android only. Replaces an ALREADY-DISPLAYED notification.
+ * collapseId alone does nothing for banners already on screen, which is the
+ * case a guard actually sees after ignoring their phone for an hour. Same
+ * key for both is what makes "one live banner per thing" true on Android.
+ * iOS ignores `tag`; its equivalent (apns-collapse-id) is set on the raw-FCM
+ * branch and applied by Expo's own bridge here.
+ */
+export function buildExpoPushMessage(m: {
+  token:       string;
+  title:       string;
+  body:        string;
+  data:        Record<string, string>;
+  channelId?:  string;
+  collapseId?: string;
+}): Record<string, unknown> {
+  return {
+    to:       m.token,
+    title:    m.title,
+    body:     m.body,
+    data:     m.data,
+    sound:    'default',
+    priority: 'high',
+    // Omitted when undefined rather than sent as null, which Expo rejects.
+    ...(m.channelId  ? { channelId:  m.channelId }  : {}),
+    ...(m.collapseId ? { collapseId: m.collapseId, tag: m.collapseId } : {}),
+  };
+}
+
+/**
  * Send a push notification to a single token.
  *
  * Token routing:
@@ -65,8 +105,27 @@ export async function sendPushNotification(params: {
   title: string;
   body: string;
   data?: Record<string, string>;
+  /** The `notifications` row this push accompanies. Rides in `data` so the
+   *  app can match a delivered tray item to the row it came from and clear
+   *  it once the row is gone — apps/mobile/lib/notificationTray.ts reads it.
+   *  Optional because six push types still write no row (see routes/shifts,
+   *  routes/sites, routes/tasks). */
+  notificationId?: string | null;
+  /** Android notification channel. Omitted → the device's `default`. */
+  channelId?: string;
+  /** Coalesce undelivered messages sharing this key. */
+  collapseId?: string;
 }): Promise<{ staleToken: boolean; delivered: boolean }> {
   if (!params.token) return { staleToken: false, delivered: false };
+
+  // notificationId travels inside `data`, not as a top-level field: the Expo
+  // Push API drops keys it does not recognise, and `data` is the only part of
+  // the payload guaranteed to reach the client verbatim on both transports.
+  // String()-ed because Expo requires data values to be strings.
+  const data: Record<string, string> = {
+    ...(params.data ?? {}),
+    ...(params.notificationId ? { notificationId: String(params.notificationId) } : {}),
+  };
 
   // ── Expo push token → Expo Push API ────────────────────────────────────────
   if (params.token.startsWith('ExponentPushToken[')) {
@@ -78,14 +137,14 @@ export async function sendPushNotification(params: {
           'Accept':        'application/json',
           'Accept-Encoding': 'gzip, deflate',
         },
-        body: JSON.stringify({
-          to:       params.token,
-          title:    params.title,
-          body:     params.body,
-          data:     params.data ?? {},
-          sound:    'default',
-          priority: 'high',
-        }),
+        body: JSON.stringify(buildExpoPushMessage({
+          token:      params.token,
+          title:      params.title,
+          body:       params.body,
+          data,
+          channelId:  params.channelId,
+          collapseId: params.collapseId,
+        })),
       });
       const json = await res.json() as any;
       if (json?.data?.status === 'error') {
@@ -138,9 +197,22 @@ export async function sendPushNotification(params: {
     await admin.messaging().send({
       token: params.token,
       notification: { title: params.title, body: params.body },
-      data: params.data,
-      android: { priority: 'high' },
-      apns:    { payload: { aps: { sound: 'default', badge: 1 } } },
+      data,
+      android: {
+        priority: 'high',
+        ...(params.collapseId ? { collapseKey: params.collapseId } : {}),
+        ...(params.channelId  ? { notification: { channelId: params.channelId } } : {}),
+      },
+      apns: {
+        // `badge: 1` was hardcoded here and is GONE. It forced every iOS
+        // handset on a raw FCM token to a badge of exactly 1 no matter how
+        // many alerts were outstanding, and it fought the client's own
+        // badge handling (shouldSetBadge + setBadgeCountAsync). Omitting the
+        // key leaves the existing badge alone, which is what lets the app own
+        // that number.
+        ...(params.collapseId ? { headers: { 'apns-collapse-id': params.collapseId } } : {}),
+        payload: { aps: { sound: 'default' } },
+      },
     });
     console.log('[firebase] FCM push sent');
     return { staleToken: false, delivered: true };

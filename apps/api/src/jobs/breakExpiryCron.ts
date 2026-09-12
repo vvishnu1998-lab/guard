@@ -43,6 +43,7 @@ import { insertNotification } from '../services/notifications';
 import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { validateAtSite } from '../services/geofence';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 export interface ExpiredBreak {
   id: string;
@@ -174,7 +175,7 @@ async function pushWithAlertRow(params: {
   body: string;
   data: Record<string, unknown>;
 }): Promise<void> {
-  await insertNotification({
+  const notifId = await insertNotification({
     guardId: params.guardId,
     type: params.type,
     title: params.title,
@@ -193,6 +194,9 @@ async function pushWithAlertRow(params: {
     data: Object.fromEntries(
       Object.entries(params.data).map(([k, v]) => [k, String(v)]),
     ) as Record<string, string>,
+    notificationId: notifId,
+    channelId:      channelForType(params.type),
+    collapseId:     collapseIdFor(params.type, params.data),
   });
 }
 
@@ -211,7 +215,14 @@ export async function notifyBreakEnded(closed: ExpiredBreak[]): Promise<void> {
         title: 'Break ended',
         body: 'Your break time is up — return to post.',
         data: {
+          // `type` was missing entirely, so _layout.tsx's
+          // `else if (data?.type)` branch never fired for break pushes — the
+          // Alerts badge did not increment and the tap handler had nothing to
+          // route on. break_session_id is what the auto-erase arm keys on;
+          // break_id is kept because shipped clients read it.
+          type: 'break_ended',
           break_id: b.id,
+          break_session_id: b.id,
           break_type: b.break_type,
           planned_duration_minutes: b.planned_duration_minutes,
         },
@@ -317,7 +328,12 @@ export async function sendReturnOverduePushes(client: PoolClient): Promise<{
             type: 'break_return_overdue',
             title: 'Return to post',
             body: 'Your break ended 10 minutes ago and you appear to be off post.',
-            data: { break_id: b.id, break_type: b.break_type },
+            data: {
+              type: 'break_return_overdue',
+              break_id: b.id,
+              break_session_id: b.id,
+              break_type: b.break_type,
+            },
           });
           pushed++;
         } catch (err) {

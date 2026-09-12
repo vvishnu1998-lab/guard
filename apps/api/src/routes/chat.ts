@@ -17,6 +17,7 @@ import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { Sentry } from '../services/sentry';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 const router = Router();
 
@@ -185,21 +186,29 @@ router.post('/rooms/:roomId/messages', requireAuth('company_admin', 'guard'), as
       const adminRow = await pool.query('SELECT name FROM company_admins WHERE id = $1', [user!.sub]);
       const senderName = adminRow.rows[0]?.name ?? 'Admin';
       const title = `New message from ${senderName}`;
-      if (guardToken) {
-        await sendPushNotification({
-          token: guardToken,
-          title,
-          body: preview,
-          data: { type: 'chat', roomId },
-        });
-      }
-      await insertNotification({
+      // Row first, push second — reordered so the push can name the row it
+      // accompanies. insertNotification never throws (internal try/catch), so
+      // this cannot delay or block delivery.
+      const notifId = await insertNotification({
         guardId: r.guard_id,
         type:    'chat',
         title,
         body:    preview,
         data:    { roomId },
       });
+      if (guardToken) {
+        await sendPushNotification({
+          token: guardToken,
+          title,
+          body: preview,
+          data: { type: 'chat', roomId },
+          notificationId: notifId,
+          channelId:      channelForType('chat'),
+          // Room-scoped: a second message in the SAME room supersedes the
+          // first undelivered banner; a message in another room does not.
+          collapseId:     collapseIdFor('chat', { roomId }),
+        });
+      }
     } catch (err) {
       Sentry.captureException(err, {
         tags: { flow: 'chat_message_push' },

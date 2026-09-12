@@ -2421,3 +2421,67 @@ it is a production write-path behaviour change, and "the browser still blocks
 it, and Sentry no longer sees it" is two assertions to prove, not one to assume.
 Confirm `ALLOWED_ORIGINS` on Railway is unchanged while doing it.
 **Size XS. Tier 1.**
+
+---
+
+## New from the notification-lifecycle work (2026-09-12)
+
+**N86. Every auto-erase arm casts a JSONB value to `uuid` guarded only by key PRESENCE — one malformed value 500s the whole Alerts feed.**
+verified: YES, by reading `apps/api/src/routes/notifications.ts` and by `EXPLAIN` against production.
+All thirteen arms in `SHIFT_SCOPED_AND_NOT_COMPLETED` share the shape
+`notifications.data ? 'k' AND EXISTS (… WHERE x = (notifications.data->>'k')::uuid …)`.
+`data ? 'k'` proves the key exists; it proves **nothing about the value**. A single row whose
+`data->>'k'` is not a parseable uuid raises `22P02` and takes down **both** `GET /api/notifications`
+and `GET /api/notifications/unread-count` for that guard — the entire Alerts tab plus its badge,
+not just the offending row.
+**Not currently reachable**: every writer is server-side and writes uuids, and the nine pre-existing
+arms have run this way in production for months. The exposure grows with each new arm (Phase 2 added
+four) and with `POST /api/notifications`, the mobile self-report route, whose `data` body is
+client-supplied — `VALID_TYPES` gates the `type` but nothing validates `data`.
+Fix is a shared guard, not thirteen edits: a `safe_uuid(text)` SQL helper returning NULL on a bad
+parse, or `… ~ '^[0-9a-fA-F]{8}-…$'` folded into one reusable fragment. Deliberately NOT done inside
+the Phase 2 commit — making four new arms defensive while nine older ones stay exposed is worse than
+consistent, and the real fix touches all thirteen.
+**Size S. Tier 1** (behaviour change on a read path both mobile surfaces depend on).
+
+**N87. Batched `shift_assigned` rows carry `shift_ids` (a JSON array) and can therefore never auto-erase.**
+verified: YES, empirically against production — all 22 of GRD0005's `shift_assigned` rows are the
+batched shape and none moves under the Phase 2 arm (76 -> 68 for that guard, none of the delta from
+this type).
+`services/shiftPush.ts` writes one row per guard per batch with
+`data: { shift_ids: [...], site_ids: [...], count, first_date, last_date }` — no singular `shift_id`.
+The Phase 2 arm keys on `data ? 'shift_id'`, so the batched row fails the guard and stays visible for
+its whole scope window. That is the SAFE behaviour and was chosen deliberately (one clock-in out of
+five does not make a five-shift assignment notice stale), but it means the arm currently only fires
+for the single-shift reassign path in `routes/shifts.ts`.
+Options, in rough order of preference: (a) erase when a session exists for **every** id in
+`shift_ids`, via `NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(data->'shift_ids') …)`;
+(b) leave as-is and accept that batch notices persist for the shift scope window; (c) have shiftPush
+write one row per shift, which fixes the erase but re-introduces the notification spam the batching
+exists to prevent. **(c) is a regression, not a fix** — the batching was deliberate.
+Decide before anyone "fixes" the arm by making it match on `shift_ids` naively.
+**Size S. Tier 1.**
+
+**N88. `task_assigned` cannot auto-erase: its push fires at TEMPLATE creation, when no task instance exists yet.**
+verified: YES — `grep -rn "task_assigned" apps/api/src` shows the payload is
+`{ type: 'task_assigned', site_id }` at `routes/tasks.ts:262` and `:271`; there is no
+`task_instance_id` anywhere in it. The push is emitted from **`POST /api/tasks/templates`**, which
+creates a `task_templates` row. Instances are generated later and elsewhere —
+`services/tasks.ts:70`, `INSERT INTO task_instances (template_id, shift_id, site_id, title, due_at)`.
+So at the moment the guard is told "New task", the thing that could be completed does not exist.
+The column and value an erase arm would need are both real (`task_instances.status` varchar(20),
+live values `pending` 8 / `completed` 4) — there is simply no row to point at.
+**Current state is deliberate**: `task_assigned` is informational, has no CASE arm, and leaves the
+feed when the guard dismisses it (read_at), like `chat` and the other four Phase 3.2 types. An arm
+guarded on `data ? 'task_instance_id'` would be false for every row — inert code that reads as
+working, which is worse than no arm.
+Every near-substitute is worse and should NOT be reached for: keying on `site_id` + any pending
+instance never erases (a recurring template always has pending instances) and is site-wide rather
+than guard-specific; keying on the template id never erases (templates have no completion state);
+copying the `task_reminder` shape fails because that arm joins through
+`notifications.shift_session_id`, which is NULL on these rows by construction.
+**If auto-erase is ever wanted, the fix is (b): move the push to instance-generation time**, where a
+real `task_instance_id` exists and can go in the payload. That changes WHEN guards are notified (at
+generation rather than at template creation), which is a product decision, not a refactor — a
+recurring template would then notify on every generation cycle instead of once.
+**Size M. Tier 1.**

@@ -87,7 +87,31 @@ export type NotificationType =
   //     Not emitted when position is unknown (logged instead — we don't
   //     guess) or the session already closed.
   | 'break_ended'
-  | 'break_return_overdue';
+  | 'break_return_overdue'
+  // Phase 3.2 — five types that were being PUSHED with no union membership
+  // and no notifications row. A push with no row is invisible the moment the
+  // banner is swiped: nothing renders in the Alerts tab, and the mobile tray
+  // reconciler (ROW_BACKED_TYPES, apps/mobile/lib/notificationTray.ts) cannot
+  // account for a type the server never writes, so it deliberately refuses to
+  // clear their banners. Giving them rows is what makes both surfaces work.
+  //
+  // All five are informational — they report something an admin did to the
+  // guard's schedule — so none has an auto-erase arm and all land on the
+  // 'default' channel.
+  //
+  //   site_deactivated      — routes/sites.ts. Data: { site_id }.
+  //   task_assigned         — routes/tasks.ts. Data: { site_id }.
+  //   shift_reassigned_away — routes/shifts.ts. Data: { shift_id,
+  //                           scheduled_start }. Never actually delivered
+  //                           before Phase 3.5 fixed its token lookup.
+  //   shift_cancelled       — routes/shifts.ts. Data: { shift_id }.
+  //   shift_schedule_edited — routes/shifts.ts. Data: { shift_id,
+  //                           scheduled_start, scheduled_end }.
+  | 'site_deactivated'
+  | 'task_assigned'
+  | 'shift_reassigned_away'
+  | 'shift_cancelled'
+  | 'shift_schedule_edited';
 
 export interface NotificationRow {
   id: string;

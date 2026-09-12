@@ -176,6 +176,9 @@ export async function fireBreachAlerts(params: {
             Object.entries(params.extraData ?? {}).map(([k, v]) => [k, String(v)]),
           )),
         },
+        notificationId: notifId,
+        channelId:      channelForType(params.eventType),
+        collapseId:     collapseIdFor(params.eventType, { violationId: params.violationId }),
       });
     }
   } catch (err) {
@@ -191,6 +194,7 @@ export async function fireBreachAlerts(params: {
 }
 
 import { validatePhotoOrQuarantine } from '../services/photoValidation';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 const router = Router();
 

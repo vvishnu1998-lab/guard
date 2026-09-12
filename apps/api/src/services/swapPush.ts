@@ -15,6 +15,7 @@ import { getActivePushToken } from './deviceRegistry';
 import { insertNotification, NotificationType } from './notifications';
 import { Sentry } from './sentry';
 import { reportPushSkip } from './pushSkipReporter';
+import { channelForType, collapseIdFor } from './pushChannels';
 
 const PACIFIC = 'America/Los_Angeles';
 
@@ -76,6 +77,21 @@ async function fireOne(
     },
   });
 
+  // The row is written BEFORE the push is dispatched (it used to race it
+  // under one Promise.allSettled) so the push can carry its id. Awaiting is
+  // free: insertNotification swallows its own errors and resolves to null.
+  const notifId = await insertNotification({
+    guardId,
+    type,
+    title,
+    body,
+    // Store the same payload the push carried so mobile deep-linking
+    // (navigateForNotification) reads from `data` regardless of which
+    // surface — push tap or in-app tap — triggered the route.
+    data:            { ...data },
+    shiftSessionId:  null,
+  });
+
   const pushPromise = (async () => {
     const token = await getActivePushToken(guardId);
     if (!token) {
@@ -90,26 +106,21 @@ async function fireOne(
       });
       return;
     }
-    await sendPushNotification({ token, title, body, data });
+    await sendPushNotification({
+      token,
+      title,
+      body,
+      data,
+      notificationId: notifId,
+      channelId:      channelForType(type),
+      collapseId:     collapseIdFor(type, data),
+    });
   })();
 
-  const notifPromise = insertNotification({
-    guardId,
-    type,
-    title,
-    body,
-    // Store the same payload the push carried so mobile deep-linking
-    // (navigateForNotification) reads from `data` regardless of which
-    // surface — push tap or in-app tap — triggered the route.
-    data:            { ...data },
-    shiftSessionId:  null,
-  });
-
-  const results = await Promise.allSettled([pushPromise, notifPromise]);
-  for (const [i, r] of results.entries()) {
+  const results = await Promise.allSettled([pushPromise]);
+  for (const r of results) {
     if (r.status === 'rejected') {
-      const channel = i === 0 ? 'push' : 'notification-row';
-      console.error(`[swap-push] ${channel} failed for guard ${guardId} type=${type}:`, r.reason);
+      console.error(`[swap-push] push failed for guard ${guardId} type=${type}:`, r.reason);
     }
   }
 }

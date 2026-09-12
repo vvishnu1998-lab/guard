@@ -51,6 +51,8 @@ import {
   type ShiftHours,
 } from '../services/shiftHours';
 import { siteLocalDayRange } from '../services/dateRange';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
+import { insertNotification } from '../services/notifications';
 
 const router = Router();
 
@@ -894,24 +896,64 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
       timeZone: (shift.site_tz as string | null) ?? 'America/Los_Angeles',
     });
 
-    const newToken = tokenByGuardId.get(new_guard_id);
-    if (newToken) {
-      sendPushNotification({
+    const assignedTitle = `Shift assigned at ${shift.site_name}`;
+    const assignedBody  = `Starts ${dateLabel}. Tap to view details.`;
+    // Row unconditionally, then push if a device is registered. Both guards
+    // in a reassignment need a durable record: the incoming one to find the
+    // shift, the outgoing one to know they are off it.
+    void (async () => {
+      const notifId = await insertNotification({
+        guardId: new_guard_id,
+        type:    'shift_assigned',
+        title:   assignedTitle,
+        body:    assignedBody,
+        data:    { type: 'shift_assigned', shift_id: id, scheduled_start: startIso },
+        shiftSessionId: null,
+      });
+      const newToken = tokenByGuardId.get(new_guard_id);
+      if (!newToken) return;
+      await sendPushNotification({
         token: newToken,
-        title: `Shift assigned at ${shift.site_name}`,
-        body:  `Starts ${dateLabel}. Tap to view details.`,
+        title: assignedTitle,
+        body:  assignedBody,
         data:  { type: 'shift_assigned', shift_id: id, scheduled_start: startIso },
-      }).catch((err) => console.error('[reassign] FCM push to new guard failed:', err));
-    }
+        notificationId: notifId,
+        channelId:      channelForType('shift_assigned'),
+        collapseId:     collapseIdFor('shift_assigned', { shift_id: id }),
+      });
+    })().catch((err) => console.error('[reassign] FCM push to new guard failed:', err));
 
-    const oldToken = shift.old_guard_id ? tokenByGuardId[shift.old_guard_id] : undefined;
-    if (oldToken && shift.old_guard_id !== new_guard_id) {
-      sendPushNotification({
-        token: oldToken,
-        title: `Shift reassigned`,
-        body:  `Your ${dateLabel} shift at ${shift.site_name} has been reassigned. You no longer need to cover it.`,
-        data:  { type: 'shift_reassigned_away', shift_id: id, scheduled_start: startIso },
-      }).catch((err) => console.error('[reassign] FCM push to old guard failed:', err));
+    // getActivePushTokens returns a Map, so this has to be .get() — the
+    // previous `tokenByGuardId[...]` bracket-indexed the Map object itself and
+    // evaluated to undefined on every call, which meant shift_reassigned_away
+    // has NEVER been delivered to anyone. tsc did not catch it because
+    // tsconfig sets noImplicitAny:false, so the bad index typed as `any`.
+    const oldToken = shift.old_guard_id ? tokenByGuardId.get(shift.old_guard_id) : undefined;
+    if (shift.old_guard_id && shift.old_guard_id !== new_guard_id) {
+      const awayTitle = `Shift reassigned`;
+      const awayBody  = `Your ${dateLabel} shift at ${shift.site_name} has been reassigned. You no longer need to cover it.`;
+      // Gated on the GUARD existing, not on the token: the row must land even
+      // for a guard with no device. Only the push needs oldToken.
+      void (async () => {
+        const notifId = await insertNotification({
+          guardId: shift.old_guard_id,
+          type:    'shift_reassigned_away',
+          title:   awayTitle,
+          body:    awayBody,
+          data:    { type: 'shift_reassigned_away', shift_id: id, scheduled_start: startIso },
+          shiftSessionId: null,
+        });
+        if (!oldToken) return;
+        await sendPushNotification({
+          token: oldToken,
+          title: awayTitle,
+          body:  awayBody,
+          data:  { type: 'shift_reassigned_away', shift_id: id, scheduled_start: startIso },
+          notificationId: notifId,
+          channelId:      channelForType('shift_reassigned_away'),
+          collapseId:     collapseIdFor('shift_reassigned_away', { shift_id: id }),
+        });
+      })().catch((err) => console.error('[reassign] FCM push to old guard failed:', err));
     }
 
     res.json(updated.rows[0]);
@@ -1221,17 +1263,30 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
     if (shift.guard_id) {
       (async () => {
         try {
-          const token = await getActivePushToken(shift.guard_id);
-          if (!token) return;
           const tz = (shift.site_tz as string | null) ?? 'America/Los_Angeles';
           const dayLabel = new Intl.DateTimeFormat('en-US', {
             weekday: 'short', month: 'short', day: 'numeric', timeZone: tz,
           }).format(new Date(shift.scheduled_start));
+          // Row first, unconditionally — a cancellation the guard never finds
+          // out about is the worst of these five to lose.
+          const notifId = await insertNotification({
+            guardId: shift.guard_id,
+            type:    'shift_cancelled',
+            title:   'Shift cancelled',
+            body:    `${dayLabel} at ${shift.site_name}`,
+            data:    { type: 'shift_cancelled', shift_id: id },
+            shiftSessionId: null,
+          });
+          const token = await getActivePushToken(shift.guard_id);
+          if (!token) return;
           await sendPushNotification({
             token,
             title: 'Shift cancelled',
             body:  `${dayLabel} at ${shift.site_name}`,
             data:  { type: 'shift_cancelled', shift_id: id },
+            notificationId: notifId,
+            channelId:      channelForType('shift_cancelled'),
+            collapseId:     collapseIdFor('shift_cancelled', { shift_id: id }),
           });
         } catch (err) {
           console.error('[shifts.cancel] push failed:', err);
@@ -1520,19 +1575,36 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
       // The old query carried `AND fcm_token IS NOT NULL`. That filter is
       // redundant now: getActivePushToken returns null when the guard has no
       // active device, which is precisely what the guard below branches on.
-      getActivePushToken(shift.guard_id)
-        .then((token) => {
+      const editTitle = `Shift time changed at ${shift.site_name}`;
+      const editBody  = `Now ${day}, ${from} – ${to}. Tap to view details.`;
+      const editData  = {
+        type: 'shift_schedule_edited',
+        shift_id: id,
+        scheduled_start: newStart.toISOString(),
+        scheduled_end:   newEnd.toISOString(),
+      };
+      // Row unconditionally; the push is best-effort on top of it. A guard
+      // whose shift moved needs the new time whether or not their handset has
+      // an active device row.
+      insertNotification({
+        guardId: shift.guard_id,
+        type:    'shift_schedule_edited',
+        title:   editTitle,
+        body:    editBody,
+        data:    editData,
+        shiftSessionId: null,
+      })
+        .then(async (notifId) => {
+          const token = await getActivePushToken(shift.guard_id);
           if (!token) return;
           return sendPushNotification({
             token,
-            title: `Shift time changed at ${shift.site_name}`,
-            body:  `Now ${day}, ${from} – ${to}. Tap to view details.`,
-            data:  {
-              type: 'shift_schedule_edited',
-              shift_id: id,
-              scheduled_start: newStart.toISOString(),
-              scheduled_end:   newEnd.toISOString(),
-            },
+            title: editTitle,
+            body:  editBody,
+            data:  editData,
+            notificationId: notifId,
+            channelId:      channelForType('shift_schedule_edited'),
+            collapseId:     collapseIdFor('shift_schedule_edited', { shift_id: id }),
           });
         })
         .catch((err) => console.error('[shifts.edit] FCM push failed:', err));

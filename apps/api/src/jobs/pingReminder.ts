@@ -47,6 +47,7 @@ import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification, NotificationType } from '../services/notifications';
 import { breakOverlapsWindow, siteLocalLabel, windowJustClosed } from '../services/pingWindows';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 // The hourly slot the activity-report + task legs nudge for. Matches
 // jobs/missedReportCron.ts's WINDOW_MS (60 min) so the reminder and the
@@ -111,21 +112,32 @@ export async function sendReminder(
     // See docs/OPS/INCIDENTS/2026-09-05-push-skip-null-token.md.
     if (skipped) skipped.skippedNoDevice += 1;
   }
-  await Promise.allSettled([
-    row.fcm_token
-      ? sendPushNotification({ token: row.fcm_token, title, body, data: payload as Record<string, string> }).catch(
-          (err) => console.error(`[pingReminder] FCM ${type} failed for guard ${row.guard_id}:`, err),
-        )
-      : Promise.resolve(),
-    insertNotification({
-      guardId: row.guard_id,
-      type,
+  // Reordered from a concurrent Promise.allSettled([push, insert]) so the
+  // row id exists before the push is built and can ride along in the payload.
+  // Safe to await first: insertNotification swallows its own errors and
+  // resolves to null, so a DB failure still cannot block or delay the push.
+  const notifId = await insertNotification({
+    guardId: row.guard_id,
+    type,
+    title,
+    body,
+    data,
+    shiftSessionId: row.shift_session_id,
+  });
+
+  if (row.fcm_token) {
+    await sendPushNotification({
+      token:          row.fcm_token,
       title,
       body,
-      data,
-      shiftSessionId: row.shift_session_id,
-    }),
-  ]);
+      data:           payload as Record<string, string>,
+      notificationId: notifId,
+      channelId:      channelForType(type),
+      collapseId:     collapseIdFor(type, payload),
+    }).catch(
+      (err) => console.error(`[pingReminder] FCM ${type} failed for guard ${row.guard_id}:`, err),
+    );
+  }
 }
 
 /**

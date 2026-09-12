@@ -7,6 +7,8 @@ import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 import { validatePingInterval, normalizeReason } from '../services/pingIntervalPicker';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
+import { insertNotification } from '../services/notifications';
 
 /**
  * Common gate: 409 if the target site has been deactivated. Used on every
@@ -575,13 +577,30 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
     (async () => {
       for (const guardId of affectedGuardIds) {
         try {
+          const title = `Site closed — ${site.name}`;
+          const body  = `Your upcoming shifts at ${site.name} were cancelled because the site was deactivated. Check your schedule.`;
+          // Row FIRST and UNCONDITIONALLY — a guard with no active device
+          // still needs to find out their shifts were cancelled, and before
+          // this the notice existed only as a push they had to be holding a
+          // registered handset to receive.
+          const notifId = await insertNotification({
+            guardId,
+            type:  'site_deactivated',
+            title,
+            body,
+            data:  { type: 'site_deactivated', site_id: req.params.id },
+            shiftSessionId: null,
+          });
           const token = await getActivePushToken(guardId);
           if (!token) continue;
           await sendPushNotification({
             token,
-            title: `Site closed — ${site.name}`,
-            body:  `Your upcoming shifts at ${site.name} were cancelled because the site was deactivated. Check your schedule.`,
+            title,
+            body,
             data:  { type: 'site_deactivated', site_id: req.params.id },
+            notificationId: notifId,
+            channelId:      channelForType('site_deactivated'),
+            collapseId:     collapseIdFor('site_deactivated', { shift_id: req.params.id }),
           });
         } catch (err) {
           console.error('[sites.deactivate] push failed for guard', guardId, err);
