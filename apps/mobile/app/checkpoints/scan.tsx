@@ -32,6 +32,7 @@ import { useOfflineStore } from '../../store/offlineStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { GuardFacingError } from '../../lib/errors';
 import { guardMessage } from '../../lib/errorCopy';
+import { syncTrayAndBadge } from '../../lib/notificationSync';
 
 const GPS_LIVE_TIMEOUT_MS = 8000;
 
@@ -178,6 +179,7 @@ export default function CheckpointScanner() {
         setVerdict({ kind: 'duplicate', label: data.checkpoint_label, scanned: data.scanned, total: data.total });
       } else {
         setVerdict({ kind: 'success', label: data.checkpoint_label, scanned: data.scanned, total: data.total });
+        void syncTrayAndBadge();
         setTimeout(done, 2000); // green confirmation auto-dismisses
       }
     } catch (err: any) {

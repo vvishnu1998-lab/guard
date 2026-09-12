@@ -20,6 +20,7 @@ import { uuidv4 }          from '../../lib/uuid';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
+import { syncTrayAndBadge } from '../../lib/notificationSync';
 
 const STEPS = ['Uploading selfie…', 'Starting shift…', 'Saving verification…'];
 
@@ -215,6 +216,9 @@ export default function ClockInStep4() {
         resetClockIn();
         router.replace('/(tabs)/home');
       }
+      // late_clock_in's arm keys on shift_sessions.clocked_in_at, which is
+      // now stamped. Outside the pdfUrl branch so it runs either way.
+      void syncTrayAndBadge();
     } catch (err: any) {
       Sentry.addBreadcrumb({
         category: 'clock_in_wizard',

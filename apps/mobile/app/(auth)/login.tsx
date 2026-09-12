@@ -15,6 +15,7 @@ import { useAuthStore } from '../../store/authStore';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { ApiError } from '../../lib/errors';
 import { guardMessage } from '../../lib/errorCopy';
+import { syncTrayAndBadge } from '../../lib/notificationSync';
 
 export default function LoginScreen() {
   const [email, setEmail]       = useState('');
@@ -55,6 +56,12 @@ export default function LoginScreen() {
         });
       }
       await loginWithEmail(email.trim(), password, fcmToken);
+      // Clear anything the tray is still holding from a previous session on
+      // this handset, and stamp the badge. A guard signing in should not
+      // inherit banners for a shift that is over — or, on a shared phone,
+      // someone else's. Not awaited: navigation is _layout's job and must
+      // not wait on a best-effort sync.
+      void syncTrayAndBadge();
       // Navigation handled by root _layout.tsx
     } catch (err: any) {
       // This branch used to test `msg.includes('locked')`. The server's 423

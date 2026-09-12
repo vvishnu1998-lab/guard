@@ -31,6 +31,7 @@ import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 } from '../../lib/uploadToS3';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
+import { syncTrayAndBadge } from '../../lib/notificationSync';
 
 interface Vehicle {
   id:            string;
@@ -188,6 +189,11 @@ export default function InspectionScreen() {
       const row = await apiClient.patch<Inspection>(`/inspections/${inspection.id}`, { [slot]: public_url });
       setInspection((prev) => ({ ...prev, ...row }));
       setStage({ kind: 'checklist' });
+      // Only when the SERVER says the inspection is finished. completed_at
+      // is stamped once all five photos + the reading are in, so gating on
+      // it means one reconcile per inspection rather than one per slot —
+      // four of which would be round-trips that could not clear anything.
+      if (row.completed_at) void syncTrayAndBadge();
       return;
     } catch (err: any) {
       if (isSessionClosed(err)) { await handleSessionClosed(err, 'inspection.photo'); return; }
