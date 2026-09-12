@@ -199,8 +199,111 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
           AND mr.resolved_at IS NOT NULL
       )
     )
+    -- Phase 2 arms. All four follow the established shape above: guard on
+    -- the key's presence first, so a row whose payload predates the key
+    -- stays VISIBLE rather than becoming un-erasable or throwing on a cast.
+    --
+    --   break_ended / break_return_overdue — hide once the break they are
+    --     about is closed (break_sessions.break_end stamped). break_end is
+    --     the end column; "ended_by" is a separate varchar recording WHO
+    --     closed it and is NULL for 11 of 35 rows, so it is not a usable
+    --     closed-test.
+    --     Rows written before Phase 3.4 carry no break_session_id at all —
+    --     breakExpiryCron did not send one — so "data ? 'break_session_id'"
+    --     is false for them and they stay visible. That is deliberate: a
+    --     backlog row we cannot resolve must not be hidden on a guess.
+    WHEN 'break_ended' THEN NOT (
+      notifications.data ? 'break_session_id' AND EXISTS (
+        SELECT 1 FROM break_sessions bs
+        WHERE bs.id = (notifications.data->>'break_session_id')::uuid
+          AND bs.break_end IS NOT NULL
+      )
+    )
+    WHEN 'break_return_overdue' THEN NOT (
+      notifications.data ? 'break_session_id' AND EXISTS (
+        SELECT 1 FROM break_sessions bs
+        WHERE bs.id = (notifications.data->>'break_session_id')::uuid
+          AND bs.break_end IS NOT NULL
+      )
+    )
+    --   clock_out_reminder — hide once the session for the referenced shift
+    --     has clocked out. Keyed on shift_id (snake_case: that is what
+    --     jobs/clockOutReminder.ts writes, unlike the camelCase 'shiftId'
+    --     the three clock-in arms above use — the payloads genuinely
+    --     differ and COALESCEing them here would hide that).
+    --     Note this erases on EITHER a manual clock-out or the
+    --     autoCompleteShifts sweep, since both stamp clocked_out_at. That
+    --     is correct: the reminder's ask ("close your own shift") is moot
+    --     once the shift is closed by any means.
+    WHEN 'clock_out_reminder' THEN NOT (
+      notifications.data ? 'shift_id' AND EXISTS (
+        SELECT 1 FROM shift_sessions ss
+        WHERE ss.shift_id = (notifications.data->>'shift_id')::uuid
+          AND ss.clocked_out_at IS NOT NULL
+      )
+    )
+    --   shift_assigned — hide once the guard has actually clocked in for
+    --     that shift, or the shift was cancelled out from under them.
+    --     Only the SINGULAR shift_id form is erasable. services/shiftPush
+    --     writes a batched row carrying "shift_ids" (a JSON array) with no
+    --     single shift_id, so "data ? 'shift_id'" is false there and the
+    --     batch row stays visible for its whole scope window — correct,
+    --     since one clock-in out of five does not make the assignment
+    --     notice stale.
+    WHEN 'shift_assigned' THEN NOT (
+      notifications.data ? 'shift_id' AND (
+        EXISTS (
+          SELECT 1 FROM shift_sessions ss
+          WHERE ss.shift_id = (notifications.data->>'shift_id')::uuid
+        )
+        OR EXISTS (
+          SELECT 1 FROM shifts s
+          WHERE s.id = (notifications.data->>'shift_id')::uuid
+            AND s.status = 'cancelled'
+        )
+      )
+    )
+    -- chat, off_post_report and off_post_task reach ELSE TRUE and that is
+    -- INTENTIONAL, not an oversight:
+    --   chat — a message is not an obligation with a completion state. It
+    --     leaves the feed when the guard dismisses it (read_at), and it
+    --     bypasses shift scoping entirely via the IN list above.
+    --   off_post_report / off_post_task — records of a completed off-post
+    --     submission, kept for the shift's duration for accountability.
+    --     Already stated at the Phase 1A comment above; restated here so
+    --     the next person to add an arm does not "fix" them.
     ELSE TRUE
   END
+  -- The swap/handoff family (13 types) shares ONE predicate, so it lives
+  -- here rather than as 13 identical WHEN arms: Postgres' simple CASE takes
+  -- exactly one value per WHEN ("WHEN 'a','b' THEN" is a syntax error), and
+  -- thirteen copy-pasted six-line arms is how one of them eventually drifts.
+  --
+  -- Swap and handoff are the SAME table — shift_swap_requests, split by
+  -- initiated_by ('guard_pre_shift' | 'guard_handoff' | 'admin') — so one
+  -- predicate genuinely covers both families.
+  --
+  -- Terminal is "status <> 'pending'". The status CHECK admits exactly
+  -- five values (pending, accepted, declined, expired, cancelled); there is
+  -- no 'complete' status, and a completed handoff sits at 'accepted'. Phrasing
+  -- it as "not pending" rather than enumerating the four keeps it correct if
+  -- a sixth terminal state is ever added.
+  AND (
+    notifications.type NOT IN (
+      'swap_request_received', 'swap_request_sent',
+      'swap_accepted', 'swap_declined', 'swap_expired',
+      'handoff_request_received', 'handoff_request_sent',
+      'handoff_accepted', 'handoff_declined', 'handoff_cancelled',
+      'handoff_complete', 'handoff_nudge', 'handoff_expired'
+    )
+    OR NOT (
+      notifications.data ? 'history_id' AND EXISTS (
+        SELECT 1 FROM shift_swap_requests ssr
+        WHERE ssr.id = (notifications.data->>'history_id')::uuid
+          AND ssr.status <> 'pending'
+      )
+    )
+  )
 `;
 
 // GET /api/notifications — current shift only, excluding completed actions.
