@@ -14,6 +14,7 @@
     "check:tray-predicate": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-tray-predicate.ts",
     "check:geofence-transitions": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-geofence-transitions.ts",
     "check:deeplink-gate": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-deeplink-gate.ts",
+    "check:notification-routes": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-notification-routes.ts",
     "postinstall": "node scripts/check-break-constants.js"
   },
   "dependencies": {

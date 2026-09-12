@@ -154,10 +154,65 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       router.push('/(tabs)/home');
       break;
 
+    // ── Schedule-admin family ────────────────────────────────────────
+    // Everything an admin did TO the guard's schedule lands on the schedule
+    // tab. None of these is an action the guard performs, so there is no
+    // deeper screen to open — the schedule is where the change is visible.
+    //
+    // 'shifts_assigned' (plural) is the LEGACY spelling and is kept
+    // deliberately. services/shiftPush.ts sent it until apps/api b9579bc,
+    // which corrected the sender to the singular 'shift_assigned' that
+    // matches the row it writes. Between that deploy and this build the
+    // singular matched NO case at all, so a batch shift-assignment tap did
+    // nothing — it had routed to the schedule tab before. Banners delivered
+    // before b9579bc still carry the plural, so both spellings must route.
     case 'shifts_assigned':
+    case 'shift_assigned':
     case 'shift_cancelled':
+    case 'shift_reassigned_away':
+    case 'shift_schedule_edited':
+    case 'site_deactivated':
       breadcrumb(type, '/(tabs)/schedule', data);
       router.push('/(tabs)/schedule');
+      break;
+
+    // ── Clock-out reminder ───────────────────────────────────────────
+    // The clock-out screen posts against activeSession and has no mount
+    // gate of its own, so routing there without a session would strand the
+    // guard on a screen whose only working control is Back. Home is the
+    // honest fallback: it owns the restore path and will show either the
+    // on-shift card or the upcoming-shift card, whichever is true.
+    case 'clock_out_reminder': {
+      const onShift = !!useShiftStore.getState().activeSession;
+      const target = onShift ? '/clock-out' : '/(tabs)/home';
+      breadcrumb(type, target, data);
+      router.push(target);
+      break;
+    }
+
+    // ── Break family ─────────────────────────────────────────────────
+    // /break renders the running break's countdown off currentBreak. With
+    // no open break there is nothing for it to count, so the active-shift
+    // screen is the target — that is where the guard starts or ends one.
+    // With no session either, neither screen has anything to show.
+    case 'break_ended':
+    case 'break_return_overdue': {
+      const st = useShiftStore.getState();
+      const target = st.currentBreak ? '/break'
+                   : st.activeSession ? '/active-shift'
+                   : '/(tabs)/home';
+      breadcrumb(type, target, data);
+      router.push(target);
+      break;
+    }
+
+    // ── Task assignment ──────────────────────────────────────────────
+    // Site-wide: routes/tasks.ts fires this when a TEMPLATE is created, so
+    // there is no task_instance_id to deep-link to (see N88). The tasks tab
+    // is the most specific screen that exists for it.
+    case 'task_assigned':
+      breadcrumb(type, '/(tabs)/tasks', data);
+      router.push('/(tabs)/tasks');
       break;
 
     // ── Swap family (batch/mobile-3) ─────────────────────────────────
@@ -208,6 +263,29 @@ export function navigateForNotification(type: string | undefined, data: Notifica
       // was already cleared above.
       breadcrumb(type, '/(tabs)/schedule', data);
       router.push('/(tabs)/schedule');
+      break;
+
+    // ── Unrouted ─────────────────────────────────────────────────────
+    // NAVIGATES NOWHERE, ON PURPOSE. A type this switch does not know is a
+    // type whose correct destination is unknown, and guessing one is worse
+    // than staying put: pushing the guard to a tab they did not ask for
+    // loses whatever they were doing.
+    //
+    // Until this build the switch had no default at all, so an unknown type
+    // fell straight out and left no trace. Eight real NotificationTypes were
+    // in exactly that state and nobody could tell from the app that a tap
+    // had done nothing — it looks identical to a missed tap. The breadcrumb
+    // is the whole point of this arm: it makes the gap observable.
+    //
+    // A NEW TYPE MUST GET A CASE. scripts/check-notification-routes.ts fails
+    // the build when a NotificationType reaches here.
+    default:
+      Sentry.addBreadcrumb({
+        category: 'notification',
+        message: `unrouted notification type: ${type ?? '(none)'}`,
+        level: 'warning',
+        data: data ? { ...data } : undefined,
+      });
       break;
   }
 }
