@@ -15,10 +15,18 @@
  *      (parity with the old rule so a 5:59 clock-in doesn't get the
  *      6:00 ping at 6:00:30).
  *   2. For each session, ask services/pingWindows.ts which window has
- *      just CLOSED (windowJustClosed → R3 + R4 + closure). If one has,
- *      and it closed within TOLERANCE_MS, fire the ping reminder naming
- *      THAT window; the mobile UI treats this as "your 6:30 ping window
- *      is closing — submit now".
+ *      just OPENED (windowJustOpened → R3 + R4 + opening). If one has,
+ *      and it opened within the recovery range, fire the ping reminder
+ *      naming THAT window; the guard then has the whole window to answer
+ *      in.
+ *
+ *      This fired at window CLOSE until 2026-09-12. That put the push and
+ *      missedPingCron's flag in the same second — session bb3934c9 got
+ *      ping_reminder at 19:00:00.262 and missed_ping at 19:00:00.263 —
+ *      so the guard was told to submit for a window that had already
+ *      closed and been marked against them. The ping they sent 52 seconds
+ *      later could not land inside it. missedPingCron is unchanged and
+ *      still flags at close; only the prompt moved.
  *
  *      This job used to compute the answer itself, from a private
  *      currentBoundary() plus a private copy of siteLocalLabel. Both are
@@ -30,11 +38,12 @@
  *      reads, which is the entire reason that module exists.
  *   3. Send at most one ping reminder per session per window, via an
  *      ATOMIC CLAIM on shift_sessions.last_ping_reminder_window
- *      (schema_v57). The window stays eligible for RECOVERY_MS after it
- *      closes, so a dropped cron minute is recovered by a later tick
- *      instead of losing the reminder outright; the claim is what makes
- *      that widening safe. Copy is time-aware — a recovered push says the
- *      window has closed rather than claiming a freshness it lacks.
+ *      (schema_v57). The window stays eligible for the recovery range
+ *      after it OPENS, so a dropped cron minute is recovered by a later
+ *      tick instead of losing the reminder outright; the claim is what
+ *      makes that widening safe. One claim per boundary now: at open there
+ *      is exactly one window in play, where at close the boundary carried
+ *      both a closing and an opening window.
  *
  * Activity-report + task reminders still run on the old UTC :00/:30
  * gate below the ping block. Those don't have the same "keyed to
@@ -46,7 +55,7 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification, NotificationType } from '../services/notifications';
-import { breakOverlapsWindow, siteLocalLabel, windowJustClosed } from '../services/pingWindows';
+import { breakOverlapsWindow, siteLocalLabel, windowJustOpened } from '../services/pingWindows';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 // The hourly slot the activity-report + task legs nudge for. Matches
@@ -239,12 +248,18 @@ runJob('pingReminder', '* * * * *', async () => {
   // interval/3 keeps the guarantee proportional, and Math.min pins the upper
   // bound where it has always been. At 30 min it computes exactly 10 minutes,
   // which is what keeps this commit a no-op on every session in production.
+  // HOW FAR INTO AN OPEN WINDOW a first prompt may still be sent. Not a
+  // firing instant, and no longer a staleness bound on a CLOSE: since the
+  // 2026-09-12 move to at-open this governs the head of the window rather
+  // than the tail of the previous one. A tick dropped at the boundary is
+  // recovered while the window is still answerable; past this the prompt is
+  // abandoned and missedPingCron remains the only record.
   const recoveryMsFor = (intervalMs: number) => Math.min(10 * 60 * 1000, Math.floor(intervalMs / 3));
-  // A close within this age is "just now"; older is a catch-up, and the copy
-  // must say so rather than claim a freshness it does not have. Wall-clock and
-  // cadence-independent on purpose: "is this push fresh" is a question about
-  // the reader, not about the grid.
-  const FRESH_MS = 90 * 1000;
+  // FRESH_MS is GONE with the at-close copy it existed for. It distinguished
+  // a push fired at the boundary from a catch-up minutes after the window had
+  // ended, so the body could stop saying "now". At open there is no such
+  // split — every prompt, first tick or recovery, names a window that is
+  // still open — so the branch and its constant are both dead.
   // Tick-scoped; reported in the summary lines below rather than per call.
   const skipped = newSkipCounter();
 
@@ -274,14 +289,15 @@ runJob('pingReminder', '* * * * *', async () => {
     // ── Ping reminder — schedule-anchored per session ─────────────────
     let pingsFired = 0;
     for (const row of rows) {
-      // The window that just CLOSED — R3 + R4 + closure, from the same
-      // module missedPingCron flags from. Never a boundary: see the
-      // windowJustClosed docblock for the two faults a boundary produced.
+      // The window that just OPENED — R3 + R4 + opening, from the same
+      // module missedPingCron flags from. Never a bare boundary: see the
+      // windowJustOpened docblock for the two faults a boundary produced
+      // and why R3/R4 are inherited rather than re-derived here.
       // Cadence from the SESSION SNAPSHOT (schema_v68), never a live join to
       // sites — a mid-shift site edit must not change the grid a guard is
       // being nagged against. NULL = pre-column session, COALESCEd to 30.
       const intervalMs = (row.ping_interval_minutes ?? 30) * 60_000;
-      const closed = windowJustClosed(
+      const open = windowJustOpened(
         new Date(row.scheduled_start),
         new Date(row.scheduled_end),
         new Date(row.clocked_in_at),
@@ -289,7 +305,7 @@ runJob('pingReminder', '* * * * *', async () => {
         recoveryMsFor(intervalMs),
         intervalMs,
       );
-      if (!closed) continue;
+      if (!open) continue;
 
       // Cheap short-circuit for the repeat ticks the widened range creates:
       // a window stays eligible for RECOVERY_MS, so without this the break
@@ -299,7 +315,7 @@ runJob('pingReminder', '* * * * *', async () => {
       // no-op UPDATE and can never double-send.
       if (
         row.last_ping_reminder_window !== null &&
-        new Date(row.last_ping_reminder_window).getTime() >= closed.windowStart.getTime()
+        new Date(row.last_ping_reminder_window).getTime() >= open.windowStart.getTime()
       ) {
         continue;
       }
@@ -307,19 +323,27 @@ runJob('pingReminder', '* * * * *', async () => {
       // Break-time quiet policy (locked 2026-08-20): no reminder for a
       // window a break overlaps.
       //
-      // This waives on the window being NAGGED FOR — the closed one,
-      // [windowStart, windowEnd] — which is the identical span
+      // This waives on the window being NAGGED FOR — now the OPEN one,
+      // [windowStart, windowEnd] — which is still the identical span
       // missedPingCron passes when it decides whether to waive the flag.
+      //
+      // Evaluated at open, it answers "is a break overlapping this window
+      // AS OF NOW", which at the head of the window means "is the guard on
+      // break right now". A break STARTED later in the window will waive
+      // the missed flag but will not have suppressed this prompt. That is
+      // deliberate: predicting future breaks is not something this job can
+      // do, and a prompt the guard ignores because they went on break is a
+      // far smaller harm than a missed window nobody was told about.
       // It previously passed [boundary, boundary + 30min), i.e. the
       // window OPENING rather than the one closing, so a break covering
       // the nagged window failed to suppress the push while a break
       // covering the NEXT one suppressed it wrongly. The comment here
       // asserted the reminder and the flag "can never disagree"; they
       // were off by exactly one window, always.
-      if (await breakOverlapsWindow(row.shift_session_id, closed.windowStart, closed.windowEnd)) {
+      if (await breakOverlapsWindow(row.shift_session_id, open.windowStart, open.windowEnd)) {
         console.log(
           `[pingReminder.skipped.break] session=${row.shift_session_id} ` +
-          `window=${closed.windowStart.toISOString()}`,
+          `window=${open.windowStart.toISOString()}`,
         );
         continue;
       }
@@ -330,10 +354,10 @@ runJob('pingReminder', '* * * * *', async () => {
       // somehow rolled back. Same two Dates the break check just used, so
       // the reminder and missedPingCron can never disagree about which
       // window is in question.
-      if (await anyPingInWindow(row.shift_session_id, closed.windowStart, closed.windowEnd)) {
+      if (await anyPingInWindow(row.shift_session_id, open.windowStart, open.windowEnd)) {
         console.log(
           `[pingReminder.skipped.answered] session=${row.shift_session_id} ` +
-          `window=${closed.windowStart.toISOString()}`,
+          `window=${open.windowStart.toISOString()}`,
         );
         continue;
       }
@@ -341,17 +365,16 @@ runJob('pingReminder', '* * * * *', async () => {
       // Claimed AFTER the break check so a waived window never burns a
       // claim, and immediately BEFORE the send so the gap in which a crash
       // could lose the push is as small as it can be.
-      if (!(await claimWindow(row.shift_session_id, closed.windowStart))) continue;
+      if (!(await claimWindow(row.shift_session_id, open.windowStart))) continue;
 
-      const label = siteLocalLabel(closed.windowStart, row.site_tz);
-      const lateMs = now.getTime() - closed.windowEnd.getTime();
-      // Time-aware copy. On a catch-up tick the window closed minutes ago,
-      // and "now" would be claiming a freshness this push does not have —
-      // the same reasoning as clockOutReminder's minutes_left branch.
-      const body =
-        lateMs <= FRESH_MS
-          ? `Submit your ${label} ping now.`
-          : `You still owe the ${label} ping. Submit it now — the window has closed.`;
+      const label = siteLocalLabel(open.windowStart, row.site_tz);
+      // ONE body, no freshness branch. At close the copy had to distinguish
+      // a fresh push from a catch-up, because a catch-up was nagging for a
+      // window that had already ended and saying "now" would have claimed a
+      // freshness it lacked. At open every push — first tick or recovery —
+      // names a window that is still open and still answerable, so there is
+      // no second state to describe.
+      const body = `Submit your ${label} ping.`;
       await sendReminder(
         row,
         'ping_reminder',
@@ -359,13 +382,15 @@ runJob('pingReminder', '* * * * *', async () => {
         body,
         {
           window_label: label,
-          // Unchanged in both meaning and value: the instant we fired,
-          // which is the close of the nagged window. Kept so forensic
-          // queries stay comparable across this fix. window_start is the
-          // new field — the label is timezone-derived and therefore
-          // ambiguous on its own.
-          window_boundary: closed.windowEnd.toISOString(),
-          window_start:    closed.windowStart.toISOString(),
+          // window_boundary is the boundary this push fired ON. It was the
+          // window's CLOSE until 2026-09-12 and is its OPEN now, so it
+          // equals window_start for every reminder sent after that date —
+          // the two are kept separate because the key is already in the
+          // payload contract and forensic queries match on the name. Only
+          // window_label is read by any client (navigateForNotification
+          // deep-links on it); both instants are server-side only.
+          window_boundary: open.windowStart.toISOString(),
+          window_start:    open.windowStart.toISOString(),
         },
         skipped,
       );
@@ -373,7 +398,7 @@ runJob('pingReminder', '* * * * *', async () => {
     }
     if (pingsFired > 0) {
       console.log(
-        `[pingReminder] schedule-anchored: fired ${pingsFired} ping reminder(s) `
+        `[pingReminder] window-open: fired ${pingsFired} ping reminder(s) `
         + `skipped_no_device=${skipped.skippedNoDevice}`,
       );
     }

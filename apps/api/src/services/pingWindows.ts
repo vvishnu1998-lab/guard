@@ -221,9 +221,83 @@ export function completedTrackableWindows(
 }
 
 /**
+ * The window a REMINDER should prompt for: the most recent window that has
+ * OPENED, that COUNTS against this guard (R3 + R4), and that opened no
+ * longer than `maxAgeMs` ago.
+ *
+ * WHY THIS REPLACED windowJustClosed AS THE REMINDER'S SOURCE. The at-close
+ * reminder and missedPingCron's flag fire in the same second, because both
+ * trigger on the window ending. Observed 2026-09-12 on session bb3934c9: the
+ * `ping_reminder` row landed at 19:00:00.262 and the `missed_ping` row at
+ * 19:00:00.263 — one millisecond apart. The guard was told to submit a ping
+ * for a window that had already closed and been marked against them, and the
+ * ping they then sent at 19:00:52 could not land inside it. Prompting at OPEN
+ * gives the full window to answer in.
+ *
+ * R3 and R4 are inherited unchanged, and deliberately: a window that opened
+ * before the guard clocked in is one they will never be flagged for, so
+ * prompting for it is the same defect in the other direction. Do not prompt
+ * for what you will not flag.
+ *
+ * `maxAgeMs` means something DIFFERENT here than it does on the closed side.
+ * There it bounded how stale a close could be and still deserve a push — a
+ * dropped-tick recovery after the fact. Here it bounds how far INTO an open
+ * window a first prompt may still be sent, so a dropped tick is recovered
+ * while the window is still answerable. At a 30-minute cadence that is the
+ * first 10 minutes of the window; past it the prompt is abandoned and
+ * missedPingCron remains the only record, exactly as before.
+ *
+ * Note the asymmetry with completedTrackableWindows, which this deliberately
+ * does NOT reuse: that function enumerates windows whose END has passed, and
+ * every window this one returns is by definition still open. Sharing it would
+ * mean inverting its central test, so the R3/R4 predicates are restated here
+ * rather than parameterised — two callers with opposite closure requirements
+ * are clearer apart than behind a flag.
+ */
+export function windowJustOpened(
+  scheduledStart: Date,
+  scheduledEnd:   Date,
+  clockedInAt:    Date,
+  now:            Date,
+  maxAgeMs:       number,
+  intervalMs:     number = PING_WINDOW_MS,
+): { windowStart: Date; windowEnd: Date } | null {
+  const ssMs  = scheduledStart.getTime();
+  const seMs  = scheduledEnd.getTime();
+  const ciMs  = clockedInAt.getTime();
+  const nowMs = now.getTime();
+
+  let latest: { windowStart: Date; windowEnd: Date } | null = null;
+  const maxN = maxWindowsFor(intervalMs);
+  for (let n = 0; n < maxN; n += 1) {
+    const wsMs = ssMs + n * intervalMs;
+    const weMs = wsMs + intervalMs;
+    if (weMs > seMs) break;        // R3 — end must fit within shift
+    if (wsMs > nowMs) break;       // window has not opened yet
+    if (wsMs < ciMs) continue;     // R4/SD-D — skip pre-clock-in windows
+    latest = { windowStart: new Date(wsMs), windowEnd: new Date(weMs) };
+  }
+
+  if (!latest) return null;
+  // Opened too long ago to still be worth a first prompt. missedPingCron
+  // will flag it at close regardless; this only decides whether we nag.
+  if (nowMs - latest.windowStart.getTime() > maxAgeMs) return null;
+  return latest;
+}
+
+/**
  * The window a REMINDER should nag for: the most recent window that has
  * CLOSED, that COUNTS against this guard (R3 + R4), and that closed no
  * longer than `maxAgeMs` ago.
+ *
+ * @deprecated No longer drives any reminder. jobs/pingReminder.ts moved to
+ * windowJustOpened above on 2026-09-12, because prompting at close put the
+ * push and missedPingCron's flag in the same second (session bb3934c9:
+ * ping_reminder 19:00:00.262, missed_ping 19:00:00.263) and left the guard no
+ * time inside the window to answer. Kept exported, unused, and untouched so
+ * the at-close behaviour remains readable next to its replacement and the
+ * switch can be reversed without archaeology. Delete once at-open has a full
+ * shift cycle in production.
  *
  * This exists because jobs/pingReminder.ts used to answer the question
  * itself, with a private `currentBoundary()` that computed
