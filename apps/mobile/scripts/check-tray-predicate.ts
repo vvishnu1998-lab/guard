@@ -13,7 +13,7 @@
  *   under-clearing — Bug 1 again, which is what this whole change set is for.
  *
  * The dangerous cases are the ones where the two regimes disagree, and the
- * push-only types (`shift_cancelled`, `shifts_assigned`, ...) that can NEVER
+ * the non-type `shifts_assigned`, which can NEVER
  * appear in the live list because the API writes no row for them. A naive
  * "type not live -> dismiss" rule passes a typecheck and clears every one of
  * them on the guard's next foreground.
@@ -163,25 +163,53 @@ const CASES: Case[] = [
     why:    'an unread message is not a completed action; dismissChatRoom owns it',
   },
   {
-    label:  'PUSH-ONLY shift_cancelled survives an empty live list',
+    label:  'ROW-BACKED shift_cancelled: gone from the live list -> dismiss',
     live:   [],
     item:   tray({ type: 'shift_cancelled', shift_id: 's1' }),
-    expect: false,
-    why:    'the API writes no row for it, so it can never be live — clearing it would lose the notice',
+    expect: true,
+    why:    'row-backed since apps/api b9579bc, so an empty live list genuinely means resolved',
   },
   {
-    label:  'PUSH-ONLY shifts_assigned survives its own row-type mismatch',
+    label:  'ROW-BACKED shift_cancelled: still live -> keep',
+    live:   [row('1', 'shift_cancelled')],
+    item:   tray({ type: 'shift_cancelled', shift_id: 's1' }),
+    expect: false,
+    why:    'the notice is still outstanding — the control for the case above',
+  },
+  {
+    label:  'NON-TYPE shifts_assigned still survives — a typo, never a type',
     live:   [row('1', 'shift_assigned')],
     item:   tray({ type: 'shifts_assigned', count: '3' }),
     expect: false,
-    why:    'shiftPush.ts sends data.type=shifts_assigned while writing a shift_assigned row',
+    why:    'b9579bc fixed the sender, but banners delivered before it carry the plural and no row matches',
   },
   {
-    label:  'PUSH-ONLY task_assigned survives',
+    label:  'ROW-BACKED task_assigned: type absent from live -> dismiss',
     live:   [row('1', 'task_reminder')],
     item:   tray({ type: 'task_assigned', site_id: 'x' }),
+    expect: true,
+    why:    'routes/tasks.ts now writes a row per guard; task_reminder being live says nothing about it',
+  },
+  {
+    label:  'ROW-BACKED site_deactivated: still live -> keep',
+    live:   [row('1', 'site_deactivated')],
+    item:   tray({ type: 'site_deactivated', site_id: 'x' }),
     expect: false,
-    why:    'routes/tasks.ts:252 pushes it and writes no row',
+    why:    'the guard has not dismissed it yet',
+  },
+  {
+    label:  'ROW-BACKED shift_schedule_edited: gone -> dismiss',
+    live:   [],
+    item:   tray({ type: 'shift_schedule_edited', shift_id: 's1' }),
+    expect: true,
+    why:    'row-backed since b9579bc',
+  },
+  {
+    label:  'ROW-BACKED shift_reassigned_away: gone -> dismiss',
+    live:   [],
+    item:   tray({ type: 'shift_reassigned_away', shift_id: 's1' }),
+    expect: true,
+    why:    'row-backed since b9579bc — and delivered at all only since its Map.get fix',
   },
   {
     label:  'missing type -> keep',
@@ -219,14 +247,23 @@ if (!ROW_BACKED_TYPES.has('ping_reminder') || !ROW_BACKED_TYPES.has('chat')) {
   console.error('  FAIL  ROW_BACKED_TYPES is missing a type the fixtures rely on');
   invariantFailures++;
 }
-for (const pushOnly of ['shift_cancelled', 'shifts_assigned', 'task_assigned', 'site_deactivated', 'shift_schedule_edited', 'shift_reassigned_away']) {
-  if (ROW_BACKED_TYPES.has(pushOnly)) {
-    console.error(`  FAIL  ${pushOnly} is push-only and must NOT be in ROW_BACKED_TYPES`);
+// The five that JOINED the set when apps/api b9579bc started writing their
+// rows. Asserted positively so a revert of that API change is caught here.
+for (const nowRowBacked of ['shift_cancelled', 'task_assigned', 'site_deactivated', 'shift_schedule_edited', 'shift_reassigned_away']) {
+  if (!ROW_BACKED_TYPES.has(nowRowBacked)) {
+    console.error(`  FAIL  ${nowRowBacked} is row-backed since b9579bc and MUST be in ROW_BACKED_TYPES`);
     invariantFailures++;
   }
 }
-if (ROW_BACKED_TYPES.size !== 29) {
-  console.error(`  FAIL  ROW_BACKED_TYPES has ${ROW_BACKED_TYPES.size} entries, expected 29 (the NotificationType union at 3148286)`);
+// shifts_assigned was never a type — only a typo in the push payload. No row
+// is ever written with it, so adding it here would make every banner
+// delivered before b9579bc vanish on the guard's next foreground.
+if (ROW_BACKED_TYPES.has('shifts_assigned')) {
+  console.error('  FAIL  shifts_assigned is a payload typo, not a type — it must NOT be in ROW_BACKED_TYPES');
+  invariantFailures++;
+}
+if (ROW_BACKED_TYPES.size !== 34) {
+  console.error(`  FAIL  ROW_BACKED_TYPES has ${ROW_BACKED_TYPES.size} entries, expected 34 (the NotificationType union at b9579bc)`);
   invariantFailures++;
 }
 for (const t of PING_TYPES) {
