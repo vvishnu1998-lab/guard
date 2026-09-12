@@ -41,10 +41,27 @@
  *     the ping rendered, which erased the miss from the record.
  *   - Ping arrived < 10 min late   → "Ping (X minutes)"
  *   - Ping arrived ≥ 10 min late   → "Late Ping (X minutes)"
- *   Lateness is measured from the start of the window the ping was
- *   submitted FOR (matched by window_label; timestamp containment as the
- *   fallback for legacy rows without labels). Every ping renders as its
- *   own row EXCEPT one that resolves a miss — see above.
+ *
+ *   TWO DIFFERENT FIGURES, MEASURED FROM DIFFERENT ENDS OF THE WINDOW.
+ *   Both are "X minutes" and it is easy to assume they share a reference
+ *   point; they do not, and aligning them would break one of them.
+ *
+ *     "Ping (X minutes)" / "Late Ping (X minutes)" — HOW FAR INTO its own
+ *       window the ping landed, measured from window START. The window is
+ *       matched by window_label, with timestamp containment as the fallback
+ *       for legacy rows without labels. A ping 12 minutes into a 30-minute
+ *       window reads "Ping (12 minutes)"; measuring this one from the end
+ *       would make every on-time ping read zero.
+ *
+ *     "Missed — answered N minutes late" — HOW LATE the backfill was,
+ *       measured from window END, because the obligation did not expire
+ *       until the window closed. This was measured from the start until
+ *       2026-09-12, which counted the whole window as lateness: a ping 53
+ *       seconds past the deadline read "31 minutes late", and the figure
+ *       scaled with the cadence rather than with the delay.
+ *
+ *   Every ping renders as its own row EXCEPT one that resolves a miss —
+ *   see above.
  *
  * Patrol rounds: one row per (site, round_window) from checkpoint_scans,
  * sorted into the timeline by round_window. Only rounds whose hour has
@@ -774,6 +791,22 @@ export async function fetchActivityRows(
     const sessionMisses = missesBySession.get(s.session_id) ?? [];
     for (const m of sessionMisses) {
       const windowStartMs = Date.parse(m.window_start);
+      // Lateness for a MISSED window is measured from its END, not its start.
+      // The obligation did not expire until the window closed, so a backfill
+      // 53 seconds after close is one minute late, not thirty-one.
+      //
+      // Measured from the start it counted the whole window as lateness and
+      // reported a figure with no behavioural meaning: on session bb3934c9
+      // (2026-09-12) a ping at 19:00:52 for the 18:30–19:00 window rendered
+      // "answered 31 minutes late" when the guard was 53 seconds past the
+      // deadline. The number scaled with the cadence rather than with the
+      // delay — the same 53-second backfill would have read 16 on a 15-minute
+      // grid and 46 on a 45-minute one.
+      //
+      // windowStartMs is NOT reused here on purpose; it still identifies the
+      // row and supplies event_time below, both of which are properties of
+      // when the obligation fell due.
+      const windowEndMs = Date.parse(m.window_end);
       const resolver = m.resolved_by_ping_id
         ? sessionPings.find((p) => p.id === m.resolved_by_ping_id)
         : undefined;
@@ -782,7 +815,7 @@ export async function fetchActivityRows(
       // range (or predates resolved_by_ping_id being populated): state
       // the outcome without inventing a lateness figure or media.
       const answeredMin = resolver
-        ? Math.max(0, Math.round((Date.parse(resolver.pinged_at) - windowStartMs) / 60_000))
+        ? Math.max(0, Math.round((Date.parse(resolver.pinged_at) - windowEndMs) / 60_000))
         : null;
 
       let status: string;

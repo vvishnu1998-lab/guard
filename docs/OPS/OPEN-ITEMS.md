@@ -2485,3 +2485,20 @@ real `task_instance_id` exists and can go in the payload. That changes WHEN guar
 generation rather than at template creation), which is a product decision, not a refactor — a
 recurring template would then notify on every generation cycle instead of once.
 **Size M. Tier 1.**
+
+**N89. `email.ts` renders a "minutes late" figure that is NOT the ping figure and must not be aligned with it.**
+verified: YES — `apps/api/src/services/email.ts:882` computes `minutesLate` and renders it at `:919`,
+`:923` and in the subject at `:950` ("⚠️ MISSED SHIFT — … is N min late"). It measures **clock-in
+lateness against `shifts.scheduled_start`** for the missed-shift alert. It has **no ping-window
+lateness render at all** — `grep -in "late|answered" email.ts` returns nothing else.
+Logged because 2026-09-12 moved the ping figure in `routes/activityLog.ts` from window START to
+window END, and there are now three same-shaped "N minutes late" strings on the platform measuring
+three different things:
+  1. `activityLog.ts` "Ping (X minutes)" / "Late Ping (X minutes)" — minutes INTO the window, from
+     window **start**. Correct as-is; measuring from the end would make every on-time ping read 0.
+  2. `activityLog.ts` "Missed — answered N minutes late" — from window **end**, as of 2026-09-12.
+  3. `email.ts` missed-shift alert — from **`scheduled_start`**, unrelated to ping windows.
+**Do not "align" (3) with (2).** They share a word and nothing else. This item exists so the next
+person who greps for lateness finds the distinction written down instead of inferring a bug.
+`email.ts` was explicitly out of scope for the Phase 2 dispatch and is unchanged.
+**Size XS. Tier 0** (documentation only, unless someone decides the copy should differ).
