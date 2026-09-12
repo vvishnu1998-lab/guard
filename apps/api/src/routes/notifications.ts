@@ -77,7 +77,21 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
       'swap_accepted', 'swap_declined', 'swap_expired',
       'handoff_request_received', 'handoff_request_sent',
       'handoff_accepted', 'handoff_declined', 'handoff_cancelled',
-      'handoff_complete', 'handoff_nudge', 'handoff_expired'
+      'handoff_complete', 'handoff_nudge', 'handoff_expired',
+      -- Phase 3b — the five types Phase 3.2 started writing rows for.
+      -- They MUST bypass shift scoping or the rows are unreachable: every
+      -- one is inserted with shift_session_id NULL (an admin edits a
+      -- schedule or closes a site with no reference to any session, and
+      -- often while the guard is not clocked in at all), and NULL never
+      -- equals the active-session subquery below. Without this line
+      -- Phase 3.2 writes rows that no query can return — visible in the
+      -- table, invisible in the app.
+      --
+      -- Like 'chat', none of the five has an auto-erase arm: they report
+      -- something an admin did, not an obligation with a completion state,
+      -- so they leave the feed when the guard dismisses them (read_at).
+      'site_deactivated', 'task_assigned', 'shift_reassigned_away',
+      'shift_cancelled', 'shift_schedule_edited'
     )
     OR notifications.shift_session_id = (
       SELECT id FROM shift_sessions

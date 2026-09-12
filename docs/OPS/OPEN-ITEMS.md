@@ -2461,3 +2461,27 @@ write one row per shift, which fixes the erase but re-introduces the notificatio
 exists to prevent. **(c) is a regression, not a fix** — the batching was deliberate.
 Decide before anyone "fixes" the arm by making it match on `shift_ids` naively.
 **Size S. Tier 1.**
+
+**N88. `task_assigned` cannot auto-erase: its push fires at TEMPLATE creation, when no task instance exists yet.**
+verified: YES — `grep -rn "task_assigned" apps/api/src` shows the payload is
+`{ type: 'task_assigned', site_id }` at `routes/tasks.ts:262` and `:271`; there is no
+`task_instance_id` anywhere in it. The push is emitted from **`POST /api/tasks/templates`**, which
+creates a `task_templates` row. Instances are generated later and elsewhere —
+`services/tasks.ts:70`, `INSERT INTO task_instances (template_id, shift_id, site_id, title, due_at)`.
+So at the moment the guard is told "New task", the thing that could be completed does not exist.
+The column and value an erase arm would need are both real (`task_instances.status` varchar(20),
+live values `pending` 8 / `completed` 4) — there is simply no row to point at.
+**Current state is deliberate**: `task_assigned` is informational, has no CASE arm, and leaves the
+feed when the guard dismisses it (read_at), like `chat` and the other four Phase 3.2 types. An arm
+guarded on `data ? 'task_instance_id'` would be false for every row — inert code that reads as
+working, which is worse than no arm.
+Every near-substitute is worse and should NOT be reached for: keying on `site_id` + any pending
+instance never erases (a recurring template always has pending instances) and is site-wide rather
+than guard-specific; keying on the template id never erases (templates have no completion state);
+copying the `task_reminder` shape fails because that arm joins through
+`notifications.shift_session_id`, which is NULL on these rows by construction.
+**If auto-erase is ever wanted, the fix is (b): move the push to instance-generation time**, where a
+real `task_instance_id` exists and can go in the payload. That changes WHEN guards are notified (at
+generation rather than at template creation), which is a product decision, not a refactor — a
+recurring template would then notify on every generation cycle instead of once.
+**Size M. Tier 1.**
