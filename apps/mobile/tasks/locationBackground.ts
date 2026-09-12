@@ -74,11 +74,15 @@ const KEYCHAIN_OPTS = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
 
 /** Persist the post state. Never throws — a failed write degrades to the
  *  'unknown' branch on the next event, which suppresses. */
-async function persistGeofenceState(sessionId: string, state: PostState): Promise<void> {
+async function persistGeofenceState(
+  sessionId: string,
+  state:     PostState,
+  reported:  boolean,
+): Promise<void> {
   try {
     await SecureStore.setItemAsync(
       GEOFENCE_STATE_KEY,
-      serializeGeofenceState(sessionId, state),
+      serializeGeofenceState(sessionId, state, reported),
       KEYCHAIN_OPTS,
     );
   } catch (err) {
@@ -86,7 +90,7 @@ async function persistGeofenceState(sessionId: string, state: PostState): Promis
       category: 'geofence',
       message:  'state persist failed',
       level:    'warning',
-      data:     { state, error: String(err) },
+      data:     { state, reported, error: String(err) },
     });
   }
 }
@@ -189,13 +193,29 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
   const onBreak = await isBreakActive();
 
   // Is this event a real transition, or the artefact of a re-registration?
-  // Decided before either branch so both record where the guard now is, and
-  // so the Enter branch has something to suppress on. See lib/geofenceState.
+  // See lib/geofenceState. Each branch persists its own next state: a
+  // SUPPRESSED exit must leave the existing record untouched, because that
+  // record's `reported: true` is the very thing that suppressed it — writing
+  // it back as unreported here would make the NEXT duplicate re-POST, which
+  // is the behaviour this is removing.
   const stored   = readStoredState(storedStateRaw, sessionId);
   const decision = decideTransition(isExit ? 'exit' : 'enter', stored);
-  await persistGeofenceState(sessionId, decision.nextState);
 
   if (isExit) {
+    if (!decision.notify) {
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message:  'geofence exit suppressed (already outside)',
+        level:    'info',
+        data:     { session_id: sessionId, stored: stored.state, reported: stored.reported },
+      });
+      return;
+    }
+    // Pessimistic: recorded as UNREPORTED before the POST is attempted, so a
+    // crash, a kill, or a dead zone between here and the response leaves a
+    // record that will retry rather than one that claims success.
+    await persistGeofenceState(sessionId, 'outside', false);
+
     if (onBreak) {
       Sentry.addBreadcrumb({
         category: 'geofence',
@@ -261,6 +281,13 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
           SecureStore.deleteItemAsync(GEOFENCE_STATE_KEY).catch(() => {}),
         ]);
       } else if (res.ok) {
+        // The server has the breach — either as a violation or, on break, as
+        // a quiet off_post_events row. Either way there is nothing left to
+        // retry, so a duplicate exit from a re-registration can now be
+        // suppressed. Written only on a confirmed 2xx: a 5xx falls through
+        // and leaves the record unreported, so the next exit re-POSTs.
+        await persistGeofenceState(sessionId, 'outside', true);
+
         // Break-quiet: the server answers 200 {code:'ON_BREAK'} when it
         // suppressed the violation and recorded a quiet off_post_events
         // row instead. Nothing to do client-side — breadcrumb so the
@@ -283,6 +310,13 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
   }
 
   if (isEnter) {
+    // Adopt the position FIRST, ahead of every gate below. If the break gate
+    // returned before this, a guard who walked back on post during a break
+    // would still be recorded 'outside', and the next re-registration would
+    // read that as a genuine re-entry and fire the exact banner this change
+    // removes.
+    await persistGeofenceState(sessionId, 'inside', false);
+
     // Break-quiet: no noise in either direction while on break — a "Back
     // on post" during break is as much of an interruption as the exit
     // alert it pairs with.
@@ -302,9 +336,9 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
     if (!decision.notify) {
       Sentry.addBreadcrumb({
         category: 'geofence',
-        message:  `geofence enter suppressed (stored=${stored})`,
+        message:  `geofence enter suppressed (stored=${stored.state})`,
         level:    'info',
-        data:     { session_id: sessionId, stored, reason: decision.reason },
+        data:     { session_id: sessionId, stored: stored.state, reason: decision.reason },
       });
       return;
     }
@@ -314,7 +348,7 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
       category: 'geofence',
       message:  'enter notified — genuine re-entry',
       level:    'info',
-      data:     { session_id: sessionId, stored, reason: decision.reason },
+      data:     { session_id: sessionId, stored: stored.state, reason: decision.reason },
     });
     await Notifications.scheduleNotificationAsync({
       content: {

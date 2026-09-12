@@ -69,10 +69,24 @@ export const GEOFENCE_STATE_KEY = 'geofence_state';
 interface StoredRecord {
   sessionId: string;
   state:     PostState;
+  /** Did the exit that produced this 'outside' actually reach the server?
+   *  Meaningless when state is 'inside'. */
+  reported:  boolean;
 }
 
-export function serializeGeofenceState(sessionId: string, state: PostState): string {
-  const record: StoredRecord = { sessionId, state };
+/** What we read back: the position, plus whether the breach behind it was
+ *  successfully reported. */
+export interface StoredSnapshot {
+  state:    StoredState;
+  reported: boolean;
+}
+
+export function serializeGeofenceState(
+  sessionId: string,
+  state:     PostState,
+  reported:  boolean,
+): string {
+  const record: StoredRecord = { sessionId, state, reported };
   return JSON.stringify(record);
 }
 
@@ -90,35 +104,59 @@ export function serializeGeofenceState(sessionId: string, state: PostState): str
  * install upgrading into this build starts from a clean slate rather than
  * trusting a record written by a different state machine.
  */
-export function readStoredState(raw: string | null, sessionId: string): StoredState {
-  if (!raw) return 'unknown';
+export function readStoredState(raw: string | null, sessionId: string): StoredSnapshot {
+  const UNKNOWN: StoredSnapshot = { state: 'unknown', reported: false };
+  if (!raw) return UNKNOWN;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return 'unknown';                       // legacy bare string, or corrupt
+    return UNKNOWN;                         // legacy bare string, or corrupt
   }
-  if (!parsed || typeof parsed !== 'object') return 'unknown';
+  if (!parsed || typeof parsed !== 'object') return UNKNOWN;
   const rec = parsed as Partial<StoredRecord>;
-  if (rec.sessionId !== sessionId) return 'unknown';   // different shift
-  if (rec.state !== 'inside' && rec.state !== 'outside') return 'unknown';
-  return rec.state;
+  if (rec.sessionId !== sessionId) return UNKNOWN;     // different shift
+  if (rec.state !== 'inside' && rec.state !== 'outside') return UNKNOWN;
+  // Absent `reported` (a record written by the Phase 3 build, before this
+  // field existed) reads false, so the first duplicate exit after an upgrade
+  // re-reports rather than being swallowed. Fail toward enforcement.
+  return { state: rec.state, reported: rec.reported === true };
 }
 
 /**
  * The transition table.
  *
- *   event   stored     notify   next      why
- *   ------  ---------  -------  --------  ---------------------------------
- *   exit    any        yes      outside   leaving is always real: the OS
- *                                         does not synthesise an EXIT for a
- *                                         device that is inside
- *   enter   outside    YES      inside    the only genuine re-entry
- *   enter   inside     no       inside    duplicate — re-registration while
- *                                         already on post. THE BUG.
- *   enter   unknown    no       inside    first event of the session, or a
- *                                         record from another session. Adopt
- *                                         the position silently.
+ *   event   stored             notify   next      why
+ *   ------  -----------------  -------  --------  -------------------------
+ *   exit    outside+reported   no       outside   duplicate — re-registration
+ *                                                 while already off post.
+ *                                                 The server already has it.
+ *   exit    outside+unreported YES      outside   the first POST never
+ *                                                 landed. Retry it.
+ *   exit    inside             yes      outside   the ordinary breach
+ *   exit    unknown            yes      outside   first event; assume real
+ *   enter   outside            YES      inside    the only genuine re-entry
+ *   enter   inside             no       inside    duplicate — re-registration
+ *                                                 while already on post.
+ *                                                 THE BUG.
+ *   enter   unknown            no       inside    first event of the session,
+ *                                                 or a record from another
+ *                                                 session. Adopt the position
+ *                                                 silently.
+ *
+ * EXIT suppression (Phase 3b) is gated on `reported`, not on position alone.
+ * The same registration artefact that fakes an ENTER fakes an EXIT when the
+ * device is outside at registration — Android sets INITIAL_TRIGGER_EXIT on
+ * the same line, iOS compares Unknown(0) != Outside(2) — and that path both
+ * notifies AND POSTs a violation, so duplicates were reaching
+ * geofence_violations.
+ *
+ * But the violation POST is a bare fetch with no retry and no offline queue,
+ * and a dead zone is exactly where a guard trips a geofence. Suppressing on
+ * position alone would turn today's accidental retry (a later synthetic exit
+ * re-POSTing a breach whose first attempt died) into a silently dropped
+ * violation. `reported` keeps the dedupe and keeps the retry: suppress only
+ * once the server has confirmed it has the breach.
  *
  * The 'unknown' row is what makes clock-in quiet: the guard clocks in while
  * standing on post, registration fires a synthetic ENTER, and with nothing
@@ -130,16 +168,26 @@ export function readStoredState(raw: string | null, sessionId: string): StoredSt
  * subsequent exit/enter pair behaves normally. Under-notifying once beats
  * notifying on every foreground.
  */
-export function decideTransition(event: GeofenceEvent, stored: StoredState): TransitionDecision {
+export function decideTransition(
+  event:    GeofenceEvent,
+  snapshot: StoredSnapshot,
+): TransitionDecision {
   if (event === 'exit') {
-    return { notify: true, nextState: 'outside', reason: 'exit' };
+    if (snapshot.state === 'outside' && snapshot.reported) {
+      return { notify: false, nextState: 'outside', reason: 'already outside' };
+    }
+    return {
+      notify:    true,
+      nextState: 'outside',
+      reason:    snapshot.state === 'outside' ? 'retry unreported exit' : 'exit',
+    };
   }
-  if (stored === 'outside') {
+  if (snapshot.state === 'outside') {
     return { notify: true, nextState: 'inside', reason: 'genuine re-entry' };
   }
   return {
     notify:    false,
     nextState: 'inside',
-    reason:    stored === 'inside' ? 'already inside' : 'no prior state',
+    reason:    snapshot.state === 'inside' ? 'already inside' : 'no prior state',
   };
 }
