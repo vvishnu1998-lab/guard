@@ -70,7 +70,12 @@ inject('../services/deviceRegistry', {
 inject('../services/pingWindows', {
   breakOverlapsWindow: async () => false,
   siteLocalLabel: () => 'label',
-  windowJustClosed: () => null,
+  // Renamed with the job's switch to at-open (2026-09-12). The stub must
+  // match the symbol pingReminder actually imports, or the import resolves
+  // to undefined and every case here fails at call time rather than in a
+  // way that names the cause. Window arithmetic itself is covered by
+  // services/_pingWindows.test.ts; this file stubs it away on purpose.
+  windowJustOpened: () => null,
 });
 inject('./_run', { runJob: () => ({ on() {}, _task: { on() {} } }) });
 
