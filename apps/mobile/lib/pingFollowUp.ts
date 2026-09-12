@@ -11,21 +11,8 @@
  */
 import * as Notifications from 'expo-notifications';
 import { apiClient } from './apiClient';
-
-/**
- * A ping/missed-ping notification's window, whichever casing the producer
- * used. The API is not consistent: jobs/pingReminder.ts writes snake_case
- * `window_label`, jobs/missedPingCron.ts writes camelCase `windowLabel`.
- * The server-side auto-erase COALESCEs both for the same reason.
- */
-function windowOf(data: unknown): string | null {
-  if (!data || typeof data !== 'object') return null;
-  const d = data as Record<string, unknown>;
-  const v = d.window_label ?? d.windowLabel;
-  return typeof v === 'string' && v ? v : null;
-}
-
-const PING_TYPES = new Set(['ping_reminder', 'missed_ping']);
+import { PING_TYPES, windowOf } from './notificationTray';
+import { reconcileTray } from './notificationSync';
 
 /**
  * Drop any DELIVERED notification for `label` from the OS tray /
@@ -40,6 +27,14 @@ const PING_TYPES = new Set(['ping_reminder', 'missed_ping']);
  * Never throws: a ping that succeeded must not surface an error because
  * tray cleanup failed. Worst case the stale banner stays, which is exactly
  * today's behaviour.
+ *
+ * Followed by a full reconcileTray(). This window-scoped pass is kept rather
+ * than folded into the reconcile because it is exact and immediate: it clears
+ * the banner for the window just answered without waiting on a round-trip,
+ * and it still works if `GET /notifications` is unreachable. The reconcile
+ * then catches everything else the submission resolved — a missed_ping row
+ * the server closed in the same transaction, say — and is a no-op when there
+ * is nothing left to clear.
  */
 export async function dismissWindowNotifications(label: string | null): Promise<void> {
   if (!label) return;
@@ -61,6 +56,9 @@ export async function dismissWindowNotifications(label: string | null): Promise<
   } catch (err) {
     console.warn('[ping] notification dismissal failed (non-fatal):', err);
   }
+  // Sweep whatever else this submission resolved. Own try/catch inside, so a
+  // failure here cannot undo the window-scoped dismissal above.
+  await reconcileTray();
 }
 
 export type Outstanding =
