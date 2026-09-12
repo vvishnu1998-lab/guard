@@ -41,6 +41,7 @@ import { pool } from '../db/pool';
 import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 interface DueRow {
   task_instance_id: string;
@@ -126,7 +127,7 @@ runJob('taskDueCron', '*/5 * * * *', async () => {
           shift_id:         row.shift_id,
         };
 
-        await insertNotification({
+        const notifId = await insertNotification({
           guardId:        row.guard_id,
           type:           'task_reminder',
           title,
@@ -146,6 +147,9 @@ runJob('taskDueCron', '*/5 * * * *', async () => {
                 task_instance_id: row.task_instance_id,
                 shift_id:         row.shift_id,
               },
+              notificationId: notifId,
+              channelId:      channelForType('task_reminder'),
+              collapseId:     collapseIdFor('task_reminder', { task_instance_id: row.task_instance_id }),
             });
           } catch (err) {
             console.error(

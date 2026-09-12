@@ -20,6 +20,7 @@ import { sendPushNotification } from './firebase';
 import { getActivePushToken } from './deviceRegistry';
 import { insertNotification } from './notifications';
 import { reportPushSkip } from './pushSkipReporter';
+import { channelForType, collapseIdFor } from './pushChannels';
 
 export interface CreatedShift {
   id:              string;
@@ -148,7 +149,7 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
       // of fcm_token state so guards without a push token still see the
       // entry when they open the app. insertNotification is best-effort
       // (internal try/catch) so this never throws.
-      await insertNotification({
+      const notifId = await insertNotification({
         guardId,
         type:  'shift_assigned',
         title,
@@ -183,6 +184,11 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
           first_date: firstDate,
           last_date:  lastDate,
         },
+        notificationId: notifId,
+        channelId:      channelForType('shift_assigned'),
+        // No single shift id on a batched assignment, and shift_ids is a
+        // joined list that would blow the 64-byte cap — so no collapse key.
+        // Two separate batches are genuinely two notifications.
       });
     } catch (err) {
       console.error('[shift-assignment-push] failed for guard', guardId, err);

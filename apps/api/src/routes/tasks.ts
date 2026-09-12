@@ -7,6 +7,7 @@ import { validateAtSite } from '../services/geofence';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 const router = Router();
 
@@ -254,6 +255,9 @@ router.post('/templates', requireAuth('company_admin'), async (req, res) => {
           title: 'New task',
           body:  title ?? 'A new task has been assigned to your site.',
           data:  { type: 'task_assigned', site_id },
+          // See sites.ts — 'default' until Phase 3.2 unions this type.
+          channelId:  'default',
+          collapseId: collapseIdFor('task_assigned', { shift_id: site_id }),
         })
       )
     );

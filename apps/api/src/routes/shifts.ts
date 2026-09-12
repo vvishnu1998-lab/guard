@@ -51,6 +51,7 @@ import {
   type ShiftHours,
 } from '../services/shiftHours';
 import { siteLocalDayRange } from '../services/dateRange';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 const router = Router();
 
@@ -901,6 +902,10 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
         title: `Shift assigned at ${shift.site_name}`,
         body:  `Starts ${dateLabel}. Tap to view details.`,
         data:  { type: 'shift_assigned', shift_id: id, scheduled_start: startIso },
+        // shift_assigned IS in the union already, so it gets a real channel.
+        // No notificationId: this path writes no row (Phase 3.2).
+        channelId:  channelForType('shift_assigned'),
+        collapseId: collapseIdFor('shift_assigned', { shift_id: id }),
       }).catch((err) => console.error('[reassign] FCM push to new guard failed:', err));
     }
 
@@ -911,6 +916,10 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
         title: `Shift reassigned`,
         body:  `Your ${dateLabel} shift at ${shift.site_name} has been reassigned. You no longer need to cover it.`,
         data:  { type: 'shift_reassigned_away', shift_id: id, scheduled_start: startIso },
+        // See sites.ts — 'default' until Phase 3.2 unions this type. NOTE this
+        // whole branch is unreachable today; Phase 3.5 fixes oldToken.
+        channelId:  'default',
+        collapseId: collapseIdFor('shift_reassigned_away', { shift_id: id }),
       }).catch((err) => console.error('[reassign] FCM push to old guard failed:', err));
     }
 
@@ -1232,6 +1241,9 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
             title: 'Shift cancelled',
             body:  `${dayLabel} at ${shift.site_name}`,
             data:  { type: 'shift_cancelled', shift_id: id },
+            // See sites.ts — 'default' until Phase 3.2 unions this type.
+            channelId:  'default',
+            collapseId: collapseIdFor('shift_cancelled', { shift_id: id }),
           });
         } catch (err) {
           console.error('[shifts.cancel] push failed:', err);
@@ -1533,6 +1545,9 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
               scheduled_start: newStart.toISOString(),
               scheduled_end:   newEnd.toISOString(),
             },
+            // See sites.ts — 'default' until Phase 3.2 unions this type.
+            channelId:  'default',
+            collapseId: collapseIdFor('shift_schedule_edited', { shift_id: id }),
           });
         })
         .catch((err) => console.error('[shifts.edit] FCM push failed:', err));

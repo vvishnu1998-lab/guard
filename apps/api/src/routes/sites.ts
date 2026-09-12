@@ -7,6 +7,7 @@ import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 import { validatePingInterval, normalizeReason } from '../services/pingIntervalPicker';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 /**
  * Common gate: 409 if the target site has been deactivated. Used on every
@@ -582,6 +583,11 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
             title: `Site closed — ${site.name}`,
             body:  `Your upcoming shifts at ${site.name} were cancelled because the site was deactivated. Check your schedule.`,
             data:  { type: 'site_deactivated', site_id: req.params.id },
+            // channelId stays 'default' until Phase 3.2 adds this type to the
+            // NotificationType union and gives it a row; it already lands on
+            // 'default' today, so this restates current behaviour.
+            channelId:  'default',
+            collapseId: collapseIdFor('site_deactivated', { shift_id: req.params.id }),
           });
         } catch (err) {
           console.error('[sites.deactivate] push failed for guard', guardId, err);

@@ -43,6 +43,7 @@ import { insertNotification } from '../services/notifications';
 import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { validateAtSite } from '../services/geofence';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 export interface ExpiredBreak {
   id: string;
@@ -174,7 +175,7 @@ async function pushWithAlertRow(params: {
   body: string;
   data: Record<string, unknown>;
 }): Promise<void> {
-  await insertNotification({
+  const notifId = await insertNotification({
     guardId: params.guardId,
     type: params.type,
     title: params.title,
@@ -193,6 +194,9 @@ async function pushWithAlertRow(params: {
     data: Object.fromEntries(
       Object.entries(params.data).map(([k, v]) => [k, String(v)]),
     ) as Record<string, string>,
+    notificationId: notifId,
+    channelId:      channelForType(params.type),
+    collapseId:     collapseIdFor(params.type, params.data),
   });
 }
 

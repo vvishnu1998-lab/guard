@@ -41,6 +41,7 @@ import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { sendMissedShiftAlert } from '../services/email';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 interface LateCandidateRow {
   shift_id: string;
@@ -91,8 +92,9 @@ async function fireGuardPush(
   // shift_session_id is NULL because no session exists yet;
   // routes/notifications.ts special-cases late_clock_in in the outer
   // scope filter to let it through the "active session" gate.
+  let notifId: string | null = null;
   if (row.guard_id) {
-    await insertNotification({
+    notifId = await insertNotification({
       guardId:        row.guard_id,
       type:           'late_clock_in',
       title,
@@ -114,6 +116,11 @@ async function fireGuardPush(
           rung:         String(rung),
           minutesLate:  String(row.minutes_late),
         },
+        notificationId: notifId,
+        channelId:      channelForType('late_clock_in'),
+        // Rung is part of the key: ladder rungs are DIFFERENT escalations of
+        // the same lateness and must not collapse into one another.
+        collapseId:     collapseIdFor('late_clock_in', { shift_id: `${row.shift_id}-${rung}` }),
       });
     } catch (err) {
       console.error(`[lateClockIn] FCM failed for shift ${row.shift_id} rung=T+${rung}:`, err);

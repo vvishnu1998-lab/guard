@@ -80,6 +80,7 @@ import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { Sentry } from '../services/sentry';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 /** How long before scheduled_end the reminder becomes eligible. */
 const LEAD_MINUTES = 5;
@@ -155,7 +156,7 @@ export async function runClockOutReminder(): Promise<number> {
 
       // Log the notification first so the in-app tray is right even when the
       // device has no usable token. Best-effort by contract; it never throws.
-      await insertNotification({
+      const notifId = await insertNotification({
         guardId:        row.guard_id,
         type:           'clock_out_reminder',
         title:          'Time to clock out',
@@ -171,6 +172,9 @@ export async function runClockOutReminder(): Promise<number> {
           title: 'Time to clock out',
           body,
           data:  { type: 'clock_out_reminder', shift_id: row.shift_id },
+          notificationId: notifId,
+          channelId:      channelForType('clock_out_reminder'),
+          collapseId:     collapseIdFor('clock_out_reminder', { shift_id: row.shift_id }),
         });
         pushed++;
       } catch (err) {

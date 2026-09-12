@@ -46,6 +46,7 @@ import { insertNotification } from '../services/notifications';
 import { breakOverlapsWindow } from '../services/pingWindows';
 import { expiresAtFor } from '../services/retention';
 import { Sentry } from '../services/sentry';
+import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 interface SessionRow {
   session_id: string;
@@ -224,7 +225,7 @@ runJob('missedReportCron', '*/5 * * * *', async () => {
           siteName:       s.site_name,
         };
 
-        await insertNotification({
+        const notifId = await insertNotification({
           guardId:        s.guard_id,
           type:           'missed_report',
           title,
@@ -247,6 +248,9 @@ runJob('missedReportCron', '*/5 * * * *', async () => {
                 windowEnd:      w.windowEnd.toISOString(),
                 siteName:       s.site_name,
               },
+              notificationId: notifId,
+              channelId:      channelForType('missed_report'),
+              collapseId:     collapseIdFor('missed_report', { missedReportId: mrId }),
             });
           } catch (err) {
             console.error(`[missedReportCron] FCM push failed for session ${s.session_id}:`, err);
