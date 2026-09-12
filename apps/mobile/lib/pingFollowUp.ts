@@ -12,7 +12,7 @@
 import * as Notifications from 'expo-notifications';
 import { apiClient } from './apiClient';
 import { PING_TYPES, windowOf } from './notificationTray';
-import { reconcileTray } from './notificationSync';
+import { syncTrayAndBadge } from './notificationSync';
 
 /**
  * Drop any DELIVERED notification for `label` from the OS tray /
@@ -56,9 +56,11 @@ export async function dismissWindowNotifications(label: string | null): Promise<
   } catch (err) {
     console.warn('[ping] notification dismissal failed (non-fatal):', err);
   }
-  // Sweep whatever else this submission resolved. Own try/catch inside, so a
-  // failure here cannot undo the window-scoped dismissal above.
-  await reconcileTray();
+  // Sweep whatever else this submission resolved, and stamp the badge — the
+  // same pair every other success path runs, so the ping path is not the one
+  // screen that clears the tray and leaves the icon counting. Own try/catch
+  // inside, so a failure here cannot undo the window-scoped dismissal above.
+  await syncTrayAndBadge();
 }
 
 export type Outstanding =

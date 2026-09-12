@@ -28,6 +28,29 @@ import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locati
 import { isUsableShiftEnd } from '../lib/shiftExpiry';
 import { initSentry } from '../lib/sentry';
 import { setupAndroidChannels } from '../lib/notifications';
+import { syncTrayAndBadge, syncBadge } from '../lib/notificationSync';
+
+/**
+ * Notification-response identifiers already routed, shared between the
+ * response listener and the cold-start handler below.
+ *
+ * A launch-from-tap can surface through BOTH — the listener fires if it
+ * happens to be registered in time, and getLastNotificationResponseAsync
+ * always returns it — and routing twice would push the same screen onto the
+ * stack twice, leaving the guard a back button that goes nowhere useful.
+ * Module scope rather than a ref because the two consumers are separate
+ * effects with separate lifetimes.
+ */
+const handledResponses = new Set<string>();
+
+function routeOnce(resp: Notifications.NotificationResponse | null): void {
+  if (!resp) return;
+  const id = resp.notification.request.identifier;
+  if (handledResponses.has(id)) return;
+  handledResponses.add(id);
+  const data = resp.notification.request.content.data as Record<string, any> | undefined;
+  navigateForNotification(data?.type, data);
+}
 
 // Initialize at module load — before any component mounts — so early native
 // crashes during startup are captured.
@@ -151,12 +174,24 @@ export default function RootLayout() {
 
   // Tap routing — open the right screen when the user taps a push notification.
   useEffect(() => {
-    const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
-      const data = resp.notification.request.content.data as Record<string, any> | undefined;
-      navigateForNotification(data?.type, data);
-    });
+    const sub = Notifications.addNotificationResponseReceivedListener(routeOnce);
     return () => sub.remove();
   }, []);
+
+  // Cold-start tap routing. A tap that LAUNCHES the app is delivered before
+  // the listener above exists, so until now it opened the app on the home tab
+  // and silently dropped the destination — the guard tapped "you're 15 min
+  // late" and landed nowhere in particular.
+  //
+  // Gated on authenticated + fonts, because this component renders null until
+  // both are settled and a push before the Stack mounts has nothing to
+  // navigate. routeOnce dedupes against the listener.
+  useEffect(() => {
+    if (status !== 'authenticated' || mustChangePassword || !fontsLoaded) return;
+    Notifications.getLastNotificationResponseAsync()
+      .then(routeOnce)
+      .catch((err) => console.warn('[push] cold-start response lookup failed:', err));
+  }, [status, mustChangePassword, fontsLoaded]);
 
   // Foreground reception — bump the appropriate badge counter optimistically,
   // then re-sync against the server so we self-correct if the optimistic bump
@@ -208,7 +243,11 @@ export default function RootLayout() {
       // Re-sync from server shortly after — the new notification row
       // should be visible, and (BUG C) any pending swap/handoff should
       // land in the inbound-swap-requests count too.
-      setTimeout(() => refreshUnread(), 500);
+      //
+      // syncBadge() rather than refreshUnread(): it calls the same
+      // unreadStore.refresh() and then stamps the OS app-icon badge with the
+      // result. Calling both would double the fetch for one count.
+      setTimeout(() => { void syncBadge(); }, 500);
     });
     return () => sub.remove();
   }, [bumpChat, bumpNotifications, refreshUnread]);
@@ -256,6 +295,11 @@ export default function RootLayout() {
         data: { from },
       });
       useShiftStore.getState().refreshFromServer();
+      // Same 2s throttle, deliberately: foregrounding is the moment a guard
+      // sees their tray, and anything they resolved while the app was
+      // backgrounded (or that a cron auto-erased) should already be gone.
+      // Not awaited — this handler must not block the AppState callback.
+      void syncTrayAndBadge();
     });
     return () => sub.remove();
   }, []);

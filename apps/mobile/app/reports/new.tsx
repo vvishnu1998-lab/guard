@@ -32,6 +32,7 @@ import { uuidv4 } from '../../lib/uuid';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { GuardFacingError } from '../../lib/errors';
 import { guardMessage } from '../../lib/errorCopy';
+import { syncTrayAndBadge } from '../../lib/notificationSync';
 
 type ReportType = 'activity' | 'incident' | 'maintenance';
 
@@ -315,6 +316,10 @@ export default function CreateReport() {
       } else {
         router.replace('/(tabs)/reports');
       }
+      // The activity_report_reminder / missed_report row the server just
+      // auto-erased still has a banner sitting in the tray. Fires on all
+      // three branches above, including the two that wait on an Alert.
+      void syncTrayAndBadge();
     } catch (err: any) {
       // REPORT_OFF_POST is expected under the Commit A hybrid policy for
       // activity + maintenance reports (Q8). Show the reason clearly and

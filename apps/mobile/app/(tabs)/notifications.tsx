@@ -54,6 +54,7 @@ import { respondConflictCopy, RespondKind } from '../../lib/respondErrorCopy';
 import { navigateForNotification } from '../../lib/navigateForNotification';
 import { useUnreadStore } from '../../store/unreadStore';
 import { visibleNotifications, groupNotifications } from '../../lib/notificationSections';
+import { syncTrayAndBadge } from '../../lib/notificationSync';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
 import { NOTIFY_SUPERVISOR } from '../../lib/copy';
@@ -283,6 +284,11 @@ export default function NotificationsScreen() {
       (async () => {
         await Promise.all([fetchNotifications(), fetchInbound()]);
         setLoading(false);
+        // Still not mark-all-read — opening the tab is not dismissal. This
+        // only clears TRAY banners whose rows the server has already erased
+        // or the guard has already dismissed, which is the opposite of
+        // marking anything read.
+        void syncTrayAndBadge();
       })();
     }, [fetchNotifications, fetchInbound]),
   );
@@ -427,7 +433,12 @@ export default function NotificationsScreen() {
     // refresh() rather than resetNotifications(): the badge is unread
     // notifications PLUS pending inbound swap/handoff requests, so it is not
     // this screen's to zero. Ask the server what it should be.
-    refresh();
+    //
+    // syncTrayAndBadge covers that refresh AND drops the row's tray banner:
+    // read_at is now set, so visibleNotifications drops it from the live set
+    // and reconcileTray clears it. Dismissing here and finding the banner
+    // still in Notification Center was half of what made Bug 1 feel broken.
+    void syncTrayAndBadge();
   }
 
   /** Clear every visible alert — the same mark-all-read that used to fire
@@ -452,7 +463,10 @@ export default function NotificationsScreen() {
               Alert.alert('Could not clear', 'Please try again.');
               return;
             }
-            refresh();
+            // Every row is now read_at-stamped, so the reconcile clears the
+            // matching tray banners too. "Clear all" that left the tray full
+            // would be the same broken promise as dismissOne's.
+            void syncTrayAndBadge();
           },
         },
       ],

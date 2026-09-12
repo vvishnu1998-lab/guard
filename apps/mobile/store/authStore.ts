@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { router } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
+import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setUserTags } from '../lib/sentry';
 import { apiClient } from '../lib/apiClient';
@@ -237,6 +238,22 @@ export const useAuthStore = create<AuthState>((set) => ({
 
       await Promise.all(Object.values(KEYS).map((k) => SecureStore.deleteItemAsync(k)));
       setUserTags({ guardId: null, companyId: null });
+
+      // Nothing in the tray outlives the session that produced it. Blanket
+      // clear rather than a reconcile: reconcileTray asks the server what is
+      // still outstanding, and by this point the bearer is gone — the call
+      // would 401, fail closed, and correctly leave every banner in place.
+      // Logging out is the one moment where clearing everything IS the right
+      // answer, and it needs no network.
+      //
+      // Both are best-effort and must never block sign-out: a guard has to be
+      // able to leave the handset even if the notification module throws.
+      await Notifications.dismissAllNotificationsAsync().catch((err) =>
+        console.warn('[tray] logout dismissAll failed (non-fatal):', err),
+      );
+      await Notifications.setBadgeCountAsync(0).catch((err) =>
+        console.warn('[tray] logout badge reset failed (non-fatal):', err),
+      );
 
       if (tokenRevoked) {
         // The root layout's plain replace('/(auth)/login') may fire first

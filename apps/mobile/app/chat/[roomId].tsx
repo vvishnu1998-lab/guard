@@ -13,6 +13,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { apiClient } from '../../lib/apiClient';
 import { useUnreadStore } from '../../store/unreadStore';
+import { dismissChatRoom } from '../../lib/notificationSync';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
 
@@ -63,6 +64,11 @@ export default function ChatRoomScreen() {
 
     loadMessages();
     markRead();
+    // Opening the room IS the action that resolves its chat banners, which is
+    // why reconcileTray deliberately never touches type='chat' — it has no way
+    // to know the guard is looking at the conversation. Room-scoped so a
+    // message from a DIFFERENT room keeps its banner.
+    void dismissChatRoom(roomId);
     pollRef.current = setInterval(() => {
       loadMessages(true);
       markRead();

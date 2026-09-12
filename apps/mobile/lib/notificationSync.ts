@@ -127,6 +127,20 @@ export async function syncBadge(): Promise<void> {
 }
 
 /**
+ * Reconcile the tray, then re-stamp the badge. The pair every success path
+ * wants, in the order that matters: dismiss first, so the count is taken
+ * after the server has been told the action landed.
+ *
+ * Both halves swallow their own errors, so this never throws and never needs
+ * awaiting for correctness — call sites that are about to navigate away can
+ * fire it without blocking the transition.
+ */
+export async function syncTrayAndBadge(): Promise<void> {
+  await reconcileTray();
+  await syncBadge();
+}
+
+/**
  * Clear the delivered chat banners for one room, then re-stamp the badge.
  *
  * Chat is excluded from reconcileTray because an unread message is not a

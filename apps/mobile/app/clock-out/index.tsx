@@ -18,6 +18,7 @@ import { uploadToS3 } from '../../lib/uploadToS3';
 import CameraCapture, { CapturedPhoto } from '../../components/CameraCapture';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
+import { syncTrayAndBadge } from '../../lib/notificationSync';
 
 const GPS_TIMEOUT_MS = 3000;
 
@@ -123,6 +124,11 @@ export default function ClockOutScreen() {
         ...signals,
       });
       clearSession();
+      // The shift is closed, so every shift-scoped row drops out of the live
+      // set at once — this is the single biggest tray clear in the app.
+      // clock_out_reminder itself never auto-erases (ELSE TRUE), so without
+      // this its banner would outlive the shift it belonged to.
+      void syncTrayAndBadge();
 
       // 5d — skip must be UNAMBIGUOUS. A silent success looks identical
       // whether a photo was attached or not, so the guard is told which

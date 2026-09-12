@@ -19,6 +19,7 @@ import CameraCapture, { CapturedPhoto } from '../../../components/CameraCapture'
 import { Colors, Spacing, Radius, Fonts } from '../../../constants/theme';
 import { GuardFacingError } from '../../../lib/errors';
 import { guardMessage } from '../../../lib/errorCopy';
+import { syncTrayAndBadge } from '../../../lib/notificationSync';
 
 interface TaskDetail {
   id:                   string;
@@ -126,6 +127,9 @@ export default function TaskCompleteScreen() {
       });
 
       setPhase('done');
+      // task_reminder's arm keys on task_instances.status, which this POST
+      // just moved off 'pending'.
+      void syncTrayAndBadge();
       setTimeout(() => router.back(), 1200);
     } catch (err: any) {
       if (isSessionClosed(err)) {
