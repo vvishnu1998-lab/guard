@@ -25,6 +25,12 @@ const VALID_TYPES: NotificationType[] = [
   'missed_ping',
   'late_clock_in',
   'missed_report',
+  // 3.1 — clock_out_reminder has been a NotificationType since the cron
+  // shipped but was never added here, so POST /api/notifications rejected
+  // it. Only the mobile self-report route is gated by this list (crons call
+  // insertNotification directly and bypass it), which is why nothing broke
+  // visibly — but the asymmetry is exactly the kind that bites later.
+  'clock_out_reminder',
   // A3 additions — swap + handoff family.
   'swap_request_received',
   'swap_request_sent',
@@ -213,16 +219,28 @@ const SHIFT_SCOPED_AND_NOT_COMPLETED = `
     --     is false for them and they stay visible. That is deliberate: a
     --     backlog row we cannot resolve must not be hidden on a guess.
     WHEN 'break_ended' THEN NOT (
-      notifications.data ? 'break_session_id' AND EXISTS (
+      COALESCE(
+        notifications.data->>'break_session_id',
+        notifications.data->>'break_id'
+      ) IS NOT NULL AND EXISTS (
         SELECT 1 FROM break_sessions bs
-        WHERE bs.id = (notifications.data->>'break_session_id')::uuid
+        WHERE bs.id = COALESCE(
+                notifications.data->>'break_session_id',
+                notifications.data->>'break_id'
+              )::uuid
           AND bs.break_end IS NOT NULL
       )
     )
     WHEN 'break_return_overdue' THEN NOT (
-      notifications.data ? 'break_session_id' AND EXISTS (
+      COALESCE(
+        notifications.data->>'break_session_id',
+        notifications.data->>'break_id'
+      ) IS NOT NULL AND EXISTS (
         SELECT 1 FROM break_sessions bs
-        WHERE bs.id = (notifications.data->>'break_session_id')::uuid
+        WHERE bs.id = COALESCE(
+                notifications.data->>'break_session_id',
+                notifications.data->>'break_id'
+              )::uuid
           AND bs.break_end IS NOT NULL
       )
     )

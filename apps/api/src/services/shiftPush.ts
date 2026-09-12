@@ -178,7 +178,10 @@ export async function pushShiftAssignments(shifts: CreatedShift[]): Promise<void
         title,
         body,
         data: {
-          type:       'shifts_assigned',
+          // Was 'shifts_assigned' (plural) while the row it accompanies is
+          // written as 'shift_assigned'. navigateForNotification has no case
+          // for the plural, so tapping this push did nothing at all.
+          type:       'shift_assigned',
           shift_ids:  shiftIds.join(','),
           count:      String(bucket.length),
           first_date: firstDate,

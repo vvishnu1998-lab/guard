@@ -8,6 +8,7 @@ import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
+import { insertNotification } from '../services/notifications';
 
 const router = Router();
 
@@ -246,20 +247,33 @@ router.post('/templates', requireAuth('company_admin'), async (req, res) => {
   ).then(async ({ rows }) => {
     if (!rows.length) return;
     const tokens = await getActivePushTokens(rows.map((r) => r.guard_id));
-    const targets = [...tokens.values()];
-    if (!targets.length) return;
+    const body   = title ?? 'A new task has been assigned to your site.';
+    // Iterate GUARDS, not tokens. The previous shape mapped over
+    // [...tokens.values()], so a guard on shift with no registered device was
+    // dropped entirely and learned about the task from nothing at all. Every
+    // guard now gets a row; the push is the part that depends on a token.
     return Promise.allSettled(
-      targets.map((tok) =>
-        sendPushNotification({
+      rows.map(async (r) => {
+        const notifId = await insertNotification({
+          guardId: r.guard_id,
+          type:    'task_assigned',
+          title:   'New task',
+          body,
+          data:    { type: 'task_assigned', site_id },
+          shiftSessionId: null,
+        });
+        const tok = tokens.get(r.guard_id);
+        if (!tok) return;
+        return sendPushNotification({
           token: tok,
           title: 'New task',
-          body:  title ?? 'A new task has been assigned to your site.',
+          body,
           data:  { type: 'task_assigned', site_id },
-          // See sites.ts — 'default' until Phase 3.2 unions this type.
-          channelId:  'default',
-          collapseId: collapseIdFor('task_assigned', { shift_id: site_id }),
-        })
-      )
+          notificationId: notifId,
+          channelId:      channelForType('task_assigned'),
+          collapseId:     collapseIdFor('task_assigned', { shift_id: site_id }),
+        });
+      })
     );
   }).catch((err) => console.error('[fcm] task assign push failed:', err));
 });

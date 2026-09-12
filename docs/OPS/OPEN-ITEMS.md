@@ -2421,3 +2421,43 @@ it is a production write-path behaviour change, and "the browser still blocks
 it, and Sentry no longer sees it" is two assertions to prove, not one to assume.
 Confirm `ALLOWED_ORIGINS` on Railway is unchanged while doing it.
 **Size XS. Tier 1.**
+
+---
+
+## New from the notification-lifecycle work (2026-09-12)
+
+**N86. Every auto-erase arm casts a JSONB value to `uuid` guarded only by key PRESENCE — one malformed value 500s the whole Alerts feed.**
+verified: YES, by reading `apps/api/src/routes/notifications.ts` and by `EXPLAIN` against production.
+All thirteen arms in `SHIFT_SCOPED_AND_NOT_COMPLETED` share the shape
+`notifications.data ? 'k' AND EXISTS (… WHERE x = (notifications.data->>'k')::uuid …)`.
+`data ? 'k'` proves the key exists; it proves **nothing about the value**. A single row whose
+`data->>'k'` is not a parseable uuid raises `22P02` and takes down **both** `GET /api/notifications`
+and `GET /api/notifications/unread-count` for that guard — the entire Alerts tab plus its badge,
+not just the offending row.
+**Not currently reachable**: every writer is server-side and writes uuids, and the nine pre-existing
+arms have run this way in production for months. The exposure grows with each new arm (Phase 2 added
+four) and with `POST /api/notifications`, the mobile self-report route, whose `data` body is
+client-supplied — `VALID_TYPES` gates the `type` but nothing validates `data`.
+Fix is a shared guard, not thirteen edits: a `safe_uuid(text)` SQL helper returning NULL on a bad
+parse, or `… ~ '^[0-9a-fA-F]{8}-…$'` folded into one reusable fragment. Deliberately NOT done inside
+the Phase 2 commit — making four new arms defensive while nine older ones stay exposed is worse than
+consistent, and the real fix touches all thirteen.
+**Size S. Tier 1** (behaviour change on a read path both mobile surfaces depend on).
+
+**N87. Batched `shift_assigned` rows carry `shift_ids` (a JSON array) and can therefore never auto-erase.**
+verified: YES, empirically against production — all 22 of GRD0005's `shift_assigned` rows are the
+batched shape and none moves under the Phase 2 arm (76 -> 68 for that guard, none of the delta from
+this type).
+`services/shiftPush.ts` writes one row per guard per batch with
+`data: { shift_ids: [...], site_ids: [...], count, first_date, last_date }` — no singular `shift_id`.
+The Phase 2 arm keys on `data ? 'shift_id'`, so the batched row fails the guard and stays visible for
+its whole scope window. That is the SAFE behaviour and was chosen deliberately (one clock-in out of
+five does not make a five-shift assignment notice stale), but it means the arm currently only fires
+for the single-shift reassign path in `routes/shifts.ts`.
+Options, in rough order of preference: (a) erase when a session exists for **every** id in
+`shift_ids`, via `NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(data->'shift_ids') …)`;
+(b) leave as-is and accept that batch notices persist for the shift scope window; (c) have shiftPush
+write one row per shift, which fixes the erase but re-introduces the notification spam the batching
+exists to prevent. **(c) is a regression, not a fix** — the batching was deliberate.
+Decide before anyone "fixes" the arm by making it match on `shift_ids` naively.
+**Size S. Tier 1.**

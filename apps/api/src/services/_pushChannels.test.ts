@@ -69,6 +69,12 @@ const ALL_TYPES = [
   'shift_start_reminder',
   'break_ended',
   'break_return_overdue',
+  // Phase 3.2 — previously pushed with no union membership and no row.
+  'site_deactivated',
+  'task_assigned',
+  'shift_reassigned_away',
+  'shift_cancelled',
+  'shift_schedule_edited',
 ] as const;
 
 // Compile-time exhaustiveness. If the union gains a member that is missing
@@ -94,7 +100,7 @@ for (const t of ALL_TYPES) {
 for (const ch of VALID_CHANNELS) {
   console.log(`  ${ch.padEnd(9)} (${String(byChannel[ch].length).padStart(2)}) ${byChannel[ch].join(', ')}`);
 }
-if (ALL_TYPES.length !== 29) fail(`expected 29 NotificationTypes, ALL_TYPES has ${ALL_TYPES.length}`);
+if (ALL_TYPES.length !== 34) fail(`expected 34 NotificationTypes, ALL_TYPES has ${ALL_TYPES.length}`);
 
 // The four channels the mobile app declares in lib/notifications.ts. A type
 // routed anywhere else would silently land on `default` on the device.
