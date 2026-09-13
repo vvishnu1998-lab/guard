@@ -92,16 +92,26 @@ function datePartIso(label: string): string {
 }
 
 /**
- * Clock-out is time-only like clock-in, EXCEPT on an overnight, where it
- * carries '26-Aug 07:00' so the reader is not left thinking a 19:00->07:00
- * shift ended twelve hours before it began. Deliberately keyed on the
- * site-local DATE differing from the Date column rather than on the clock
- * appearing to go backwards, which a sub-hour shift could trip.
+ * Time-only like clock-in, EXCEPT when the instant falls on a different
+ * site-local day from the Date column, where it carries '26-Aug 07:00' so the
+ * reader is not left thinking a 19:00->07:00 shift ended twelve hours before
+ * it began. Deliberately keyed on the site-local DATE differing from the Date
+ * column rather than on the clock appearing to go backwards, which a sub-hour
+ * shift could trip.
+ *
+ * Serves Clock Out, Sched Start and Sched End — all three can land on another
+ * day, and an overnight shift's Sched End always does. It was named
+ * clockOutCell while clock-out was the only such column; the rule was never
+ * specific to clock-out, so the name moved rather than the logic being copied.
+ *
+ * Clock In deliberately does NOT use it: shift_date is derived FROM
+ * clocked_in_at, so its date can never differ and a prefix is unreachable.
+ * Sched Start CAN differ — a guard clocking in after midnight on a shift
+ * planned the previous evening files under the later date.
  */
-function clockOutCell(clockOutLabel: string, shiftDateIso: string): string {
-  const outDate = datePartIso(clockOutLabel);
-  return outDate === shiftDateIso ? hhmm(clockOutLabel)
-                                  : `${ddMmm(outDate)} ${hhmm(clockOutLabel)}`;
+function localTimeCell(label: string, shiftDateIso: string): string {
+  const d = datePartIso(label);
+  return d === shiftDateIso ? hhmm(label) : `${ddMmm(d)} ${hhmm(label)}`;
 }
 
 function fill(cell: ExcelJS.Cell, argb: string): void {
@@ -244,11 +254,18 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   for (const a of data.by_site) s.addRow([a.site_name ?? '', a.actual_hours]);
 
   // ══ Sheet 2 — HOURS DETAIL ══════════════════════════════════════════════
-  const DETAIL = ['Guard', 'Site', 'Date', 'Day', 'Clock In', 'Clock Out', 'Scheduled',
+  // Sched Start / Sched End sit next to Day, ahead of the actual times, so a
+  // row reads plan-then-outcome left to right. Coverage % is column 14 and
+  // Flag column 15 — every getCell() below is positional and the compiler
+  // cannot check any of them, so they move together with this array.
+  const DETAIL = ['Guard', 'Site', 'Date', 'Day', 'Sched Start', 'Sched End',
+                  'Clock In', 'Clock Out', 'Scheduled',
                   'Actual', 'Break', 'Geofence violation', 'Variance', 'Coverage %', 'Flag'];
   const d = wb.addWorksheet('HOURS DETAIL');
-  // Index 9 is 'Geofence violation' (was 'Unverified') — widened to fit.
-  d.columns = [{ width: 22 }, { width: 26 }, { width: 11 }, { width: 6 }, { width: 21 },
+  // Index 12 is 'Geofence violation' (was 'Unverified') — widened to fit.
+  // Indices 5/6 hold 'dd-Mmm HH:MM' on an overnight, so 14 not 6.
+  d.columns = [{ width: 22 }, { width: 26 }, { width: 11 }, { width: 6 },
+               { width: 14 }, { width: 14 }, { width: 21 },
                { width: 21 }, { width: 11 }, { width: 10 }, { width: 9 }, { width: 20 },
                { width: 10 }, { width: 12 }, { width: 24 }];
   headerRow(d, DETAIL);
@@ -266,18 +283,22 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   for (const r of detailRows) {
     const row = d.addRow([
       r.guard_name, r.site_name, ddMmmYy(r.shift_date), r.day_of_week,
-      hhmm(r.clock_in_label), clockOutCell(r.clock_out_label, r.shift_date),
+      localTimeCell(r.sched_start_label, r.shift_date),
+      localTimeCell(r.sched_end_label, r.shift_date),
+      hhmm(r.clock_in_label), localTimeCell(r.clock_out_label, r.shift_date),
       r.scheduled_hours, r.actual_hours, r.break_hours, r.offpost_hours,
       r.variance_hours, null, r.flags.join(' '),
     ]);
-    coverageCell(row.getCell(12), r.coverage_pct);
-    if (r.flags.length > 0) fill(row.getCell(13), RED);
+    coverageCell(row.getCell(14), r.coverage_pct);
+    if (r.flags.length > 0) fill(row.getCell(15), RED);
   }
-  const dTotal = d.addRow(['TOTAL', '', '', '', '', '',
+  // Seven blanks, not five: Site, Date, Day, Sched Start, Sched End, Clock In,
+  // Clock Out. Scheduled must land on column 9.
+  const dTotal = d.addRow(['TOTAL', '', '', '', '', '', '', '',
     data.overall.scheduled_hours, data.overall.actual_hours, data.overall.break_hours,
     data.overall.offpost_hours, data.overall.variance_hours,
     null, '' /* never a flag on a total */]);
-  coverageCell(dTotal.getCell(12), data.overall.coverage_pct);
+  coverageCell(dTotal.getCell(14), data.overall.coverage_pct);
   totalRow(dTotal);
   d.views = [{ state: 'frozen', ySplit: 1 }];
   d.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: DETAIL.length } };
@@ -295,12 +316,14 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
     for (const r of flagged) {
       const row = e.addRow([
         r.guard_name, r.site_name, ddMmmYy(r.shift_date), r.day_of_week,
-        hhmm(r.clock_in_label), clockOutCell(r.clock_out_label, r.shift_date),
+        localTimeCell(r.sched_start_label, r.shift_date),
+        localTimeCell(r.sched_end_label, r.shift_date),
+        hhmm(r.clock_in_label), localTimeCell(r.clock_out_label, r.shift_date),
         r.scheduled_hours, r.actual_hours, r.break_hours, r.offpost_hours,
         r.variance_hours, null, r.flags.join(' '),
       ]);
-      coverageCell(row.getCell(12), r.coverage_pct);
-      fill(row.getCell(13), RED);
+      coverageCell(row.getCell(14), r.coverage_pct);
+      fill(row.getCell(15), RED);
     }
   }
   e.views = [{ state: 'frozen', ySplit: 3 }];
@@ -323,6 +346,8 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   note('Geofence violation', 'Time the guard’s presence at the post could not be confirmed: ping windows spanned by an open boundary alert in which no location check-in was received. A guard who is at the post but does not check in accrues time in this column, so it is not a confirmed measure of time away from the post. Bounded to the session window.');
   note('Variance', 'Actual minus scheduled.');
   note('Coverage %', 'Actual as a percentage of scheduled, stored as a real percentage so it sorts and filters as a number. Blank where there is no schedule.');
+  note('Sched Start', 'When the shift was planned to begin. Site-local time, 24-hour, with a date prefix (e.g. 26-Aug 19:00) only when it falls on a different local day from the Date column — the same rule as Clock Out. Compare against Clock In to see lateness; the Scheduled column is the length of this window, not a separate figure.');
+  note('Sched End', 'When the shift was planned to finish. Same format and date-prefix rule as Sched Start. On an overnight shift this is always the following day, so it is nearly always prefixed.');
   note('Clock In / Out', 'Site-local time, 24-hour. Clock Out carries a date prefix (e.g. 26-Aug 07:00) only when the shift ended on a later local day than it started.');
   note('Flagged', 'On an aggregate row, the number of distinct shifts carrying at least one flag. Flag names stay on the detail rows — a flag is a per-shift judgement, so a total never carries one.');
   note('RAG colours', 'Coverage cells: green ≥ 95%, amber 80–95%, red < 80%. Flagged rows carry a red flag cell.');
