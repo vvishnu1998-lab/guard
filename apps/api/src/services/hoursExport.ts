@@ -66,6 +66,10 @@
  *     tenants before.
  *   * Every date and time is rendered site-local from sites.timezone, and
  *     labels are preformatted here so no consumer re-derives them.
+ *   * sched_start_* / sched_end_* are the SHIFT's planned window, the same
+ *     pair scheduled_hours is the length of. Like scheduled_hours they
+ *     describe the shift, not the session, so both sessions of a handoff
+ *     carry the identical window — that is the intent, not a duplicate.
  *   * Dropped from the old sheet: Total Hours (legacy), Break (mins),
  *     Status. The first contradicts actual_hours by design, the second
  *     duplicates break_hours in different units, the third describes the
@@ -94,6 +98,10 @@ export interface HoursExportRow {
   shift_date:       string;   // YYYY-MM-DD, site-local
   shift_date_label: string;   // DD/MM/YYYY, site-local
   day_of_week:      string;   // Mon..Sun, site-local
+  sched_start_iso:  string;   // the SHIFT's planned window — see header
+  sched_start_label:string;   // DD/MM/YYYY, HH:MM:SS site-local
+  sched_end_iso:    string;
+  sched_end_label:  string;
   clock_in_iso:     string;
   clock_in_label:   string;   // DD/MM/YYYY, HH:MM:SS site-local
   clock_out_iso:    string;
@@ -218,6 +226,8 @@ interface RawRow {
   site_id: string; site_name: string; site_timezone: string;
   shift_id: string; session_id: string;
   shift_date: string; shift_date_label: string; day_of_week: string;
+  sched_start_iso: Date; sched_start_label: string;
+  sched_end_iso: Date; sched_end_label: string;
   clock_in_iso: Date; clock_in_label: string;
   clock_out_iso: Date; clock_out_label: string;
   clock_out_reason: string | null;
@@ -262,6 +272,10 @@ export async function buildHoursExport(
       TO_CHAR((ss.clocked_in_at AT TIME ZONE s.timezone)::date, 'YYYY-MM-DD') AS shift_date,
       TO_CHAR((ss.clocked_in_at AT TIME ZONE s.timezone)::date, 'DD/MM/YYYY') AS shift_date_label,
       TO_CHAR( ss.clocked_in_at AT TIME ZONE s.timezone,          'Dy')       AS day_of_week,
+      sh.scheduled_start                               AS sched_start_iso,
+      TO_CHAR(sh.scheduled_start AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS sched_start_label,
+      sh.scheduled_end                                 AS sched_end_iso,
+      TO_CHAR(sh.scheduled_end   AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS sched_end_label,
       ss.clocked_in_at                                 AS clock_in_iso,
       TO_CHAR(ss.clocked_in_at  AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS clock_in_label,
       ss.clocked_out_at                                AS clock_out_iso,
@@ -292,6 +306,10 @@ export async function buildHoursExport(
       shift_id: r.shift_id, session_id: r.session_id,
       shift_date: r.shift_date, shift_date_label: r.shift_date_label,
       day_of_week: r.day_of_week,
+      sched_start_iso: new Date(r.sched_start_iso).toISOString(),
+      sched_start_label: r.sched_start_label,
+      sched_end_iso: new Date(r.sched_end_iso).toISOString(),
+      sched_end_label: r.sched_end_label,
       clock_in_iso:  new Date(r.clock_in_iso).toISOString(),
       clock_in_label: r.clock_in_label,
       clock_out_iso: new Date(r.clock_out_iso).toISOString(),
