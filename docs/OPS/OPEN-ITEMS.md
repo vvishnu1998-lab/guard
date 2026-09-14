@@ -2725,3 +2725,59 @@ count without knowing the topology can make `req.ip` client-controlled, which is
 strictly worse than keying on a shared intermediate.
 
 **Size S to measure, UNKNOWN to fix. Tier 1.**
+
+---
+
+## New from the brief-pipeline audit (2026-09-14)
+
+**N94. The count of historical overlapping shift pairs is recorded as 31 in one place and 37 in another, and nobody has reconciled them.**
+verified: YES, as a discrepancy — both figures were read at `b0a7170`, and both were
+handed to the model in run `34881357451`'s context pack.
+
+```
+OPEN-ITEMS.md  N45 (original text, now inside the CLOSED block)
+  "...would have to tolerate the 31 historical overlapping pairs already in production"
+
+f027f72  commit message
+  "All 37 historical overlapping pairs in production are terminal-status, so it has
+   ZERO violating rows and adds VALIDATED: no NOT VALID, no backfill..."
+```
+
+**Neither number was re-derived for this item** — settling it needs a read of `shifts`,
+which is a data query, and the audit pass that found this was restricted to catalog
+reads. So this is filed, not answered.
+
+**Why it is probably low-risk, stated so nobody treats this as urgent.**
+`shifts_no_guard_overlap` is PARTIAL — `WHERE status IN ('scheduled','active')` — and it
+was added VALIDATED and exists in production today (`pg_constraint`, read 2026-09-14).
+Postgres will not validate an exclusion constraint against violating rows, so
+**empirically zero non-terminal overlapping pairs existed at apply time**, whatever the
+terminal-status count turns out to be. Both 31 and 37 describe rows the predicate
+excludes.
+
+**Why it is still worth closing.** The "zero violating rows" reasoning in `f027f72` rests
+on the claim that *all* historical pairs are terminal. If the true total is 37 and one of
+them is not terminal, that reasoning was wrong and got away with it. And a figure that
+appears twice with two values is a figure nobody can cite.
+
+The query that settles it — one read, no write:
+
+```sql
+SELECT a.status AS status_a, b.status AS status_b, COUNT(*)
+  FROM shifts a
+  JOIN shifts b
+    ON a.guard_id = b.guard_id
+   AND a.id < b.id
+   AND tstzrange(a.scheduled_start, a.scheduled_end)
+    && tstzrange(b.scheduled_start, b.scheduled_end)
+ WHERE a.guard_id IS NOT NULL
+ GROUP BY 1, 2
+ ORDER BY 3 DESC;
+```
+
+Sum the counts for the total; any row where both statuses are in
+(`scheduled`, `active`) is a pair the constraint would now reject. Then correct
+whichever of the two numbers is wrong, in both places.
+
+**Size XS. Tier 0** (read-only prod query), rising to Tier 1 if it turns up a
+non-terminal pair, because that reopens the migration's reasoning.

@@ -824,33 +824,73 @@ c_waiting() {
 
   # OPEN-ITEMS.md is TRIMMED, not embedded whole. It is the largest and
   # fastest-growing repo-memory file and most of it is history: the "Carried
-  # items" section is a backlog inherited from Phase 1, and several entries in
-  # both sections are marked CLOSED. The model needs the open items so it does
-  # not re-report a known issue as new; it does not need the archive.
+  # items" section is a backlog inherited from Phase 1, and several entries are
+  # marked CLOSED. The model needs the open items so it does not re-report a
+  # known issue as new; it does not need the archive.
+  #
+  # THE PREVIOUS RULE DROPPED HALF THE FILE. It was
+  #     /^## Carried items/ { carried = NR; exit }
+  # -- `exit`, not "skip this section". "## Carried items" sits at line 1359 of
+  # 2727, so lines 1359-2727 never reached the pack: the Carried-items archive
+  # (92 lines, which was the intent) AND the twelve "## New from ..." sections
+  # after it (1277 lines, which was not). New items are appended to the END of
+  # this file, so the rule made the NEWEST findings the least visible.
+  #
+  # That is the other half of the 2026-09-14 false P2. Run 34881357451 was given
+  # the stale N45 block (line 860, before the cut) and was NOT given N90 (line
+  # 2554+, after it), which records that schema_v77's constraint had been proven
+  # against a live database. Verified against that run's uploaded pack: zero
+  # occurrences of N90 or N91, one occurrence of the stale N45.
+  #
+  # The skip now ENDS at the next "## " heading, whatever its text. Checked
+  # 2026-09-14: "## Carried items" contains no sub-heading at any level, and the
+  # file's only "### " heading (line 363) is inside a different section, so
+  # nothing inside the archive can close the skip early.
   #
   # What is dropped is stated in the pack rather than silently omitted -- a
   # trimmed file that does not say it was trimmed is how a reader concludes an
-  # item does not exist.
-  printf -- '\n---\n\n# FILE: docs/OPS/OPEN-ITEMS.md (TRIMMED -- open items only)\n\n'
-  awk '
-    /^## Carried items/ { carried = NR; exit }
-    { print > "/tmp/triage-openitems.txt" }
-  ' docs/OPS/OPEN-ITEMS.md
-  if [ -s /tmp/triage-openitems.txt ]; then
+  # item does not exist. The notice now prints the LINE COUNT actually dropped,
+  # so a rule that starts over-trimming again says so in its own output.
+  OI_TXT=/tmp/triage-openitems.txt
+  OI_STATE=/tmp/triage-openitems.state
+  printf -- '\n---\n\n# FILE: docs/OPS/OPEN-ITEMS.md (TRIMMED -- see the note at the end)\n\n'
+  awk -v state="$OI_STATE" '
+    /^## Carried items/ { skip = 1; found = 1; dropped++; next }
+    skip && /^## /      { skip = 0 }
+    skip                { dropped++; next }
+                        { print }
+    END                 { printf "%d %d\n", found + 0, dropped + 0 > state }
+  ' docs/OPS/OPEN-ITEMS.md > "$OI_TXT"
+
+  if [ -s "$OI_TXT" ]; then
     # Drop item blocks whose heading line says CLOSED. Blocks start at a bold
-    # item marker such as **N4. or **C6.
+    # item marker such as **N4. or **C6. UNCHANGED -- this rule is how a fixed
+    # item leaves the pack, and relabelling a heading is what triggers it.
     awk '
       /^\*\*[NC][0-9]+\./ { skip = ($0 ~ /CLOSED/) ? 1 : 0 }
       !skip { print }
-    ' /tmp/triage-openitems.txt
-    printf '\n> TRIMMED: the "Carried items" section and every item marked CLOSED\n'
-    printf '> were omitted from this pack. Read docs/OPS/OPEN-ITEMS.md in the repo\n'
-    printf '> for the full list -- you have the Read tool.\n'
-    rm -f /tmp/triage-openitems.txt
+    ' "$OI_TXT"
+
+    OI_FOUND=0; OI_DROPPED=0
+    read -r OI_FOUND OI_DROPPED < "$OI_STATE" || true
+    printf '\n> TRIMMED. Exactly two things are omitted and nothing else:\n'
+    if [ "$OI_FOUND" = "1" ]; then
+      printf '>   1. the "## Carried items" section ONLY -- %s lines, from that heading\n' "$OI_DROPPED"
+      printf '>      to the next "## " heading. Every section AFTER it is included,\n'
+      printf '>      including the newest ones at the end of the file.\n'
+    else
+      printf '>   1. nothing -- no "## Carried items" heading exists in the file.\n'
+    fi
+    printf '>   2. every item block whose heading line contains the word CLOSED.\n'
+    printf '> Everything else in the file is above. Read docs/OPS/OPEN-ITEMS.md in the\n'
+    printf '> repo for the full list -- you have the Read tool.\n'
+    rm -f "$OI_TXT" "$OI_STATE"
   else
-    # No "## Carried items" heading: fall back to a fixed head and SAY SO.
-    printf '> NOTE: no "## Carried items" heading found; showing the first 80\n'
-    printf '> lines only. The file structure changed -- fix this collector.\n\n'
+    # Reaching here now means the file is empty or unreadable, not that a
+    # heading is missing -- the skip above cannot consume the whole file.
+    printf '> NOTE: trimming docs/OPS/OPEN-ITEMS.md produced NO output. The file is\n'
+    printf '> empty or unreadable. This is a collector defect -- fix it, and do not\n'
+    printf '> read the absence of items as "no open items".\n\n'
     head -80 docs/OPS/OPEN-ITEMS.md
   fi
   printf '\n'
