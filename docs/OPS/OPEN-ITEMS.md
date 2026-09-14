@@ -857,7 +857,29 @@ deserves its own diff and its own review.
 
 ---
 
-**N45. Every overlap check is check-then-act under READ COMMITTED — none locks the candidate guard's rows.**
+**N45. CLOSED 2026-09-13 — every overlap check was check-then-act under READ COMMITTED; none locked the candidate guard's rows.**
+verified: **RESOLVED by `schema_v77`, applied by hand 2026-09-13.** `pg_constraint` returns
+`shifts_no_guard_overlap` on `shifts` with `contype='x'`, and `pg_extension` returns
+`btree_gist 1.8` — both read from the production catalog 2026-09-14. Shipped as PR #52
+(`f027f72`, merge `addb974`). It needed a hand-apply because `apps/api/railway.json` starts
+`node dist/index.js` and never runs `db:migrate`, so no deploy can apply a migration.
+
+**Follow-on items are filed under "New from N45 overlap constraint (2026-09-14)" further down
+this file — `N90` (this repo cannot run a DB-dependent test, and this constraint is the first
+thing that needs one) and `N91` (four `err.message` catches left in `routes/guards.ts`).
+Both are OPEN.**
+
+**This entry stayed un-relabelled for one day and that reached Slack.** `ops-triage` run
+`34881357451` posted `BROKE P2 · N45 guard-overlap constraint (schema_v77) shipped in code but
+migration not confirmed applied` on 2026-09-14, the morning after the constraint went in. The
+trim filter in `scripts/ops/triage.sh` keeps any block whose heading lacks the word `CLOSED`,
+so the original text below was handed to the model as a live finding. **Relabelling the heading
+is what removes it from the context pack** — writing a newer section elsewhere in this file
+does not.
+
+The original finding follows unchanged, except that its present-tense claim about `btree_gist`
+has been removed because it is false.
+
 verified: YES — all call sites read at `b7490c8`.
 
 There are now eleven guard-overlap checks in `routes/shifts.ts` (eight pre-existing, three
@@ -874,9 +896,7 @@ A real guarantee needs one of:
 - `SELECT … FOR UPDATE` over the overlapping rows inside each transaction — which does not
   work for the two paths that have no transaction (`single`, `repeat_days`), or
 - a GiST **exclusion constraint** on `tstzrange(scheduled_start, scheduled_end)` partitioned
-  by `guard_id`. **`btree_gist` is not installed** (`pg_extension` carries only `plpgsql` and
-  `uuid-ossp`), and the constraint would have to tolerate the 31 historical overlapping pairs
-  already in production — so it needs a `NOT VALID` add plus a decision about the existing rows.
+  by `guard_id`. **This is the route that shipped** — see the CLOSED note above.
 
 `services/shiftOverlap.ts` says this in its docblock so nobody mistakes the helper for a
 guarantee.
@@ -2705,3 +2725,59 @@ count without knowing the topology can make `req.ip` client-controlled, which is
 strictly worse than keying on a shared intermediate.
 
 **Size S to measure, UNKNOWN to fix. Tier 1.**
+
+---
+
+## New from the brief-pipeline audit (2026-09-14)
+
+**N94. The count of historical overlapping shift pairs is recorded as 31 in one place and 37 in another, and nobody has reconciled them.**
+verified: YES, as a discrepancy — both figures were read at `b0a7170`, and both were
+handed to the model in run `34881357451`'s context pack.
+
+```
+OPEN-ITEMS.md  N45 (original text, now inside the CLOSED block)
+  "...would have to tolerate the 31 historical overlapping pairs already in production"
+
+f027f72  commit message
+  "All 37 historical overlapping pairs in production are terminal-status, so it has
+   ZERO violating rows and adds VALIDATED: no NOT VALID, no backfill..."
+```
+
+**Neither number was re-derived for this item** — settling it needs a read of `shifts`,
+which is a data query, and the audit pass that found this was restricted to catalog
+reads. So this is filed, not answered.
+
+**Why it is probably low-risk, stated so nobody treats this as urgent.**
+`shifts_no_guard_overlap` is PARTIAL — `WHERE status IN ('scheduled','active')` — and it
+was added VALIDATED and exists in production today (`pg_constraint`, read 2026-09-14).
+Postgres will not validate an exclusion constraint against violating rows, so
+**empirically zero non-terminal overlapping pairs existed at apply time**, whatever the
+terminal-status count turns out to be. Both 31 and 37 describe rows the predicate
+excludes.
+
+**Why it is still worth closing.** The "zero violating rows" reasoning in `f027f72` rests
+on the claim that *all* historical pairs are terminal. If the true total is 37 and one of
+them is not terminal, that reasoning was wrong and got away with it. And a figure that
+appears twice with two values is a figure nobody can cite.
+
+The query that settles it — one read, no write:
+
+```sql
+SELECT a.status AS status_a, b.status AS status_b, COUNT(*)
+  FROM shifts a
+  JOIN shifts b
+    ON a.guard_id = b.guard_id
+   AND a.id < b.id
+   AND tstzrange(a.scheduled_start, a.scheduled_end)
+    && tstzrange(b.scheduled_start, b.scheduled_end)
+ WHERE a.guard_id IS NOT NULL
+ GROUP BY 1, 2
+ ORDER BY 3 DESC;
+```
+
+Sum the counts for the total; any row where both statuses are in
+(`scheduled`, `active`) is a pair the constraint would now reject. Then correct
+whichever of the two numbers is wrong, in both places.
+
+**Size XS. Tier 0** (read-only prod query), rising to Tier 1 if it turns up a
+non-terminal pair, because that reopens the migration's reasoning.

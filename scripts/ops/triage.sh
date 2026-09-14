@@ -120,19 +120,36 @@ psql_at() {
 
 # ── individual collectors ───────────────────────────────────────────────────
 
+# A 503 is a RESULT -- the API answered and it is unhealthy, which is a finding
+# the collector succeeded in collecting. Only a transport failure (curl non-zero,
+# or http 000 = never connected) is a failure to collect. Before this, neither
+# was: curl's status was never read and the function's exit status was the
+# trailing printf's, so a dead host produced "HTTP 000" inside a section the
+# harness recorded as a success.
 c_health() {
-  local body code
-  body="$(curl -s --max-time 20 "$API/health")"
+  local body code rc
+  body="$(curl -s --max-time 20 "$API/health")" && rc=0 || rc=$?
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$API/health")"
   printf 'HTTP %s\n%s\n' "$code" "$body"
+  if [ "$rc" -ne 0 ] || [ "$code" = "000" ]; then
+    printf 'curl could not reach %s/health (rc=%s, http=%s)\n' "$API" "$rc" "$code"
+    return 1
+  fi
+  return 0
 }
 
 c_health_crons() {
-  local body code
-  body="$(curl -s --max-time 20 "$API/health/crons")"
+  local body code rc
+  # NOTE first: this function must end on something that can fail.
+  printf 'NOTE: 503 with a stale list is the dead-cron alarm. 200 with stale:[] is healthy.\n'
+  body="$(curl -s --max-time 20 "$API/health/crons")" && rc=0 || rc=$?
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$API/health/crons")"
   printf 'HTTP %s\n%s\n' "$code" "$body"
-  printf '\nNOTE: 503 with a stale list is the dead-cron alarm. 200 with stale:[] is healthy.\n'
+  if [ "$rc" -ne 0 ] || [ "$code" = "000" ]; then
+    printf 'curl could not reach %s/health/crons (rc=%s, http=%s)\n' "$API" "$rc" "$code"
+    return 1
+  fi
+  return 0
 }
 
 c_heartbeats() {
@@ -142,20 +159,25 @@ c_heartbeats() {
 }
 
 c_starnet_sessions() {
+  # NOTES FIRST, deliberately. This function has to END on psql so that its exit
+  # status is the query's and not a printf's -- the trailing-NOTE form meant a
+  # failed query was recorded as a successful collection.
+  printf 'NOTE: if open_starnet_sessions is 0, the control list below proves the join works.\n'
+  printf 'An empty result from a broken join is indistinguishable from a true zero.\n\n'
   printf 'open_starnet_sessions: '
   psql_at "SELECT COUNT(*) FROM shift_sessions ss
              JOIN guards g ON g.id = ss.guard_id
-            WHERE ss.clocked_out_at IS NULL AND g.company_id = '$STARNET'"
+            WHERE ss.clocked_out_at IS NULL AND g.company_id = '$STARNET'" || return 1
   printf '\ncontrol -- open sessions per company_id (all tenants):\n'
   printf 'company_id|open_sessions\n'
   psql_at "SELECT g.company_id, COUNT(*) FROM shift_sessions ss
              JOIN guards g ON g.id = ss.guard_id
             WHERE ss.clocked_out_at IS NULL GROUP BY g.company_id ORDER BY 2 DESC"
-  printf '\nNOTE: if open_starnet_sessions is 0, the control list proves the join works.\n'
-  printf 'An empty result from a broken join is indistinguishable from a true zero.\n'
 }
 
 c_customer_signal() {
+  # NOTE first, so the function ends on psql. See c_starnet_sessions.
+  printf 'NOTE: counts only, no identities. A sustained drop is the customer leaving.\n\n'
   printf 'active_guards_last_7d|active_guards_prior_7d|sessions_last_7d\n'
   psql_at "SELECT
       (SELECT COUNT(DISTINCT ss.guard_id) FROM shift_sessions ss
@@ -171,7 +193,6 @@ c_customer_signal() {
          JOIN guards g ON g.id = ss.guard_id
         WHERE g.company_id = '$STARNET'
           AND ss.clocked_in_at >= NOW() - INTERVAL '7 days')"
-  printf '\nNOTE: counts only, no identities. A sustained drop is the customer leaving.\n'
 }
 
 c_open_violations() {
@@ -291,27 +312,192 @@ c_git_log() { git log -10 --oneline; }
 
 # ── Phase 4.5 brief collectors ──────────────────────────────────────────────
 
-c_deploy_vs_main() {
-  local top id status main_sha
-  top="$(railway deployment list --service guard --environment production 2>&1 \
-        | grep SUCCESS | head -1)"
-  if [ -z "$top" ]; then
-    printf 'no SUCCESS deployment row returned\n'
+# ── schema-applied ──────────────────────────────────────────────────────────
+#
+# Reads the tip of the `files` array in migrate.ts, then asks the PRODUCTION
+# CATALOG whether that migration's contract is actually there.
+#
+# WHY THIS EXISTS. Run 34881357451 posted
+#   BROKE P2 -- N45 guard-overlap constraint (schema_v77) shipped in code but
+#   migration not confirmed applied ... gap open ~15.5h since f027f72
+# The constraint had been applied by hand the previous evening. No collector
+# was wrong, because NO COLLECTOR EXISTED: the claim was inferred from
+# STATE.md and OPEN-ITEMS.md, which the shell embeds as ground truth and which
+# were nine versions and one day stale respectively. The runner had a working
+# psql session against production throughout that run -- eight other collectors
+# used it -- and nobody had ever pointed it at a catalog. The "~15.5h" was the
+# age of a commit message, not of any measured state.
+#
+# CATALOG ONLY. pg_constraint / pg_extension / pg_class / pg_attribute /
+# pg_indexes. No table is read, so the data rule in docs/OPS/POLICY.md is not
+# in play and no column grant matters (see N10).
+#
+# THE THREE OUTCOMES ARE NOT THE SAME THING, and conflating them is the bug
+# this file keeps re-shipping:
+#   APPLIED  -- asked, and every mapped object is there.
+#   MISSING  -- asked, and something is not there. The collector SUCCEEDED;
+#               returns 0. A real finding, not a failure to collect.
+#   COLLECTOR FAILED -- could not ask. psql error, unreadable migrate.ts, or
+#               an UNMAPPED tip. Returns 1, so fix 6 fails the run.
+#
+# UNMAPPED is deliberately NOT "UNVERIFIED" and NOT "APPLIED". It means the
+# database was reachable and nothing was asked of it, because nobody wrote down
+# what to look for. That is a repo defect with a one-line fix, and it must never
+# be mistakable for a pass or for an unreachable database.
+c_schema_applied() {
+  local map file tip v kind name sql out rc
+  local n_checked=0 n_present=0 missing=''
+
+  # <version>|<kind>|<object>     kind = constraint|index|table|column|extension
+  #
+  # ADD A LINE WHEN YOU ADD A MIGRATION. A file name does not say what it
+  # created, so each tip needs one object that is present if and only if that
+  # migration ran. More than one line per version is fine; all must pass.
+  map="$(cat <<'MAP'
+v77|constraint|shifts_no_guard_overlap
+v77|extension|btree_gist
+v76|column|shifts.unstaffed_warning_sent_at
+v75|index|idx_prt_token
+v74|constraint|chk_shift_reassignments_direction
+v73|index|idx_shifts_scheduled_start
+v72|index|idx_shifts_guard_scheduled
+v71|constraint|chk_shifts_source
+v70|table|site_config_audit
+v69|constraint|chk_shift_sessions_ping_interval_minutes
+MAP
+)"
+
+  # The tip is the LAST entry in array order, which is not the same as the
+  # highest number -- order is what migrate.ts replays.
+  file="$(grep -o "'schema_v[0-9]*\.sql'" apps/api/src/db/migrate.ts | tail -1 | tr -d "'")"
+  if [ -z "$file" ]; then
+    printf 'cannot read the files array tip from apps/api/src/db/migrate.ts\n'
     return 1
   fi
-  id="$(printf '%s' "$top" | awk '{print $1}')"
-  status="$(printf '%s' "$top" | awk -F'|' '{gsub(/ /,"",$2); print $2}')"
+  tip="v${file#schema_v}"; tip="${tip%.sql}"
+  printf 'migrate_ts_tip: %s (%s)\n' "$tip" "$file"
+
+  # Fed by heredoc, NOT by a pipe: a pipe would put the loop in a subshell and
+  # `return 1` below would exit only that subshell, leaving the function at 0.
+  # That is precisely the masked-failure class this commit exists to remove.
+  while IFS='|' read -r v kind name; do
+    [ "$v" = "$tip" ] || continue
+    case "$kind" in
+      constraint) sql="SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = '$name'" ;;
+      index)      sql="SELECT indexdef FROM pg_indexes WHERE indexname = '$name'" ;;
+      extension)  sql="SELECT 'btree_gist-style extension present, version ' || extversion FROM pg_extension WHERE extname = '$name'" ;;
+      table)      sql="SELECT 'table ' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE c.relname = '$name' AND c.relkind = 'r' AND n.nspname = 'public'" ;;
+      column)     sql="SELECT 'column ' || format_type(atttypid, atttypmod) FROM pg_attribute
+                        WHERE attrelid = '${name%%.*}'::regclass AND attname = '${name#*.}' AND NOT attisdropped" ;;
+      *)          printf 'UNMAPPED -- unknown kind "%s" for %s in the mapping table\n' "$kind" "$name"
+                  return 1 ;;
+    esac
+
+    out="$(psql_at "$sql")" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf 'psql failed probing %s %s: %s\n' \
+        "$kind" "$name" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+      return 1
+    fi
+
+    n_checked=$((n_checked + 1))
+    if [ -n "$out" ]; then
+      n_present=$((n_present + 1))
+      printf '  %s %s: PRESENT\n' "$kind" "$name"
+      printf '    %s\n' "$out"
+    else
+      missing="${missing}${missing:+, }${kind} ${name}"
+      printf '  %s %s: ABSENT\n' "$kind" "$name"
+    fi
+  done <<MAPEOF
+$map
+MAPEOF
+
+  if [ "$n_checked" -eq 0 ]; then
+    printf 'UNMAPPED -- tip %s has no object in the mapping table. Add one line to\n' "$tip"
+    printf 'c_schema_applied. UNMAPPED is not APPLIED and not UNVERIFIED: the database\n'
+    printf 'was reachable and nothing was asked of it.\n'
+    return 1
+  fi
+
+  if [ -n "$missing" ]; then
+    printf 'schema_applied: MISSING -- %s\n' "$missing"
+  else
+    printf 'schema_applied: APPLIED (%s/%s mapped objects present)\n' "$n_present" "$n_checked"
+  fi
+
+  # Explicit, not incidental. Every failure path above returns 1 before it can
+  # reach here, so this 0 is a claim that the probe ran -- not the exit status
+  # of whichever printf happened to come last.
+  return 0
+}
+
+# The comment that used to sit here claimed "the Railway CLI does not print a
+# commit sha on `deployment list` (checked again 2026-09-06, CLI 4.36.1 /
+# 5.49.2). There is no read-only way to get it from the CLI." That is false,
+# and it is why nobody retried for eight days: `deployment list` takes --json,
+# on 4.36.1 as well as 5.x, and the payload carries meta.commitHash alongside
+# meta.branch, meta.repo and meta.commitMessage. Whoever checked read the human
+# table, which genuinely has only id | STATUS | timestamp.
+#
+# The old line under it was not a result, it was a string constant:
+#   printf 'deploy_matches_main: UNVERIFIED (railway CLI prints no commit sha)'
+# one possible value for the life of the file, printed whether or not anything
+# had been asked. That is the check-window-anchor failure class -- a probe that
+# exits 0 without doing its job -- with the verdict hardcoded rather than merely
+# skipped.
+#
+# MISMATCH returns 0: the collector did its job and the news is bad, which is a
+# finding, not a collection failure. An absent meta.commitHash returns 1, and
+# that distinction is the whole point of this commit: if a project-scoped
+# RAILWAY_TOKEN is not served `meta`, this must fail loudly and get fixed, not
+# settle into a permanent well-worded UNVERIFIED. /health also carries the
+# commit as of this branch, which is the fallback if that turns out to be so.
+c_deploy_vs_main() {
+  local raw rc node dep_id status sha main_sha
+  raw="$(railway deployment list --service guard --environment production --limit 5 --json 2>&1)" \
+    && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$raw" ]; then
+    printf 'railway deployment list --json failed (rc=%s): %s\n' \
+      "$rc" "$(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-200)"
+    return 1
+  fi
+  if ! printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf 'railway --json did not return an array: %s\n' \
+      "$(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-200)"
+    return 1
+  fi
+
+  node="$(printf '%s' "$raw" | jq -c '[ .[] | select(.status == "SUCCESS") ][0] // empty')"
+  if [ -z "$node" ]; then
+    printf 'no SUCCESS deployment among the 5 most recent rows\n'
+    return 1
+  fi
+
+  dep_id="$(printf '%s' "$node" | jq -r '.id // "unknown"')"
+  status="$(printf '%s' "$node" | jq -r '.status // "unknown"')"
+  sha="$(printf '%s' "$node" | jq -r '.meta.commitHash // empty')"
   main_sha="$(git rev-parse origin/main 2>/dev/null || git rev-parse HEAD)"
 
-  printf 'deployment_id: %s\n' "$id"
+  printf 'deployment_id: %s\n' "$dep_id"
   printf 'status: %s\n' "$status"
   printf 'origin_main: %s\n' "$main_sha"
-  # The Railway CLI does not print a commit sha on `deployment list` (checked
-  # again 2026-09-06, CLI 4.36.1 / 5.49.2). There is no read-only way to get it
-  # from the CLI, so the match is UNVERIFIED rather than guessed. Do not infer
-  # it from timestamps -- that inference was already flagged as circumstantial
-  # in STATE.md and it is not good enough to drive a green UP line.
-  printf 'deploy_matches_main: UNVERIFIED (railway CLI prints no commit sha)\n'
+  printf 'deployed_commit: %s\n' "${sha:-<absent from meta>}"
+
+  if [ -z "$sha" ]; then
+    printf 'deploy_matches_main: UNVERIFIED (deployment JSON parsed but carries no meta.commitHash -- check RAILWAY_TOKEN scope, then GET /health commit)\n'
+    return 1
+  fi
+  if [ "$sha" = "$main_sha" ]; then
+    printf 'deploy_matches_main: MATCH (%s == %s)\n' "$sha" "$main_sha"
+  else
+    printf 'deploy_matches_main: MISMATCH (deployed %s ≠ main %s)\n' "$sha" "$main_sha"
+  fi
+
+  # Explicit, for the same reason as c_schema_applied: this 0 is a claim that
+  # the probe ran, not the exit status of the last printf.
+  return 0
 }
 
 c_failures_24h() {
@@ -519,7 +705,9 @@ c_customer_pulse() {
 
 c_ahead() {
   printf 'expiries with a date within 30 days:\n'
-  python3 - <<'PYEOF'
+  # `|| return 1`: the EXPIRIES parser used to catch Exception and sys.exit(0),
+  # so a malformed table printed one line and the section was banked as good.
+  python3 - <<'PYEOF' || return 1
 import re, datetime, sys
 # Read the DATE COLUMN ONLY. A naive "first date anywhere in the row" match
 # reported E4/E9/E10/E11 as expiring 2026-09-05 in the 2026-09-06 dry run --
@@ -546,7 +734,7 @@ try:
         if days <= 30:
             dated.append(f'  {ident}: {label} -- {due} ({days} days)')
 except Exception as e:
-    print('  EXPIRIES parse failed:', e); sys.exit(0)
+    print('  EXPIRIES parse failed:', e); sys.exit(1)
 print('\n'.join(dated) if dated else '  none dated within 30 days')
 print(f'  {len(undated)} row(s) carry no date in the expires column: {", ".join(undated) or "none"}')
 print('  UNDATED ROWS ARE NOT "FINE" -- they are unchecked.')
@@ -617,6 +805,7 @@ c_waiting() {
   collect 'sentry-netraops-api'         c_sentry_api
   collect 'sentry-netraops-mobile'      c_sentry_mobile
   collect 'git-log'                     c_git_log
+  collect 'schema-applied'              c_schema_applied
   collect 'deploy-vs-main'              c_deploy_vs_main
   collect 'failures-24h'                c_failures_24h
   collect 'customer-pulse'              c_customer_pulse
@@ -635,33 +824,73 @@ c_waiting() {
 
   # OPEN-ITEMS.md is TRIMMED, not embedded whole. It is the largest and
   # fastest-growing repo-memory file and most of it is history: the "Carried
-  # items" section is a backlog inherited from Phase 1, and several entries in
-  # both sections are marked CLOSED. The model needs the open items so it does
-  # not re-report a known issue as new; it does not need the archive.
+  # items" section is a backlog inherited from Phase 1, and several entries are
+  # marked CLOSED. The model needs the open items so it does not re-report a
+  # known issue as new; it does not need the archive.
+  #
+  # THE PREVIOUS RULE DROPPED HALF THE FILE. It was
+  #     /^## Carried items/ { carried = NR; exit }
+  # -- `exit`, not "skip this section". "## Carried items" sits at line 1359 of
+  # 2727, so lines 1359-2727 never reached the pack: the Carried-items archive
+  # (92 lines, which was the intent) AND the twelve "## New from ..." sections
+  # after it (1277 lines, which was not). New items are appended to the END of
+  # this file, so the rule made the NEWEST findings the least visible.
+  #
+  # That is the other half of the 2026-09-14 false P2. Run 34881357451 was given
+  # the stale N45 block (line 860, before the cut) and was NOT given N90 (line
+  # 2554+, after it), which records that schema_v77's constraint had been proven
+  # against a live database. Verified against that run's uploaded pack: zero
+  # occurrences of N90 or N91, one occurrence of the stale N45.
+  #
+  # The skip now ENDS at the next "## " heading, whatever its text. Checked
+  # 2026-09-14: "## Carried items" contains no sub-heading at any level, and the
+  # file's only "### " heading (line 363) is inside a different section, so
+  # nothing inside the archive can close the skip early.
   #
   # What is dropped is stated in the pack rather than silently omitted -- a
   # trimmed file that does not say it was trimmed is how a reader concludes an
-  # item does not exist.
-  printf -- '\n---\n\n# FILE: docs/OPS/OPEN-ITEMS.md (TRIMMED -- open items only)\n\n'
-  awk '
-    /^## Carried items/ { carried = NR; exit }
-    { print > "/tmp/triage-openitems.txt" }
-  ' docs/OPS/OPEN-ITEMS.md
-  if [ -s /tmp/triage-openitems.txt ]; then
+  # item does not exist. The notice now prints the LINE COUNT actually dropped,
+  # so a rule that starts over-trimming again says so in its own output.
+  OI_TXT=/tmp/triage-openitems.txt
+  OI_STATE=/tmp/triage-openitems.state
+  printf -- '\n---\n\n# FILE: docs/OPS/OPEN-ITEMS.md (TRIMMED -- see the note at the end)\n\n'
+  awk -v state="$OI_STATE" '
+    /^## Carried items/ { skip = 1; found = 1; dropped++; next }
+    skip && /^## /      { skip = 0 }
+    skip                { dropped++; next }
+                        { print }
+    END                 { printf "%d %d\n", found + 0, dropped + 0 > state }
+  ' docs/OPS/OPEN-ITEMS.md > "$OI_TXT"
+
+  if [ -s "$OI_TXT" ]; then
     # Drop item blocks whose heading line says CLOSED. Blocks start at a bold
-    # item marker such as **N4. or **C6.
+    # item marker such as **N4. or **C6. UNCHANGED -- this rule is how a fixed
+    # item leaves the pack, and relabelling a heading is what triggers it.
     awk '
       /^\*\*[NC][0-9]+\./ { skip = ($0 ~ /CLOSED/) ? 1 : 0 }
       !skip { print }
-    ' /tmp/triage-openitems.txt
-    printf '\n> TRIMMED: the "Carried items" section and every item marked CLOSED\n'
-    printf '> were omitted from this pack. Read docs/OPS/OPEN-ITEMS.md in the repo\n'
-    printf '> for the full list -- you have the Read tool.\n'
-    rm -f /tmp/triage-openitems.txt
+    ' "$OI_TXT"
+
+    OI_FOUND=0; OI_DROPPED=0
+    read -r OI_FOUND OI_DROPPED < "$OI_STATE" || true
+    printf '\n> TRIMMED. Exactly two things are omitted and nothing else:\n'
+    if [ "$OI_FOUND" = "1" ]; then
+      printf '>   1. the "## Carried items" section ONLY -- %s lines, from that heading\n' "$OI_DROPPED"
+      printf '>      to the next "## " heading. Every section AFTER it is included,\n'
+      printf '>      including the newest ones at the end of the file.\n'
+    else
+      printf '>   1. nothing -- no "## Carried items" heading exists in the file.\n'
+    fi
+    printf '>   2. every item block whose heading line contains the word CLOSED.\n'
+    printf '> Everything else in the file is above. Read docs/OPS/OPEN-ITEMS.md in the\n'
+    printf '> repo for the full list -- you have the Read tool.\n'
+    rm -f "$OI_TXT" "$OI_STATE"
   else
-    # No "## Carried items" heading: fall back to a fixed head and SAY SO.
-    printf '> NOTE: no "## Carried items" heading found; showing the first 80\n'
-    printf '> lines only. The file structure changed -- fix this collector.\n\n'
+    # Reaching here now means the file is empty or unreadable, not that a
+    # heading is missing -- the skip above cannot consume the whole file.
+    printf '> NOTE: trimming docs/OPS/OPEN-ITEMS.md produced NO output. The file is\n'
+    printf '> empty or unreadable. This is a collector defect -- fix it, and do not\n'
+    printf '> read the absence of items as "no open items".\n\n'
     head -80 docs/OPS/OPEN-ITEMS.md
   fi
   printf '\n'
@@ -807,24 +1036,72 @@ if [ -z "$BODY" ]; then
 $(head -c 3500 "$OUT")"
 fi
 
-PAYLOAD="$(BODY="$BODY" RUN_URL="$RUN_URL" FAILS="$COLLECTOR_FAILURES" python3 -c '
-import json, os
-body = os.environ["BODY"]
-url = os.environ["RUN_URL"]
-fails = os.environ.get("FAILS", "0")
-suffix = "\n\nFull report: " + url
-if fails != "0":
-    suffix = "\n\n:warning: " + fails + " collector(s) failed -- some signals are UNVERIFIED." + suffix
-print(json.dumps({"text": body + suffix}))
-')"
+# ── THE TWO LINKS ──────────────────────────────────────────────────────────
+#
+# The brief used to end with the SAME url twice, written by two authors that
+# did not know about each other: `Full evidence: <run url>` from the last line
+# of triage-prompt.md's template, and `Full report: <run url>` appended here.
+# Three artifacts were uploaded on every run and NEITHER link pointed at any of
+# them -- the context pack, the one thing that lets a reader check a finding in
+# ten seconds, had a direct url that appeared nowhere.
+#
+# The template line is gone; this is now the only place links are added.
+#
+# The pack's artifact url does not exist until upload-artifact has run, which is
+# necessarily AFTER this script finishes building the pack. So in CI the
+# workflow defers the post: it sets TRIAGE_SLACK_DEFER=1, this script writes the
+# finished brief text and stops, the uploads run, and a final workflow step
+# appends both links and posts. Outside CI there is no artifact, and the brief
+# says so rather than printing a url that 404s.
+BRIEF_FILE="${TRIAGE_BRIEF_FILE:-slack-brief.txt}"
 
-if [ "$LOCAL" = "1" ]; then
-  printf '%s' "$PAYLOAD" > "${SLACK_SINK:-/tmp/slack.json}"
-  printf 'local mode: slack payload written to %s\n' "${SLACK_SINK:-/tmp/slack.json}"
-else
-  curl -s -X POST -H 'Content-type: application/json' \
-    --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null
-  printf 'slack: posted\n'
+if [ "$COLLECTOR_FAILURES" != "0" ]; then
+  BODY="$BODY
+
+:warning: $COLLECTOR_FAILURES collector(s) failed -- some signals are UNVERIFIED."
 fi
 
+printf '%s' "$BODY" > "$BRIEF_FILE"
+printf 'brief: %s (%s bytes)\n' "$BRIEF_FILE" "$(wc -c < "$BRIEF_FILE" | tr -d ' ')"
+
+if [ "${TRIAGE_SLACK_DEFER:-0}" = "1" ]; then
+  printf 'slack: DEFERRED -- workflow posts after upload so the pack url can be included\n'
+else
+  # Not deferred: local run, or a hand-run outside CI. No artifact exists, so
+  # only the run page is linked and the pack is named as a local path.
+  PAYLOAD="$(BODY="$BODY" RUN_URL="$RUN_URL" CONTEXT="$CONTEXT" python3 -c '
+import json, os
+body = os.environ["BODY"]
+print(json.dumps({"text": body
+                  + "\n\nFull report: " + os.environ["RUN_URL"]
+                  + "\nContext pack: " + os.environ["CONTEXT"] + " (local file -- not uploaded)"}))
+')"
+  if [ "$LOCAL" = "1" ]; then
+    printf '%s' "$PAYLOAD" > "${SLACK_SINK:-/tmp/slack.json}"
+    printf 'local mode: slack payload written to %s\n' "${SLACK_SINK:-/tmp/slack.json}"
+  else
+    curl -s -X POST -H 'Content-type: application/json' \
+      --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null
+    printf 'slack: posted\n'
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# The run's own verdict.
+#
+# This was `exit 0`, unconditional. COLLECTOR_FAILURES was counted, printed, and
+# used for a Slack :warning: prefix -- and never tested. The workflow went green
+# whether one collector failed or all sixteen did, which is the permanently-green
+# check the repo already named once: apps/api/scripts/check-window-anchor.ts,
+# "a required check that skips is green forever and verifies nothing".
+#
+# AFTER the Slack post on purpose. A degraded brief is more useful than none, so
+# the message ships first and the run goes red second. Every later workflow step
+# is `if: always()`, so the uploads and the post still run when this exits 1.
+# ---------------------------------------------------------------------------
+if [ "$COLLECTOR_FAILURES" -gt 0 ]; then
+  printf 'FAILING THE RUN: %s collector(s) failed. Signals are missing, not green.\n' \
+    "$COLLECTOR_FAILURES" >&2
+  exit 1
+fi
 exit 0

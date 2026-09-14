@@ -56,7 +56,7 @@ The pack contains these sections, each with a line count:
 | section | what it holds |
 |---|---|
 | `health` | `GET /health` body + HTTP code |
-| `health-crons` | `GET /health/crons` body + HTTP code. `jobs` should be 19; any entry in `stale` is a finding. `/health` returning ok proves nothing about crons — it runs `SELECT 1` only. |
+| `health-crons` | `GET /health/crons` body + HTTP code. `jobs` should be **20**; any entry in `stale` is a finding. `/health` returning ok proves nothing about crons — it runs `SELECT 1` only. **`cron-heartbeats` lists only 19** — `monthlyHoursReport` (`0 12 1 * *`) has no heartbeat row between firings, so its age is invisible here. `jobs:20` alongside 19 heartbeat rows is the NORMAL state, not a finding. |
 | `cron-heartbeats` | `job_name\|last_result\|age_seconds` for every job that has ticked. Four jobs are daily or monthly; check the interval in `CRONS.md` before calling a large age stale. |
 | `starnet-open-sessions` | STARNET open-session count, plus a control count per `company_id` across all tenants |
 | `customer-signal` | distinct STARNET guards active last 7d vs prior 7d, and session count. Counts only. |
@@ -65,7 +65,8 @@ The pack contains these sections, each with a line count:
 | `railway-logs` | up to 100 log lines with the count actually returned |
 | `sentry-netraops-api` / `sentry-netraops-mobile` | issues with events in the last 24h, as `id\|shortId\|level\|count_24h\|lifetime\|firstSeen\|lastSeen\|title`. **`count_24h` is the last 24 hours; `lifetime` is the total since `firstSeen` and may span months — never quote `lifetime` as a 24h figure.** |
 | `git-log` | `git log -10 --oneline` |
-| `deploy-vs-main` | current SUCCESS deployment id + status + `origin/main` sha. **`deploy_matches_main` is always UNVERIFIED** — the Railway CLI prints no commit sha, so the match cannot be established read-only. Say UNVERIFIED in the UP line; do not infer it from timestamps. |
+| `schema-applied` | the tip of `migrate.ts`'s `files` array, and whether that migration's contract is actually in the production catalog. Four outcomes, and they are **not** interchangeable: `APPLIED` (asked, everything present), `MISSING` (asked, something absent — a real finding, the collector succeeded), `UNMAPPED` (the tip has no object mapped — a repo defect, **not** a pass and **not** UNVERIFIED), and `COLLECTOR FAILED` (could not ask). **Never grade this from `STATE.md` or `OPEN-ITEMS.md`** — on 2026-09-14 both were stale and a false `BROKE P2` went to Slack because no collector existed. This section is now the only admissible evidence about applied schema. |
+| `deploy-vs-main` | current SUCCESS deployment id + status + `origin/main` sha + the **deployed commit**, read from `railway deployment list --json` (`meta.commitHash`). `deploy_matches_main` is now a real three-way result: `MATCH (<sha> == <sha>)`, `MISMATCH (deployed <sha> ≠ main <sha>)`, or `UNVERIFIED (<the actual reason>)`. **It is no longer always UNVERIFIED** — the claim that the CLI cannot print a sha was false, and stood for eight days. Quote whichever of the three the collector printed; never infer the match from timestamps. A `MISMATCH` is a real finding: main has moved and the running API has not. |
 | `failures-24h` | cron heartbeats with `last_result='error'` (count + job names), push failures and `ai.enhance.failed` counts grepped from the log window, the previous two runner conclusions, per-project Sentry issue counts since the 24h cutoff, and **`sentry-dropped`** |
 | `failures-24h` → `email liveness` | age of the last **successful** email, from `shifts.missed_alert_sent_at` and `shifts.daily_report_email_sent_at` — both stamped only after a send succeeds. `hours_since_last_successful_email` is the **GREATEST** of the two and is the alarm number; the two per-column ages and the shifts-due context are there to interpret it. The collector prints an `ALARM:` line; use it, do not recompute. |
 | `failures-24h` → `sentry-dropped` | events Sentry **refused**, per project, split by reason, over an explicit 24h window (both the requested and the API-returned window are printed — quote the returned one). `platform_refused_24h` is the alarm number: `rate_limited` of any reason, plus `client_discard/ratelimit_backoff`, which is the SDK obeying a 429 Sentry sent. `client_local_discard_24h` (`event_processor`, `network_error`) is **our own `beforeSend`/`ignoreErrors` and device connectivity — never a finding**. The collector prints an `ALARM:` line; use it, do not recompute. |
@@ -158,13 +159,18 @@ has no decision attached.**
 
 ```
 <emoji> <Day Mon D> — <"no failures in 24 h" | "N failures, worst Pn">
-<emoji> UP        <API · DB · N/19 crons · deploy = main | deploy ≠ main | UNVERIFIED>
-<emoji> BROKE     <"nothing in 24 h" | one line per failure: Pn · what · who (tenant/IDs/count) · duration · next step>
+<emoji> UP        <API · DB · N/20 crons · deploy = main | deploy ≠ main | UNVERIFIED>
+<emoji> BROKE     <"nothing in 24 h" | one line per failure: Pn · what · who (tenant/IDs/count) · duration · next step
+                                     | one line per unestablished signal: UNVERIFIED · what · the exact command that would settle it>
 <emoji> CUSTOMER  <STARNET active yesterday yes/no · N guards this week (↑ → ↓ vs last) · Nataniel last spoken N d ago>
 <emoji> AHEAD     <expiries ≤30 d with days left · API $X MTD of $50 | UNVERIFIED · Sentry N/50K · any failed payment>
 <emoji> WAITING   <open PRs by number · [VISHNU] items>
-Full evidence: <run url>
 ```
+
+**Do not write a link of any kind into the brief.** The runner appends exactly
+two, the run page and the context pack, after the artifacts exist. A link
+written here duplicates one of them -- the 2026-09-14 brief ended with the same
+url twice under two different labels, and neither pointed at the pack.
 
 ### Emoji
 
@@ -175,11 +181,16 @@ Per line, and the header takes the **worst** of the five:
 | 🔴 | any P0 or P1, or UP is not green |
 | 🟡 | P2, or AHEAD / WAITING is non-empty |
 | 🟢 | otherwise |
-| ⚪ | that line is **entirely** UNVERIFIED |
+| ⚪ | the line's only content is UNVERIFIED, and no verified failure sits alongside it |
 
-Severity per `POLICY.md`. ⚪ is for a line you could not establish at all — not
-for a line with one unverified field in it. A line that is partly known is
+Severity per `POLICY.md`. ⚪ means there is nothing established on that line to
+colour — not that one field in it is unknown. A line that is partly known is
 coloured by what you know and says `UNVERIFIED` for the rest.
+
+So a BROKE line carrying **only** UNVERIFIED items and no verified failure is
+⚪, not 🟡 and not 🟢: you did not find a problem and you also did not establish
+its absence. If even one verified failure sits on the line, that failure's
+severity colours it and the UNVERIFIED items ride alongside.
 
 ### Rules
 
@@ -241,10 +252,41 @@ coloured by what you know and says `UNVERIFIED` for the rest.
   Escalate above P2 if `platform_refused_24h` exceeds the day's `accepted`
   count, i.e. more was refused than landed. Report the **number the collector
   printed**; do not add `client_local_discard_24h` to it.
+- **An unverifiable signal is never assigned a severity.** If you could not
+  establish whether something is broken, the BROKE line says `UNVERIFIED`, names
+  what you could not establish, and gives **the exact command that would settle
+  it**. It does **not** carry a `Pn`. "I could not check" and "I checked and it
+  is broken" are different facts and the brief must be able to tell them apart.
+
+  ```
+  UNVERIFIED · schema_v77 apply state · psql -c "select conname from pg_constraint where conname='shifts_no_guard_overlap'"
+  ```
+
+  **This is the rule that was missing on 2026-09-14.** Run `34881357451` could
+  not establish whether `schema_v77` had been applied — correctly, because no
+  collector asked, and the full report said so in those words. The brief had
+  only two slots, `"nothing in 24 h"` and `Pn · …`, so the model picked the one
+  that did not claim all-clear and wrote `P2 · … migration not confirmed
+  applied · gap open ~15.5h since f027f72`. The constraint had been applied by
+  hand the previous evening. The "~15.5h" was the age of a commit message, not
+  of any observed state. **The grammar chose the severity, not the evidence.**
+
+  A duration belongs only on a `Pn` line, where it measures an observed failure.
+  An `UNVERIFIED` line never carries one: nothing was observed, so nothing has
+  a duration.
+
 - **Do not pad.** "nothing in 24 h" is a complete BROKE line and a good outcome.
   Do not manufacture a finding to fill the space.
 - The counts come from the pack's `deploy-vs-main`, `failures-24h`,
   `customer-pulse`, `ahead` and `waiting` sections. Do not recompute them.
 - If a pack section says `COLLECTOR FAILED` or `UNVERIFIED`, the corresponding
-  brief field says `UNVERIFIED`. **Never infer a green from a missing signal** —
-  that is the failure this loop was built to stop.
+  brief field says `UNVERIFIED`. **This maps to neither a green nor a `Pn`.**
+  Both directions are errors and both have now happened:
+  - **UNVERIFIED → green** is the failure this loop was built to stop. A missing
+    signal is never evidence that a thing is fine.
+  - **UNVERIFIED → `Pn`** is the failure of 2026-09-14. A missing signal is not
+    evidence that a thing is broken either, and dressing one as a graded finding
+    sends someone to fix something that was never wrong.
+
+  The honest rendering of a signal you do not have is the word `UNVERIFIED` and
+  the command that would get it. Nothing else.

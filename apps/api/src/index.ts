@@ -172,7 +172,19 @@ app.use(express.json());
 app.get('/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', db: 'connected' });
+    // `commit` is the build this process is running, injected by Railway. It
+    // exists so "is the deployed API on main?" has an answer that does not
+    // depend on a CLI, a token scope, or a dashboard: ops-triage compares it
+    // with origin/main. Railway already sets it -- services/hoursWorkbook.ts
+    // has read it since the hours export shipped -- so this exposes a value
+    // the runtime already had rather than adding a new dependency.
+    // null off Railway, which is the correct answer for a local process and
+    // must never be read as a match.
+    res.json({
+      status: 'ok',
+      db: 'connected',
+      commit: process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
+    });
   } catch {
     res.status(503).json({ status: 'error', db: 'disconnected' });
   }
