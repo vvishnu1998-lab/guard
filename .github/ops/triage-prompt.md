@@ -159,8 +159,9 @@ has no decision attached.**
 
 ```
 <emoji> <Day Mon D> — <"no failures in 24 h" | "N failures, worst Pn">
-<emoji> UP        <API · DB · N/19 crons · deploy = main | deploy ≠ main | UNVERIFIED>
-<emoji> BROKE     <"nothing in 24 h" | one line per failure: Pn · what · who (tenant/IDs/count) · duration · next step>
+<emoji> UP        <API · DB · N/20 crons · deploy = main | deploy ≠ main | UNVERIFIED>
+<emoji> BROKE     <"nothing in 24 h" | one line per failure: Pn · what · who (tenant/IDs/count) · duration · next step
+                                     | one line per unestablished signal: UNVERIFIED · what · the exact command that would settle it>
 <emoji> CUSTOMER  <STARNET active yesterday yes/no · N guards this week (↑ → ↓ vs last) · Nataniel last spoken N d ago>
 <emoji> AHEAD     <expiries ≤30 d with days left · API $X MTD of $50 | UNVERIFIED · Sentry N/50K · any failed payment>
 <emoji> WAITING   <open PRs by number · [VISHNU] items>
@@ -176,11 +177,16 @@ Per line, and the header takes the **worst** of the five:
 | 🔴 | any P0 or P1, or UP is not green |
 | 🟡 | P2, or AHEAD / WAITING is non-empty |
 | 🟢 | otherwise |
-| ⚪ | that line is **entirely** UNVERIFIED |
+| ⚪ | the line's only content is UNVERIFIED, and no verified failure sits alongside it |
 
-Severity per `POLICY.md`. ⚪ is for a line you could not establish at all — not
-for a line with one unverified field in it. A line that is partly known is
+Severity per `POLICY.md`. ⚪ means there is nothing established on that line to
+colour — not that one field in it is unknown. A line that is partly known is
 coloured by what you know and says `UNVERIFIED` for the rest.
+
+So a BROKE line carrying **only** UNVERIFIED items and no verified failure is
+⚪, not 🟡 and not 🟢: you did not find a problem and you also did not establish
+its absence. If even one verified failure sits on the line, that failure's
+severity colours it and the UNVERIFIED items ride alongside.
 
 ### Rules
 
@@ -242,10 +248,41 @@ coloured by what you know and says `UNVERIFIED` for the rest.
   Escalate above P2 if `platform_refused_24h` exceeds the day's `accepted`
   count, i.e. more was refused than landed. Report the **number the collector
   printed**; do not add `client_local_discard_24h` to it.
+- **An unverifiable signal is never assigned a severity.** If you could not
+  establish whether something is broken, the BROKE line says `UNVERIFIED`, names
+  what you could not establish, and gives **the exact command that would settle
+  it**. It does **not** carry a `Pn`. "I could not check" and "I checked and it
+  is broken" are different facts and the brief must be able to tell them apart.
+
+  ```
+  UNVERIFIED · schema_v77 apply state · psql -c "select conname from pg_constraint where conname='shifts_no_guard_overlap'"
+  ```
+
+  **This is the rule that was missing on 2026-09-14.** Run `34881357451` could
+  not establish whether `schema_v77` had been applied — correctly, because no
+  collector asked, and the full report said so in those words. The brief had
+  only two slots, `"nothing in 24 h"` and `Pn · …`, so the model picked the one
+  that did not claim all-clear and wrote `P2 · … migration not confirmed
+  applied · gap open ~15.5h since f027f72`. The constraint had been applied by
+  hand the previous evening. The "~15.5h" was the age of a commit message, not
+  of any observed state. **The grammar chose the severity, not the evidence.**
+
+  A duration belongs only on a `Pn` line, where it measures an observed failure.
+  An `UNVERIFIED` line never carries one: nothing was observed, so nothing has
+  a duration.
+
 - **Do not pad.** "nothing in 24 h" is a complete BROKE line and a good outcome.
   Do not manufacture a finding to fill the space.
 - The counts come from the pack's `deploy-vs-main`, `failures-24h`,
   `customer-pulse`, `ahead` and `waiting` sections. Do not recompute them.
 - If a pack section says `COLLECTOR FAILED` or `UNVERIFIED`, the corresponding
-  brief field says `UNVERIFIED`. **Never infer a green from a missing signal** —
-  that is the failure this loop was built to stop.
+  brief field says `UNVERIFIED`. **This maps to neither a green nor a `Pn`.**
+  Both directions are errors and both have now happened:
+  - **UNVERIFIED → green** is the failure this loop was built to stop. A missing
+    signal is never evidence that a thing is fine.
+  - **UNVERIFIED → `Pn`** is the failure of 2026-09-14. A missing signal is not
+    evidence that a thing is broken either, and dressing one as a graded finding
+    sends someone to fix something that was never wrong.
+
+  The honest rendering of a signal you do not have is the word `UNVERIFIED` and
+  the command that would get it. Nothing else.
