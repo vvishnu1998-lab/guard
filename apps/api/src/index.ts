@@ -114,7 +114,47 @@ app.use(cors({
     if (!origin) return cb(null, true);               // native app / curl / health
     if (allowedOrigins.includes(origin)) return cb(null, true);
     if (VERCEL_PREVIEW_PATTERN.test(origin)) return cb(null, true);
-    return cb(new Error(`CORS: origin ${origin} not allowed`));
+    // DECLINE, don't throw (N85). `cb(null, false)` is how the cors API spells
+    // "this origin is not allowed"; `cb(new Error(...))` spells "this server
+    // broke". A disallowed origin is a routine, expected, client-side
+    // condition, and it was being reported as a 500 and captured by Sentry as
+    // an unhandled exception.
+    //
+    // NO RESPONSE HEADER CHANGES EITHER WAY, and that is the thing to check
+    // before "improving" this line. Read cors/lib/index.js:218-226:
+    //
+    //     originCallback(req.headers.origin, function (err2, origin) {
+    //       if (err2 || !origin) { next(err2); }          // BOTH forms land here
+    //       else { corsOptions.origin = origin; cors(...); }
+    //     });
+    //
+    // `cb(new Error)` gives err2=Error; `cb(null,false)` gives err2=null with
+    // a falsy origin. Neither reaches the branch that calls configureOrigin,
+    // so Access-Control-Allow-Origin and Vary were absent before this change
+    // and are absent after it. The browser blocks a disallowed origin for the
+    // same reason it always did — the header is missing, not the status.
+    //
+    // WHAT DOES CHANGE is the argument to next(). next(Error) diverts to the
+    // error chain, and Layer.handle_error skips every handler whose arity is
+    // not 4 (express/lib/router/layer.js:65). So today a rejected request
+    // never reaches app.use(globalLimiter) below — sending a disallowed
+    // Origin header is a way to BYPASS the global rate limiter. next(null)
+    // continues the normal chain, so these requests are now counted like
+    // every other request. That is the second half of this fix, not a
+    // side effect of it.
+    //
+    // Reaching the routes is not a new exposure: the `!origin` branch four
+    // lines up already admits every request that simply omits the header —
+    // curl, scripts, and most bots — which is the larger class by far. This
+    // makes origin-bearing requests behave like origin-less ones.
+    //
+    // REJECTED ALTERNATIVE: keeping the throw and setting err.status = 403.
+    // That also stops the Sentry capture (its filter is status >= 500, and a
+    // bare Error reports as 500 — @sentry/node integrations/tracing/
+    // express.js:177-184), but it keeps the short-circuit and so leaves the
+    // rate-limiter bypass above open, and a decline is properly the absence
+    // of a header rather than a refusal status.
+    return cb(null, false);
   },
   credentials: true,
   // Content-Disposition is NOT a CORS-safelisted response header, so without

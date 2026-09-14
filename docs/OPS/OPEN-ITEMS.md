@@ -2408,9 +2408,35 @@ becomes a Sentry exception, unbounded and forever.
 That is the same defect class as the SendGrid retry storm (N27/N28): an
 expected, correlated, indefinitely repeating condition reported as individual
 events, which exhausted the monthly quota in ~10 hours and blinded error
-monitoring for a further 94. It has not fired yet only because nothing is
-currently hammering the API cross-origin. It needs no attacker — a search
-crawler hitting an embedded URL would do it.
+monitoring for a further 94.
+
+**CORRECTED 2026-09-14 — it has already fired, 286 times, and the "nine" in the
+Phase-0 audit was a quiet-day snapshot.** Re-queried live against Sentry issue
+`NETRAOPS-API-2` (id `7486773945`) at `addb974`:
+
+```
+times_seen : 286          firstSeen : 2026-05-17T09:45:56Z
+last 24h   : 0            lastSeen  : 2026-09-12T19:53:40Z
+```
+
+It is BURSTY, which is why a single 24h reading understates it by 30x:
+
+| 09-05 | 09-06 | 09-08 | 09-11 | 09-12 |
+|---|---|---|---|---|
+| 3 | 3 | **267** | 5 | 8 |
+
+The "n=9" recorded in `docs/OPS/INCIDENTS/2026-09-06-enhancement-credit-
+exhaustion.md:140` was the 09-05/09-06 shoulder. The peak is **267 events in one
+day**, and the ceiling is set by whoever is crawling, not by us.
+
+**And the prediction in the sentence this replaces was right.** 95 of the last
+100 events carry `Origin: https://api.netraops.com` — the API's own public
+domain — on `POST /graphql`, a route this API does not have, from
+`Mozilla/5.0 (compatible; Google-Extended/1.0; +http://www.google.com/bot.html)`
+at `X-Real-Ip: 35.205.81.31` (Google Cloud). A crawler probing for a GraphQL
+endpoint, setting Origin to the host it is probing. The remaining 5 are ours
+(`localhost:3000` / `:3001`). Nothing else needs doing about the bot: the
+requests 404 and always have.
 
 Found while trying to run apps/web locally against production's API: the
 preflight on `POST /api/auth/admin/login` from `http://localhost:3000` returned
@@ -2585,3 +2611,97 @@ Fix is the same four-line shape PR #52 applied thirteen times: keep the
 `console.error`, drop `err?.message` from the response body, leave the existing
 23505 branches above each one alone. Ships alone, no prerequisite, no consumer
 change. **Size XS. Tier 1.**
+
+---
+
+## New from the N85 CORS fix (2026-09-14)
+
+**N92. Both health routes swallow their error with a bare `catch {}` — a database outage produces NO Sentry event from the route that exists to detect it.**
+verified: YES — `apps/api/src/index.ts:176` and `:219` read at `addb974` (line
+numbers post-N85-fix; `:137` and `:180` before it).
+
+```js
+172: app.get('/health', async (_req, res) => {
+173:   try {
+174:     await pool.query('SELECT 1');
+175:     res.json({ status: 'ok', db: 'connected' });
+176:   } catch {                                                  // no binding
+177:     res.status(503).json({ status: 'error', db: 'disconnected' });
+178:   }
+179: });
+```
+
+`/health/crons` at `:205-222` has the identical shape at `:219`.
+
+Neither binds the error. So there is no `console.error`, nothing in the Railway
+log, and — because the catch swallows rather than rethrows — nothing ever
+reaches `Sentry.setupExpressErrorHandler` at `:254`. **A production Postgres
+outage is invisible in Sentry from `/health`.** The 503 is correct and an
+external uptime monitor would see it; the point is that the error stream shows
+nothing, so the first notification is whoever happens to be looking.
+
+**Same class as N85, inverted, which is why it was found alongside it.** N85
+reports a routine, expected condition as an unhandled exception. This reports a
+genuine infrastructure failure as nothing at all. Both are a status decision
+made without regard to observability.
+
+**Deliberately NOT folded into the N85 fix.** That change is one line in the
+CORS callback plus its comment, and it ships with a two-assertion verification
+("the browser still blocks it, and Sentry no longer sees it"). Adding capture to
+two unrelated routes would make its diff lie about its own blast radius, and
+would put a new source of Sentry events into the same commit whose purpose is
+proving a source of Sentry events stopped.
+
+Fix: bind the error, `console.error` it, and `Sentry.captureException` with a
+`flow: 'health'` tag. Consider `captureMessage` at `level: 'warning'` instead —
+a DB outage will produce one event per probe per interval, and an uptime monitor
+polling every 30s is its own small storm. That choice is the reason this is not
+a one-liner. **Size XS. Tier 1.**
+
+---
+
+**N93. `trust proxy = 1` resolves `req.ip` to an intermediate hop, and Railway's own `X-Real-Ip` disagrees with it.**
+verified: PARTIALLY — the code path is traced and the header values are from a
+real captured event; what the resolved value is on a live request is NOT
+verified.
+
+`apps/api/src/index.ts:66` sets `app.set('trust proxy', 1)`. `req.ip` then comes
+from `proxy-addr`, which builds `[socketAddr, ...XFF.reverse()]`
+(`forwarded/index.js:32`) and keeps hops while `trust(addrs[i], i)` holds
+(`proxy-addr/index.js:68-72`). With a numeric `1`, only `addrs[0]` is trusted.
+
+On a real event captured in Sentry issue `NETRAOPS-API-2`:
+
+```
+X-Forwarded-For: 35.205.81.31, 79.127.178.82
+X-Real-Ip:       35.205.81.31
+```
+
+addrs = `[railway-socket, 79.127.178.82, 35.205.81.31]`, trust 1 hop, so
+`req.ip` resolves to **`79.127.178.82`** — while Railway itself names the client
+as `35.205.81.31`. **The two disagree.**
+
+**Why it matters.** `req.ip` is the default key for both rate limiters
+(`express-rate-limit@8.5.2`, no custom `keyGenerator` anywhere in
+`apps/api/src`): `globalLimiter` at 500/15min and `authLimiter` at 20/15min. If
+`79.127.178.82` is an intermediate shared across many real clients, then those
+clients share a rate-limit budget. That is the shape of the deepak lockout
+(2026-08-20), where retried revoked sessions consumed a shared `/api/auth`
+budget.
+
+**Pre-existing, and NOT caused by the N85 fix.** It is recorded now because that
+fix makes it *reachable* from a new direction: before it, a rejected CORS origin
+never reached `globalLimiter` at all (the error path skips every 3-arg
+middleware, `express/lib/router/layer.js:65`); after it, those requests are
+counted. Closing the bypass is correct and is half the point of the fix — but it
+means bot traffic now keys through whatever `req.ip` resolves to, so the
+question stops being academic.
+
+**What is actually unknown**, and it is the only thing worth measuring first:
+whether `79.127.178.82` is per-client or shared. Everything else follows. Log
+`req.ip`, `X-Real-Ip` and `X-Forwarded-For` together on one route for a day and
+compare; do not change `trust proxy` before that reading exists. Raising the hop
+count without knowing the topology can make `req.ip` client-controlled, which is
+strictly worse than keying on a shared intermediate.
+
+**Size S to measure, UNKNOWN to fix. Tier 1.**
