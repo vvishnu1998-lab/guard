@@ -291,6 +291,127 @@ c_git_log() { git log -10 --oneline; }
 
 # ── Phase 4.5 brief collectors ──────────────────────────────────────────────
 
+# ── schema-applied ──────────────────────────────────────────────────────────
+#
+# Reads the tip of the `files` array in migrate.ts, then asks the PRODUCTION
+# CATALOG whether that migration's contract is actually there.
+#
+# WHY THIS EXISTS. Run 34881357451 posted
+#   BROKE P2 -- N45 guard-overlap constraint (schema_v77) shipped in code but
+#   migration not confirmed applied ... gap open ~15.5h since f027f72
+# The constraint had been applied by hand the previous evening. No collector
+# was wrong, because NO COLLECTOR EXISTED: the claim was inferred from
+# STATE.md and OPEN-ITEMS.md, which the shell embeds as ground truth and which
+# were nine versions and one day stale respectively. The runner had a working
+# psql session against production throughout that run -- eight other collectors
+# used it -- and nobody had ever pointed it at a catalog. The "~15.5h" was the
+# age of a commit message, not of any measured state.
+#
+# CATALOG ONLY. pg_constraint / pg_extension / pg_class / pg_attribute /
+# pg_indexes. No table is read, so the data rule in docs/OPS/POLICY.md is not
+# in play and no column grant matters (see N10).
+#
+# THE THREE OUTCOMES ARE NOT THE SAME THING, and conflating them is the bug
+# this file keeps re-shipping:
+#   APPLIED  -- asked, and every mapped object is there.
+#   MISSING  -- asked, and something is not there. The collector SUCCEEDED;
+#               returns 0. A real finding, not a failure to collect.
+#   COLLECTOR FAILED -- could not ask. psql error, unreadable migrate.ts, or
+#               an UNMAPPED tip. Returns 1, so fix 6 fails the run.
+#
+# UNMAPPED is deliberately NOT "UNVERIFIED" and NOT "APPLIED". It means the
+# database was reachable and nothing was asked of it, because nobody wrote down
+# what to look for. That is a repo defect with a one-line fix, and it must never
+# be mistakable for a pass or for an unreachable database.
+c_schema_applied() {
+  local map file tip v kind name sql out rc
+  local n_checked=0 n_present=0 missing=''
+
+  # <version>|<kind>|<object>     kind = constraint|index|table|column|extension
+  #
+  # ADD A LINE WHEN YOU ADD A MIGRATION. A file name does not say what it
+  # created, so each tip needs one object that is present if and only if that
+  # migration ran. More than one line per version is fine; all must pass.
+  map="$(cat <<'MAP'
+v77|constraint|shifts_no_guard_overlap
+v77|extension|btree_gist
+v76|column|shifts.unstaffed_warning_sent_at
+v75|index|idx_prt_token
+v74|constraint|chk_shift_reassignments_direction
+v73|index|idx_shifts_scheduled_start
+v72|index|idx_shifts_guard_scheduled
+v71|constraint|chk_shifts_source
+v70|table|site_config_audit
+v69|constraint|chk_shift_sessions_ping_interval_minutes
+MAP
+)"
+
+  # The tip is the LAST entry in array order, which is not the same as the
+  # highest number -- order is what migrate.ts replays.
+  file="$(grep -o "'schema_v[0-9]*\.sql'" apps/api/src/db/migrate.ts | tail -1 | tr -d "'")"
+  if [ -z "$file" ]; then
+    printf 'cannot read the files array tip from apps/api/src/db/migrate.ts\n'
+    return 1
+  fi
+  tip="v${file#schema_v}"; tip="${tip%.sql}"
+  printf 'migrate_ts_tip: %s (%s)\n' "$tip" "$file"
+
+  # Fed by heredoc, NOT by a pipe: a pipe would put the loop in a subshell and
+  # `return 1` below would exit only that subshell, leaving the function at 0.
+  # That is precisely the masked-failure class this commit exists to remove.
+  while IFS='|' read -r v kind name; do
+    [ "$v" = "$tip" ] || continue
+    case "$kind" in
+      constraint) sql="SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = '$name'" ;;
+      index)      sql="SELECT indexdef FROM pg_indexes WHERE indexname = '$name'" ;;
+      extension)  sql="SELECT 'btree_gist-style extension present, version ' || extversion FROM pg_extension WHERE extname = '$name'" ;;
+      table)      sql="SELECT 'table ' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE c.relname = '$name' AND c.relkind = 'r' AND n.nspname = 'public'" ;;
+      column)     sql="SELECT 'column ' || format_type(atttypid, atttypmod) FROM pg_attribute
+                        WHERE attrelid = '${name%%.*}'::regclass AND attname = '${name#*.}' AND NOT attisdropped" ;;
+      *)          printf 'UNMAPPED -- unknown kind "%s" for %s in the mapping table\n' "$kind" "$name"
+                  return 1 ;;
+    esac
+
+    out="$(psql_at "$sql")" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf 'psql failed probing %s %s: %s\n' \
+        "$kind" "$name" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+      return 1
+    fi
+
+    n_checked=$((n_checked + 1))
+    if [ -n "$out" ]; then
+      n_present=$((n_present + 1))
+      printf '  %s %s: PRESENT\n' "$kind" "$name"
+      printf '    %s\n' "$out"
+    else
+      missing="${missing}${missing:+, }${kind} ${name}"
+      printf '  %s %s: ABSENT\n' "$kind" "$name"
+    fi
+  done <<MAPEOF
+$map
+MAPEOF
+
+  if [ "$n_checked" -eq 0 ]; then
+    printf 'UNMAPPED -- tip %s has no object in the mapping table. Add one line to\n' "$tip"
+    printf 'c_schema_applied. UNMAPPED is not APPLIED and not UNVERIFIED: the database\n'
+    printf 'was reachable and nothing was asked of it.\n'
+    return 1
+  fi
+
+  if [ -n "$missing" ]; then
+    printf 'schema_applied: MISSING -- %s\n' "$missing"
+  else
+    printf 'schema_applied: APPLIED (%s/%s mapped objects present)\n' "$n_present" "$n_checked"
+  fi
+
+  # Explicit, not incidental. Every failure path above returns 1 before it can
+  # reach here, so this 0 is a claim that the probe ran -- not the exit status
+  # of whichever printf happened to come last.
+  return 0
+}
+
 c_deploy_vs_main() {
   local top id status main_sha
   top="$(railway deployment list --service guard --environment production 2>&1 \
@@ -617,6 +738,7 @@ c_waiting() {
   collect 'sentry-netraops-api'         c_sentry_api
   collect 'sentry-netraops-mobile'      c_sentry_mobile
   collect 'git-log'                     c_git_log
+  collect 'schema-applied'              c_schema_applied
   collect 'deploy-vs-main'              c_deploy_vs_main
   collect 'failures-24h'                c_failures_24h
   collect 'customer-pulse'              c_customer_pulse
