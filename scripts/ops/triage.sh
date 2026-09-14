@@ -412,27 +412,71 @@ MAPEOF
   return 0
 }
 
+# The comment that used to sit here claimed "the Railway CLI does not print a
+# commit sha on `deployment list` (checked again 2026-09-06, CLI 4.36.1 /
+# 5.49.2). There is no read-only way to get it from the CLI." That is false,
+# and it is why nobody retried for eight days: `deployment list` takes --json,
+# on 4.36.1 as well as 5.x, and the payload carries meta.commitHash alongside
+# meta.branch, meta.repo and meta.commitMessage. Whoever checked read the human
+# table, which genuinely has only id | STATUS | timestamp.
+#
+# The old line under it was not a result, it was a string constant:
+#   printf 'deploy_matches_main: UNVERIFIED (railway CLI prints no commit sha)'
+# one possible value for the life of the file, printed whether or not anything
+# had been asked. That is the check-window-anchor failure class -- a probe that
+# exits 0 without doing its job -- with the verdict hardcoded rather than merely
+# skipped.
+#
+# MISMATCH returns 0: the collector did its job and the news is bad, which is a
+# finding, not a collection failure. An absent meta.commitHash returns 1, and
+# that distinction is the whole point of this commit: if a project-scoped
+# RAILWAY_TOKEN is not served `meta`, this must fail loudly and get fixed, not
+# settle into a permanent well-worded UNVERIFIED. /health also carries the
+# commit as of this branch, which is the fallback if that turns out to be so.
 c_deploy_vs_main() {
-  local top id status main_sha
-  top="$(railway deployment list --service guard --environment production 2>&1 \
-        | grep SUCCESS | head -1)"
-  if [ -z "$top" ]; then
-    printf 'no SUCCESS deployment row returned\n'
+  local raw rc node dep_id status sha main_sha
+  raw="$(railway deployment list --service guard --environment production --limit 5 --json 2>&1)" \
+    && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$raw" ]; then
+    printf 'railway deployment list --json failed (rc=%s): %s\n' \
+      "$rc" "$(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-200)"
     return 1
   fi
-  id="$(printf '%s' "$top" | awk '{print $1}')"
-  status="$(printf '%s' "$top" | awk -F'|' '{gsub(/ /,"",$2); print $2}')"
+  if ! printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf 'railway --json did not return an array: %s\n' \
+      "$(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-200)"
+    return 1
+  fi
+
+  node="$(printf '%s' "$raw" | jq -c '[ .[] | select(.status == "SUCCESS") ][0] // empty')"
+  if [ -z "$node" ]; then
+    printf 'no SUCCESS deployment among the 5 most recent rows\n'
+    return 1
+  fi
+
+  dep_id="$(printf '%s' "$node" | jq -r '.id // "unknown"')"
+  status="$(printf '%s' "$node" | jq -r '.status // "unknown"')"
+  sha="$(printf '%s' "$node" | jq -r '.meta.commitHash // empty')"
   main_sha="$(git rev-parse origin/main 2>/dev/null || git rev-parse HEAD)"
 
-  printf 'deployment_id: %s\n' "$id"
+  printf 'deployment_id: %s\n' "$dep_id"
   printf 'status: %s\n' "$status"
   printf 'origin_main: %s\n' "$main_sha"
-  # The Railway CLI does not print a commit sha on `deployment list` (checked
-  # again 2026-09-06, CLI 4.36.1 / 5.49.2). There is no read-only way to get it
-  # from the CLI, so the match is UNVERIFIED rather than guessed. Do not infer
-  # it from timestamps -- that inference was already flagged as circumstantial
-  # in STATE.md and it is not good enough to drive a green UP line.
-  printf 'deploy_matches_main: UNVERIFIED (railway CLI prints no commit sha)\n'
+  printf 'deployed_commit: %s\n' "${sha:-<absent from meta>}"
+
+  if [ -z "$sha" ]; then
+    printf 'deploy_matches_main: UNVERIFIED (deployment JSON parsed but carries no meta.commitHash -- check RAILWAY_TOKEN scope, then GET /health commit)\n'
+    return 1
+  fi
+  if [ "$sha" = "$main_sha" ]; then
+    printf 'deploy_matches_main: MATCH (%s == %s)\n' "$sha" "$main_sha"
+  else
+    printf 'deploy_matches_main: MISMATCH (deployed %s ≠ main %s)\n' "$sha" "$main_sha"
+  fi
+
+  # Explicit, for the same reason as c_schema_applied: this 0 is a claim that
+  # the probe ran, not the exit status of the last printf.
+  return 0
 }
 
 c_failures_24h() {
