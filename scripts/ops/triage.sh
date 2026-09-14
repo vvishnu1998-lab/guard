@@ -120,19 +120,36 @@ psql_at() {
 
 # ── individual collectors ───────────────────────────────────────────────────
 
+# A 503 is a RESULT -- the API answered and it is unhealthy, which is a finding
+# the collector succeeded in collecting. Only a transport failure (curl non-zero,
+# or http 000 = never connected) is a failure to collect. Before this, neither
+# was: curl's status was never read and the function's exit status was the
+# trailing printf's, so a dead host produced "HTTP 000" inside a section the
+# harness recorded as a success.
 c_health() {
-  local body code
-  body="$(curl -s --max-time 20 "$API/health")"
+  local body code rc
+  body="$(curl -s --max-time 20 "$API/health")" && rc=0 || rc=$?
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$API/health")"
   printf 'HTTP %s\n%s\n' "$code" "$body"
+  if [ "$rc" -ne 0 ] || [ "$code" = "000" ]; then
+    printf 'curl could not reach %s/health (rc=%s, http=%s)\n' "$API" "$rc" "$code"
+    return 1
+  fi
+  return 0
 }
 
 c_health_crons() {
-  local body code
-  body="$(curl -s --max-time 20 "$API/health/crons")"
+  local body code rc
+  # NOTE first: this function must end on something that can fail.
+  printf 'NOTE: 503 with a stale list is the dead-cron alarm. 200 with stale:[] is healthy.\n'
+  body="$(curl -s --max-time 20 "$API/health/crons")" && rc=0 || rc=$?
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$API/health/crons")"
   printf 'HTTP %s\n%s\n' "$code" "$body"
-  printf '\nNOTE: 503 with a stale list is the dead-cron alarm. 200 with stale:[] is healthy.\n'
+  if [ "$rc" -ne 0 ] || [ "$code" = "000" ]; then
+    printf 'curl could not reach %s/health/crons (rc=%s, http=%s)\n' "$API" "$rc" "$code"
+    return 1
+  fi
+  return 0
 }
 
 c_heartbeats() {
@@ -142,20 +159,25 @@ c_heartbeats() {
 }
 
 c_starnet_sessions() {
+  # NOTES FIRST, deliberately. This function has to END on psql so that its exit
+  # status is the query's and not a printf's -- the trailing-NOTE form meant a
+  # failed query was recorded as a successful collection.
+  printf 'NOTE: if open_starnet_sessions is 0, the control list below proves the join works.\n'
+  printf 'An empty result from a broken join is indistinguishable from a true zero.\n\n'
   printf 'open_starnet_sessions: '
   psql_at "SELECT COUNT(*) FROM shift_sessions ss
              JOIN guards g ON g.id = ss.guard_id
-            WHERE ss.clocked_out_at IS NULL AND g.company_id = '$STARNET'"
+            WHERE ss.clocked_out_at IS NULL AND g.company_id = '$STARNET'" || return 1
   printf '\ncontrol -- open sessions per company_id (all tenants):\n'
   printf 'company_id|open_sessions\n'
   psql_at "SELECT g.company_id, COUNT(*) FROM shift_sessions ss
              JOIN guards g ON g.id = ss.guard_id
             WHERE ss.clocked_out_at IS NULL GROUP BY g.company_id ORDER BY 2 DESC"
-  printf '\nNOTE: if open_starnet_sessions is 0, the control list proves the join works.\n'
-  printf 'An empty result from a broken join is indistinguishable from a true zero.\n'
 }
 
 c_customer_signal() {
+  # NOTE first, so the function ends on psql. See c_starnet_sessions.
+  printf 'NOTE: counts only, no identities. A sustained drop is the customer leaving.\n\n'
   printf 'active_guards_last_7d|active_guards_prior_7d|sessions_last_7d\n'
   psql_at "SELECT
       (SELECT COUNT(DISTINCT ss.guard_id) FROM shift_sessions ss
@@ -171,7 +193,6 @@ c_customer_signal() {
          JOIN guards g ON g.id = ss.guard_id
         WHERE g.company_id = '$STARNET'
           AND ss.clocked_in_at >= NOW() - INTERVAL '7 days')"
-  printf '\nNOTE: counts only, no identities. A sustained drop is the customer leaving.\n'
 }
 
 c_open_violations() {
@@ -684,7 +705,9 @@ c_customer_pulse() {
 
 c_ahead() {
   printf 'expiries with a date within 30 days:\n'
-  python3 - <<'PYEOF'
+  # `|| return 1`: the EXPIRIES parser used to catch Exception and sys.exit(0),
+  # so a malformed table printed one line and the section was banked as good.
+  python3 - <<'PYEOF' || return 1
 import re, datetime, sys
 # Read the DATE COLUMN ONLY. A naive "first date anywhere in the row" match
 # reported E4/E9/E10/E11 as expiring 2026-09-05 in the 2026-09-06 dry run --
@@ -711,7 +734,7 @@ try:
         if days <= 30:
             dated.append(f'  {ident}: {label} -- {due} ({days} days)')
 except Exception as e:
-    print('  EXPIRIES parse failed:', e); sys.exit(0)
+    print('  EXPIRIES parse failed:', e); sys.exit(1)
 print('\n'.join(dated) if dated else '  none dated within 30 days')
 print(f'  {len(undated)} row(s) carry no date in the expires column: {", ".join(undated) or "none"}')
 print('  UNDATED ROWS ARE NOT "FINE" -- they are unchecked.')
@@ -1023,4 +1046,22 @@ print(json.dumps({"text": body
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# The run's own verdict.
+#
+# This was `exit 0`, unconditional. COLLECTOR_FAILURES was counted, printed, and
+# used for a Slack :warning: prefix -- and never tested. The workflow went green
+# whether one collector failed or all sixteen did, which is the permanently-green
+# check the repo already named once: apps/api/scripts/check-window-anchor.ts,
+# "a required check that skips is green forever and verifies nothing".
+#
+# AFTER the Slack post on purpose. A degraded brief is more useful than none, so
+# the message ships first and the run goes red second. Every later workflow step
+# is `if: always()`, so the uploads and the post still run when this exits 1.
+# ---------------------------------------------------------------------------
+if [ "$COLLECTOR_FAILURES" -gt 0 ]; then
+  printf 'FAILING THE RUN: %s collector(s) failed. Signals are missing, not green.\n' \
+    "$COLLECTOR_FAILURES" >&2
+  exit 1
+fi
 exit 0
