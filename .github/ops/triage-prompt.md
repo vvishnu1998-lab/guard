@@ -165,8 +165,12 @@ has no decision attached.**
 <emoji> CUSTOMER  <STARNET active yesterday yes/no · N guards this week (↑ → ↓ vs last) · Nataniel last spoken N d ago>
 <emoji> AHEAD     <expiries ≤30 d with days left · API $X MTD of $50 | UNVERIFIED · Sentry N/50K · any failed payment>
 <emoji> WAITING   <open PRs by number · [VISHNU] items>
-Full evidence: <run url>
 ```
+
+**Do not write a link of any kind into the brief.** The runner appends exactly
+two, the run page and the context pack, after the artifacts exist. A link
+written here duplicates one of them -- the 2026-09-14 brief ended with the same
+url twice under two different labels, and neither pointed at the pack.
 
 ### Emoji
 

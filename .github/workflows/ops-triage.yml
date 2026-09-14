@@ -105,6 +105,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRIAGE_FOCUS: ${{ inputs.focus }}
           TRIAGE_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          # The brief is written, not posted. The context pack's artifact url
+          # does not exist until upload-artifact has run, and that cannot happen
+          # until this step has finished building the pack. The post is the last
+          # step in the job.
+          TRIAGE_SLACK_DEFER: '1'
           # Scheduled runs are routine -> cheaper model. A manual run carries a
           # focus, which means a human is chasing something -> stronger model.
           MODEL: ${{ inputs.focus != '' && 'claude-opus-5' || 'claude-sonnet-5' }}
@@ -116,6 +121,7 @@ jobs:
       # evidence: a report that claims all-green is only trustworthy alongside
       # the signals it was written from.
       - name: Upload context pack
+        id: pack
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -143,3 +149,52 @@ jobs:
           path: report.md
           retention-days: 30
           if-no-files-found: warn
+
+      # LAST, deliberately. The brief carries exactly two links -- the run page
+      # and the context pack -- and the pack's url does not exist until the
+      # upload above has finished.
+      #
+      # Before this, the brief ended with the SAME url twice: `Full evidence`
+      # written by the model from triage-prompt.md's template, and `Full report`
+      # appended by triage.sh. Neither knew about the other and neither pointed
+      # at any of the three artifacts the run had just uploaded.
+      #
+      # jq -n builds the JSON so a brief containing a quote, a backslash or a
+      # newline cannot break the payload or inject fields.
+      - name: Post brief to Slack
+        if: always() && !inputs.dry_run
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PACK_URL: ${{ steps.pack.outputs.artifact-url }}
+        run: |
+          if [ ! -f slack-brief.txt ]; then
+            echo "no slack-brief.txt -- the triage step failed before writing one" >&2
+            BODY="Triage run failed before it produced a brief. This is a RUNNER FAILURE, not an all-green result."
+          else
+            BODY="$(cat slack-brief.txt)"
+          fi
+          # A missing PACK_URL is stated, never silently dropped: a brief that
+          # links only the run page should say why. Built with $'\n' rather than
+          # a literal newline inside the quotes, so the YAML block indentation
+          # cannot leak into the posted message.
+          if [ -n "$PACK_URL" ]; then
+            PACK_LINE="Context pack: ${PACK_URL}"
+          else
+            PACK_LINE="Context pack: UNAVAILABLE (artifact upload produced no url)"
+          fi
+          LINKS="Full report: ${RUN_URL}"$'\n'"${PACK_LINE}"
+          jq -n --arg body "$BODY" --arg links "$LINKS" \
+            '{text: ($body + "\n\n" + $links)}' > slack-payload.json
+          # --fail and an explicit status check. Without them this prints
+          # "slack: posted" after a 404 from a rotated webhook, which is the
+          # same exits-0-without-doing-its-job class the rest of this PR removes
+          # -- and it would be invisible, because nobody reads a green run.
+          if curl -sS --fail --max-time 20 -X POST -H 'Content-type: application/json' \
+               --data @slack-payload.json "$SLACK_WEBHOOK_URL" > /dev/null; then
+            echo "slack: posted"
+          else
+            echo "slack: POST FAILED (rc=$?) -- the brief did not reach Slack" >&2
+            exit 1
+          fi
+

@@ -973,24 +973,54 @@ if [ -z "$BODY" ]; then
 $(head -c 3500 "$OUT")"
 fi
 
-PAYLOAD="$(BODY="$BODY" RUN_URL="$RUN_URL" FAILS="$COLLECTOR_FAILURES" python3 -c '
+# ── THE TWO LINKS ──────────────────────────────────────────────────────────
+#
+# The brief used to end with the SAME url twice, written by two authors that
+# did not know about each other: `Full evidence: <run url>` from the last line
+# of triage-prompt.md's template, and `Full report: <run url>` appended here.
+# Three artifacts were uploaded on every run and NEITHER link pointed at any of
+# them -- the context pack, the one thing that lets a reader check a finding in
+# ten seconds, had a direct url that appeared nowhere.
+#
+# The template line is gone; this is now the only place links are added.
+#
+# The pack's artifact url does not exist until upload-artifact has run, which is
+# necessarily AFTER this script finishes building the pack. So in CI the
+# workflow defers the post: it sets TRIAGE_SLACK_DEFER=1, this script writes the
+# finished brief text and stops, the uploads run, and a final workflow step
+# appends both links and posts. Outside CI there is no artifact, and the brief
+# says so rather than printing a url that 404s.
+BRIEF_FILE="${TRIAGE_BRIEF_FILE:-slack-brief.txt}"
+
+if [ "$COLLECTOR_FAILURES" != "0" ]; then
+  BODY="$BODY
+
+:warning: $COLLECTOR_FAILURES collector(s) failed -- some signals are UNVERIFIED."
+fi
+
+printf '%s' "$BODY" > "$BRIEF_FILE"
+printf 'brief: %s (%s bytes)\n' "$BRIEF_FILE" "$(wc -c < "$BRIEF_FILE" | tr -d ' ')"
+
+if [ "${TRIAGE_SLACK_DEFER:-0}" = "1" ]; then
+  printf 'slack: DEFERRED -- workflow posts after upload so the pack url can be included\n'
+else
+  # Not deferred: local run, or a hand-run outside CI. No artifact exists, so
+  # only the run page is linked and the pack is named as a local path.
+  PAYLOAD="$(BODY="$BODY" RUN_URL="$RUN_URL" CONTEXT="$CONTEXT" python3 -c '
 import json, os
 body = os.environ["BODY"]
-url = os.environ["RUN_URL"]
-fails = os.environ.get("FAILS", "0")
-suffix = "\n\nFull report: " + url
-if fails != "0":
-    suffix = "\n\n:warning: " + fails + " collector(s) failed -- some signals are UNVERIFIED." + suffix
-print(json.dumps({"text": body + suffix}))
+print(json.dumps({"text": body
+                  + "\n\nFull report: " + os.environ["RUN_URL"]
+                  + "\nContext pack: " + os.environ["CONTEXT"] + " (local file -- not uploaded)"}))
 ')"
-
-if [ "$LOCAL" = "1" ]; then
-  printf '%s' "$PAYLOAD" > "${SLACK_SINK:-/tmp/slack.json}"
-  printf 'local mode: slack payload written to %s\n' "${SLACK_SINK:-/tmp/slack.json}"
-else
-  curl -s -X POST -H 'Content-type: application/json' \
-    --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null
-  printf 'slack: posted\n'
+  if [ "$LOCAL" = "1" ]; then
+    printf '%s' "$PAYLOAD" > "${SLACK_SINK:-/tmp/slack.json}"
+    printf 'local mode: slack payload written to %s\n' "${SLACK_SINK:-/tmp/slack.json}"
+  else
+    curl -s -X POST -H 'Content-type: application/json' \
+      --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null
+    printf 'slack: posted\n'
+  fi
 fi
 
 exit 0
