@@ -13,7 +13,10 @@ import { getActivePushTokens, getActivePushToken } from '../services/deviceRegis
 import { isPastPacificDate, isPastPacificDateString, pacificDateStr } from '../services/pacificDate';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { clearScheduleDerivedLatches } from '../services/shiftLatches';
-import { findOverlappingShift, overlapConflictBody } from '../services/shiftOverlap';
+import {
+  findOverlappingShift, overlapConflictBody,
+  isGuardOverlapViolation, resolveOverlapAfterRace, guardOverlapRaceBody,
+} from '../services/shiftOverlap';
 import { findOpenSession, clockedInAtPacific, OpenSessionConflictBody } from '../services/openSession';
 import { expiresAtFor } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
@@ -270,6 +273,12 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       for (const r of w.rows) windowByDate.set(r.d, { s: r.s, e: r.e });
     }
 
+    // N45: the window the loop is currently trying to claim. The catch
+    // resolves ONLY this one window rather than rescanning every date —
+    // the transaction aborts at the first failing INSERT, so this is the
+    // date that lost, and one query is enough to name the collision.
+    let attempting: { d: string; s: Date | string; e: Date | string } | null = null;
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -291,6 +300,7 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
           // built from that same array — but fail loudly inside the existing
           // rollback path rather than silently skipping a date's check.
           if (!win) throw new Error(`overlap window not computed for date ${d}`);
+          attempting = { d, s: win.s, e: win.e };
           const conflict = await findOverlappingShift(guard_id, win.s, win.e, null, client);
           if (conflict) {
             await client.query('ROLLBACK');
@@ -327,8 +337,24 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       return;
     } catch (err: any) {
       await client.query('ROLLBACK').catch(() => {});
+
+      // N45 LOST RACE. The pre-flight at :299 passed for every date and the
+      // constraint caught one at INSERT. Re-resolve that single window on
+      // `pool` — the 23P01 aborted `client` — and answer with the SAME body
+      // the pre-flight emits, so a race is indistinguishable from an
+      // ordinary conflict. Zero shifts were created either way: the whole
+      // batch is one transaction and it has just rolled back.
+      if (isGuardOverlapViolation(err) && guard_id && attempting) {
+        const conflict = await resolveOverlapAfterRace(
+          guard_id, attempting.s, attempting.e, null,
+        );
+        if (conflict) return res.status(409).json(overlapConflictBody(conflict));
+        return res.status(409).json(guardOverlapRaceBody(null));
+      }
+
       console.error('[shifts.specific_dates] error:', err);
-      return res.status(500).json({ error: err?.message ?? 'Failed to create shifts' });
+      // N78 FLOOR: no err.message on the wire.
+      return res.status(500).json({ error: 'Failed to create shifts' });
     } finally {
       client.release();
     }
@@ -470,14 +496,34 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
 
     const created: Array<Record<string, unknown>> = [];
     for (const p of pending) {
-      const r = await pool.query(
-        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
-                             created_by, created_by_role, source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-        [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status, expiresAtFor('shift'),
-         req.user!.sub, req.user!.role, 'manual']
-      );
-      created.push(r.rows[0]);
+      try {
+        const r = await pool.query(
+          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
+                               created_by, created_by_role, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+          [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status, expiresAtFor('shift'),
+           req.user!.sub, req.user!.role, 'manual']
+        );
+        created.push(r.rows[0]);
+      } catch (err: any) {
+        // N45 LOST RACE. This path has NO TRANSACTION — each INSERT commits
+        // on its own — so the rows already written STAY written. That is
+        // pre-existing (see the overlap docblock above) and this handler
+        // does not change it; what it must not do is imply otherwise.
+        //
+        // So the body carries `created` rather than the pre-flight's bare
+        // 409, which is emitted BEFORE anything is written and correctly
+        // implies zero. An admin told "conflict" while N rows landed
+        // silently would re-submit and double-book by hand.
+        if (!isGuardOverlapViolation(err) || !guard_id) throw err;
+        const conflict = await resolveOverlapAfterRace(guard_id, p.start, p.end, null);
+        return res.status(409).json({
+          ...guardOverlapRaceBody(conflict),
+          created,
+          created_count: created.length,
+          partial: true,
+        });
+      }
     }
     res.status(201).json(created);
     // Aggregated per-guard push, fire-and-forget after response.
@@ -525,13 +571,24 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     }
   }
 
-  const result = await pool.query(
-    `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
-                         created_by, created_by_role, source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-    [guard_id || null, site_id, scheduled_start, scheduled_end, status, expiresAtFor('shift'),
-     req.user!.sub, req.user!.role, 'manual']
-  );
+  let result;
+  try {
+    result = await pool.query(
+      `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
+                           created_by, created_by_role, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [guard_id || null, site_id, scheduled_start, scheduled_end, status, expiresAtFor('shift'),
+       req.user!.sub, req.user!.role, 'manual']
+    );
+  } catch (err: any) {
+    // N45 LOST RACE. One INSERT, nothing partially applied, so this is the
+    // pre-flight's own 409 arriving a few milliseconds later.
+    if (!isGuardOverlapViolation(err) || !guard_id) throw err;
+    const conflict = await resolveOverlapAfterRace(
+      guard_id, scheduled_start, scheduled_end, null,
+    );
+    return res.status(409).json(guardOverlapRaceBody(conflict));
+  }
   res.status(201).json(result.rows[0]);
   // Aggregated per-guard push, fire-and-forget after response.
   const row = result.rows[0];
@@ -557,6 +614,11 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     return res.status(400).json({ error: 'reason must be a string up to 500 chars' });
   }
 
+  // N45: the window this write is claiming, hoisted so the catch below can
+  // name the colliding shift after a lost race. `shift` is const-scoped to
+  // the try and is not visible from there.
+  let raceWin: { s: Date | string; e: Date | string } | null = null;
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -581,6 +643,7 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
       return res.status(404).json({ error: 'Shift not found' });
     }
     const shift = shiftRes.rows[0];
+    raceWin = { s: shift.scheduled_start, e: shift.scheduled_end };
 
     if (user!.role === 'company_admin' && shift.company_id !== user!.company_id) {
       await client.query('ROLLBACK');
@@ -733,9 +796,26 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     return;
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
+
+    // N45 LOST RACE. The pre-flight overlap check at :682 passed and the
+    // constraint caught it at COMMIT — same condition, milliseconds later.
+    // Answer with the 409 this route already emits for a conflict so the
+    // admin cannot tell the two apart, because operationally they are one
+    // thing. Resolved on `pool`, never on `client`: the 23P01 aborted that
+    // transaction and every further statement on it raises 25P02.
+    // NOT captured to Sentry — an expected, correlated, user-visible
+    // condition reported as an exception is the N27/N28 defect class.
+    if (isGuardOverlapViolation(err) && raceWin) {
+      const conflict = await resolveOverlapAfterRace(guard_id, raceWin.s, raceWin.e, id);
+      return res.status(409).json(guardOverlapRaceBody(conflict));
+    }
+
     console.error('[shifts.assign-guard] error:', err);
     Sentry.captureException(err, { tags: { route: 'shifts.assign-guard' }, extra: { shift_id: id } });
-    return res.status(500).json({ error: err?.message ?? 'Failed to assign guard' });
+    // N78 FLOOR: never put err.message on the wire. apps/web renders
+    // body.error verbatim (adminApi.ts:73 -> [shiftId]/page.tsx:363), so a
+    // raw driver string reaches an admin's screen.
+    return res.status(500).json({ error: 'Failed to assign guard' });
   } finally {
     client.release();
   }
@@ -756,6 +836,9 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
   if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
     return res.status(400).json({ error: 'reason must be a string up to 500 chars' });
   }
+
+  // N45: hoisted for the catch — see the assign-guard twin above.
+  let raceWin: { s: Date | string; e: Date | string } | null = null;
 
   const client = await pool.connect();
   try {
@@ -778,6 +861,7 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
       return res.status(404).json({ error: 'Shift not found' });
     }
     const shift = shiftRes.rows[0];
+    raceWin = { s: shift.scheduled_start, e: shift.scheduled_end };
 
     // company_admin can only touch their own company's shifts; vishnu has no
     // company scope.
@@ -794,6 +878,15 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 
     // Past shifts cannot be reassigned (auto-complete cron has already
     // settled their status as 'completed' or 'missed').
+    //
+    // NOTE, because this gate is narrower than it looks: 'cancelled' is NOT
+    // refused here. So this route can take a CANCELLED shift and write it
+    // back to 'scheduled' — moving a row that was outside schema_v77's
+    // partial index back INTO it, where it can collide with whatever was
+    // scheduled in the gap. That is a real path to SQLSTATE 23P01 that has
+    // nothing to do with changing which guard holds the shift, and it was
+    // found by TESTING the constraint locally, not by reading this gate.
+    // The catch at the bottom of this route handles it.
     if (shift.status === 'completed' || shift.status === 'missed') {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -959,8 +1052,31 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     res.json(updated.rows[0]);
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
+
+    // N45 LOST RACE — see PATCH /:id/assign-guard for the reasoning.
+    //
+    // TWO WAYS TO GET HERE, and the second is the surprising one:
+    //   1. a concurrent write took the window between the check at :843 and
+    //      this COMMIT — the ordinary race.
+    //   2. the shift was 'cancelled'. The status gate at :881 refuses only
+    //      'completed' and 'missed', so this route resurrects a cancelled
+    //      shift as 'scheduled' and moves it back INTO the partial index,
+    //      where it collides with whatever was scheduled in the gap. No
+    //      concurrency required — one admin, one click.
+    // (2) was found by TESTING the constraint locally, not by reasoning
+    // about this route. Do not remove this handler on the grounds that the
+    // race window is small; case 2 is not a race at all.
+    if (isGuardOverlapViolation(err) && raceWin) {
+      const conflict = await resolveOverlapAfterRace(new_guard_id, raceWin.s, raceWin.e, id);
+      return res.status(409).json(guardOverlapRaceBody(conflict));
+    }
+
     console.error('[reassign] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to reassign shift' });
+    // This route had NO Sentry capture at all; the overlap branch above
+    // deliberately still does not, but a genuine 500 should be visible.
+    Sentry.captureException(err, { tags: { route: 'shifts.reassign' }, extra: { shift_id: id } });
+    // N78 FLOOR: no err.message on the wire.
+    res.status(500).json({ error: 'Failed to reassign shift' });
   } finally {
     client.release();
   }
@@ -1296,7 +1412,9 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[shifts.cancel] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to cancel shift' });
+    // N78 FLOOR: never put err.message on the wire. apps/web renders
+    // body.error verbatim (adminApi.ts:73 -> [shiftId]/page.tsx:363).
+    res.status(500).json({ error: 'Failed to cancel shift' });
   } finally {
     client.release();
   }
@@ -1364,6 +1482,10 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     return res.status(400).json({ error: 'reason must be a string up to 500 chars' });
   }
 
+  // N45: guard + NEW window, hoisted for the catch. Null when the shift
+  // carries no guard — an unassigned row cannot violate the constraint.
+  let raceEditWin: { guardId: string; s: Date | string; e: Date | string } | null = null;
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1383,6 +1505,9 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
       return res.status(404).json({ error: 'Shift not found' });
     }
     const shift = shiftRes.rows[0];
+    if (shift.guard_id) {
+      raceEditWin = { guardId: shift.guard_id, s: newStart, e: newEnd };
+    }
 
     // company_admin is scoped to its own company; vishnu has no company
     // scope. 404 rather than 403 so we don't leak which shift ids exist.
@@ -1612,9 +1737,21 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     return;
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
+
+    // N45 LOST RACE. This route moves the WINDOW rather than the guard, so
+    // the collision is against the shift's existing guard over its NEW
+    // hours. excludeShiftId is this row: it must not conflict with itself.
+    if (isGuardOverlapViolation(err) && raceEditWin) {
+      const conflict = await resolveOverlapAfterRace(
+        raceEditWin.guardId, raceEditWin.s, raceEditWin.e, id,
+      );
+      return res.status(409).json(guardOverlapRaceBody(conflict));
+    }
+
     console.error('[shifts.edit] error:', err);
     Sentry.captureException(err, { tags: { route: 'shifts.edit' }, extra: { shift_id: id } });
-    return res.status(500).json({ error: err?.message ?? 'Failed to edit shift' });
+    // N78 FLOOR: no err.message on the wire.
+    return res.status(500).json({ error: 'Failed to edit shift' });
   } finally {
     client.release();
   }
@@ -1939,7 +2076,10 @@ router.post('/:id/swap-request', requireAuth('guard'), async (req, res) => {
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[swap-request] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to create swap request' });
+    // N78 FLOOR: never put err.message on the wire. This route is
+    // requireAuth('guard') — errorCopy.ts:53 renders ApiError.message
+    // straight into an Alert, so driver text lands on a handset.
+    res.status(500).json({ error: 'Failed to create swap request' });
   } finally {
     client.release();
   }
@@ -1951,6 +2091,10 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
   const accept     = typeof req.body?.accept === 'boolean' ? req.body.accept : null;
   if (!history_id) return res.status(400).json({ error: 'history_id is required' });
   if (accept === null) return res.status(400).json({ error: 'accept (boolean) is required' });
+
+  // N45: hoisted for the catch — see PATCH /:id/assign-guard for the pattern.
+  let raceSwapWin:
+    { guardId: string; s: Date | string; e: Date | string; shiftId: string } | null = null;
 
   const client = await pool.connect();
   try {
@@ -2067,6 +2211,10 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
     // [start, end) cross-site overlap. Same window, same exclusion, same
     // statuses; the arguments map one-for-one onto the parameters that were
     // bound here before.
+    raceSwapWin = {
+      guardId: hist.to_guard_id, s: shift.scheduled_start, e: shift.scheduled_end,
+      shiftId: shift.id,
+    };
     const conflict = await findOverlappingShift(
       hist.to_guard_id, shift.scheduled_start, shift.scheduled_end, shift.id, client,
     );
@@ -2129,8 +2277,29 @@ router.post('/:id/swap-response', requireAuth('guard'), async (req, res) => {
     }).catch((err) => console.error('[swap-response] accept push failed:', err));
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
+
+    // N45 LOST RACE, GUARD-FACING. Reuses RECIPIENT_OVERLAP rather than
+    // minting a code: mobile derives ApiError.code from body.error
+    // (lib/errors.ts:72), so a NEW enum would need the mobile OTA to land
+    // first — and the 1.0.16 tail (5 active devices at this ref) never
+    // receives it. A 23P01 here means exactly what the pre-flight above
+    // already says, so the existing sentence is not a compromise.
+    if (isGuardOverlapViolation(err) && raceSwapWin) {
+      const conflict = await resolveOverlapAfterRace(
+        raceSwapWin.guardId, raceSwapWin.s, raceSwapWin.e, raceSwapWin.shiftId,
+      );
+      return res.status(409).json({
+        code:    'RECIPIENT_OVERLAP',
+        error:   'RECIPIENT_OVERLAP',
+        message: 'You now have an overlapping shift; swap is no longer possible.',
+        ...(conflict ? { conflict: overlapConflictBody(conflict).conflict } : {}),
+      });
+    }
+
     console.error('[swap-response] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to respond to swap request' });
+    // N78 FLOOR: err.message here reaches a GUARD's phone — errorCopy.ts:53
+    // renders ApiError.message straight into an Alert.
+    res.status(500).json({ error: 'Failed to respond to swap request' });
   } finally {
     client.release();
   }
@@ -2300,7 +2469,10 @@ router.post('/:id/handoff-request', requireAuth('guard'), async (req, res) => {
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[handoff-request] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to create handoff request' });
+    // N78 FLOOR: never put err.message on the wire. This route is
+    // requireAuth('guard') — errorCopy.ts:53 renders ApiError.message
+    // straight into an Alert, so driver text lands on a handset.
+    res.status(500).json({ error: 'Failed to create handoff request' });
   } finally {
     client.release();
   }
@@ -2456,7 +2628,10 @@ router.post('/:id/handoff-response', requireAuth('guard'), async (req, res) => {
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[handoff-response] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to respond to handoff' });
+    // N78 FLOOR: never put err.message on the wire. This route is
+    // requireAuth('guard') — errorCopy.ts:53 renders ApiError.message
+    // straight into an Alert, so driver text lands on a handset.
+    res.status(500).json({ error: 'Failed to respond to handoff' });
   } finally {
     client.release();
   }
@@ -2496,6 +2671,11 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
   }
 
   const coords = clock_in_coords ?? `(${lat},${lng})`;
+
+  // N45: hoisted for the catch. windowStart is NOW, not the shift's start —
+  // a handoff transfers the remainder, per shiftOverlap.ts:33-44.
+  let raceHandoffWin:
+    { guardId: string; s: Date | string; e: Date | string; shiftId: string } | null = null;
 
   const client = await pool.connect();
   try {
@@ -2592,6 +2772,9 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
     // Runs inside the existing transaction on `client`, under the FOR UPDATE
     // OF ssr, sh taken above. That lock covers this shift and the swap row;
     // it does NOT cover B's other shifts, so this remains check-then-act.
+    raceHandoffWin = {
+      guardId: user!.sub, s: new Date(), e: hist.scheduled_end, shiftId: id,
+    };
     const conflict = await findOverlappingShift(
       user!.sub, new Date(), hist.scheduled_end, id, client,
     );
@@ -2739,8 +2922,25 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
     }).catch((err) => console.error('[handoff-clock-in] complete push failed:', err));
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
+
+    // N45 LOST RACE, GUARD-FACING, MID-HANDOFF. Answers with the SAME bare
+    // overlapConflictBody shape this route's own pre-flight uses — no code,
+    // because that pre-flight has none and inventing one here would need an
+    // OTA ahead of the API (N46). The window is [NOW, shift end): a handoff
+    // transfers the REMAINDER, so B's finished morning shift must not count.
+    if (isGuardOverlapViolation(err) && raceHandoffWin) {
+      const conflict = await resolveOverlapAfterRace(
+        raceHandoffWin.guardId, raceHandoffWin.s, raceHandoffWin.e, raceHandoffWin.shiftId,
+      );
+      if (conflict) return res.status(409).json(overlapConflictBody(conflict));
+      return res.status(409).json({
+        error: 'You picked up an overlapping shift a moment ago. Pull down to refresh.',
+      });
+    }
+
     console.error('[handoff-clock-in] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to complete handoff clock-in' });
+    // N78 FLOOR: err.message here reaches a GUARD's phone mid-shift.
+    res.status(500).json({ error: 'Failed to complete handoff clock-in' });
   } finally {
     client.release();
   }
@@ -2820,7 +3020,10 @@ router.post('/:id/handoff-cancel', requireAuth('guard'), async (req, res) => {
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[handoff-cancel] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to cancel handoff' });
+    // N78 FLOOR: never put err.message on the wire. This route is
+    // requireAuth('guard') — errorCopy.ts:53 renders ApiError.message
+    // straight into an Alert, so driver text lands on a handset.
+    res.status(500).json({ error: 'Failed to cancel handoff' });
   } finally {
     client.release();
   }
@@ -3765,7 +3968,11 @@ router.post('/break-start', requireAuth('guard'), idempotent('break-start'), asy
       });
     }
     console.error('break-start error:', err);
-    res.status(500).json({ error: err.message ?? 'Failed to start break' });
+    // N78 FLOOR: never put err.message on the wire. requireAuth('guard') —
+    // errorCopy.ts:53 renders ApiError.message straight into an Alert.
+    // Spelled `err.message` rather than `err?.message`, which is why the
+    // first sweep for this defect missed it; grep BOTH spellings.
+    res.status(500).json({ error: 'Failed to start break' });
   }
 });
 
@@ -3796,7 +4003,11 @@ router.post('/break-end', requireAuth('guard'), async (req, res) => {
     res.json(result.rows[0]);
   } catch (err: any) {
     console.error('break-end error:', err);
-    res.status(500).json({ error: err.message ?? 'Failed to end break' });
+    // N78 FLOOR: never put err.message on the wire. requireAuth('guard') —
+    // errorCopy.ts:53 renders ApiError.message straight into an Alert.
+    // Spelled `err.message` rather than `err?.message`, which is why the
+    // first sweep for this defect missed it; grep BOTH spellings.
+    res.status(500).json({ error: 'Failed to end break' });
   }
 });
 
@@ -4259,7 +4470,11 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   } catch (err: any) {
     await client.query('ROLLBACK');
     console.error('clock-out error:', err);
-    res.status(500).json({ error: err.message ?? 'Failed to clock out' });
+    // N78 FLOOR: never put err.message on the wire. requireAuth('guard') —
+    // errorCopy.ts:53 renders ApiError.message straight into an Alert.
+    // Spelled `err.message` rather than `err?.message`, which is why the
+    // first sweep for this defect missed it; grep BOTH spellings.
+    res.status(500).json({ error: 'Failed to clock out' });
   } finally {
     client.release();
   }
