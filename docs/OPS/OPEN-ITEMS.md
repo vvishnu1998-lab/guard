@@ -2502,3 +2502,45 @@ three different things:
 person who greps for lateness finds the distinction written down instead of inferring a bug.
 `email.ts` was explicitly out of scope for the Phase 2 dispatch and is unchanged.
 **Size XS. Tier 0** (documentation only, unless someone decides the copy should differ).
+
+---
+
+## New from N45 overlap constraint (2026-09-14)
+
+**N90. This repo has no way to run a DB-dependent test, and N45's constraint is the first thing that needs one.**
+verified: YES — all eight `_*.test.ts` files under `apps/api/src` are pure. Each
+declares `Run: npx ts-node <path>` in its own header, `apps/api/package.json` has
+no `test` script, and nothing in CI invokes them as a suite.
+
+N45's exclusion constraint (`schema_v77`, `shifts_no_guard_overlap`) was proven
+against a local PG 18.6 with 19 assertions — a real 23P01, the 25P02 that follows
+it on the same client, discrimination against a decoy exclusion constraint on
+another table, conflict resolution, and both body shapes. **Every one of those
+assertions needs a live Postgres, so none of them shipped as a test.** The proof
+lives in a scratch script and dies with the session.
+
+What is therefore unprotected:
+
+- `isGuardOverlapViolation` matching the **constraint name** and not merely
+  SQLSTATE 23P01. The decoy test is the only thing that ever demonstrated this,
+  and it is exactly the assertion that silently stops holding when somebody adds
+  a second exclusion constraint anywhere in the schema.
+- The `[)` bound. A future edit to `tstzrange(...)` in the migration would be
+  caught by nothing, and back-to-back shifts would start 409ing in production.
+- The partial predicate tracking `services/shiftOverlap.ts:101`. Postgres cannot
+  enforce the agreement and neither can `tsc`.
+
+**This is a decision about the repo, not a test to dash off.** The options are not
+equivalent: a `DATABASE_URL=`-gated test that skips when the variable is unset will skip
+forever and rot; a throwaway container needs Docker, which is **not installed on
+this machine** (`command not found: docker`, checked 2026-09-14); a dedicated
+local role on the existing `postgresql@18` works today but is not reproducible in
+CI. There is also a hook in the way BY DESIGN — `.claude/hooks/guard.sh` blocks
+any command containing `DATABASE_URL=`, which is correct for production safety and is
+precisely what a DB test harness has to set. (That hook fired while this very
+item was being written, on the prose above. Its header calls false positives
+cheap and says to rephrase; that is what happened.)
+
+Do not resolve this by weakening the hook.
+
+**Size M. Tier 1** (repo tooling; the hook question is Tier 2 if touched).

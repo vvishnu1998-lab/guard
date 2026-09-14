@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { SLOT_EXPANSION_CTE, OCCUPIED_CTE } from '../services/slotExpansion';
-import { findOverlappingShift } from '../services/shiftOverlap';
+import {
+  findOverlappingShift, isGuardOverlapViolation,
+} from '../services/shiftOverlap';
 import { checkShiftEligibility, eligibilityError } from '../services/guardAssignments';
 import { expiresAtFor } from '../services/retention';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
@@ -921,8 +923,21 @@ router.post('/site/:siteId/assign-slots', requireAuth('company_admin', 'vishnu')
         created.push(upd.rows[0]);
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
-        console.error('[scheduling.assign-slots] patch failed:', err);
-        fail('write_failed', 'Could not assign that slot. Try again.');
+        // N45 LOST RACE. This route's failure vocabulary is already
+        // enum-keyed, and 'overlap' already exists in it — this endpoint's
+        // consumer is components/admin/SlotAssignPanel.tsx, whose own
+        // REASON_LABEL:114 maps 'overlap' to "Busy elsewhere" and whose row
+        // at :396 renders `REASON_LABEL[reason] — message`. (The bulk
+        // surface's map in lib/bulkShiftCopy.ts is a DIFFERENT map for a
+        // different endpoint; do not cite it for this one.) So the race
+        // needs a BRANCH, not a new code: 'write_failed' would tell the
+        // admin to retry something that will never succeed.
+        if (isGuardOverlapViolation(err)) {
+          fail('overlap', 'That guard was given an overlapping shift a moment ago.');
+        } else {
+          console.error('[scheduling.assign-slots] patch failed:', err);
+          fail('write_failed', 'Could not assign that slot. Try again.');
+        }
       } finally {
         client.release();
       }
@@ -946,18 +961,37 @@ router.post('/site/:siteId/assign-slots', requireAuth('company_admin', 'vishnu')
       // Nothing READS source yet. It was added by schema_v71 for this moment;
       // every one of the 527 production rows says 'manual' today, 512 of them
       // because that is the column DEFAULT rather than because anyone chose it.
-      const ins = await pool.query<{ id: string; guard_id: string; site_id: string;
-        scheduled_start: Date; scheduled_end: Date }>(
-        `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
-                             created_by, created_by_role, source)
-         SELECT $1, $2, $3::timestamptz, $4::timestamptz, 'scheduled', $5, $6, $7, 'profile'
-          WHERE (SELECT COUNT(*) FROM shifts x
-                  WHERE x.site_id = $2 AND x.scheduled_start = $3::timestamptz
-                    AND x.status NOT IN ('cancelled','unassigned')) < $8
-         RETURNING id, guard_id, site_id, scheduled_start, scheduled_end`,
-        [guardId, req.params.siteId, slotStart, slot.slot_end.toISOString(),
-         expiresAtFor('shift'), req.user!.sub, req.user!.role, slot.guards_needed],
-      );
+      // WRAPPED, AND THAT IS A FIX IN ITS OWN RIGHT (N45 Phase 2, ruling 5).
+      // This branch had NO try/catch and the route has no route-level catch
+      // either, so ANY error here escaped to express-async-errors and became
+      // a bare 500 — abandoning the loop, discarding the per-slot
+      // assigned/failed report, and leaving every slot already committed in
+      // this batch written but unreported. That is a live defect today,
+      // independent of the exclusion constraint; the constraint only adds a
+      // new way to reach it. The PATCH branch above has always been wrapped.
+      let ins;
+      try {
+        ins = await pool.query<{ id: string; guard_id: string; site_id: string;
+          scheduled_start: Date; scheduled_end: Date }>(
+          `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
+                               created_by, created_by_role, source)
+           SELECT $1, $2, $3::timestamptz, $4::timestamptz, 'scheduled', $5, $6, $7, 'profile'
+            WHERE (SELECT COUNT(*) FROM shifts x
+                    WHERE x.site_id = $2 AND x.scheduled_start = $3::timestamptz
+                      AND x.status NOT IN ('cancelled','unassigned')) < $8
+           RETURNING id, guard_id, site_id, scheduled_start, scheduled_end`,
+          [guardId, req.params.siteId, slotStart, slot.slot_end.toISOString(),
+           expiresAtFor('shift'), req.user!.sub, req.user!.role, slot.guards_needed],
+        );
+      } catch (err) {
+        if (isGuardOverlapViolation(err)) {
+          fail('overlap', 'That guard was given an overlapping shift a moment ago.');
+        } else {
+          console.error('[scheduling.assign-slots] insert failed:', err);
+          fail('write_failed', 'Could not assign that slot. Try again.');
+        }
+        continue;
+      }
       if (!ins.rows[0]) {
         fail('slot_full', 'That slot filled up while this was selected.');
         continue;
