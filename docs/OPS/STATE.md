@@ -263,16 +263,57 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
-## Schema — verified 2026-09-08 21:40 UTC (v68 applied; v66 rows corrected)
+## Schema — verified 2026-09-14 18:55 UTC (v69-v77 applied; v68 rows retained)
 
 | thing | value |
 |---|---|
-| tip in `migrate.ts` (file) | **v68** — `files` array ends `'schema_v67.sql', 'schema_v68.sql'` (`apps/api/src/db/migrate.ts:10`) |
-| tip on disk | **v68** — `ls schema_v*.sql \| sort -V \| tail -1` → `schema_v68.sql`. 67 files on disk, 67 entries in the array, no duplicates, every entry resolves. |
-| tip applied in prod DB | **v68** — `information_schema.columns` shows `shift_sessions.ping_interval_minutes` `integer`, `is_nullable=YES`, `column_default=null`. Applied by Vishnu 2026-09-08. |
+| tip in `migrate.ts` (file) | **v77** — `files` array ends `'schema_v76.sql', 'schema_v77.sql'` (`apps/api/src/db/migrate.ts:10`) |
+| tip on disk | **v77** — `ls schema_v*.sql \| sort -V \| tail -1` → `schema_v77.sql`. 76 `schema_v*.sql` on disk (78 `.sql` total, incl. `schema.sql` and `schema_auth.sql`), 78 entries in the array, no duplicates, every entry resolves. |
+| tip applied in prod DB | **v77** — `pg_constraint` returns `shifts_no_guard_overlap` on `shifts` with `contype='x'`, and `pg_extension` returns `btree_gist 1.8`. **Applied by hand by Vishnu 2026-09-13**, re-verified by catalog read 2026-09-14. Full `pg_get_constraintdef` below. |
 | **v67** | **APPLIED 2026-09-05.** `to_regclass('public.cron_heartbeats')` returns `cron_heartbeats` — v67's entire contract. |
 | **v68** | **APPLIED 2026-09-08** (PR #21). `shift_sessions.ping_interval_minutes INTEGER NULL`, no default, no CHECK. 211 sessions: **210 NULL, 1 stamped `30`** (first at 19:00:14Z), so the Phase D `COALESCE(x, 30)` resolves to 30 for every row that exists. |
-| **v69** | **FREE** — no `schema_v69.sql` on disk; the chain ends at v68. |
+| **v69** | **APPLIED** — `chk_shift_sessions_ping_interval_minutes` present on `shift_sessions`. |
+| **v70** | **APPLIED** — `to_regclass('public.site_config_audit')` is non-null. |
+| **v71** | **APPLIED** — `shifts.source` present; `chk_shifts_source` and `chk_shifts_created_by_role` both present on `shifts`. |
+| **v72** | **APPLIED** — `to_regclass('public.idx_shifts_guard_scheduled')` is non-null. |
+| **v73** | **APPLIED** — `to_regclass('public.idx_shifts_scheduled_start')` is non-null. |
+| **v74** | **APPLIED** — `chk_shift_reassignments_direction` present; `shift_reassignments.new_guard_id` has `attnotnull = false`. |
+| **v75** | **APPLIED** — `shifts.guard_id` and `clock_in_verifications.site_photo_url` both `attnotnull = false`; `to_regclass('public.idx_prt_token')` is non-null. |
+| **v76** | **APPLIED** — `shifts.unstaffed_warning_sent_at` present. |
+| **v77** | **APPLIED 2026-09-13 BY HAND** (PR #52, `f027f72` / merge `addb974`). Constraint and extension quoted below. |
+| **v78** | **FREE** — no `schema_v78.sql` on disk; the chain ends at v77. |
+
+### v77 — the exact verification
+
+Read from the production catalog 2026-09-14 18:55 UTC via `postgres-readonly`:
+
+```
+conname              | shifts_no_guard_overlap
+contype              | x
+table                | shifts
+pg_get_constraintdef | EXCLUDE USING gist (guard_id WITH =,
+                       tstzrange(scheduled_start, scheduled_end) WITH &&)
+                       WHERE (((status)::text = ANY ((ARRAY['scheduled'::character varying,
+                       'active'::character varying])::text[])))
+
+extname    | btree_gist
+extversion | 1.8
+```
+
+**This table was nine versions stale for six days and that staleness shipped a false
+P2 to Slack.** On 2026-09-14, `ops-triage` run `34881357451` posted
+`BROKE P2 · N45 guard-overlap constraint (schema_v77) shipped in code but migration
+not confirmed applied`. The constraint had been applied the previous evening. The
+model was not guessing: `scripts/ops/triage.sh` embeds this file **verbatim and in
+full** into the context pack, so the `v68` rows above and the `v69 FREE` row were
+handed to it as ground truth, and it cited them.
+
+The lesson is the same one the v66 note below already records, with one addition:
+**a stale row here is not a documentation defect, it is an input to an automated
+alarm.** `c_schema_applied` in `scripts/ops/triage.sh` now reads the catalog on
+every run, so the brief no longer depends on this table being fresh — but the table
+is still what a human reads first, and it must be corrected when a migration is
+applied by hand, in the same sitting.
 
 **The v66 rows above were stale for three days.** This table recorded v66 as the
 tip of both the file and the DB while v67 was already applied and v68 was free.

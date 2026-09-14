@@ -56,7 +56,7 @@ The pack contains these sections, each with a line count:
 | section | what it holds |
 |---|---|
 | `health` | `GET /health` body + HTTP code |
-| `health-crons` | `GET /health/crons` body + HTTP code. `jobs` should be 19; any entry in `stale` is a finding. `/health` returning ok proves nothing about crons — it runs `SELECT 1` only. |
+| `health-crons` | `GET /health/crons` body + HTTP code. `jobs` should be **20**; any entry in `stale` is a finding. `/health` returning ok proves nothing about crons — it runs `SELECT 1` only. **`cron-heartbeats` lists only 19** — `monthlyHoursReport` (`0 12 1 * *`) has no heartbeat row between firings, so its age is invisible here. `jobs:20` alongside 19 heartbeat rows is the NORMAL state, not a finding. |
 | `cron-heartbeats` | `job_name\|last_result\|age_seconds` for every job that has ticked. Four jobs are daily or monthly; check the interval in `CRONS.md` before calling a large age stale. |
 | `starnet-open-sessions` | STARNET open-session count, plus a control count per `company_id` across all tenants |
 | `customer-signal` | distinct STARNET guards active last 7d vs prior 7d, and session count. Counts only. |

@@ -857,7 +857,29 @@ deserves its own diff and its own review.
 
 ---
 
-**N45. Every overlap check is check-then-act under READ COMMITTED — none locks the candidate guard's rows.**
+**N45. CLOSED 2026-09-13 — every overlap check was check-then-act under READ COMMITTED; none locked the candidate guard's rows.**
+verified: **RESOLVED by `schema_v77`, applied by hand 2026-09-13.** `pg_constraint` returns
+`shifts_no_guard_overlap` on `shifts` with `contype='x'`, and `pg_extension` returns
+`btree_gist 1.8` — both read from the production catalog 2026-09-14. Shipped as PR #52
+(`f027f72`, merge `addb974`). It needed a hand-apply because `apps/api/railway.json` starts
+`node dist/index.js` and never runs `db:migrate`, so no deploy can apply a migration.
+
+**Follow-on items are filed under "New from N45 overlap constraint (2026-09-14)" further down
+this file — `N90` (this repo cannot run a DB-dependent test, and this constraint is the first
+thing that needs one) and `N91` (four `err.message` catches left in `routes/guards.ts`).
+Both are OPEN.**
+
+**This entry stayed un-relabelled for one day and that reached Slack.** `ops-triage` run
+`34881357451` posted `BROKE P2 · N45 guard-overlap constraint (schema_v77) shipped in code but
+migration not confirmed applied` on 2026-09-14, the morning after the constraint went in. The
+trim filter in `scripts/ops/triage.sh` keeps any block whose heading lacks the word `CLOSED`,
+so the original text below was handed to the model as a live finding. **Relabelling the heading
+is what removes it from the context pack** — writing a newer section elsewhere in this file
+does not.
+
+The original finding follows unchanged, except that its present-tense claim about `btree_gist`
+has been removed because it is false.
+
 verified: YES — all call sites read at `b7490c8`.
 
 There are now eleven guard-overlap checks in `routes/shifts.ts` (eight pre-existing, three
@@ -874,9 +896,7 @@ A real guarantee needs one of:
 - `SELECT … FOR UPDATE` over the overlapping rows inside each transaction — which does not
   work for the two paths that have no transaction (`single`, `repeat_days`), or
 - a GiST **exclusion constraint** on `tstzrange(scheduled_start, scheduled_end)` partitioned
-  by `guard_id`. **`btree_gist` is not installed** (`pg_extension` carries only `plpgsql` and
-  `uuid-ossp`), and the constraint would have to tolerate the 31 historical overlapping pairs
-  already in production — so it needs a `NOT VALID` add plus a decision about the existing rows.
+  by `guard_id`. **This is the route that shipped** — see the CLOSED note above.
 
 `services/shiftOverlap.ts` says this in its docblock so nobody mistakes the helper for a
 guarantee.
