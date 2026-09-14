@@ -2544,3 +2544,44 @@ cheap and says to rephrase; that is what happened.)
 Do not resolve this by weakening the hook.
 
 **Size M. Tier 1** (repo tooling; the hook question is Tier 2 if touched).
+
+---
+
+**N91. Four catches in `routes/guards.ts` still put the driver's `err.message` on the wire.**
+verified: YES — read at `f027f72`, after PR #52 cleared `routes/shifts.ts` and
+`routes/scheduling.ts`.
+
+```
+guards.ts:148    POST   /api/guards                               err.message
+guards.ts:943    POST   /api/guards/:id/assign                    err?.message
+guards.ts:1054   PATCH  /api/guards/:guardId/assignments/:id      err?.message
+guards.ts:1096   DELETE /api/guards/:guardId/assignments/:id      err?.message
+```
+
+All four are `requireAuth('company_admin')` — **admin-only, no guard-facing
+surface**, which is the whole reason they were left out of PR #52 rather than
+folded in. That PR touches neither file's neighbours, and widening it into
+`guards.ts` to fix an unrelated-severity instance of the same defect would have
+made its diff lie about its own scope.
+
+`apps/web` renders `body.error` verbatim (`lib/adminApi.ts:73` →
+`app/admin/**/page.tsx`), so the failure mode is the N78 one: a Postgres driver
+string printed at an admin. Lower stakes than the nine `requireAuth('guard')`
+catches PR #52 fixed, because nothing here reaches a handset — but the same
+defect, and `POST /api/guards` is a routine admin action.
+
+**Note the two spellings**, because this is what made the inventory wrong twice
+during the N45 work: `:148` is `err.message`, the other three are
+`err?.message`. A sweep for either one alone misses the rest. The grep that
+finds all of them:
+
+```
+grep -rn "error:.*err[?]\?\.\(message\|detail\|hint\|constraint\|code\)" apps/api/src/
+```
+
+At `f027f72` that returns exactly these four and nothing else in the API.
+
+Fix is the same four-line shape PR #52 applied thirteen times: keep the
+`console.error`, drop `err?.message` from the response body, leave the existing
+23505 branches above each one alone. Ships alone, no prerequisite, no consumer
+change. **Size XS. Tier 1.**
