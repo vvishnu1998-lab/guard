@@ -245,6 +245,70 @@ function relTime(d: Date | string | null | undefined): string {
   return `${yr} year${yr === 1 ? '' : 's'} ago`;
 }
 
+// ── HTML escaping (N79) ──────────────────────────────────────────────────
+//
+// Every template below builds HTML by string concatenation. A value that
+// reaches a text node unescaped can break the layout with a stray `<` or `&`,
+// and a value that reaches an ATTRIBUTE unescaped can close the attribute
+// early with a `"`. Mail clients strip scripts, every recipient is inside the
+// tenant that typed the value, and none holds a session with this API — so
+// this is a CORRECTNESS defect, not a vulnerability. It is fixed now because
+// the blast radius grows with every template added.
+//
+// THE RULE: escape ONCE, at the innermost point a raw value enters a string.
+// Never escape a variable that already holds assembled markup.
+//
+// `&` IS REPLACED FIRST, and that ordering is load-bearing. Replace `<` first
+// and the `&` of the `&lt;` you just wrote gets escaped again on the next
+// pass, producing `&amp;lt;` in a customer's inbox.
+
+/** Text nodes. */
+function escapeHtml(s: unknown): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/** Attribute values. Adds the quote that would otherwise end the attribute.
+ *  Used at the three sites where a user-supplied value lands inside one:
+ *  href="tel:${…guard_phone}" and href="mailto:${…primary_admin_email}" x3.
+ *  Every attribute in this file is double-quoted, so `'` needs no handling. */
+function escapeAttr(s: unknown): string {
+  return escapeHtml(s).replace(/"/g, '&quot;');
+}
+
+// ── DO NOT ESCAPE THESE. They hold MARKUP, not text ──────────────────────
+//
+// This set was DECIDED, not missed. Escaping any of them prints raw CSS or
+// literal <tr>/<span>/<div> text in the email. Each is an HTML fragment
+// assembled from already-escaped parts; the escaping happened inside them.
+//
+//   BASE_STYLE (x12 sites)   the stylesheet body, inside <style>…</style>
+//   typeBadgeHtml(...)       returns a <span> badge
+//   sevSpan        :256      <span> or ''
+//   reportRows     :710      .map() -> <div class="rrow"> blocks
+//   incidentNote   :719      <p> or ''
+//   phoneRow       :910      <tr>…<a href="tel:…"> or ''
+//   blocks        :1024      .map() -> per-site <tr> groups
+//   distanceRow   :1354      <tr>…</tr>, both ternary arms
+//   reportTypeRow :1357      <tr> or ''
+//   coordsRow     :1360      <tr>…<code>
+//   photoBlock    :1373      <p>…<a> or ''
+//   sameSiteBadge :1503      <span> or ''
+//   reasonBlock   :1506,1618 <div><p> or ''
+//   contact       :1730,1880,1968   <p>…<a href="mailto:…">
+//   pill          :1626,1632,1637   <span> (reassigned, all three arms)
+//   extraRow      :1628,1634,1639   <tr> or '' (reassigned, all three arms)
+//   plus four inline ternaries that return whole fragments:
+//     :743 the hours <table>   :767 the reports block
+//     :1050-1052 the <a> arms  :1984 the "Assigned site(s)" <p>
+//
+// VERIFIED BY REASSIGNMENT SCAN, not by reading one initialiser: `pill`,
+// `extraRow`, `primaryLine` and `headline` are `let` in renderHandoffFyi and
+// assigned in all three branches. Reading a single initialiser would have
+// classified them wrong. Re-run that scan before trusting this list again.
+
 function typeBadgeHtml(type: string, severity?: string | null): string {
   const colors: Record<string, string> = {
     activity: '#D97706', incident: '#DC2626', maintenance: '#2563EB',
@@ -259,7 +323,12 @@ function typeBadgeHtml(type: string, severity?: string | null): string {
   return `<span style="background:${bg};color:#fff;padding:2px 7px;border-radius:3px;font-size:11px;font-weight:bold">${type.toUpperCase()}</span>${sevSpan}`;
 }
 
-const BASE_STYLE = `
+// EXPORTED so the N79 check can assert the <style> block is emitted VERBATIM.
+// Today BASE_STYLE contains no & < >, so escaping it would be a silent
+// no-op — the check could not see the mistake. Add one child selector
+// (`.card > p`) and escaping it breaks every email, so the check compares
+// the emitted stylesheet against this constant rather than trusting that.
+export const BASE_STYLE = `
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;margin:0;padding:20px}
   .card{background:#fff;border-radius:8px;max-width:640px;margin:0 auto;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
   .hdr{background:#0B1526;color:#F59E0B;padding:24px 28px}
@@ -387,10 +456,10 @@ export function renderIncidentAlert(data: {
     <div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${data.site_name} · ${dateLabel}</p>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
     </div>
     <div class="body">
-      <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${greetName},</p>
+      <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
@@ -399,7 +468,7 @@ export function renderIncidentAlert(data: {
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
-      <p style="margin:0;color:#333;font-size:14px;line-height:1.6;white-space:pre-wrap">${data.description}</p>
+      <p style="margin:0;color:#333;font-size:14px;line-height:1.6;white-space:pre-wrap">${escapeHtml(data.description)}</p>
 
       <div style="text-align:center;margin-top:28px">
         <a class="btn" href="${incidentUrl}">View Incident in Portal</a>
@@ -407,8 +476,8 @@ export function renderIncidentAlert(data: {
     </div>
     <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      Provided by <strong style="color:#666">${data.company_name}</strong>.<br/>
-      Reply to this email to contact ${data.company_name}.
+      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
+      Reply to this email to contact ${escapeHtml(data.company_name)}.
     </div>
   </div>`;
 
@@ -708,7 +777,11 @@ export function renderDailyShiftReport(data: {
     activity: '#D97706', incident: '#DC2626', maintenance: '#2563EB',
   };
   const reportRows = data.reports.map((r) => {
-    const desc = r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description;
+    // Truncate FIRST, then escape: escaping first and slicing at 300 could
+    // cut an entity in half and emit `&am` into the document.
+    const desc = escapeHtml(
+      r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description,
+    );
     return `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
       <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTSite(r.reported_at, tz)}</span></p>
       <p style="margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
@@ -727,10 +800,10 @@ export function renderDailyShiftReport(data: {
     <div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${data.site_name} · ${dateLabel}</p>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
     </div>
     <div class="body">
-      <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${greetName},</p>
+      <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">Here is the shift summary for your site.</p>
 
       <div style="text-align:center;margin-bottom:22px">
@@ -757,7 +830,7 @@ export function renderDailyShiftReport(data: {
       </table>` : ''}
 
       <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
-        <tr><td style="padding:6px 0;color:#888;width:110px">Guard</td><td style="padding:6px 0">${titleCase(data.guard_name)} <span style="color:#888">(${data.badge_number})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888;width:110px">Guard</td><td style="padding:6px 0">${escapeHtml(titleCase(data.guard_name))} <span style="color:#888">(${escapeHtml(data.badge_number)})</span></td></tr>
         <tr><td style="padding:6px 0;color:#888">Clock-in</td><td style="padding:6px 0">${clockIn}</td></tr>
         <tr><td style="padding:6px 0;color:#888">Clock-out</td><td style="padding:6px 0">${clockOut}</td></tr>
       </table>
@@ -774,8 +847,8 @@ export function renderDailyShiftReport(data: {
     </div>
     <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      Provided by <strong style="color:#666">${data.company_name}</strong>.<br/>
-      Reply to this email to contact ${data.company_name}.
+      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
+      Reply to this email to contact ${escapeHtml(data.company_name)}.
     </div>
   </div>`;
 
@@ -908,7 +981,7 @@ export function renderMissedShiftAlert(row: {
     : `${upcoming} other upcoming shift${upcoming === 1 ? '' : 's'} in the next 24h.`;
 
   const phoneRow = row.guard_phone
-    ? `<tr><td style="padding:6px 0;color:#888;width:120px">Phone</td><td style="padding:6px 0"><a href="tel:${row.guard_phone}" style="color:#0B1526;text-decoration:underline">${row.guard_phone}</a></td></tr>`
+    ? `<tr><td style="padding:6px 0;color:#888;width:120px">Phone</td><td style="padding:6px 0"><a href="tel:${escapeAttr(row.guard_phone)}" style="color:#0B1526;text-decoration:underline">${escapeHtml(row.guard_phone)}</a></td></tr>`
     : '';
 
   const html = `<style>${BASE_STYLE}</style>
@@ -916,25 +989,25 @@ export function renderMissedShiftAlert(row: {
     <div class="hdr" style="background:#7F1D1D">
       <div class="brand" style="color:#FCA5A5">NETRAOPS · ALERT</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Missed Shift</h1>
-      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${row.site_name} · ${guardTitle} is ${minutesLate} min late</p>
+      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${escapeHtml(guardTitle)} is ${minutesLate} min late</p>
     </div>
     <div class="body">
       <p style="font-size:15px;color:#B91C1C;font-weight:600;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
-        ⚠️ ${guardTitle} did not clock in. ${minutesLate} minutes past the scheduled start.
+        ⚠️ ${escapeHtml(guardTitle)} did not clock in. ${minutesLate} minutes past the scheduled start.
       </p>
 
       <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
-        <tr><td style="padding:6px 0;color:#888;width:120px">Guard</td><td style="padding:6px 0">${guardTitle} <span style="color:#888">(${row.badge_number})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888;width:120px">Guard</td><td style="padding:6px 0">${escapeHtml(guardTitle)} <span style="color:#888">(${escapeHtml(row.badge_number)})</span></td></tr>
         ${phoneRow}
-        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
-        <tr><td style="padding:6px 0;color:#888">Address</td><td style="padding:6px 0">${row.site_address}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${escapeHtml(row.site_name)}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Address</td><td style="padding:6px 0">${escapeHtml(row.site_address)}</td></tr>
         <tr><td style="padding:6px 0;color:#888">Scheduled</td><td style="padding:6px 0">${scheduledLabel}</td></tr>
         <tr><td style="padding:6px 0;color:#888">Last app login</td><td style="padding:6px 0">${relTime(row.last_login_at)}</td></tr>
         <tr><td style="padding:6px 0;color:#888;vertical-align:top">Coverage</td><td style="padding:6px 0">${upcomingText}</td></tr>
       </table>
 
       <p style="color:#555;font-size:13px;margin:22px 0 0 0">
-        Please contact the guard immediately or reassign the shift to another guard at <strong>${row.site_name}</strong>.
+        Please contact the guard immediately or reassign the shift to another guard at <strong>${escapeHtml(row.site_name)}</strong>.
       </p>
 
       <div style="text-align:center;margin-top:24px">
@@ -1041,8 +1114,8 @@ export function renderUnstaffedPostWarning(
 
     return `
       <div style="border:1px solid #E5E7EB;border-left:3px solid #D97706;border-radius:6px;padding:14px 16px;margin:0 0 12px 0">
-        <div style="font-size:15px;font-weight:600;color:#0B1526">${r.site_name}</div>
-        <div style="font-size:13px;color:#888;margin-top:2px">${r.site_address}</div>
+        <div style="font-size:15px;font-weight:600;color:#0B1526">${escapeHtml(r.site_name)}</div>
+        <div style="font-size:13px;color:#888;margin-top:2px">${escapeHtml(r.site_address)}</div>
         <table style="width:100%;border-collapse:collapse;font-size:13px;color:#333;margin-top:10px">
           <tr><td style="padding:4px 0;color:#888;width:110px">Scheduled</td><td style="padding:4px 0">${when}</td></tr>
           <tr><td style="padding:4px 0;color:#888">Starts in</td><td style="padding:4px 0;color:#92400E;font-weight:600">${startsInMin} min</td></tr>
@@ -1063,8 +1136,10 @@ export function renderUnstaffedPostWarning(
   const ctaUrl   = postCount === 1 ? `${WEB_BASE}/admin/shifts/${rows[0].id}` : `${WEB_BASE}/admin/shifts`;
   const ctaLabel = postCount === 1 ? 'Assign a Guard' : 'Open Admin Dashboard';
 
+  // Escaped here: this string's only consumer is the HTML body below, and the
+  // subject line is built separately from the raw value.
   const headline = postCount === 1
-    ? `${rows[0].site_name} starts within the hour with no guard assigned`
+    ? `${escapeHtml(rows[0].site_name)} starts within the hour with no guard assigned`
     : `${postCount} posts start within the hour with no guard assigned`;
 
   const html = `<style>${BASE_STYLE}</style>
@@ -1334,16 +1409,16 @@ export function renderGeofenceBreachAlert(row: {
   // Header
   const headerTitle = isReport ? 'Off-post Report' : 'Geofence Breach';
   const headerSub   = isReport
-    ? `${row.site_name} · ${reportTypeLabel} report filed off-post`
-    : `${row.site_name} · ${guardTitle} ${distanceFragment} off-site`;
+    ? `${escapeHtml(row.site_name)} · ${reportTypeLabel} report filed off-post`
+    : `${escapeHtml(row.site_name)} · ${escapeHtml(guardTitle)} ${distanceFragment} off-site`;
 
   // Headline banner (the red-on-pink stripe inside the body)
   const distanceClause = distanceM != null
     ? ` — ${distanceM}m outside the geofence.`
     : ' — outside the permitted boundary.';
   const headlineText = isReport
-    ? `⚠️ ${guardTitle} filed ${article} ${reportTypeLabel} report${distanceM != null ? ` ${distanceM}m off-post` : ' off-post'} at ${row.site_name}.`
-    : `⚠️ ${guardTitle} left the post at ${row.site_name}${distanceClause}`;
+    ? `⚠️ ${escapeHtml(guardTitle)} filed ${article} ${reportTypeLabel} report${distanceM != null ? ` ${distanceM}m off-post` : ' off-post'} at ${escapeHtml(row.site_name)}.`
+    : `⚠️ ${escapeHtml(guardTitle)} left the post at ${escapeHtml(row.site_name)}${distanceClause}`;
 
   // Body framing paragraph — explanatory copy under the meta table
   const bodyFraming = isReport
@@ -1387,9 +1462,9 @@ export function renderGeofenceBreachAlert(row: {
       </p>
 
       <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:4px">
-        <tr><td style="padding:6px 0;color:#888;width:140px">Guard</td><td style="padding:6px 0">${guardTitle} <span style="color:#888">(${row.badge_number})</span></td></tr>
-        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
-        <tr><td style="padding:6px 0;color:#888">Address</td><td style="padding:6px 0">${row.site_address}</td></tr>
+        <tr><td style="padding:6px 0;color:#888;width:140px">Guard</td><td style="padding:6px 0">${escapeHtml(guardTitle)} <span style="color:#888">(${escapeHtml(row.badge_number)})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${escapeHtml(row.site_name)}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Address</td><td style="padding:6px 0">${escapeHtml(row.site_address)}</td></tr>
         <tr><td style="padding:6px 0;color:#888">Time</td><td style="padding:6px 0">${fmtDTSite(row.occurred_at, tz)}</td></tr>
         ${distanceRow}
         ${reportTypeRow}
@@ -1504,7 +1579,7 @@ export function renderSwapAcceptedFyi(row: {
     ? '<span style="background:#DCFCE7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">SAME SITE</span>'
     : '<span style="background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">CROSS SITE</span>';
   const reasonBlock = row.reason
-    ? `<div style="background:#F3F4F6;border-left:3px solid #9CA3AF;padding:10px 14px;margin-top:16px"><p style="margin:0;color:#374151;font-size:13px;font-style:italic">Reason: &ldquo;${row.reason}&rdquo;</p></div>`
+    ? `<div style="background:#F3F4F6;border-left:3px solid #9CA3AF;padding:10px 14px;margin-top:16px"><p style="margin:0;color:#374151;font-size:13px;font-style:italic">Reason: &ldquo;${escapeHtml(row.reason)}&rdquo;</p></div>`
     : '';
 
   const dashboardUrl = `${WEB_BASE}/admin/shifts/${row.shift_id}`;
@@ -1514,7 +1589,7 @@ export function renderSwapAcceptedFyi(row: {
     <div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Coverage Swap</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${row.site_name} · ${dayLabel}</p>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${dayLabel}</p>
     </div>
     <div class="body">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
@@ -1523,9 +1598,9 @@ export function renderSwapAcceptedFyi(row: {
       </p>
 
       <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:6px">
-        <tr><td style="padding:6px 0;color:#888;width:130px">From</td><td style="padding:6px 0">${fromName} <span style="color:#888">(${row.from_badge})</span></td></tr>
-        <tr><td style="padding:6px 0;color:#888">To</td><td style="padding:6px 0">${toName} <span style="color:#888">(${row.to_badge})</span></td></tr>
-        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
+        <tr><td style="padding:6px 0;color:#888;width:130px">From</td><td style="padding:6px 0">${escapeHtml(fromName)} <span style="color:#888">(${escapeHtml(row.from_badge)})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">To</td><td style="padding:6px 0">${escapeHtml(toName)} <span style="color:#888">(${escapeHtml(row.to_badge)})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${escapeHtml(row.site_name)}</td></tr>
         <tr><td style="padding:6px 0;color:#888">When</td><td style="padding:6px 0">${dayLabel} · ${timeRange}</td></tr>
         <tr><td style="padding:6px 0;color:#888">Coverage</td><td style="padding:6px 0">${sameSiteBadge}</td></tr>
       </table>
@@ -1556,7 +1631,8 @@ export function renderSwapAcceptedFyi(row: {
 // renderHandoffFyi. Best-effort — the caller `.catch()`es on the returned
 // promise so email failure never rolls back the committed handoff.
 
-interface HandoffFyiRow {
+// EXPORTED alongside renderHandoffFyi, so the N79 check can build a fixture.
+export interface HandoffFyiRow {
   history_id:       string;
   shift_id:         string;
   reason:           string | null;
@@ -1607,7 +1683,10 @@ async function loadHandoffFyiRow(historyId: string): Promise<HandoffFyiRow | nul
   return result.rows[0] ?? null;
 }
 
-function renderHandoffFyi(
+// EXPORTED for the N79 escaping check (scripts/check-email-escaping.ts).
+// The three sendHandoff*Fyi wrappers below all hit the database, so this
+// is the only way a fixture test can reach this template's HTML.
+export function renderHandoffFyi(
   row: HandoffFyiRow,
   kind: 'accepted' | 'completed' | 'nudge',
   nudgeMinutes = 0,
@@ -1616,7 +1695,7 @@ function renderHandoffFyi(
   const fromName = titleCase(row.from_guard_name);
   const toName   = titleCase(row.to_guard_name);
   const reasonBlock = row.reason
-    ? `<div style="background:#F3F4F6;border-left:3px solid #9CA3AF;padding:10px 14px;margin-top:16px"><p style="margin:0;color:#374151;font-size:13px;font-style:italic">Reason: &ldquo;${row.reason}&rdquo;</p></div>`
+    ? `<div style="background:#F3F4F6;border-left:3px solid #9CA3AF;padding:10px 14px;margin-top:16px"><p style="margin:0;color:#374151;font-size:13px;font-style:italic">Reason: &ldquo;${escapeHtml(row.reason)}&rdquo;</p></div>`
     : '';
   const dashboardUrl = `${WEB_BASE}/admin/shifts/${row.shift_id}`;
 
@@ -1624,18 +1703,18 @@ function renderHandoffFyi(
   if (kind === 'accepted') {
     headline    = 'Handoff accepted';
     pill        = '<span style="background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">WAITING FOR ARRIVAL</span>';
-    primaryLine = `${toName} accepted the mid-shift handoff. ${fromName} remains on shift until ${toName} arrives and clocks in on-site.`;
+    primaryLine = `${escapeHtml(toName)} accepted the mid-shift handoff. ${escapeHtml(fromName)} remains on shift until ${escapeHtml(toName)} arrives and clocks in on-site.`;
     extraRow    = row.accepted_at ? `<tr><td style="padding:6px 0;color:#888">Accepted at</td><td style="padding:6px 0">${fmtTimeSite(row.accepted_at, tz)} ${tz}</td></tr>` : '';
   } else if (kind === 'completed') {
     const worked = row.duration_hours != null ? `${Number(row.duration_hours).toFixed(2)}h` : '—';
     headline    = 'Handoff complete';
     pill        = '<span style="background:#DCFCE7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">GUARD SWAPPED</span>';
-    primaryLine = `${toName} clocked in on-site. ${fromName} is now clocked out (worked ${worked} on this shift).`;
+    primaryLine = `${escapeHtml(toName)} clocked in on-site. ${escapeHtml(fromName)} is now clocked out (worked ${worked} on this shift).`;
     extraRow    = row.handoff_at ? `<tr><td style="padding:6px 0;color:#888">Handoff at</td><td style="padding:6px 0">${fmtTimeSite(row.handoff_at, tz)} ${tz}</td></tr>` : '';
   } else {
     headline    = 'Handoff still pending arrival';
     pill        = `<span style="background:#FEE2E2;color:#991B1B;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">${nudgeMinutes} MIN LATE</span>`;
-    primaryLine = `${toName} accepted a handoff for ${row.site_name} ${nudgeMinutes} minutes ago but has not clocked in yet. ${fromName} remains on shift.`;
+    primaryLine = `${escapeHtml(toName)} accepted a handoff for ${escapeHtml(row.site_name)} ${nudgeMinutes} minutes ago but has not clocked in yet. ${escapeHtml(fromName)} remains on shift.`;
     extraRow    = row.accepted_at ? `<tr><td style="padding:6px 0;color:#888">Accepted at</td><td style="padding:6px 0">${fmtTimeSite(row.accepted_at, tz)} ${tz}</td></tr>` : '';
   }
 
@@ -1644,16 +1723,16 @@ function renderHandoffFyi(
     <div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headline}</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${row.site_name}</p>
+      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)}</p>
     </div>
     <div class="body">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
       <p style="color:#555;font-size:14px;margin:0 0 18px 0">${primaryLine}</p>
 
       <table style="width:100%;border-collapse:collapse;font-size:14px;color:#333;margin-bottom:6px">
-        <tr><td style="padding:6px 0;color:#888;width:130px">From</td><td style="padding:6px 0">${fromName} <span style="color:#888">(${row.from_badge})</span></td></tr>
-        <tr><td style="padding:6px 0;color:#888">To</td><td style="padding:6px 0">${toName} <span style="color:#888">(${row.to_badge})</span></td></tr>
-        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${row.site_name}</td></tr>
+        <tr><td style="padding:6px 0;color:#888;width:130px">From</td><td style="padding:6px 0">${escapeHtml(fromName)} <span style="color:#888">(${escapeHtml(row.from_badge)})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">To</td><td style="padding:6px 0">${escapeHtml(toName)} <span style="color:#888">(${escapeHtml(row.to_badge)})</span></td></tr>
+        <tr><td style="padding:6px 0;color:#888">Site</td><td style="padding:6px 0">${escapeHtml(row.site_name)}</td></tr>
         <tr><td style="padding:6px 0;color:#888">Status</td><td style="padding:6px 0">${pill}</td></tr>
         ${extraRow}
       </table>
@@ -1728,7 +1807,7 @@ export function renderGuardWelcome(data: {
   temp_password: string;
 }) {
   const contact = data.primary_admin_email
-    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = `<style>${BASE_STYLE}</style>
     <div class="card">
@@ -1739,14 +1818,14 @@ export function renderGuardWelcome(data: {
       </div>
       <div class="body">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
-        <p style="color:#333;margin-bottom:16px">Hi ${data.guard_name},</p>
+        <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.guard_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
-          An account has been created for you on NetraOps by <strong>${data.company_name}</strong>.
+          An account has been created for you on NetraOps by <strong>${escapeHtml(data.company_name)}</strong>.
         </p>
         <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
         <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
-          <li>Email: ${data.guard_email}</li>
-          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+          <li>Email: ${escapeHtml(data.guard_email)}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${escapeHtml(data.temp_password)}</strong></li>
         </ul>
         <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
           <em>You'll be required to change this password on first login.</em>
@@ -1818,14 +1897,14 @@ export function renderPrimaryAdminWelcome(data: {
       </div>
       <div class="body">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
-        <p style="color:#333;margin-bottom:16px">Hi ${data.admin_name},</p>
+        <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
-          An admin account has been created for you on NetraOps for <strong>${data.company_name}</strong>.
+          An admin account has been created for you on NetraOps for <strong>${escapeHtml(data.company_name)}</strong>.
         </p>
         <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
         <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
-          <li>Email: ${data.admin_email}</li>
-          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+          <li>Email: ${escapeHtml(data.admin_email)}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${escapeHtml(data.temp_password)}</strong></li>
         </ul>
         <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
           <em>You'll be required to change this password on first login.</em>
@@ -1878,7 +1957,7 @@ export function renderSecondaryAdminWelcome(data: {
   temp_password: string;
 }) {
   const contact = data.primary_admin_email
-    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = `<style>${BASE_STYLE}</style>
     <div class="card">
@@ -1889,14 +1968,14 @@ export function renderSecondaryAdminWelcome(data: {
       </div>
       <div class="body">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
-        <p style="color:#333;margin-bottom:16px">Hi ${data.admin_name},</p>
+        <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
-          <strong>${data.creator_name}</strong> has created an admin account for you on NetraOps for <strong>${data.company_name}</strong>.
+          <strong>${escapeHtml(data.creator_name)}</strong> has created an admin account for you on NetraOps for <strong>${escapeHtml(data.company_name)}</strong>.
         </p>
         <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
         <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
-          <li>Email: ${data.admin_email}</li>
-          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+          <li>Email: ${escapeHtml(data.admin_email)}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${escapeHtml(data.temp_password)}</strong></li>
         </ul>
         <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
           <em>You'll be required to change this password on first login.</em>
@@ -1966,7 +2045,7 @@ export function renderClientWelcome(data: {
   temp_password: string;
 }) {
   const contact = data.primary_admin_email
-    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${data.primary_admin_email}" style="color:#F59E0B">${data.primary_admin_email}</a></p>`
+    ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = `<style>${BASE_STYLE}</style>
     <div class="card">
@@ -1977,17 +2056,17 @@ export function renderClientWelcome(data: {
       </div>
       <div class="body">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
-        <p style="color:#333;margin-bottom:16px">Hi ${data.client_name},</p>
+        <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.client_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:12px">
-          A client portal account has been created for you by <strong>${data.company_name}</strong> to review security operations.
+          A client portal account has been created for you by <strong>${escapeHtml(data.company_name)}</strong> to review security operations.
         </p>
         ${data.site_names
-          ? `<p style="color:#555;font-size:13px;margin:0 0 20px">Assigned site(s): <strong>${data.site_names}</strong></p>`
+          ? `<p style="color:#555;font-size:13px;margin:0 0 20px">Assigned site(s): <strong>${escapeHtml(data.site_names)}</strong></p>`
           : ''}
         <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
         <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
-          <li>Email: ${data.client_email}</li>
-          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${data.temp_password}</strong></li>
+          <li>Email: ${escapeHtml(data.client_email)}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${escapeHtml(data.temp_password)}</strong></li>
         </ul>
         <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
           <em>You'll be required to change this password on first login.</em>
