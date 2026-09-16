@@ -3127,8 +3127,12 @@ verified: **RESOLVED in the commit that carries this heading change**, on branch
 - `apps/api/tsconfig.scripts.json` — typecheck-only project (`noEmit`, `rootDir: "."`,
   `include: ["src/**/*", "scripts/**/*"]`), extending the base rather than restating it.
 - `check:types` in `apps/api/package.json` — runs both projects.
-- **The one real error fixed in place.** `_tmp-emit-hours.ts:6` was a genuine signature
-  drift — `VIOLATION_HOURS_ROW_SQL` takes three aliases, not two (`shiftHours.ts:276`).
+- **The one real error, since removed with its file.** It was a genuine signature drift —
+  a call passing two aliases to `VIOLATION_HOURS_ROW_SQL`, which takes three
+  (`shiftHours.ts:276`). It lived in a one-shot debug emitter that printed some SQL once,
+  was referenced by nothing, and was deleted rather than kept under CI for good: a file
+  whose only purpose was a single past investigation is a maintenance obligation with no
+  remaining payer. **No file in `apps/api/scripts/` carries a type error today.**
 
 **CORRECTED: `scripts/` held ONE error, not the two this item originally reported.** The
 second, a `TS2322` on `test-d2-magic-live.ts`'s `new Blob([body], …)`, **does not exist** —
@@ -3198,11 +3202,14 @@ apps/api/scripts/test-d2-magic-live.ts(75,33): error TS2322: Uint8Array<ArrayBuf
                                                not assignable to BlobPart
 ```
 
-> **The transcript above is left verbatim because it is evidence of what the probe
-> reported — but the SECOND line is a FALSE POSITIVE and the count of 2 is wrong.** The
-> probe config sat outside the repo tree and resolved a different set of ambient `@types`.
-> Under `apps/api/tsconfig.scripts.json`, in its final location, that same code compiles
-> clean. The real count was **1**. See the correction in the CLOSED block above.
+> **Left verbatim because it is evidence of what the probe reported. Neither line describes
+> the tree today, and both paths above are dead references — do not chase them.**
+> The SECOND line is a FALSE POSITIVE: the probe config sat outside the repo and resolved a
+> different set of ambient `@types`, and under `apps/api/tsconfig.scripts.json` that same
+> code compiles clean, so the real count was **1**, not 2. The FIRST line was real, and its
+> file no longer exists — the emitter was deleted rather than maintained. The transcript is
+> not edited to match, because falsifying a tool's output to fit a later conclusion would
+> destroy the only record of how the miscount happened. See the CLOSED block above.
 
 **`rootDir: "src"` is LOAD-BEARING and is the trap in this item.** `build` is `tsc`,
 `outDir` is `dist`, and both `package.json` `start` and `railway.json` `startCommand` are
