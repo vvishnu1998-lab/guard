@@ -71,9 +71,35 @@ API.** Hold the deploy gate for it like any other merge.
 running app keeps its loaded JS and only swaps on cold start. Honour the gate if
 asked, but do not reason as though an OTA can interrupt a shift mid-request.
 
-**Tier 0 read-only prod queries go through `postgres-readonly` only.** That role
-holds SELECT on all 48 public tables and **can read every credential column** —
-`guards`/`company_admins`/`clients`.`password_hash`, `guard_devices.push_token`,
-`password_reset_tokens.token`, `revoked_tokens.jti`, `login_attempts.otp_hash`.
-"Read-only" is not "harmless": the *guard data* rule above governs what may leave
-the query, and no credential column value may leave the DB at all.
+**Tier 0 read-only prod queries go through `postgres-readonly` only.** There are
+**50** public base tables. That role holds table-level SELECT on **42** of them and
+**column-level** SELECT on the other 8 — `guards`, `company_admins`, `clients`,
+`guard_devices`, `login_attempts`, `password_reset_tokens`, `revoked_tokens`,
+`vishnu_state`. On those 8 the grant **excludes the credential columns**, so the
+role **cannot read them**: `password_hash`, `tokens_not_before`, `push_token`,
+`otp_hash`, `token`, `jti`.
+
+**This corrects the previous text, which said "all 48 public tables" and "can read
+every credential column".** The second half was wrong in the safe direction, and it
+was corrected 2026-09-15 rather than left alone because a policy doc that overstates
+a role's reach invites a wrong risk call later. Proof, from the role itself:
+
+```
+SELECT count(password_hash) FROM guards;   ->  ERROR: permission denied for table guards
+SELECT count(*)             FROM guards;   ->  49          (column-level grant, no table grant)
+```
+
+Two practical consequences, both of which have already misled a reading of this
+role:
+
+* `has_table_privilege(current_user, 'guards', 'SELECT')` returns **false** while
+  `SELECT count(*) FROM guards` **succeeds**. A column-level grant does not show up
+  as a table privilege. Do not conclude a table is unreadable from that function.
+* `information_schema.columns` is privilege-filtered, so it **under-reports** those
+  8 tables — 523 columns against `pg_attribute`'s 534, 8 tables disagreeing. Take
+  column inventories from `pg_attribute`. Every other table, including `sites` and
+  `shifts`, agrees exactly.
+
+"Read-only" is still not "harmless": the *guard data* rule above governs what may
+leave the query. The credential columns are now enforced by the grant rather than by
+discipline — but the rule stands for everything the grant does not cover.

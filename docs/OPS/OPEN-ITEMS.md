@@ -777,7 +777,25 @@ locked as D15.**
 
 ## New from Phase A schema work (2026-09-09)
 
-**N43. `migrate.ts` has been unrunnable end-to-end since 2026-08-29 — a full replay dies at file 6 of 74.**
+**N43. CLOSED 2026-09-13 — `migrate.ts` has been unrunnable end-to-end since 2026-08-29 — a full replay dies at file 6 of 74.**
+verified: **RESOLVED by `5d813b3`, shipped as PR #39 (merge `befe70d`, branch
+`fix/n43-migration-chain-replay`).** `5d813b3` is an ancestor of `origin/main` at `eeaac6b`
+(`git merge-base --is-ancestor`), and `schema_v5.sql` now carries the DATA guard its own header
+describes rather than the unguarded `ADD CONSTRAINT` that raised 23514.
+
+**The end-to-end chain replay was NOT re-run in the 2026-09-15 audit that closed this heading.**
+That needs a live throwaway database, which was outside a read-only pass. What was verified is
+narrower and is stated so nobody upgrades it later: the fixing commit is on main, and the guard is
+present in the file. The replay proof referenced below stands on its original 2026-09-09 run, not
+on a re-derivation.
+
+**Why the heading moved before the replay was re-run.** `scripts/ops/triage.sh` keeps any item block
+whose heading lacks the word CLOSED, and OPEN-ITEMS.md is embedded verbatim in the triage context
+pack. A resolved item with an open heading is handed to the model as live work on *every* run — the
+same false-Pn mechanism the Carried-items trim was written to stop. Leaving it open was the larger
+risk of the two.
+
+Original finding, retained:
 verified: YES — mechanism read at `7de9e0c` and both halves confirmed against production.
 
 `npm run db:migrate` replays every file in the `migrate.ts` array from `schema.sql` onward. It
@@ -2206,7 +2224,35 @@ Recommend the first, in its own commit, with the grep for `error === ` branches 
 
 ## New from N60 unstaffed-post warning (2026-09-11)
 
-**N79. Every email template interpolates operator-supplied text into HTML unescaped.**
+**N79. CLOSED 2026-09-15 — every email template interpolates operator-supplied text into HTML unescaped.**
+verified: **RESOLVED by `a93ba3c`, shipped as PR #56 (merge `eeaac6b`).** `escapeHtml` at
+`services/email.ts:266` and `escapeAttr` at `:278`, with the `&`-first replacement ordering
+documented as load-bearing. 80 `escapeHtml(` and 5 `escapeAttr(` call sites across 11 HTML
+builders, plus an explicit DO-NOT-ESCAPE allowlist at `:282-309` for the fragments that hold
+markup rather than text.
+
+**Proven by a harness, not by reading.** `npm --prefix apps/api run check:email-escaping`
+(`scripts/check-email-escaping.ts`) → `PASS — 11 templates: user text escaped, markup intact,
+subjects raw, no double-escape`, against the poison fixture `O'Brien & Sons <Site "A">`. It
+asserts five things per template, and assertion 4 is the one that matters most: the markup
+SURVIVED. Over-escaping — raw CSS and literal `<tr>` text in a customer's inbox — is a worse
+failure than the under-escaping it replaces, and a sample of templates cannot catch it. The
+harness is offline and needs no database.
+
+**Three renders stay deliberately unescaped and are correct.** Subject lines (`:484`, `:855`,
+`:1023`, `:1406-07`) are mail headers, not HTML — escaping one prints `&amp;` in the inbox.
+`reportTypeLabel` at `:1412`/`:1420` is allowlisted to three literals by
+`routes/reports.ts:183` before anything else runs, and is additionally constrained by
+`reports_report_type_check`.
+
+**Prod, read 2026-09-15:** `SELECT name FROM sites WHERE name ~ '[<>&"'']'` → **zero rows**.
+Across `sites.name`/`address`, `companies.name`, `guards.name`, `clients.name` and
+`reports.description` (933 rows), **0** values need escaping; the only two special characters
+are apostrophes in `reports.description`, which `escapeHtml` correctly leaves alone in a text
+node. So this changed zero emails on the day it shipped — it was taken prospectively, which is
+the right time to take it.
+
+Original finding, retained:
 verified: YES — `apps/api/src/services/email.ts` read in full at `d5af3f4`.
 
 Eleven templates build HTML with template literals, and 30 distinct
@@ -2533,10 +2579,38 @@ recurring template would then notify on every generation cycle instead of once.
 **Size M. Tier 1.**
 
 **N89. `email.ts` renders a "minutes late" figure that is NOT the ping figure and must not be aligned with it.**
-verified: YES — `apps/api/src/services/email.ts:882` computes `minutesLate` and renders it at `:919`,
-`:923` and in the subject at `:950` ("⚠️ MISSED SHIFT — … is N min late"). It measures **clock-in
-lateness against `shifts.scheduled_start`** for the missed-shift alert. It has **no ping-window
-lateness render at all** — `grep -in "late|answered" email.ts` returns nothing else.
+verified: YES — re-derived at `eeaac6b` 2026-09-15. `apps/api/src/services/email.ts:955` computes
+`minutesLate` and renders it at `:992`, `:996` and in the subject at `:1023` ("⚠️ MISSED SHIFT — …
+is N min late"). It measures **clock-in lateness against `shifts.scheduled_start`**, at RENDER
+time, for the missed-shift alert:
+
+```js
+const minutesLate = Math.max(0, Math.floor(
+  (Date.now() - new Date(row.scheduled_start).getTime()) / 60_000
+));
+```
+
+It has **no ping-window lateness render at all** — `grep -in "late|answered" email.ts` returns
+nothing else.
+
+**The line numbers above were :882/:919/:923/:950 when this item was filed.** They moved when
+`a93ba3c` (N79) inserted escaping calls. That is the cheap tell for a stale citation and it is
+why they are re-derived here rather than carried: a number that no longer resolves is how a
+reader concludes the code changed when only the file grew.
+
+**Recipients: company admins of that tenant, and nobody else.** `sendMissedShiftAlert` fans out
+via `getActiveAdminEmails(company_id)` (`services/email.ts:139`, `SELECT email FROM
+company_admins WHERE company_id = $1 AND is_active = true`). `client_email` IS SELECTed by the
+route's query and is then **deliberately discarded** — the query's own comment says so. No
+client and no super-admin receives this. Any audit that reads the SELECT list and stops there
+will get this wrong.
+
+**This number is in no PDF.** `grep` over `services/pdf/` returns nothing for it. The figure that
+DOES reach a client-handed document is (2) below, the `activityLog` one: `POST
+/api/admin/activity-log/pdf` (`routes/admin.ts:1714`) renders `missed_answered_late`, and its own
+`STATUS_LABEL` comment at `:1805` notes the row status already reads "Missed — answered N minutes
+late". So the two figures differ AND only one of them is client-facing, which sharpens the
+decision below rather than softening it.
 Logged because 2026-09-12 moved the ping figure in `routes/activityLog.ts` from window START to
 window END, and there are now three same-shaped "N minutes late" strings on the platform measuring
 three different things:
@@ -2604,11 +2678,35 @@ guards.ts:1054   PATCH  /api/guards/:guardId/assignments/:id      err?.message
 guards.ts:1096   DELETE /api/guards/:guardId/assignments/:id      err?.message
 ```
 
-All four are `requireAuth('company_admin')` — **admin-only, no guard-facing
-surface**, which is the whole reason they were left out of PR #52 rather than
+**CORRECTED 2026-09-15 — the four are not all the same gate.** This item said
+"All four are `requireAuth('company_admin')`". Two of them are not:
+
+```
+guards.ts:76    POST   /api/guards                             requireAuth('company_admin')
+guards.ts:897   POST   /api/guards/:id/assign                  requireAuth('company_admin')
+guards.ts:976   PATCH  /api/guards/:guardId/assignments/:id    requireAuth('company_admin', 'vishnu')
+guards.ts:1061  DELETE /api/guards/:guardId/assignments/:id    requireAuth('company_admin', 'vishnu')
+```
+
+The conclusion is unchanged and so is the severity — **admin-only, no guard-facing
+surface**, no `requireAuth('guard')` anywhere in the four, nothing reaches a
+handset. That is the whole reason they were left out of PR #52 rather than
 folded in. That PR touches neither file's neighbours, and widening it into
 `guards.ts` to fix an unrelated-severity instance of the same defect would have
-made its diff lie about its own scope.
+made its diff lie about its own scope. The correction is recorded because an
+inventory that is wrong in a harmless direction still teaches the next reader to
+trust it, and the next one may not be harmless.
+
+**What each can actually leak.** `:148` and `:943` sit below 23505 branches, so
+what reaches them is every OTHER pg error (23503, 23514, 22001, 42703) plus any
+non-pg throw; `:1054` and `:1096` have no code branches above them at all, so
+23505 reaches those two as well. A `pg` `err.message` carries schema
+identifiers — table, column and constraint names, e.g. `duplicate key value
+violates unique constraint "uq_guard_site_active"`. It does NOT carry row
+values (those are in `err.detail`), a stack, or a file path, and no credential
+is reachable on these paths. So: schema shape disclosed to an authenticated
+admin of the same tenant. Real, low, and worth closing on the floor rather than
+on the severity.
 
 `apps/web` renders `body.error` verbatim (`lib/adminApi.ts:73` →
 `app/admin/**/page.tsx`), so the failure mode is the N78 one: a Postgres driver
@@ -2724,7 +2822,70 @@ compare; do not change `trust proxy` before that reading exists. Raising the hop
 count without knowing the topology can make `req.ip` client-controlled, which is
 strictly worse than keying on a shared intermediate.
 
-**Size S to measure, UNKNOWN to fix. Tier 1.**
+**MEASURED 2026-09-15 — and it needed no new logging.** The reading this item asked
+for already exists in production: `routes/auth.ts:63` writes `req.ip` into
+`auth_events.ip_address` on every auth event, so the RESOLVED value has been
+recorded all along. The day of logging was never necessary.
+
+**The central unknown is answered: the resolved hop is SHARED.** Over 30 days —
+947 events, 31 distinct resolved IPs, 0 NULL, 0 comma-lists:
+
+```
+resolved req.ip   events  distinct actors  distinct roles
+152.233.76.10        122       21                3
+152.233.76.9         131       18                3
+79.127.217.65        109       18                3
+```
+
+Guards, admins and clients share single keys, and the values fall in sequential
+runs (`152.233.76.9/.10/.11`, `84.17.44.225-229`) — an egress pool, not client
+devices. The specific hop this item named, `79.127.178.82`, appears **once** in 30
+days.
+
+**But the exposure is theoretical today, and the WINDOW is why.** Keyed on the
+limiter's own 15-minute window across 90 days (874 windows): worst burst on any
+single IP is **11** against `authLimiter`'s cap of **20**; the most actors sharing
+one window is **4**; windows over the cap: **0**. The 30-day aggregate reads as an
+emergency and the 15-minute view does not. **The 15-minute view is the correct
+one, because 15 minutes is the mechanism.** Same data, opposite conclusions, and
+the window has to come from the thing being measured.
+
+```sql
+-- the exposure query, re-runnable, read-only
+WITH w AS (
+  SELECT ip_address,
+         to_timestamp(floor(extract(epoch FROM created_at) / 900) * 900) AS win,
+         count(*) AS events_in_window, count(DISTINCT actor_id) AS actors_in_window
+    FROM auth_events WHERE created_at > NOW() - INTERVAL '90 days'
+   GROUP BY 1, 2
+)
+SELECT max(events_in_window), max(actors_in_window),
+       count(*) FILTER (WHERE events_in_window > 20) FROM w;
+```
+
+**STILL UNMEASURED, and it is the only thing blocking a fix:** the live
+`X-Forwarded-For` chain LENGTH. No route logs it, so no Railway line carries it,
+and a response header cannot reveal a request header — `curl -sI` on `/health`
+returns `ratelimit-limit: 500` and `x-railway-edge: sjc1` and nothing about the
+inbound chain. For the one captured 2-entry chain the arithmetic is
+`[socket, 79.127.178.82, 35.205.81.31]`, so `trust=2` would resolve `req.ip` to
+`X-Real-Ip` and `trust=3` would make it client-controlled — **but that holds only
+if the chain is ALWAYS length 2, which is exactly what is unmeasured.** A fixed
+hop count is wrong the moment one path presents a different length.
+
+**DECISION 2026-09-15: OPEN, no urgency, and do NOT set a hop number.** 0 of 874
+windows have ever exceeded the cap, so there is nothing to force. The proposed
+fix is to sidestep hop-counting entirely — give both limiters
+`keyGenerator: (req) => (req.headers['x-real-ip'] as string) ?? req.ip`, keying on
+the value Railway itself asserts, which is correct under any chain length. **It is
+blocked on one prerequisite: verify that Railway's edge OVERWRITES an inbound
+`X-Real-Ip` rather than passing it through.** If it passes through, that
+keyGenerator hands the rate-limit key to the client and is strictly worse than
+today's shared intermediate. Verify on a non-prod service — never by forging a
+header at production.
+
+**Size: measurement DONE (was S). Fix XS once the prerequisite is verified, and
+blocked until then. Tier 1.**
 
 ---
 
@@ -2743,9 +2904,39 @@ f027f72  commit message
    ZERO violating rows and adds VALIDATED: no NOT VALID, no backfill..."
 ```
 
-**Neither number was re-derived for this item** — settling it needs a read of `shifts`,
-which is a data query, and the audit pass that found this was restricted to catalog
-reads. So this is filed, not answered.
+**ANSWERED 2026-09-15 by running the query below against production. Both numbers were
+CORRECT WHEN WRITTEN; neither is correct as a standing fact.** The count is not a
+constant — it grows as shifts are created — so a bare figure in prose is stale the week
+after it is written. Counting each pair at `greatest(a.created_at, b.created_at)`:
+
+```
+31   every date 2026-08-26 .. 2026-09-01   <- N45's original text was written here
+37   2026-09-11 .. 2026-09-14             <- f027f72 is 2026-09-13
+40   from 2026-09-15                       <- today
+```
+
+**Classification: DATA CHANGED BETWEEN RUNS.** Not a different predicate, not a different
+time window, not a wrong query. There was never a discrepancy to reconcile — there were
+two correct snapshots two weeks apart, both recorded without a date.
+
+**The durable fact, which is what should have been written down instead of a count:**
+`shifts_no_guard_overlap` is PARTIAL on `status IN ('scheduled','active')`, so **a
+violating pair needs BOTH sides in that set. There have never been any — 0 today, 0 at
+apply time.** That statement does not go stale. A count does.
+
+Distribution today (40 pairs):
+
+```
+cancelled/completed 14   completed/cancelled 9   completed/completed 9
+cancelled/cancelled  4   cancelled/scheduled 1   cancelled/missed    1
+missed/completed     1   scheduled/cancelled 1
+```
+
+**`f027f72`'s "all 37 are terminal-status" was TRUE when written.** Two pairs now carry a
+non-terminal (`scheduled`) side, and both were created **2026-09-14 — the day AFTER that
+commit**. So the worry below did not materialise: the migration's zero-violating-rows
+reasoning was sound at the time, and it still holds today, because each of those two pairs
+has a `cancelled` counterpart and a violation requires both sides.
 
 **Why it is probably low-risk, stated so nobody treats this as urgent.**
 `shifts_no_guard_overlap` is PARTIAL — `WHERE status IN ('scheduled','active')` — and it
@@ -2755,10 +2946,17 @@ Postgres will not validate an exclusion constraint against violating rows, so
 terminal-status count turns out to be. Both 31 and 37 describe rows the predicate
 excludes.
 
-**Why it is still worth closing.** The "zero violating rows" reasoning in `f027f72` rests
-on the claim that *all* historical pairs are terminal. If the true total is 37 and one of
-them is not terminal, that reasoning was wrong and got away with it. And a figure that
-appears twice with two values is a figure nobody can cite.
+**Why it was worth closing** (kept as the original reasoning). The "zero violating rows"
+claim in `f027f72` rests on *all* historical pairs being terminal. If the true total were
+37 and one of them not terminal, that reasoning was wrong and got away with it. And a
+figure that appears twice with two values is a figure nobody can cite. Both halves are now
+settled above: the claim was true when made, and the reason the figure differed was the
+calendar, not an error.
+
+**What remains to do is a text edit, not a query.** Replace the bare count in N45's
+original text and treat `f027f72`'s message as immutable history — a commit body is a
+record of what was believed at that sha, and it was correct at that sha. Do not
+"correct" it.
 
 The query that settles it — one read, no write:
 
@@ -2776,11 +2974,16 @@ SELECT a.status AS status_a, b.status AS status_b, COUNT(*)
 ```
 
 Sum the counts for the total; any row where both statuses are in
-(`scheduled`, `active`) is a pair the constraint would now reject. Then correct
-whichever of the two numbers is wrong, in both places.
+(`scheduled`, `active`) is a pair the constraint would now reject. **Run 2026-09-15: 40
+total, 0 where both sides are non-terminal.**
 
-**Size XS. Tier 0** (read-only prod query), rising to Tier 1 if it turns up a
-non-terminal pair, because that reopens the migration's reasoning.
+**Whenever this is re-run, write the DATE beside the number.** An undated count in this
+file is what produced the apparent discrepancy in the first place, and it will produce
+another one.
+
+**Size XS. Tier 0** (read-only prod query). It did not rise to Tier 1: the run turned up
+two pairs with a non-terminal side, but both postdate `f027f72` and neither has both sides
+in the predicate, so the migration's reasoning is untouched.
 
 ---
 
@@ -2826,3 +3029,142 @@ shift.scheduled_start, shift.scheduled_end, id, client)` and return
 `{ code: 'GUARD_OVERLAP', ...overlapConflictBody(conflict) }`. Then the
 pre-flight and the race are byte-identical. Costs one extra join on a path that
 is already failing. **Size XS. Tier 1.**
+
+---
+
+## New from the ten-item re-derivation (2026-09-15)
+
+Filed by the read-only audit at `eeaac6b` that re-derived N79/N89/N91/N92/N93/N94/N95 from
+source and production. These three were found during that pass and had **never been filed
+under any number** — two of them existed only as comments in the code that works around them.
+
+**N96. Six `UPDATE sites` statements across five routes carry no `company_id`; tenancy rests entirely on a separate preceding read.**
+verified: YES — `apps/api/src/routes/sites.ts` read in full at `eeaac6b`.
+
+```
+sites.ts:182   PUT    /api/sites/:id                 UPDATE sites SET ... WHERE id = $6
+sites.ts:314   PATCH  /api/sites/:id/ping-interval   UPDATE sites SET ping_interval_minutes = $1
+sites.ts:359   POST   /api/sites/:id/instructions    UPDATE sites SET instructions_pdf_url = $1 WHERE id = $2
+sites.ts:429   PATCH  /api/sites/:id/client-access   UPDATE sites SET client_access_disabled_at = ... WHERE id = $1
+sites.ts:518   PATCH  /api/sites/:id/active          UPDATE sites SET is_active = true WHERE id = $1
+sites.ts:530   PATCH  /api/sites/:id/active          UPDATE sites SET is_active = false, ... WHERE id = $1
+```
+
+**This is NOT a live cross-tenant leak, and the item should not be read as one.** Every one
+of those writes is preceded by a tenant-scoped read that 404s a foreign site — `PUT`,
+`/ping-interval`, `/instructions` and `/geofence` through `assertSiteActive`
+(`sites.ts:19`, `SELECT is_active FROM sites WHERE id = $1 AND company_id = $2`), and
+`/client-access` (`:407-412`) and `/active` (`:503-506`) through their own inline
+equivalents. A cross-tenant PUT returns 404 today. `admin.ts:280` is also unscoped and is
+CORRECT — it is `requireAuth('vishnu')`, which is cross-tenant by design.
+
+**The TOCTOU window is real in shape and unreachable in practice.** Between the gate's
+SELECT and the UPDATE — on two different pooled connections, no transaction, no lock —
+`sites.company_id` for that row would have to change. **Nothing in this repo ever writes
+`sites.company_id`:** no route, no migration, no script. Verified by grep at `eeaac6b`. So
+the window cannot be driven from the application.
+
+**Why file it anyway.** The safety of six write statements rests on a line above each one
+that nothing enforces — not the type system, not the SQL, not a test. The failure is
+prospective and quiet: a future "move a site between tenants" feature makes the window
+live, and a reviewer copying the unscoped shape into a seventh route that forgets its gate
+gets a silent cross-tenant write with no error anywhere. `sites.company_id` is `uuid NOT
+NULL` (pg_attribute, read 2026-09-15), so the scoped form can never accidentally match.
+
+Two sibling routes in the same file already do it right and are the pattern to copy:
+- `sites.ts:227` `/:id/toggles` — `WHERE id = $3 AND company_id = $4` plus
+  `if (!result.rows[0]) return 404`. **This is the shape.**
+- `sites.ts:291` `/:id/ping-interval` — `SELECT ... WHERE id AND company_id FOR UPDATE`
+  inside a transaction. Stronger: it CLOSES the TOCTOU rather than narrowing it.
+
+Fix: add `AND company_id = $N` and the `404` branch to all six statements, matching
+`/:id/toggles`. **Do not fix only `PUT`** — that leaves five identical shapes behind and
+makes the file read as audited. No migration. No client-visible change on any correct
+request. (Six statements, five routes: `/:id/active` writes twice, once per branch.)
+**Size S. Tier 1.**
+
+---
+
+**N97. `apps/api/scripts/` is typechecked by nothing, and no workflow runs `tsc` at all.**
+verified: YES — measured at `eeaac6b`.
+
+`apps/api/tsconfig.json` is `"include": ["src/**/*"]`, so the 23 `.ts` files under
+`apps/api/scripts/` are outside every typecheck. Measured with a throwaway config that adds
+them (the repo config was not edited): **2 errors, 2 files, 0 in `src/`**.
+
+```
+apps/api/scripts/_tmp-emit-hours.ts(6,51):    error TS2554: Expected 3 arguments, but got 2.
+apps/api/scripts/test-d2-magic-live.ts(75,33): error TS2322: Uint8Array<ArrayBufferLike>
+                                               not assignable to BlobPart
+```
+
+**`rootDir: "src"` is LOAD-BEARING and is the trap in this item.** `build` is `tsc`,
+`outDir` is `dist`, and both `package.json` `start` and `railway.json` `startCommand` are
+`node dist/index.js`. Adding `scripts/**/*` to `include` forces `rootDir` to widen, which
+relocates output to `dist/src/index.js` and **breaks the deploy**. So the fix is a SEPARATE
+`tsconfig.scripts.json` for typechecking only — **never a widened `include` on the base
+config**. Anyone who "just adds scripts to the include" ships a service that will not start.
+
+**CI runs no typecheck whatever.** Three workflows exist — `gitleaks`, `ops-triage`,
+`window-anchor` — and none invokes `tsc`. `src/` is typechecked only incidentally, at
+Railway build time. `window-anchor.yml`'s own header already says it: *"`npm run build` is
+`tsc` alone and apps/api has no test script."* Exactly one script is covered, by accident:
+`npx ts-node scripts/check-window-anchor.ts` (`window-anchor.yml:93`) type-checks by
+default, covering that file and its imports. The other 22 are covered by nothing.
+
+Fix: `apps/api/tsconfig.scripts.json` extending the base with `noEmit`, a widened `rootDir`
+and `scripts/**/*`; a `check:types` script running both projects; the two errors fixed in
+place; a CI job. The N91 `err.message` grep belongs in that same job — it is a greppable
+invariant and currently lives only in a reviewer's memory.
+**Size S. Tier 1** — set by the CI job and the `rootDir` separation, NOT by the error
+count. Two errors, both outside `src/`, is what makes it safe.
+
+---
+
+**N98. `presentGuards` and `siteFenceCentre` match sites BY NAME, because two admin payloads omit `site_id`.**
+verified: YES — both consumers and both SQL payloads read at `eeaac6b`.
+
+```
+apps/web/app/admin/sites/[id]/page.tsx:1263   guards.filter((g) => g.site_name === site.name)
+apps/web/lib/siteFence.ts:52                  sites.find((x) => x.name === siteName)
+```
+
+`runningIntervals` (`page.tsx:1293-1299`) is derived from `presentGuards`, so a wrong match
+also reports another site's ping cadence.
+
+Neither payload carries the id, confirmed in the SQL rather than inferred:
+- `GET /api/admin/live-guards` (`routes/admin.ts:929`) joins `sites s ON s.id = ss.site_id`
+  but projects only `s.name AS site_name`.
+- `GET /api/admin/violations` (`routes/admin.ts:1056`) projects `s.name`, `s.timezone`. It
+  ACCEPTS `?site_id=` as a filter (`:1121`) and still never returns it.
+
+**`siteFence.ts` already documents the cause in its own docblock** — *"neither
+/api/admin/live-guards nor /api/admin/violations returns site_id"*. Any fix that touches
+only `presentGuards` leaves the second match in place.
+
+**Not firing today, and the reason it cannot is not the reason you would guess.**
+Same-tenant collisions: **zero** (`GROUP BY company_id, name HAVING count(*) > 1` → empty,
+2026-09-15). Duplicates exist but are strictly CROSS-tenant — `william pen hotel` 3 rows
+across 3 tenants, `bethel ame church` 2 across 2 — and those cannot reach this code because
+`live-guards` is scoped `WHERE s.company_id = $1` (`admin.ts:1003`). So the payload only
+ever holds one tenant's sites.
+
+**The invariant it leans on is unenforced.** `sites` has exactly ONE index —
+`sites_pkey` on `id`. There is **no unique index on `(company_id, name)`** (pg_index, read
+2026-09-15). "Names are unique per company" is a convention with nothing behind it; nothing
+stops an admin creating a duplicate tomorrow, at which point two sites' open sessions merge
+into one page's present-guards list.
+
+Fix: add `site_id` to both payloads (one line each — `ss.site_id`, `gv.site_id`), switch
+both consumers to id equality, keep the name for display. Consumers to update, all admin
+web, **no mobile and no client portal**: `admin/page.tsx:104`,
+`admin/sites/[id]/page.tsx:657`, `admin/live-status/page.tsx:228,313`,
+`components/admin/LiveMap.tsx`, `lib/siteFence.ts`. Types are optional-field additions, so
+every consumer tolerates an API that has not deployed yet, per the stale-API rule.
+
+**The unique index on `(company_id, name)` is deliberately NOT part of this.** It is a
+separate decision with its own blast radius, it would need its own uniqueness check first,
+and the id fix makes it unnecessary rather than depending on it. Matching on the primary
+key is correct whether or not names are unique.
+**Size S. Tier 1** — set by the consumer surface (six call sites across five files) and the
+second match site, not by the SQL, which is one line per payload.
