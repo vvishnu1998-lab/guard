@@ -2667,7 +2667,42 @@ Do not resolve this by weakening the hook.
 
 ---
 
-**N91. Four catches in `routes/guards.ts` still put the driver's `err.message` on the wire.**
+**N91. CLOSED 2026-09-15 — four catches in `routes/guards.ts` still put the driver's `err.message` on the wire.**
+verified: **RESOLVED in the commit that carries this heading change**, on branch
+`fix/backlog-docs-n91-n97`. All four response bodies now emit their existing fallback copy
+and nothing else:
+
+```
+guards.ts:151   POST   /api/guards                             'Failed to create guard'
+guards.ts:947   POST   /api/guards/:id/assign                  'Failed to assign guard'
+guards.ts:1060  PATCH  /api/guards/:guardId/assignments/:id    'Failed to update assignment'
+guards.ts:1104  DELETE /api/guards/:guardId/assignments/:id    'Failed to remove assignment'
+```
+
+Every `console.error` is kept, every 23505 branch above them is untouched, and the fallback
+strings are byte-identical to what the `??` already produced whenever `err.message` was
+undefined — so the only behaviour change is that a driver string can no longer reach an
+admin's screen. `npx tsc --noEmit -p apps/api/tsconfig.json` from the repo root: clean.
+
+**Proven in both directions, which is the part worth keeping.** The invariant is a grep, so
+it was tested as one:
+
+```
+grep -rnE "error:.*err\??\.(message|detail|hint|constraint|code)" apps/api/src/
+```
+
+→ **0 lines** after the fix. Reintroducing a single instance makes it return **exactly 1**
+(`guards.ts:947`), and reverting returns it to 0 — the file's sha256 before the temporary
+reintroduction and after the revert are identical, so the control proves the grep discriminates
+rather than merely passing. A test that has never been seen to fail is not evidence.
+
+**The grep belongs in CI, and N97 is where it lands** — not in this commit. Until that job
+exists, this invariant is enforced by nothing but review, which is exactly how the defect
+survived PR #52 and how the inventory above came to be wrong about the auth levels for two
+of the four. Treat N91 as closed in the code and unguarded against regression until N97
+ships.
+
+Original finding, retained:
 verified: YES — read at `f027f72`, after PR #52 cleared `routes/shifts.ts` and
 `routes/scheduling.ts`.
 
