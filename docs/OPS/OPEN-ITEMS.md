@@ -3120,7 +3120,48 @@ request. (Six statements, five routes: `/:id/active` writes twice, once per bran
 
 ---
 
-**N97. `apps/api/scripts/` is typechecked by nothing, and no workflow runs `tsc` at all.**
+**N97. CLOSED 2026-09-15 — `apps/api/scripts/` is typechecked by nothing, and no workflow runs `tsc` at all.**
+verified: **RESOLVED in the commit that carries this heading change**, on branch
+`fix/backlog-docs-n91-n97`. Four parts:
+
+- `apps/api/tsconfig.scripts.json` — typecheck-only project (`noEmit`, `rootDir: "."`,
+  `include: ["src/**/*", "scripts/**/*"]`), extending the base rather than restating it.
+- `check:types` in `apps/api/package.json` — runs both projects.
+- The two errors fixed in place. `_tmp-emit-hours.ts:6` was a real signature drift
+  (`VIOLATION_HOURS_ROW_SQL` takes three aliases, not two — `shiftHours.ts:276`);
+  `test-d2-magic-live.ts:75` copies into a fresh `ArrayBuffer`-backed `Uint8Array`, because
+  `BlobPart` requires `Uint8Array<ArrayBuffer>` and a bare `Uint8Array` admits
+  `SharedArrayBuffer`. Same bytes, same request.
+- `.github/workflows/typecheck.yml` on `pull_request` + `push: [main]`, with the N78/N91
+  response-body grep as a second step.
+
+**`apps/api/tsconfig.json` is byte-identical to `origin/main`** — sha256
+`a81a1ff5…68da1c3d` on both sides, `git diff origin/main -- apps/api/tsconfig.json` empty.
+That was the point of splitting the projects, and it is the assertion to re-run if anyone
+proposes "simplifying" this into one config.
+
+**The load-bearing proof is the build layout, not the typecheck.** `npm --prefix apps/api
+run build` still emits `apps/api/dist/index.js`, and `apps/api/dist/src/` does **not**
+exist — so `node dist/index.js`, which is both `package.json` `start` and `railway.json`
+`startCommand`, still resolves. A widened `include` on the base config would have moved the
+emit under `dist/src/` and shipped a service that does not boot; `tsc` would have reported
+success the whole way. **Anyone touching these configs should re-run
+`ls apps/api/dist | head` and look for `src`, not just check that the typecheck is green.**
+
+**Both CI steps were proven to FAIL, not merely to pass.** Reintroducing the arity error
+makes `check:types` exit non-zero (2, tsc's type-error code) naming
+`scripts/_tmp-emit-hours.ts(6,55)`; reintroducing one `err?.message` makes the grep step
+exit 1 naming `guards.ts:947`. Both files' sha256 before the temporary reintroduction and
+after the revert are identical. The grep step's sense is inverted — `grep` exits 1 on no
+match, which is the PASS case — and that is exactly the shape that silently always-passes
+if nobody tests the failing direction.
+
+**What is still NOT covered, stated so the green check is not over-read.** This job proves
+the API typechecks and carries no driver text in a response body. It runs no tests
+(`apps/api` still has no test script — N90), touches neither `apps/web` nor `apps/mobile`,
+and a clean `tsc` says nothing about runtime behaviour or hydration.
+
+Original finding, retained:
 verified: YES — measured at `eeaac6b`.
 
 `apps/api/tsconfig.json` is `"include": ["src/**/*"]`, so the 23 `.ts` files under

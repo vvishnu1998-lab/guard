@@ -1,0 +1,82 @@
+name: typecheck
+
+# N97. Until this existed, NOTHING in CI ran `tsc`.
+#
+# `npm run build` is bare `tsc` and apps/api has no test script, so `src/` was
+# typechecked only as a side effect of a Railway deploy — after merge, on the
+# thing already shipping. `apps/api/scripts/` was checked by nothing at all:
+# tsconfig.json is `include: ["src/**/*"]`, so its 23 files were outside every
+# compile. Exactly one was covered by accident — window-anchor.yml runs
+# `npx ts-node scripts/check-window-anchor.ts`, and ts-node type-checks by
+# default, which covers that file and its imports and nothing else.
+#
+# Two errors were sitting in scripts/ when this landed, both real, neither in
+# src/. See N97 in docs/OPS/OPEN-ITEMS.md.
+#
+# WHY TWO PROJECTS AND NOT A WIDER include. apps/api/tsconfig.json emits, and
+# its `rootDir: "src"` decides the output layout: `node dist/index.js` is both
+# package.json `start` and railway.json `startCommand`. Widening that config's
+# include to cover scripts/ forces rootDir to widen too, relocating the emit to
+# `dist/src/index.js` and shipping a service that will not boot. tsconfig.scripts.json
+# is therefore typecheck-only (`noEmit`), and the build config is untouched.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  typecheck:
+    name: tsc (src + scripts) and the N78/N91 response-body floor
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Node 20 leaves hosted runners on 2026-09-16; the action majors below
+      # are the Node 24 ones (see docs/OPS/STATE.md, "Actions on Node 24").
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # Root lockfile, npm workspaces ("workspaces": ["apps/*","packages/*"]).
+      - name: Install
+        run: npm ci
+
+      # Both projects. The base config fails on anything in src/; the scripts
+      # config fails on anything in src/ OR scripts/.
+      - name: Typecheck
+        run: npm --prefix apps/api run check:types
+
+      # N78/N91 FLOOR, enforced rather than remembered.
+      #
+      # No response body in apps/api/src may carry err.message (or .detail,
+      # .hint, .constraint, .code). apps/web puts body.error straight into
+      # ApiError.message and admin screens render it verbatim, so a Postgres
+      # driver string in a catch reaches an operator's screen; on the
+      # guard-facing routes PR #52 cleared, it reached a handset.
+      #
+      # This is a grep because the defect is a grep. It lived in an OPEN-ITEMS
+      # entry and in reviewers' memory through PR #52, which fixed thirteen
+      # instances and left four standing in guards.ts for another three days.
+      #
+      # grep exits 1 when it finds nothing, which is the PASS case here, so the
+      # sense is inverted deliberately: a MATCH fails the job. grep runs bare
+      # (not -q) so the offending lines are printed in the log before the exit.
+      # Proven in both directions before this landed — a clean tree passes, and
+      # one reintroduced err?.message fails it naming the line.
+      - name: No err.message on the wire
+        run: |
+          set -euo pipefail
+          PATTERN='error:.*err\??\.(message|detail|hint|constraint|code)'
+          if grep -rnE "$PATTERN" apps/api/src/; then
+            echo ""
+            echo "FAIL: the lines above put a driver string in a response body."
+            echo "Log it with console.error and return fixed copy instead."
+            echo "See N91 in docs/OPS/OPEN-ITEMS.md."
+            exit 1
+          fi
+          echo "PASS: no err.message on the wire in apps/api/src/."

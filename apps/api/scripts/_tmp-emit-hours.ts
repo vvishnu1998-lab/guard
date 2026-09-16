@@ -3,5 +3,5 @@ console.log('===PER_SESSION===');    console.log(SHIFT_HOURS_SQL_FIELDS('ss', 's
 console.log('===AGG_CANONICAL===');  console.log(SHIFT_HOURS_AGG_SQL_FIELDS('ss'));
 console.log('===AGG_HPREFIX===');    console.log(SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix'));
 console.log('===ROW_BREAK_bs_ss5==='); console.log(BREAK_HOURS_ROW_SQL('bs', 'ss5'));
-console.log('===ROW_VIOL_gv_ss6==='); console.log(VIOLATION_HOURS_ROW_SQL('gv', 'ss6'));
+console.log('===ROW_VIOL_gv_ss6_sh6==='); console.log(VIOLATION_HOURS_ROW_SQL('gv', 'ss6', 'sh6'));
 process.exit(0);

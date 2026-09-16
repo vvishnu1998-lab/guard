@@ -1,0 +1,23 @@
+// N97. TYPECHECK-ONLY project covering src/ AND scripts/.
+//
+// apps/api/tsconfig.json is the BUILD config and must stay exactly as it is.
+// Its `rootDir: "src"` is load-bearing: `npm run build` is bare `tsc`, `outDir`
+// is `dist`, and both package.json `start` and railway.json `startCommand` are
+// `node dist/index.js`. Widening the base config's `include` to cover scripts/
+// forces rootDir to widen with it, which relocates the emit to
+// `dist/src/index.js` and ships a service that will not start.
+//
+// So the two concerns are split instead: the base config still emits, and this
+// one only checks. `noEmit` is what makes the widened rootDir harmless here —
+// nothing is written, so no output layout can change.
+//
+// Kept in sync by construction: this extends the base rather than restating it,
+// so every compilerOption above rootDir/noEmit has exactly one definition.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "scripts/**/*"]
+}
