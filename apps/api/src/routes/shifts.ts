@@ -1187,6 +1187,14 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 // left in BOTH `error` and `message`. swap-response and handoff-response put
 // the enum in `error` AS WELL. That difference is deliberate. Do not "fix" it.
 //
+// THAT SENTENCE IS TRUE OF ALL SIX ONLY AS OF N78 (2026-09-15). The
+// open-session branch was the one exception: it carried the enum in `error`
+// as well as `code`, inherited from before codes existed, so an admin read
+// the literal string SHIFT_HAS_OPEN_SESSION where the other five showed a
+// sentence. It now carries prose like its siblings. Anyone comparing this
+// docblock against git history before that date will find the discrepancy —
+// the docblock was aspirational, and the branch is what moved.
+//
 // The rule is not "put the enum in both fields". It is: PUT THE ENUM WHERE
 // THE CONSUMER CAN READ IT — and which fields those are depends on which
 // client calls the route.
@@ -1272,18 +1280,31 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
         `shift_status=${shift.status}`,
       );
       return res.status(409).json({
-        // `code` is the only new field. `error` already carried this enum at
-        // HEAD and is left exactly as it was, so the wire shape is unchanged
-        // for every existing reader.
+        // N78 — RESOLVED HERE. This branch used to put the enum in BOTH
+        // `code` and `error` while the five below put prose in `error`, so an
+        // admin cancelling a shift a guard was clocked in on read the literal
+        // string SHIFT_HAS_OPEN_SESSION on screen: apps/web's ApiError takes
+        // its message from `body.error` (lib/adminApi.ts:73) and the detail
+        // page renders it raw (app/admin/shifts/[shiftId]/page.tsx:363).
+        // The sentence it should have shown was sitting unused in `message`
+        // two lines below.
         //
-        // NOTE, not a thing to "tidy": this branch puts the enum in `error`
-        // and the five below put prose there. That asymmetry is INHERITED
-        // from HEAD, not introduced here, and it is why an admin already sees
-        // the raw string SHIFT_HAS_OPEN_SESSION on this one branch today
-        // (adminApi.ts:73 renders body.error). Fixing that is a copy change
-        // with its own blast radius; it is not part of adding codes.
+        // THE RULE, and it is the same one PR #42 established for the other
+        // five: the enum lives in `code`, `error` keeps prose. It is not a
+        // stylistic preference — `error` is the field web RENDERS, and it is
+        // also the fallback lib/bulkShiftCopy.ts:126 lands on for any code
+        // its REASON_LABEL does not know. An enum in `error` turns that
+        // fallback into a raw token; prose in `error` makes every future
+        // unmapped code degrade to a readable sentence.
+        //
+        // Safe to move: a repo-wide grep for `=== 'SHIFT_HAS_OPEN_SESSION'`,
+        // `case`, and `.includes()` finds nothing branching on this value.
+        // The only other reader is bulkShiftCopy.ts, which resolves on
+        // `code`. jobs/autoCompleteShifts.ts:50 names it in a COMMENT only.
         code:    'SHIFT_HAS_OPEN_SESSION',
-        error:   'SHIFT_HAS_OPEN_SESSION',
+        error:
+          'A guard is still clocked in on this shift. They must clock out ' +
+          '(or the shift must reach its scheduled end) before it can be cancelled.',
         message:
           'A guard is still clocked in on this shift. They must clock out ' +
           '(or the shift must reach its scheduled end) before it can be cancelled.',
