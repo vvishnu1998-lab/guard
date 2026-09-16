@@ -51,7 +51,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { adminPatch, adminPost } from '../../lib/adminApi';
 import {
-  admits, cancelFailureLabel, REASON_LABEL,
+  admits, cancelFailureLabel, assignFailureLabel, REASON_LABEL,
 } from '../../lib/bulkShiftCopy';
 import type { BulkVerb } from '../../lib/bulkShiftCopy';
 
@@ -336,12 +336,21 @@ export default function BulkShiftActions({
         }
         moved++;
       } catch (e: any) {
-        // Cancel resolves on the machine enum; assign has none on either
-        // route yet (N83), so it renders the server's prose as reassign
-        // always has.
+        // BOTH verbs resolve on the machine enum now (N83). This used to read
+        // `e?.message ?? 'Could not assign'` for the assign branch, because
+        // neither assign route emitted a code — so a mixed batch rendered two
+        // registers at once: a mapped label for a cancel failure and raw
+        // server prose for an assign failure, side by side in one list.
+        //
+        // assignFailureLabel covers assign-guard AND reassign, which the
+        // branch above routes between on the row's status. It also collapses
+        // the two shapes schema_v77 created for one condition: a pre-flight
+        // overlap and a lost 23P01 race both arrive as GUARD_OVERLAP and read
+        // "Busy elsewhere" either way. An admin should not be able to tell
+        // which one happened, because operationally they are the same thing.
         failed.set(id, verb === 'cancel'
           ? cancelFailureLabel(e)
-          : (e?.message ?? 'Could not assign'));
+          : assignFailureLabel(e));
       }
       setProgress({ done: i + 1, total: ids.length });
     }
