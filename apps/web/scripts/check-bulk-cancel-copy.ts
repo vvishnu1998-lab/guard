@@ -102,11 +102,28 @@ for (const c of BEFORE) {
 }
 console.log(`  ${BEFORE.length}/${BEFORE.length} unchanged`);
 
-/** Bodies the route emits NOW. `error` keeps its prose; `code` is new. */
+/** Bodies the route emits NOW. `error` keeps its prose; `code` is new.
+ *
+ *  THAT WAS TRUE OF FOUR OF THESE FIVE UNTIL N78 (2026-09-15). The
+ *  open-session entry below was the exception and contradicted this very
+ *  sentence: the route put the enum in `error` as well as `code`, so an admin
+ *  read the literal string SHIFT_HAS_OPEN_SESSION on screen while the other
+ *  four showed a sentence. The route now carries prose there like its
+ *  siblings, and the fixture below matches what it actually sends.
+ *
+ *  WHY THIS FIXTURE DID NOT CATCH IT, and the reason it is worth reading
+ *  rather than just running: cancelFailureLabel resolves on `body.code`
+ *  (lib/bulkShiftCopy.ts:122) and never reaches the `e.message` fallback for
+ *  a code it knows. So this check passed identically before and after the
+ *  fix. GREEN IS NOT THE SIGNAL HERE — what the entries assert is. Keep the
+ *  `error` values byte-identical to the route's. */
 const AFTER: { label: string; err: ApiError; want: string }[] = [
   { label: 'SHIFT_HAS_OPEN_SESSION', want: REASON_LABEL.SHIFT_HAS_OPEN_SESSION,
-    err: mk(409, { code: 'SHIFT_HAS_OPEN_SESSION', error: 'SHIFT_HAS_OPEN_SESSION',
-                   message: 'A guard is still clocked in on this shift.' }) },
+    err: mk(409, { code: 'SHIFT_HAS_OPEN_SESSION',
+                   error:   'A guard is still clocked in on this shift. They must clock out '
+                          + '(or the shift must reach its scheduled end) before it can be cancelled.',
+                   message: 'A guard is still clocked in on this shift. They must clock out '
+                          + '(or the shift must reach its scheduled end) before it can be cancelled.' }) },
   { label: "SHIFT_NOT_SCHEDULED (active)", want: REASON_LABEL.SHIFT_NOT_SCHEDULED,
     err: mk(409, { code: 'SHIFT_NOT_SCHEDULED', shift_status: 'active',
                    error: 'This shift is in progress (guard clocked in). Cancel is not allowed.',

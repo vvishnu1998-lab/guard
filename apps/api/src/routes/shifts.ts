@@ -628,10 +628,15 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     // session gate below sees its row, or this commits first and clock-in's
     // own `WHERE status = 'scheduled'` no longer matches. Without the lock
     // there is a window where both succeed.
+    //
+    // si.is_active is N82: PATCH /:id/reassign has always selected it and
+    // refused a deactivated site; this route never did. `sites` was already
+    // joined, so this is one column, not a new query.
     const shiftRes = await client.query(
       `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
               sh.scheduled_start, sh.scheduled_end,
-              si.company_id, si.name AS site_name, si.timezone AS site_tz
+              si.company_id, si.name AS site_name, si.timezone AS site_tz,
+              si.is_active AS site_is_active
          FROM shifts sh
          JOIN sites si ON si.id = sh.site_id
         WHERE sh.id = $1
@@ -650,6 +655,33 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
       return res.status(404).json({ error: 'Shift not found' });
     }
 
+    // SITE GATE (N82). reassign:876 has refused a deactivated site since it
+    // was written; this route never has. Same surface, same button, opposite
+    // answers — now that the bulk ASSIGN verb routes between the two on the
+    // row's status, an admin at a deactivated site could FILL an empty post
+    // but not MOVE an assigned one, for a reason nothing on screen explains.
+    //
+    // A deactivated site cannot accept new work and filling an empty post IS
+    // new work — the same argument reassign already makes. Placed after the
+    // tenant check and before the status gate to mirror reassign's ordering
+    // exactly, so the two routes refuse in the same sequence.
+    //
+    // NOT covered by anything else on this path: checkShiftEligibility
+    // (services/guardAssignments.ts) does `SELECT name FROM sites` and gates
+    // only on guard_site_assignments windows — it never reads is_active.
+    //
+    // ZERO INSTANCES IN PRODUCTION, which is why this ships with a LOCAL
+    // proof: prod holds 1 deactivated site with 0 shifts of any status
+    // against it (re-verified 2026-09-15), so no production row can exercise
+    // either direction.
+    if (!shift.site_is_active) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code:  'SITE_DEACTIVATED',
+        error: 'Site is deactivated. Reactivate it before assigning shifts.',
+      });
+    }
+
     // STATUS GATE — the defect this route existed without.
     //
     // The UPDATE at the bottom used to run unconditionally with
@@ -665,7 +697,16 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     if (shift.status !== 'unassigned' || shift.guard_id !== null) {
       await client.query('ROLLBACK');
       const alreadyAssigned = shift.guard_id !== null;
+      // TWO CODES, NOT ONE WITH A DISCRIMINATOR. These are different
+      // failures: SHIFT_ALREADY_ASSIGNED means somebody is on it and the
+      // caller wants the reassign route; SHIFT_NOT_ASSIGNABLE means the row
+      // is in a status that takes no guard at all. A caller should not have
+      // to parse a second field to learn which failure it got.
+      //
+      // `error` prose is byte-identical to what this branch sent before.
       return res.status(409).json({
+        code: alreadyAssigned ? 'SHIFT_ALREADY_ASSIGNED' : 'SHIFT_NOT_ASSIGNABLE',
+        ...(alreadyAssigned ? {} : { shift_status: shift.status }),
         // DO NOT NAME A UI CONTROL HERE. This used to read "Use Reassign
         // Guard to change who is on it", naming a button that no longer
         // exists: the bulk surface collapsed REASSIGN and ASSIGN into one
@@ -701,6 +742,14 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
         // session is the reason, not the verb: somebody is already working
         // this shift, so changing who it belongs to would strand their open
         // session (see the cancel route's note on why that is unrecoverable).
+        //
+        // REUSED, not minted. PATCH /:id/cancel already spells this exact
+        // condition and lib/bulkShiftCopy.ts already maps it. One meaning,
+        // one token. The PROSE differs between the two routes and should —
+        // cancel explains clocking out, this explains that the shift can no
+        // longer be assigned. That is exactly why the enum lives in `code`
+        // and never in `error`.
+        code:  'SHIFT_HAS_OPEN_SESSION',
         error: 'A guard has already clocked in on this shift. It can no longer be assigned.',
       });
     }
@@ -712,7 +761,10 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     );
     if (!guardRes.rows[0]) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Guard not found, inactive, or belongs to a different company.' });
+      return res.status(400).json({
+        code:  'GUARD_NOT_FOUND',
+        error: 'Guard not found, inactive, or belongs to a different company.',
+      });
     }
 
     // Phase A — gate against guard_site_assignments for the shift's Pacific
@@ -723,7 +775,11 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     const eligAssign = await checkShiftEligibility(guard_id, shift.site_id, shiftDate, client);
     if (!eligAssign.ok) {
       await client.query('ROLLBACK');
-      return res.status(422).json({ error: eligibilityError(eligAssign, shiftDate) });
+      return res.status(422).json({
+        code:   'GUARD_NOT_ELIGIBLE',
+        reason: eligAssign.reason,
+        error:  eligibilityError(eligAssign, shiftDate),
+      });
     }
 
     // OVERLAP CHECK — absent before. Assigning a guard is exactly as capable
@@ -741,7 +797,21 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     );
     if (overlap.rows[0]) {
       await client.query('ROLLBACK');
+      // ADOPTS the code the RACE path already emits, never the reverse.
+      // schema_v77's exclusion constraint made this same condition reachable
+      // twice in one request: here as a pre-flight check, and again at COMMIT
+      // as SQLSTATE 23P01, which the catch at the bottom answers with
+      // guardOverlapRaceBody -> code 'GUARD_OVERLAP'. Before this, the two
+      // sent different body shapes for one failure, milliseconds apart.
+      //
+      // STILL NOT IDENTICAL, deliberately: the race body also carries a
+      // `conflict` object naming the colliding shift. This query is
+      // `SELECT 1` and has no columns to build one from. Closing that gap
+      // means routing this through findOverlappingShift, which would also
+      // change the prose — a wider change than adopting the code, and not
+      // part of this one.
       return res.status(409).json({
+        code:  'GUARD_OVERLAP',
         error: 'Selected guard has an overlapping shift in the same time window.',
       });
     }
@@ -873,7 +943,10 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     // Deactivated sites can't accept new work — reassignment is new work.
     if (!shift.site_is_active) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Site is deactivated. Reactivate it before reassigning shifts.' });
+      return res.status(409).json({
+        code:  'SITE_DEACTIVATED',
+        error: 'Site is deactivated. Reactivate it before reassigning shifts.',
+      });
     }
 
     // Past shifts cannot be reassigned (auto-complete cron has already
@@ -889,7 +962,11 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     // The catch at the bottom of this route handles it.
     if (shift.status === 'completed' || shift.status === 'missed') {
       await client.query('ROLLBACK');
+      // STATUS UNCHANGED — this is a 400 and stays a 400. Adding a code is
+      // not a reason to renegotiate the status a caller already handles.
       return res.status(400).json({
+        code:         'SHIFT_NOT_ASSIGNABLE',
+        shift_status: shift.status,
         error: 'This shift cannot be reassigned — it has already completed or was marked missed.',
       });
     }
@@ -902,7 +979,10 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     );
     if (!guardRes.rows[0]) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Guard not found, inactive, or belongs to a different company.' });
+      return res.status(400).json({
+        code:  'GUARD_NOT_FOUND',
+        error: 'Guard not found, inactive, or belongs to a different company.',
+      });
     }
 
     // Phase A — the new guard must be assigned to the shift's site for the
@@ -913,7 +993,11 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     const eligReassign = await checkShiftEligibility(new_guard_id, shift.site_id, shiftDate, client);
     if (!eligReassign.ok) {
       await client.query('ROLLBACK');
-      return res.status(422).json({ error: eligibilityError(eligReassign, shiftDate) });
+      return res.status(422).json({
+        code:   'GUARD_NOT_ELIGIBLE',
+        reason: eligReassign.reason,
+        error:  eligibilityError(eligReassign, shiftDate),
+      });
     }
 
     // Overlap check: any OTHER scheduled/active shift the new guard holds in
@@ -932,7 +1016,10 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     );
     if (overlap.rows[0]) {
       await client.query('ROLLBACK');
+      // Adopts the race path's code — see the twin in assign-guard above for
+      // why, and for why `conflict` is deliberately still absent here.
       return res.status(409).json({
+        code:  'GUARD_OVERLAP',
         error: 'Selected guard has an overlapping shift in the same time window.',
       });
     }
@@ -1187,6 +1274,14 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 // left in BOTH `error` and `message`. swap-response and handoff-response put
 // the enum in `error` AS WELL. That difference is deliberate. Do not "fix" it.
 //
+// THAT SENTENCE IS TRUE OF ALL SIX ONLY AS OF N78 (2026-09-15). The
+// open-session branch was the one exception: it carried the enum in `error`
+// as well as `code`, inherited from before codes existed, so an admin read
+// the literal string SHIFT_HAS_OPEN_SESSION where the other five showed a
+// sentence. It now carries prose like its siblings. Anyone comparing this
+// docblock against git history before that date will find the discrepancy —
+// the docblock was aspirational, and the branch is what moved.
+//
 // The rule is not "put the enum in both fields". It is: PUT THE ENUM WHERE
 // THE CONSUMER CAN READ IT — and which fields those are depends on which
 // client calls the route.
@@ -1272,18 +1367,31 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
         `shift_status=${shift.status}`,
       );
       return res.status(409).json({
-        // `code` is the only new field. `error` already carried this enum at
-        // HEAD and is left exactly as it was, so the wire shape is unchanged
-        // for every existing reader.
+        // N78 — RESOLVED HERE. This branch used to put the enum in BOTH
+        // `code` and `error` while the five below put prose in `error`, so an
+        // admin cancelling a shift a guard was clocked in on read the literal
+        // string SHIFT_HAS_OPEN_SESSION on screen: apps/web's ApiError takes
+        // its message from `body.error` (lib/adminApi.ts:73) and the detail
+        // page renders it raw (app/admin/shifts/[shiftId]/page.tsx:363).
+        // The sentence it should have shown was sitting unused in `message`
+        // two lines below.
         //
-        // NOTE, not a thing to "tidy": this branch puts the enum in `error`
-        // and the five below put prose there. That asymmetry is INHERITED
-        // from HEAD, not introduced here, and it is why an admin already sees
-        // the raw string SHIFT_HAS_OPEN_SESSION on this one branch today
-        // (adminApi.ts:73 renders body.error). Fixing that is a copy change
-        // with its own blast radius; it is not part of adding codes.
+        // THE RULE, and it is the same one PR #42 established for the other
+        // five: the enum lives in `code`, `error` keeps prose. It is not a
+        // stylistic preference — `error` is the field web RENDERS, and it is
+        // also the fallback lib/bulkShiftCopy.ts:126 lands on for any code
+        // its REASON_LABEL does not know. An enum in `error` turns that
+        // fallback into a raw token; prose in `error` makes every future
+        // unmapped code degrade to a readable sentence.
+        //
+        // Safe to move: a repo-wide grep for `=== 'SHIFT_HAS_OPEN_SESSION'`,
+        // `case`, and `.includes()` finds nothing branching on this value.
+        // The only other reader is bulkShiftCopy.ts, which resolves on
+        // `code`. jobs/autoCompleteShifts.ts:50 names it in a COMMENT only.
         code:    'SHIFT_HAS_OPEN_SESSION',
-        error:   'SHIFT_HAS_OPEN_SESSION',
+        error:
+          'A guard is still clocked in on this shift. They must clock out ' +
+          '(or the shift must reach its scheduled end) before it can be cancelled.',
         message:
           'A guard is still clocked in on this shift. They must clock out ' +
           '(or the shift must reach its scheduled end) before it can be cancelled.',

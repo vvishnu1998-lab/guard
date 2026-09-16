@@ -2781,3 +2781,48 @@ whichever of the two numbers is wrong, in both places.
 
 **Size XS. Tier 0** (read-only prod query), rising to Tier 1 if it turns up a
 non-terminal pair, because that reopens the migration's reasoning.
+
+---
+
+## New from N83 assign-route codes (2026-09-15)
+
+**N95. The two assign routes now agree on the overlap CODE but not on the overlap BODY — the race carries a `conflict` object the pre-flight cannot build.**
+verified: YES — `apps/api/src/routes/shifts.ts`, both routes, read after N83.
+
+schema_v77's exclusion constraint made one condition reachable twice inside a
+single request: once as a pre-flight check, and again at COMMIT as SQLSTATE
+23P01. N83 made both answer with `code: 'GUARD_OVERLAP'`, so the surface no
+longer renders two registers. **The bodies still differ:**
+
+| | pre-flight | race (23P01) |
+|---|---|---|
+| `code`  | `GUARD_OVERLAP` | `GUARD_OVERLAP` |
+| `error` | prose | prose |
+| `conflict` | **absent** | `{ shift_id, guard_name, site_name, scheduled_start, scheduled_end }` |
+
+The pre-flight query is `SELECT 1 FROM shifts WHERE … LIMIT 1` — it has no
+columns to build a conflict from. The race path resolves the collision through
+`resolveOverlapAfterRace` -> `overlapConflictBody`, which names the shift.
+
+**So an admin gets a more useful message when they LOSE A RACE than when they
+hit the ordinary check**, which is backwards: the common case is the
+uninformative one.
+
+**Why this was NOT folded into N83.** Closing it means routing the pre-flight
+through `findOverlappingShift`, which returns `overlapConflictBody`'s sentence
+("These hours overlap <name>'s shift at <site> on <day>, <from> - <to>. Move or
+cancel that shift first.") instead of the current "Selected guard has an
+overlapping shift in the same time window." **That is a prose change**, and
+N83 shipped under a byte-identical-error-values proof: 126 distinct values
+unchanged, exactly one added. Folding a prose change in would have destroyed
+the only evidence that nothing else drifted. It is its own change with its own
+before/after, not a widening of that one.
+
+**Both call sites carry a comment saying so**, so the asymmetry is not
+discovered later as an oversight.
+
+Fix: replace the `SELECT 1` in each route with `findOverlappingShift(guard_id,
+shift.scheduled_start, shift.scheduled_end, id, client)` and return
+`{ code: 'GUARD_OVERLAP', ...overlapConflictBody(conflict) }`. Then the
+pre-flight and the race are byte-identical. Costs one extra join on a path that
+is already failing. **Size XS. Tier 1.**
