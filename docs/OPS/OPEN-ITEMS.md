@@ -3127,11 +3127,30 @@ verified: **RESOLVED in the commit that carries this heading change**, on branch
 - `apps/api/tsconfig.scripts.json` — typecheck-only project (`noEmit`, `rootDir: "."`,
   `include: ["src/**/*", "scripts/**/*"]`), extending the base rather than restating it.
 - `check:types` in `apps/api/package.json` — runs both projects.
-- The two errors fixed in place. `_tmp-emit-hours.ts:6` was a real signature drift
-  (`VIOLATION_HOURS_ROW_SQL` takes three aliases, not two — `shiftHours.ts:276`);
-  `test-d2-magic-live.ts:75` copies into a fresh `ArrayBuffer`-backed `Uint8Array`, because
-  `BlobPart` requires `Uint8Array<ArrayBuffer>` and a bare `Uint8Array` admits
-  `SharedArrayBuffer`. Same bytes, same request.
+- **The one real error fixed in place.** `_tmp-emit-hours.ts:6` was a genuine signature
+  drift — `VIOLATION_HOURS_ROW_SQL` takes three aliases, not two (`shiftHours.ts:276`).
+
+**CORRECTED: `scripts/` held ONE error, not the two this item originally reported.** The
+second, a `TS2322` on `test-d2-magic-live.ts`'s `new Blob([body], …)`, **does not exist** —
+it was an artifact of the throwaway probe config used to take the original measurement, and
+the "fix" made for it has been reverted.
+
+The probe lived in a scratch directory OUTSIDE the repo tree. TypeScript resolves
+`@types` by walking up from the tsconfig's own directory, so a config sitting in
+`/tmp/...` resolves a different — and here, impoverished — set of ambient types than one
+sitting in `apps/api/`. `Blob` and `BlobPart` came from somewhere else, and the variance
+error followed. Same source file, two configs, on the identical bytes:
+
+```
+apps/api/tsconfig.scripts.json      (shipped, in-tree)   -> NO ERRORS
+<scratch>/tsconfig.scripts-probe.json (phase-1 probe)    -> error TS2322 ... BlobPart
+```
+
+**The lesson is the measurement, not the Blob.** A throwaway tsconfig placed outside the
+tree it is measuring does not measure that tree — it measures a different type environment
+that happens to contain the same files. Any future "how bad is it if we widen the
+typecheck?" question must be answered with a config in its final location, or the count
+comes back wrong in the alarming direction. This one over-reported by 100%.
 - `.github/workflows/typecheck.yml` on `pull_request` + `push: [main]`, with the N78/N91
   response-body grep as a second step.
 
@@ -3149,12 +3168,17 @@ success the whole way. **Anyone touching these configs should re-run
 `ls apps/api/dist | head` and look for `src`, not just check that the typecheck is green.**
 
 **Both CI steps were proven to FAIL, not merely to pass.** Reintroducing the arity error
-makes `check:types` exit non-zero (2, tsc's type-error code) naming
-`scripts/_tmp-emit-hours.ts(6,55)`; reintroducing one `err?.message` makes the grep step
-exit 1 naming `guards.ts:947`. Both files' sha256 before the temporary reintroduction and
-after the revert are identical. The grep step's sense is inverted — `grep` exits 1 on no
-match, which is the PASS case — and that is exactly the shape that silently always-passes
-if nobody tests the failing direction.
+makes `check:types` exit non-zero (2, tsc's type-error code) naming the offending line;
+reintroducing one `err?.message` makes the grep step exit 1 naming `guards.ts:947`. Both
+files' sha256 before the temporary reintroduction and after the revert are identical, so
+the controls show the checks discriminate rather than merely passing. The grep step's sense
+is inverted — `grep` exits 1 on no match, which is the PASS case — and that is exactly the
+shape that silently always-passes if nobody tests the failing direction.
+
+**That the checks discriminate is not idle.** The probe artifact above was caught only
+because the failing direction was re-run against the shipped config: the "error" it was
+supposed to reproduce did not. A check that had only ever been seen to pass would have
+carried the phantom into the record unchallenged.
 
 **What is still NOT covered, stated so the green check is not over-read.** This job proves
 the API typechecks and carries no driver text in a response body. It runs no tests
@@ -3173,6 +3197,12 @@ apps/api/scripts/_tmp-emit-hours.ts(6,51):    error TS2554: Expected 3 arguments
 apps/api/scripts/test-d2-magic-live.ts(75,33): error TS2322: Uint8Array<ArrayBufferLike>
                                                not assignable to BlobPart
 ```
+
+> **The transcript above is left verbatim because it is evidence of what the probe
+> reported — but the SECOND line is a FALSE POSITIVE and the count of 2 is wrong.** The
+> probe config sat outside the repo tree and resolved a different set of ambient `@types`.
+> Under `apps/api/tsconfig.scripts.json`, in its final location, that same code compiles
+> clean. The real count was **1**. See the correction in the CLOSED block above.
 
 **`rootDir: "src"` is LOAD-BEARING and is the trap in this item.** `build` is `tsc`,
 `outDir` is `dist`, and both `package.json` `start` and `railway.json` `startCommand` are

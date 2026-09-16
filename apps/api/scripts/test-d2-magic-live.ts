@@ -72,10 +72,7 @@ interface PresignResp {
 async function postMultipart(url: string, fields: Record<string, string>, body: Uint8Array, mime = 'image/jpeg'): Promise<{status: number; body: string}> {
   const form = new FormData();
   for (const [k, v] of Object.entries(fields)) form.append(k, v);
-  // Copy into a fresh ArrayBuffer-backed view: BlobPart requires
-  // Uint8Array<ArrayBuffer>, and a bare Uint8Array is Uint8Array<ArrayBufferLike>,
-  // which admits SharedArrayBuffer. Same bytes, same request.
-  form.append('file', new Blob([new Uint8Array(body)], { type: mime }), 'upload.jpg');
+  form.append('file', new Blob([body], { type: mime }), 'upload.jpg');
   const r = await fetch(url, { method: 'POST', body: form });
   return { status: r.status, body: await r.text() };
 }
