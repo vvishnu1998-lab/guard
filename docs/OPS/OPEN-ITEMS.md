@@ -3259,10 +3259,26 @@ seventh route copied from the unscoped shape with its gate forgotten.
 
 `npm --prefix apps/api run check:types` from the repo root: clean.
 
-**Out of scope, noted for its own item:** the sibling `UPDATE clients SET
-tokens_not_before = NOW() WHERE id IN (SELECT client_id FROM client_sites WHERE site_id =
-$1)` in the same `Promise.all` is also untenanted. It is a different table and was not
-touched here.
+**The sibling `UPDATE clients` in `/:id/client-access` is scoped too, in a second commit
+on this branch.** It bumps `tokens_not_before` to revoke live client sessions, and it was
+untenanted: `client_sites` is a junction and the predicate never mentioned who was asking.
+It also runs FIRST and unconditionally — `Promise.all` starts both writes before either
+result is inspected — so on a cross-tenant call it would have **revoked another tenant's
+client sessions even though the site write matched nothing.** `clients.company_id` exists
+and is `uuid NOT NULL` (pg_attribute, read 2026-09-16). Same `isVishnu` ternary.
+
+Proved on its own throwaway DB, 3 cases, SQL parser-extracted:
+`A vs B's site → 0 rows`, `A vs A's site → 1 row`, `origin/main vs B's site → 1 row`.
+
+**No `rowCount` check on that statement, deliberately:** a site with no linked clients
+legitimately updates zero rows, so a 404 there would refuse the toggle for every
+client-less site. The tenant verdict belongs to the sites write, which makes it.
+
+**Still open, noted for its own item:** a SECOND untenanted `UPDATE clients SET
+tokens_not_before` lives in the deactivation cascade of `PATCH /:id/active`. It is
+currently unreachable cross-tenant — the scoped site UPDATE above it now ROLLBACKs and
+404s first — so it is safe by SEQUENCING, not by its own predicate. Worth closing on the
+same terms, but it was outside this change.
 
 Original finding, retained:
 verified: YES — `apps/api/src/routes/sites.ts` read in full at `eeaac6b`.

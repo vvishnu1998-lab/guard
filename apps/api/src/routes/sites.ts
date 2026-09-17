@@ -428,12 +428,32 @@ router.patch('/:id/client-access', requireAuth('company_admin', 'vishnu'), async
     // site by bumping tokens_not_before. Filter to clients actually
     // linked to this site via the junction; login re-derives access
     // from the client_sites + sites.client_access_disabled_at gate.
-    pool.query(
-      `UPDATE clients
-          SET tokens_not_before = NOW()
-        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
-      [req.params.id],
-    ),
+    // N96. Tenant-scoped on the same terms as the sites write below. This one
+    // runs FIRST and unconditionally — the Promise.all starts both before
+    // either result is inspected — so on a cross-tenant call it would revoke
+    // another tenant's client sessions even though the site write matched
+    // nothing. The `site_id` filter alone does not bound it to the caller's
+    // tenant; `client_sites` is a junction and the predicate never mentions
+    // who is asking.
+    //
+    // NO rowCount CHECK HERE, deliberately: a site with no linked clients
+    // legitimately updates zero rows, so a 404 on that would refuse the toggle
+    // for every client-less site. The tenant verdict is the sites write's to
+    // make, and it is made below.
+    isVishnu
+      ? pool.query(
+          `UPDATE clients
+              SET tokens_not_before = NOW()
+            WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
+          [req.params.id],
+        )
+      : pool.query(
+          `UPDATE clients
+              SET tokens_not_before = NOW()
+            WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)
+              AND company_id = $2`,
+          [req.params.id, req.user!.company_id],
+        ),
     // N96. Tenant-scoped for a company_admin, deliberately NOT for vishnu —
     // mirroring the gate at the top of this route, which picks an unscoped
     // SELECT for the same reason. This route grants cross-tenant access to the
