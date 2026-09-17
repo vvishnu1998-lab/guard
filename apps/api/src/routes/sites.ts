@@ -588,11 +588,26 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
     // sites A, B, C shouldn't lose global access just because B was
     // deactivated. Login re-derives access from client_sites + the
     // site's is_active flag.
+    // N96. Tenant-scoped like every other write in this file. Unconditional,
+    // with no isVishnu arm: this route is requireAuth('company_admin') alone,
+    // so there is no super-admin caller to exempt — unlike /:id/client-access,
+    // which admits `vishnu` and needs the ternary.
+    //
+    // It was already unreachable cross-tenant once the site UPDATE above began
+    // ROLLBACKing on a foreign row, so this closes a window that was shut by
+    // SEQUENCING. Safe-by-ordering is the weaker guarantee: it holds only while
+    // the statement above it keeps its 404, and nothing enforces that pairing.
+    // A predicate on the statement itself survives someone reordering the
+    // cascade or lifting this block into another route.
+    //
+    // No rowCount check, same reason as the client-access twin: a site with no
+    // linked clients legitimately revokes nothing.
     await client.query(
       `UPDATE clients
           SET tokens_not_before = NOW()
-        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
-      [req.params.id],
+        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)
+          AND company_id = $2`,
+      [req.params.id, req.user!.company_id],
     );
     const cancelled = await client.query<{ id: string; guard_id: string | null }>(
       `UPDATE shifts

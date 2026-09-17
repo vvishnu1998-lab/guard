@@ -3274,11 +3274,25 @@ Proved on its own throwaway DB, 3 cases, SQL parser-extracted:
 legitimately updates zero rows, so a 404 there would refuse the toggle for every
 client-less site. The tenant verdict belongs to the sites write, which makes it.
 
-**Still open, noted for its own item:** a SECOND untenanted `UPDATE clients SET
-tokens_not_before` lives in the deactivation cascade of `PATCH /:id/active`. It is
-currently unreachable cross-tenant — the scoped site UPDATE above it now ROLLBACKs and
-404s first — so it is safe by SEQUENCING, not by its own predicate. Worth closing on the
-same terms, but it was outside this change.
+**The second `UPDATE clients` — the deactivation cascade in `PATCH /:id/active` — is
+scoped too, in a third commit on this branch.** It was already unreachable cross-tenant
+once the site UPDATE above it began ROLLBACKing on a foreign row, so this closed a window
+that was shut by SEQUENCING. **Safe-by-ordering is the weaker guarantee:** it holds only
+while the statement above keeps its 404, and nothing enforces that pairing — a reordered
+cascade or a copy of the block into another route loses it silently. A predicate on the
+statement itself survives both.
+
+Unconditional, with no `isVishnu` arm: `/:id/active` is `requireAuth('company_admin')`
+alone, so there is no super-admin caller to exempt — unlike `/:id/client-access`. Proved
+on its own throwaway DB, same 3 cases, same parser-extracted SQL, same results.
+
+**So every write in `routes/sites.ts` now carries its own tenant predicate.** Measured at
+HEAD by parser extraction, the file holds **11** write statements: **9 carry
+`company_id`**, and the **2** that do not are the deliberate `vishnu` arms in
+`/:id/client-access`, the one route that grants that role cross-tenant access by design.
+This branch changed **7** of them — 5 on `sites`, 2 on `clients`, across 4 routes; the
+other 2 (`/:id/toggles`, `/:id/ping-interval`) were already correct and were not touched.
+**Nothing in the file is tenant-safe only because of a line above it any more.**
 
 Original finding, retained:
 verified: YES — `apps/api/src/routes/sites.ts` read in full at `eeaac6b`.
