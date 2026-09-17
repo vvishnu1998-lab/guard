@@ -20,12 +20,13 @@
  * 201 fresh / 200 duplicate / 404 unknown tag / 422 too far (anti-fraud,
  * shows label + distance from err.details) / 403 no session / offline.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Location from 'expo-location';
 import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import { router, useLocalSearchParams } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import * as Sentry from '@sentry/react-native';
 import { apiClient, ApiError } from '../../lib/apiClient';
 import { useOfflineStore } from '../../store/offlineStore';
@@ -95,6 +96,27 @@ export default function CheckpointScanner() {
   // Torch for laminated tags mounted indoors under warm low light — the
   // customer scans these at night. Default OFF; persists while open.
   const [torch, setTorch] = useState(false);
+
+  /** The AVCaptureSession / CameraX binding is owned by <CameraView>, and this
+   *  screen is reached with router.push — so backing out or being navigated
+   *  over used to leave the sensor, the ISP and the torch running with the
+   *  screen off-stack. Measured: 119% CPU while open, +100 MB resident and
+   *  ~29 FPS for the rest of the session after leaving, with
+   *  `FigCaptureSourceRemote err=-17281` repeating as the session was
+   *  rebuilt against one that was never released.
+   *
+   *  Gate is a conditional MOUNT, not expo-camera's `active` prop: `active` is
+   *  documented @platform ios (expo-camera 17.0.10, Camera.types.d.ts:336-341)
+   *  and only ios/CameraViewModule.swift:218 registers it, so it would leave
+   *  the two Android handsets in the fleet unfixed. */
+  const isFocused = useIsFocused();
+
+  // Drop the torch BEFORE the session goes away, and make sure a screen left
+  // with the torch lit does not come back lit — expo-camera re-lights it on
+  // the next foreground (ios/CameraView.swift onAppForegrounded).
+  useEffect(() => {
+    if (!isFocused) setTorch(false);
+  }, [isFocused]);
   // Ref lock flips synchronously on first detection — state alone is too
   // slow and lets a single tag double-fire onBarcodeScanned.
   const lockRef = useRef(false);
@@ -305,6 +327,10 @@ export default function CheckpointScanner() {
       <Text style={styles.type}>{linkMode ? `LINK: ${linkLabel.toUpperCase()}` : 'SCAN TAG'}</Text>
 
       <View style={styles.cameraContainer}>
+        {/* Unmounted on blur so the capture session is released. styles
+            .cameraContainer is a fixed 340px box, so the placeholder holds the
+            layout and nothing below it shifts. */}
+        {!isFocused ? <View style={styles.camera} /> : (
         <CameraView
           style={styles.camera}
           facing={'back' as CameraType}
@@ -340,6 +366,7 @@ export default function CheckpointScanner() {
             </View>
           )}
         </CameraView>
+        )}
       </View>
 
       {verdict.kind === 'submitting' && (
