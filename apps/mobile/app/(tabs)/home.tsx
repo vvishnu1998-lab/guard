@@ -7,6 +7,7 @@ import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Sentry from '@sentry/react-native';
 import { router, useFocusEffect } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { useShiftStore } from '../../store/shiftStore';
 import { useClockInStore } from '../../store/clockInStore';
 import { useOfflineStore } from '../../store/offlineStore';
@@ -118,6 +119,11 @@ export default function HomeScreen() {
   const { open: openDrawer } = useDrawerStore();
   const { guardId } = useAuthStore();
   const isOnShift = !!activeSession;
+  /** Drives the map's own my-location layer. react-native-maps opens a native
+   *  location session of its own for `showsUserLocation` — independent of the
+   *  expo-location watcher below — so gating only the watcher would leave the
+   *  arrow lit. Both have to be focus-scoped or neither is. */
+  const isFocused = useIsFocused();
 
   const [upcomingShift, setUpcomingShift] = useState<ApiShift | null>(null);
   const [loadingShift, setLoadingShift] = useState(false);
@@ -262,11 +268,34 @@ export default function HomeScreen() {
   //   3. 15-second first-fix timeout → Sentry breadcrumb + user-visible retry.
   //   4. Sentry.captureMessage on permission-denied so we can distinguish
   //      "user tapped Deny" from cold-start latency in production traces.
+  //
+  // Battery: this watcher is FOCUS-SCOPED (see the useFocusEffect below).
+  // It used to live in a `useEffect(…, [])`, whose cleanup runs only on
+  // unmount — and a bottom-tabs screen does not unmount on blur, so the
+  // session stayed open for the whole foreground life of the app and the iOS
+  // location arrow stayed lit on every other tab. Xcode Energy gauge put
+  // Location at 46-67% of app energy. Scope is focus only: what Home renders
+  // while focused is unchanged, on shift or off.
   const [locError, setLocError] = useState<'denied' | 'timeout' | null>(null);
   const watcherRef  = useRef<Location.LocationSubscription | null>(null);
   const timeoutRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Generation counter for in-flight acquireLocation() chains.
+   *
+   *  watchPositionAsync is awaited, so a blur landing between the call and the
+   *  assignment would run cleanup against a still-null watcherRef, remove
+   *  nothing, and then have the promise resolve a live subscription into a
+   *  ref nothing reads again — an orphaned CoreLocation session for the life
+   *  of the JS context. Harmless-ish at one mount per launch; a real leak now
+   *  that we start and stop on every focus change. Blur and every re-entry
+   *  bump this, so a superseded chain removes its own subscription instead of
+   *  publishing it. Also covers a double-tap of RETRY. */
+  const genRef      = useRef(0);
 
   async function acquireLocation() {
+    // Zero-arg by contract: the RETRY button passes it straight to onPress,
+    // so a GestureResponderEvent lands in arg 0. Cancellation rides on genRef
+    // rather than a parameter for exactly that reason.
+    const gen = ++genRef.current;
     setLocError(null);
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
     watcherRef.current?.remove();
@@ -300,7 +329,7 @@ export default function HomeScreen() {
       });
     }, 15_000);
 
-    watcherRef.current = await Location.watchPositionAsync(
+    const sub = await Location.watchPositionAsync(
       { accuracy: Location.Accuracy.Balanced, timeInterval: 30000, distanceInterval: 10 },
       (pos) => {
         setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
@@ -308,17 +337,31 @@ export default function HomeScreen() {
         setLocError(null);
       },
     );
+
+    // Blurred, unmounted, or superseded while the await was in flight: this
+    // subscription is the only reference to that native session, so remove it
+    // here rather than publishing it to a ref no cleanup will visit again.
+    if (gen !== genRef.current) { sub.remove(); return; }
+    watcherRef.current = sub;
   }
 
-  useEffect(() => {
-    acquireLocation();
-    return () => {
-      watcherRef.current?.remove();
-      watcherRef.current = null;
-      if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Focus-scoped, NOT mount-scoped. Home is the first Tabs.Screen and bottom-tabs
+  // keeps a blurred tab mounted, so an unmount-scoped cleanup never ran in
+  // practice. Accuracy / timeInterval / distanceInterval are deliberately
+  // untouched — cadence tuning is a separate phase.
+  useFocusEffect(
+    useCallback(() => {
+      acquireLocation();
+      return () => {
+        // Invalidate any chain still awaiting watchPositionAsync above.
+        genRef.current++;
+        watcherRef.current?.remove();
+        watcherRef.current = null;
+        if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+  );
 
   useEffect(() => {
     if (!isOnShift) restoreOrFetchShift();
@@ -559,7 +602,7 @@ export default function HomeScreen() {
             latitudeDelta:  0.005,
             longitudeDelta: 0.005,
           } : undefined}
-          showsUserLocation
+          showsUserLocation={isFocused}
           showsMyLocationButton={false}
         >
           {userLocation && (

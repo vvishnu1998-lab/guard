@@ -3555,3 +3555,33 @@ and the id fix makes it unnecessary rather than depending on it. Matching on the
 key is correct whether or not names are unique.
 **Size S. Tier 1** — set by the consumer surface (six call sites across five files) and the
 second match site, not by the SQL, which is one line per payload.
+
+**N99. `violation/[violationId].tsx` spins GPS every 10s on a screen reachable with NO active shift, and Android cannot back out of it.**
+verified: YES — read from source at `86ebb0b`, found while auditing mobile battery consumers
+(PR "gate Home GPS watcher…"). Deliberately NOT fixed in that branch: out of its scope.
+
+`app/violation/[violationId].tsx:130` arms `setInterval(checkLocation, POLL_INTERVAL_MS)`
+with `POLL_INTERVAL_MS = 10_000` (`:23`). `checkLocation` calls
+`Location.getCurrentPositionAsync({ accuracy: Balanced })` at **`:81`**, which executes
+**before** the `if (!geofence) return;` guard at **`:87`**. So GPS is spun on every tick
+regardless of whether a shift exists.
+
+**The reachable-with-no-shift path is the part that matters.** The screen is normally
+entered by tapping a `geofence_breach` push (`lib/navigateForNotification.ts:90-93`), but it
+is equally reachable by tapping an **old** breach row in the notifications tab
+(`app/(tabs)/notifications.tsx:298`). With no active session the store has no
+`activeShift.geofence`, so `:87` returns every tick, `resolving` never becomes true, and the
+auto-resolve + `clearInterval` at `:105-123` is **unreachable**. The poll then runs until the
+process is killed.
+
+Compounding, same screen: `BackHandler.addEventListener('hardwareBackPress', () => true)` at
+`:67` swallows Android back whenever `onBreak` is false, and the red takeover render
+(`:162-203`) contains no dismiss control — so on Android there is no exit. An infinite
+`Animated.loop` at `:53` (`useNativeDriver: true`) also holds the compositor at refresh rate
+for as long as the screen is mounted.
+
+Fix shape (not yet designed): move the `getCurrentPositionAsync` call below the `:87`
+geofence guard so a shiftless mount costs nothing, and give the no-shift state an exit.
+**Both halves touch the off-post takeover, which is guard-facing enforcement — do not
+"simplify" the back-button block while here.**
+**Size S. Tier 2** — any change to guard-facing enforcement logic.
