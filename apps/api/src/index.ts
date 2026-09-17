@@ -59,6 +59,7 @@ import './jobs/clockOutReminder';
 // above or it reports 0. See jobs/_run.ts for why the wrapper exists.
 import { logJobRegistration, registeredJobs, computeStaleJobs } from './jobs/_run';
 import type { HeartbeatRow } from './jobs/_run';
+import { makeEdgeReporter } from './utils/healthEdge';
 
 logJobRegistration();
 
@@ -168,10 +169,18 @@ app.use(cors({
 app.use(globalLimiter);
 app.use(express.json());
 
+// N92. One reporter per probe. Each holds a healthy/unhealthy flag so a DB
+// outage logs on EVERY probe but reaches Sentry ONCE, on the edge — see
+// utils/healthEdge.ts for why per-probe capture is the N27 defect class.
+// Module scope, not per-request: the flag has to survive between probes.
+const dbHealth    = makeEdgeReporter('db');
+const cronsHealth = makeEdgeReporter('crons');
+
 // Health check
 app.get('/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
+    dbHealth.recover();
     // `commit` is the build this process is running, injected by Railway. It
     // exists so "is the deployed API on main?" has an answer that does not
     // depend on a CLI, a token scope, or a dashboard: ops-triage compares it
@@ -185,7 +194,8 @@ app.get('/health', async (_req, res) => {
       db: 'connected',
       commit: process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
     });
-  } catch {
+  } catch (err) {
+    dbHealth.fail(err);
     res.status(503).json({ status: 'error', db: 'disconnected' });
   }
 });
@@ -223,12 +233,19 @@ app.get('/health/crons', async (_req, res) => {
               last_result
          FROM cron_heartbeats`,
     );
+    // Recovery is keyed on the QUERY succeeding, not on the verdict. The
+    // stale-jobs 503 below is a successful probe reporting a finding — the
+    // database answered. Putting recover() after that branch would let a
+    // stale-cron period suppress the recovery of a DATABASE outage, which is
+    // a different fault with a different fix.
+    cronsHealth.recover();
     const stale = computeStaleJobs(jobs, rows);
     if (stale.length > 0) {
       return res.status(503).json({ status: 'stale', jobs: jobs.length, stale });
     }
     return res.json({ status: 'ok', jobs: jobs.length, stale: [] });
-  } catch {
+  } catch (err) {
+    cronsHealth.fail(err);
     return res.status(503).json({ status: 'error' });
   }
 });

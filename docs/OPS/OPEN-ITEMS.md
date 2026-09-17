@@ -2769,7 +2769,73 @@ change. **Size XS. Tier 1.**
 
 ## New from the N85 CORS fix (2026-09-14)
 
-**N92. Both health routes swallow their error with a bare `catch {}` — a database outage produces NO Sentry event from the route that exists to detect it.**
+**N92. CLOSED 2026-09-16 — both health routes swallow their error with a bare `catch {}` — a database outage produces NO Sentry event from the route that exists to detect it.**
+verified: **RESOLVED on branch `fix/n92-health-observable`.** Both catches now bind
+the error. `utils/healthEdge.ts` holds one `EdgeReporter` per probe (`db`, `crons`),
+each with a private `healthy` flag:
+
+- `fail(err)` — `console.error` on **every** call, unconditionally.
+  `Sentry.captureException(err, { tags: { flow: 'health', probe: name } })` **only on
+  the healthy→unhealthy edge**.
+- `recover()` — logs once when recovering; **never** captures. An event for "it works
+  again" spends quota to report a non-problem.
+
+No timers, no clock, one boolean per probe. Behaviour is fully determined by the call
+sequence, which is what makes it testable without a database or a DSN.
+
+**Why edge-triggered and not per-probe — the filed justification was WRONG and the
+real one is better.** This item said "an uptime monitor polling every 30s is its own
+small storm". **Nothing polls these endpoints every 30s. Nothing polls them on any
+schedule at all**, verified 2026-09-16:
+- `apps/api/railway.json` has **no `healthcheckPath`** — Railway does not probe.
+- Sentry Uptime monitor `8024493` is **still pointed at `https://www.netraops.com`**,
+  not at `/health/crons` — the repoint is unclosed runbook work (see N4 above and
+  `RUNBOOK-phase4-apply.md` step d).
+- The only scheduled probe is `ops-triage`, `cron: '7 13 * * *'` — **once daily**, and
+  its collectors curl each endpoint **twice** per run. So ~**2 probes per endpoint per
+  day**.
+
+Per-probe capture would therefore cost about **2 events/day** today, which is not a
+storm. **The design still holds, for the prospective reason:** the repoint is queued,
+and Sentry Uptime's cadence is minutes — at 1–5 min that is **288–1440 events per
+endpoint per day, for as long as an outage lasts**, against `sampleRate: 1.0`
+(`services/sentry.ts:70`) with no SDK-side dedup. N27 already exhausted the Sentry
+quota once and blinded error monitoring for 94 hours. Edge-triggering makes the
+repoint safe to perform without revisiting this code, which is the point.
+
+**`recover()` fires on the QUERY succeeding, not on the verdict.** `/health/crons` has
+TWO 503 branches: `status: 'stale'` is a *successful* probe reporting a finding — the
+database answered — and only the catch is an error. `recover()` therefore runs
+immediately after the query returns, **before** the stale branch. Putting it after
+would let a stale-cron period suppress the recovery of a DATABASE outage: a different
+fault with a different fix.
+
+**Both 503 bodies are byte-identical to `origin/main`**, proven rather than asserted:
+every response literal in `index.ts` was extracted through the TypeScript parser on
+both sides and diffed — **zero differences across the whole file**. The three
+`res.status(503)` lines are unchanged in content; only their line numbers moved.
+
+**Proven in both directions.** Against the real helper, with `Sentry.captureException`
+replaced by a counting spy and **no DSN set** (so the SDK is never initialised and no
+event could leave the process even without the spy): `fail()`×5 → 5 log lines, **1**
+capture; `recover()` → 1 log, 0 captures; a SECOND outage `fail()`×3 → 3 logs, **1**
+more capture (the flag resets, it does not latch); `recover()`×2 → no capture, no
+throw, one log; two reporters capture independently. Removing the edge guard from the
+real file turns the first assertion into **5 captures** and fails the suite — the exact
+per-probe storm this rejects — and the file's sha256 before and after the revert is
+identical.
+
+**NOT done, deliberately: no end-to-end boot test.** `services/sentry.ts:22` is
+`import 'dotenv/config'` and it is the first import in `index.ts`; `dotenv` resolves
+`.env` from the process CWD, the repo root `.env` exists and defines a database URL,
+and booting `index.ts` also registers all 19 cron jobs — several of which WRITE. A
+local integration test is therefore one cwd mistake away from running crons against
+production. The unit proof above covers the reporter exhaustively; the wiring is four
+lines and typechecked.
+
+`npm --prefix apps/api run check:types` from the repo root: clean.
+
+Original finding, retained:
 verified: YES — `apps/api/src/index.ts:176` and `:219` read at `addb974` (line
 numbers post-N85-fix; `:137` and `:180` before it).
 
