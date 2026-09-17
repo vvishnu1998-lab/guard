@@ -3455,7 +3455,60 @@ count. Two errors, both outside `src/`, is what makes it safe.
 
 ---
 
-**N98. `presentGuards` and `siteFenceCentre` match sites BY NAME, because two admin payloads omit `site_id`.**
+**N98. CLOSED 2026-09-16 — `presentGuards` and `siteFenceCentre` match sites BY NAME, because two admin payloads omit `site_id`.**
+verified: **RESOLVED on branch `fix/n98-site-id-match`**, API + web in one PR.
+`GET /api/admin/live-guards` now projects `ss.site_id` and `GET /api/admin/violations`
+projects `gv.site_id`; both consumers match on it.
+
+**The violations half is PROPHYLACTIC and closes no live defect.** No web consumer matches
+a breach to a site by name — `site_name` appears once in `live-status`, rendering a table
+cell, and the only `siteFenceCentre` call is passed a LIVE-GUARD row. It is added so the
+pair is consistent and so `siteFence.ts`'s docblock, which named BOTH endpoints as the
+reason it matched on name, stops being true of either. Both real matches were fed by
+live-guards alone.
+
+**The name branch stays, deliberately — it is the stale-API bridge.** Vercel and Railway
+are never simultaneous. Between the web deploy and the API deploy that follows it,
+`site_id` is undefined on every row; without the fallback `presentGuards` would be EMPTY
+on every site and `siteFenceCentre` would return null for every click — replacing a rare
+wrong answer with a guaranteed dead one. It costs one ternary and expires on its own.
+
+**No unique index on `(company_id, name)` is being added** — Vishnu ruled. Matching on the
+primary key is correct whether or not names are unique, which makes the index unnecessary
+rather than a prerequisite. Prod read 2026-09-16: **0** same-tenant collisions, **0** null
+or blank site names, 23 sites. Duplicates that do exist are strictly cross-tenant and
+cannot reach this code, because live-guards is scoped `WHERE s.company_id = $1`.
+
+**Proof — the collision prod does not have, seeded.** One tenant, TWO sites with the
+identical name, one guard clocked in on each. The live-guards SQL was extracted from
+`admin.ts` through the TypeScript parser; `presentGuards`' predicate was extracted from
+the page's own source at both refs and evaluated; `siteFenceCentre` was imported, not
+retyped. 13 assertions, all passing:
+
+```
+BEFORE (name match)   site 1 page shows 2 guards,  site 2 page shows 2   <- merged
+AFTER  (id match)     site 1 page shows 1,         site 2 page shows 1
+runningIntervals      BEFORE site 1 reports cadences [30,45] -- 45 is the OTHER site's
+                      AFTER  site 1 [30], site 2 [45]
+FALLBACK              site_id stripped -> re-merges to 2 (bridge works);
+                      without the fallback the same rows give 0
+siteFenceCentre       by id -> the right centre for each; stale -> name, first match
+```
+
+The `runningIntervals` line is the part worth remembering: a name collision did not merely
+list the wrong guards, it reported **another site's ping cadence as this site's** — on the
+surface an admin uses to decide whether a cadence change has taken effect.
+
+**Types stayed additive.** `site_id?` was added only to the two `LiveGuard` declarations
+that read it (`admin/sites/[id]`, `admin/live-status`) and `id?` to `SiteFenceLike`.
+`LiveGuard` is declared THREE times in `apps/web` with no shared module; the third
+(`admin/page.tsx`) never matches by name and was left alone. All four call sites type the
+response through `adminGet<T>` generics rather than object literals, so an API that gains
+a field raises no excess-property error and one that lacks it leaves the field undefined.
+
+`npm --prefix apps/api run check:types` and `npm --prefix apps/web run build`: both clean.
+
+Original finding, retained:
 verified: YES — both consumers and both SQL payloads read at `eeaac6b`.
 
 ```

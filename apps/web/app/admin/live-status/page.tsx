@@ -34,6 +34,9 @@ interface LiveGuard {
   id:              string;
   name:            string;
   badge_number:    string;
+  /** N98. Optional on purpose — an API that has not deployed yet omits it and
+   *  siteFenceCentre falls back to the name match. */
+  site_id?:        string;
   site_name:       string;
   session_id:      string;
   clocked_in_at:   string;
@@ -513,7 +516,9 @@ export default function LiveMapPage() {
                     // No fix at all — not even a clock-in. Send the viewport
                     // to their post rather than doing nothing: the admin
                     // still learns where this guard is supposed to be.
-                    const fence = siteFenceCentre(sitesList, g.site_name);
+                    // N98. id first, name as the stale-API bridge — see
+                    // siteFenceCentre's docblock.
+                    const fence = siteFenceCentre(sitesList, g.site_id, g.site_name);
                     if (fence) setMapFocus({ lat: fence.lat, lng: fence.lng });
                   }}
                   title={locatable ? 'Show on map' : 'No fix yet — show this guard\u2019s post'}
