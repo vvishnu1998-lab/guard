@@ -930,6 +930,14 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
   const result = await pool.query(
     `SELECT
        g.id, g.name, g.badge_number,
+       -- N98. site_id is what the web matches a row to a site on. It used to
+       -- send site_name alone, so apps/web compared NAMES: presentGuards on
+       -- the site detail page and siteFenceCentre in lib/siteFence.ts. Names
+       -- are unique per company in practice and nothing enforces it — there is
+       -- no unique index on (company_id, name) and one is deliberately not
+       -- being added — so the match was one duplicate name away from merging
+       -- two sites' guards into one page.
+       ss.site_id,
        s.name    AS site_name,
        ss.id     AS session_id,
        ss.clocked_in_at,
@@ -1140,6 +1148,14 @@ router.get('/violations', requireAuth('company_admin', 'vishnu'), async (req, re
             (gv.resolved_at IS NOT NULL) AS is_resolved,
             g.name         AS guard_name,
             g.badge_number,
+            -- N98, PROPHYLACTIC. No web consumer matches a breach to a site by
+            -- name today: site_name is rendered on the breach table and nothing
+            -- else reads it. This is here so the pair of payloads is
+            -- consistent, and so siteFence.ts's docblock, which names BOTH
+            -- endpoints as the reason it matches on name, stops being true of
+            -- either. (No backticks in this comment: it lives inside a
+            -- template literal, where one would end the string.)
+            gv.site_id,
             s.name         AS site_name,
             s.timezone     AS site_timezone
      FROM geofence_violations gv
