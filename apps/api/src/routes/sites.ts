@@ -185,9 +185,15 @@ router.put('/:id', requireAuth('company_admin'), async (req, res) => {
        contract_start = COALESCE($3, contract_start),
        contract_end = COALESCE($4, contract_end),
        timezone = COALESCE($5, timezone)
-     WHERE id = $6 RETURNING *`,
-    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, timezone || null, req.params.id]
+     WHERE id = $6 AND company_id = $7 RETURNING *`,
+    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, timezone || null, req.params.id, req.user!.company_id]
   );
+  // N96. The gate above already 404s a foreign site; this is the second half
+  // of the belt and braces. The gate is a SEPARATE statement on a SEPARATE
+  // pooled connection, so its verdict is a read that the write does not
+  // inherit — scoping the write is what makes the tenant check part of the
+  // mutation rather than a promise made a moment earlier.
+  if (!result.rows[0]) return res.status(404).json({ error: 'Site not found' });
   res.json(result.rows[0]);
 });
 
@@ -355,10 +361,13 @@ router.post('/:id/instructions', requireAuth('company_admin'), upload.single('fi
   const key = `site-instructions/${req.params.id}/instructions.pdf`;
   const url = await uploadBufferToS3(key, buf, 'application/pdf');
 
-  await pool.query(
-    'UPDATE sites SET instructions_pdf_url = $1 WHERE id = $2',
-    [url, req.params.id]
+  const result = await pool.query(
+    'UPDATE sites SET instructions_pdf_url = $1 WHERE id = $2 AND company_id = $3',
+    [url, req.params.id, req.user!.company_id]
   );
+  // N96. rowCount, not rows[0]: this statement has no RETURNING, so rows is
+  // always empty and a rows[0] test would 404 every upload.
+  if (result.rowCount === 0) return res.status(404).json({ error: 'Site not found' });
 
   res.json({ url, key });
 });
@@ -413,7 +422,7 @@ router.patch('/:id/client-access', requireAuth('company_admin', 'vishnu'), async
   if (!siteRow.rows[0]) return res.status(404).json({ error: 'Site not found' });
   if (!siteRow.rows[0].is_active) return res.status(409).json({ error: 'Site is deactivated. Reactivate it before making changes.' });
 
-  await Promise.all([
+  const [, siteUpdate] = await Promise.all([
     // v36 multi-site: don't touch clients.is_active (that's a per-client
     // global) — just kick any live JWT whose baked-in site_id was this
     // site by bumping tokens_not_before. Filter to clients actually
@@ -425,11 +434,26 @@ router.patch('/:id/client-access', requireAuth('company_admin', 'vishnu'), async
         WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
       [req.params.id],
     ),
-    pool.query(
-      `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
-      [req.params.id],
-    ),
+    // N96. Tenant-scoped for a company_admin, deliberately NOT for vishnu —
+    // mirroring the gate at the top of this route, which picks an unscoped
+    // SELECT for the same reason. This route grants cross-tenant access to the
+    // super-admin BY DESIGN, and `company_id` is optional on AuthPayload and
+    // absent for that role, so an unconditional predicate here would compare
+    // against undefined and refuse every super-admin call.
+    isVishnu
+      ? pool.query(
+          `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
+          [req.params.id],
+        )
+      : pool.query(
+          `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'}
+            WHERE id = $1 AND company_id = $2`,
+          [req.params.id, req.user!.company_id],
+        ),
   ]);
+
+  // N96. rowCount on the sites write — no RETURNING on either arm.
+  if (siteUpdate.rowCount === 0) return res.status(404).json({ error: 'Site not found' });
 
   res.json({ success: true });
 });
@@ -514,10 +538,12 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
 
   // Reactivation branch — single flag update per policy.
   if (active) {
-    await pool.query(
-      'UPDATE sites SET is_active = true WHERE id = $1',
-      [req.params.id],
+    const reactivated = await pool.query(
+      'UPDATE sites SET is_active = true WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.user!.company_id],
     );
+    // N96. rowCount — no RETURNING on this statement.
+    if (reactivated.rowCount === 0) return res.status(404).json({ error: 'Site not found' });
     return res.json({ success: true, cascaded: null });
   }
 
@@ -526,10 +552,17 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
   const affectedGuardIds = new Set<string>();
   try {
     await client.query('BEGIN');
-    await client.query(
-      'UPDATE sites SET is_active = false, client_access_disabled_at = NOW() WHERE id = $1',
-      [req.params.id],
+    const deactivated = await client.query(
+      'UPDATE sites SET is_active = false, client_access_disabled_at = NOW() WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.user!.company_id],
     );
+    // N96. rowCount — no RETURNING. ROLLBACK first: this is the head of a
+    // cascade that goes on to unassign guards and revoke client sessions, and
+    // none of that may survive a site the write could not match.
+    if (deactivated.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Site not found' });
+    }
     // v36 multi-site: kick any live client session whose JWT baked in
     // this site_id. Don't touch clients.is_active — a client covering
     // sites A, B, C shouldn't lose global access just because B was

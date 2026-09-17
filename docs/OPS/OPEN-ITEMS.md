@@ -3195,7 +3195,76 @@ Filed by the read-only audit at `eeaac6b` that re-derived N79/N89/N91/N92/N93/N9
 source and production. These three were found during that pass and had **never been filed
 under any number** — two of them existed only as comments in the code that works around them.
 
-**N96. Six `UPDATE sites` statements across five routes carry no `company_id`; tenancy rests entirely on a separate preceding read.**
+**N96. CLOSED 2026-09-16 — FIVE (not six) `UPDATE sites` statements across four routes carry no `company_id`; tenancy rests entirely on a separate preceding read.**
+verified: **RESOLVED on branch `fix/n96-scope-sites-writes`.** Every one of the five now
+carries `AND company_id = $N` plus a 404 branch, matching `/:id/toggles`:
+
+```
+sites.ts  PUT   /:id                  rows[0]  (this one has RETURNING *)
+sites.ts  POST  /:id/instructions     rowCount
+sites.ts  PATCH /:id/client-access    rowCount   (company_admin arm only — see below)
+sites.ts  PATCH /:id/active           rowCount   (reactivate)
+sites.ts  PATCH /:id/active           rowCount   (deactivate, ROLLBACK before the 404)
+```
+
+**COUNT CORRECTED: five, not six.** This item listed `:314`
+(`PATCH /:id/ping-interval`) as unscoped. **It was already scoped** —
+`WHERE id = $2 AND company_id = $3` — and it is in fact the strongest of the set, doing
+its tenant check under `FOR UPDATE` inside a transaction. The audit that filed this used a
+line-oriented grep, which truncated the multi-line statement at
+`UPDATE sites SET ping_interval_minutes = $1` and never saw the WHERE on the next line.
+**That route was not touched.** The lesson is the same one N97 taught from the other
+direction: a grep that reads one line of a multi-line statement is not reading the
+statement.
+
+**`rowCount`, not `rows[0]`, on four of the five.** Only `PUT /:id` has a `RETURNING`
+clause. On the other four `rows` is always empty, so a `rows[0]` test would have 404'd
+**every** successful call — a self-inflicted outage on the instructions upload, the
+client-access toggle and both halves of activate/deactivate.
+
+**`/:id/client-access` keeps a conditional predicate, deliberately.** That route is
+`requireAuth('company_admin', 'vishnu')` and its gate already picks an UNSCOPED select
+for the super-admin, because cross-tenant access is what that role is for. `company_id`
+is optional on `AuthPayload` and absent for `vishnu`, so an unconditional predicate would
+compare against `undefined` and refuse every super-admin call. The UPDATE mirrors the
+gate's own ternary.
+
+**The deactivate branch ROLLBACKs before its 404.** It is the head of a cascade that goes
+on to unassign guards and revoke client sessions; none of that may survive a site the
+write could not match.
+
+**Proof — 15 cases, SQL extracted through the TypeScript parser, never retyped.** Two
+tenants, one site each, every statement run against a throwaway local PG, each case in a
+transaction that is rolled back:
+
+```
+HEAD, tenant A's company_id vs tenant B's site   -> rowCount 0   x5   (matches nothing)
+HEAD, tenant A's company_id vs tenant A's site   -> rowCount 1   x5   (no regression)
+origin/main, same statement vs tenant B's site   -> rowCount 1   x5   (the latent leak)
+```
+
+**Route-level control, with the gate temporarily bypassed so the request reaches the
+write:** a cross-tenant `PUT /api/sites/<B's site>` from a tenant-A admin returns **404**
+after the fix and returned **200** before — and on the pre-fix run tenant B's site name
+was actually changed to `CROSS TENANT WRITE ATTEMPT`, confirmed by reading the row back.
+That is what the gate has been the only thing preventing.
+
+**Still not a live leak, and the framing has not changed:** every one of the five is
+preceded by a tenant-scoped read that 404s a foreign site, and nothing in the repo ever
+writes `sites.company_id`. Production confirms there is no path behind the application
+either — `sites.company_id` is `uuid NOT NULL`, and `sites` carries **0** user triggers,
+**0** rules, **0** RLS policies, `relrowsecurity = false` (read 2026-09-16). The fix
+closes a window that required a future "move a site between tenants" feature, or a
+seventh route copied from the unscoped shape with its gate forgotten.
+
+`npm --prefix apps/api run check:types` from the repo root: clean.
+
+**Out of scope, noted for its own item:** the sibling `UPDATE clients SET
+tokens_not_before = NOW() WHERE id IN (SELECT client_id FROM client_sites WHERE site_id =
+$1)` in the same `Promise.all` is also untenanted. It is a different table and was not
+touched here.
+
+Original finding, retained:
 verified: YES — `apps/api/src/routes/sites.ts` read in full at `eeaac6b`.
 
 ```
