@@ -785,35 +785,25 @@ router.patch('/:id/assign-guard', requireAuth('company_admin', 'vishnu'), async 
     // OVERLAP CHECK — absent before. Assigning a guard is exactly as capable
     // of double-booking them as reassigning one, and this route had no check
     // at all. Same predicate and 409 shape as reassign.
-    const overlap = await client.query(
-      `SELECT 1 FROM shifts
-        WHERE guard_id = $1
-          AND id      != $2
-          AND status IN ('scheduled','active')
-          AND scheduled_start < $4
-          AND scheduled_end   > $3
-        LIMIT 1`,
-      [guard_id, id, shift.scheduled_start, shift.scheduled_end],
+    // N95. IDENTICAL TO THE RACE PATH BY CONSTRUCTION, not by agreement.
+    // schema_v77's exclusion constraint made this one condition reachable
+    // twice in a single request: here as a pre-flight, and again at COMMIT as
+    // SQLSTATE 23P01. Both now resolve the collision the same way and render
+    // it through the SAME function, so there is no second body shape to drift.
+    // It used to be `SELECT 1`, which had no columns to name the offending
+    // shift — so the admin got a MORE useful message when they lost a race
+    // than when they hit the ordinary check, which is backwards.
+    //
+    // `client`, not the default `pool`: this runs inside the transaction
+    // opened above and must see its snapshot. The race path deliberately uses
+    // `pool` instead — by then the 23P01 has aborted this client and any
+    // further statement on it raises 25P02.
+    const conflict = await findOverlappingShift(
+      guard_id, shift.scheduled_start, shift.scheduled_end, id, client,
     );
-    if (overlap.rows[0]) {
+    if (conflict) {
       await client.query('ROLLBACK');
-      // ADOPTS the code the RACE path already emits, never the reverse.
-      // schema_v77's exclusion constraint made this same condition reachable
-      // twice in one request: here as a pre-flight check, and again at COMMIT
-      // as SQLSTATE 23P01, which the catch at the bottom answers with
-      // guardOverlapRaceBody -> code 'GUARD_OVERLAP'. Before this, the two
-      // sent different body shapes for one failure, milliseconds apart.
-      //
-      // STILL NOT IDENTICAL, deliberately: the race body also carries a
-      // `conflict` object naming the colliding shift. This query is
-      // `SELECT 1` and has no columns to build one from. Closing that gap
-      // means routing this through findOverlappingShift, which would also
-      // change the prose — a wider change than adopting the code, and not
-      // part of this one.
-      return res.status(409).json({
-        code:  'GUARD_OVERLAP',
-        error: 'Selected guard has an overlapping shift in the same time window.',
-      });
+      return res.status(409).json(guardOverlapRaceBody(conflict));
     }
 
     // Re-arm the reminder chain for the incoming guard: an unassigned shift
@@ -1001,27 +991,20 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
     }
 
     // Overlap check: any OTHER scheduled/active shift the new guard holds in
-    // the same time window. Past shifts (completed/missed) can't overlap a
-    // future window in any meaningful sense, but we filter them explicitly
-    // for clarity.
-    const overlap = await client.query(
-      `SELECT 1 FROM shifts
-        WHERE guard_id = $1
-          AND id      != $2
-          AND status IN ('scheduled','active')
-          AND scheduled_start < $4
-          AND scheduled_end   > $3
-        LIMIT 1`,
-      [new_guard_id, id, shift.scheduled_start, shift.scheduled_end],
+    // the same time window. The status filter lives inside
+    // findOverlappingShift's predicate — past shifts (completed/missed) can't
+    // overlap a future window in any meaningful sense, but it filters them
+    // explicitly for clarity.
+    //
+    // N95. Same body as the race path by construction — see the twin in
+    // assign-guard above. `client`, not `pool`: this is inside the
+    // transaction opened above.
+    const conflict = await findOverlappingShift(
+      new_guard_id, shift.scheduled_start, shift.scheduled_end, id, client,
     );
-    if (overlap.rows[0]) {
+    if (conflict) {
       await client.query('ROLLBACK');
-      // Adopts the race path's code — see the twin in assign-guard above for
-      // why, and for why `conflict` is deliberately still absent here.
-      return res.status(409).json({
-        code:  'GUARD_OVERLAP',
-        error: 'Selected guard has an overlapping shift in the same time window.',
-      });
+      return res.status(409).json(guardOverlapRaceBody(conflict));
     }
 
     // Re-arm the reminder chain for the incoming guard. This used to be an
