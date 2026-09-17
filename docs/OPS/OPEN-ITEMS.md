@@ -3024,7 +3024,63 @@ in the predicate, so the migration's reasoning is untouched.
 
 ## New from N83 assign-route codes (2026-09-15)
 
-**N95. The two assign routes now agree on the overlap CODE but not on the overlap BODY — the race carries a `conflict` object the pre-flight cannot build.**
+**N95. CLOSED 2026-09-16 — the two assign routes now agree on the overlap CODE but not on the overlap BODY — the race carries a `conflict` object the pre-flight cannot build.**
+verified: **RESOLVED on branch `fix/n95-overlap-body-shape`**, API + web in one PR
+because the two halves cannot ship apart (see below). Both pre-flights now call
+`findOverlappingShift(…, client)` and render through `guardOverlapRaceBody` — the
+same function the race path already used.
+
+**Identity is BY CONSTRUCTION, not by two call sites agreeing.** There is no second
+body literal left to drift. This is also why the pre-flight does not spread
+`overlapConflictBody` directly, which was the obvious-looking fix: that emits
+`{code, error, conflict}` and drops `message`, which the race body carries — and the
+two would have differed again, silently, with a green diff.
+
+**Proofs.** Error values extracted from `shifts.ts` through the TypeScript parser,
+not retyped (PR #42/#55 standard): **202 → 200** distinct response-body key/value
+pairs, the diff being exactly two REMOVALS and **zero additions** —
+`code "GUARD_OVERLAP"` and `error "Selected guard has an overlapping shift in the
+same time window."`. **No new prose entered the system:** `services/shiftOverlap.ts`
+is untouched, so the sentence the pre-flight now emits is the one the race path has
+emitted since PR #52.
+
+Bodies, on a local throwaway PG carrying schema_v77's constraint verbatim and
+importing the repo's own helpers: for BOTH routes the pre-flight 409 and a **real**
+23P01 409 (SQLSTATE 23P01 on `shifts_no_guard_overlap`, not a simulated error object)
+serialise byte-identical, with a negative control proving `findOverlappingShift`
+returns null on a clear window — an identity test passes trivially against a function
+that always returns the same thing.
+
+**The web half was not optional, and it was already broken.**
+`admin/shifts/[shiftId]/page.tsx` matched on PROSE: `msg.includes('overlapping
+shift')`. The race body has ALWAYS read "These hours overlap <name>'s shift at
+<site>…", which does not contain that substring — so **a lost race already fell
+through to the raw-message branch and printed server prose the mapped copy existed to
+replace.** Shipping the API half alone would have extended that miss from the rare
+case to the common one. Both branches now key on `body.code` (`GUARD_OVERLAP`,
+`SHIFT_NOT_ASSIGNABLE`).
+
+**Stale-API safe, verified against `origin/main` rather than assumed:** both codes are
+emitted by the OLD API too — `SHIFT_NOT_ASSIGNABLE` and `GUARD_OVERLAP` are both
+present in the pre-N95 reassign route, and `guardOverlapRaceBody` has always supplied
+`code`. So the web branch is correct against an un-deployed API and a deployed one,
+and Vercel/Railway never being simultaneous costs nothing here.
+
+**Client-visible prose changed on two surfaces, in opposite directions.**
+1. `AssignGuardModal` renders `body.error` verbatim, so an admin assigning into a
+   conflict now reads WHICH shift collides instead of a bare sentence. Improvement.
+2. The reassign modal's **race** case now renders the mapped copy instead of raw
+   server prose. Its pre-flight case is unchanged.
+   `BulkShiftActions` is unaffected — it maps the code and reads "Busy elsewhere"
+   either way, deliberately, so an admin cannot tell a race from an ordinary conflict.
+
+**One behavioural difference, deliberate.** `resolveOverlapAfterRace` swallows a failed
+lookup and returns null, because a race that cannot name its conflict should still
+answer 409. The pre-flight calls `findOverlappingShift` directly and will THROW on a DB
+error, landing in the route catch as a 500. Correct for an in-transaction read: the
+transaction is already doomed, and 409-shaped prose would hide a database fault.
+
+Original finding, retained:
 verified: YES — `apps/api/src/routes/shifts.ts`, both routes, read after N83.
 
 schema_v77's exclusion constraint made one condition reachable twice inside a

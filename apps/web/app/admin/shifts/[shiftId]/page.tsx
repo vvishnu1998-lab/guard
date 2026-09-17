@@ -380,10 +380,26 @@ export default function ShiftDetailPage() {
       await load();
     } catch (e: any) {
       const msg = String(e?.message ?? '');
-      // Map server error codes to operator-friendly messages.
-      if (msg.includes('overlapping shift')) {
+      // Map server error CODES to operator-friendly messages.
+      //
+      // N95. These two used to match on PROSE — msg.includes('overlapping
+      // shift') and msg.includes('cannot be reassigned') — and the first was
+      // already broken. PATCH /:id/reassign answers an overlap twice: as a
+      // pre-flight 409 and, when a concurrent write takes the window, as a
+      // 23P01 race 409. The race body has ALWAYS said "These hours overlap
+      // <name>'s shift at <site>…", which does not contain the substring
+      // "overlapping shift", so a lost race fell through to the raw-message
+      // branch and printed server prose the copy below was written to replace.
+      // Nobody saw it because the race is rare — a client that silently takes
+      // the wrong branch reports nothing.
+      //
+      // `code` is the stable contract and `error` is copy that gets reworded;
+      // every reword silently breaks whatever was matching it. adminApi.ts
+      // keeps the whole parsed body on ApiError.body for exactly this.
+      const code = (e as ApiError)?.body?.code;
+      if (code === 'GUARD_OVERLAP') {
         setSubmitErr('Selected guard has an overlapping shift in the same time window.');
-      } else if (msg.includes('cannot be reassigned')) {
+      } else if (code === 'SHIFT_NOT_ASSIGNABLE') {
         setSubmitErr('This shift cannot be reassigned — it has already completed or was marked missed.');
       } else {
         setSubmitErr(msg || 'Reassignment failed. Please try again.');
