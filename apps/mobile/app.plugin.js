@@ -11,7 +11,14 @@ module.exports = function withAndroidSdkVersion(config) {
         props.push({ type: 'property', key, value });
       }
     };
-    set('android.targetSdkVersion', '35');
+    // Play requires targetSdkVersion 36 for production releases as of this
+    // release; vc25 was rejected for targeting 35. Expo SDK 54 defaults to 36
+    // for both values, and the previous '35' here was a leftover from SDK 51.
+    // compileSdkVersion is pinned alongside it because you cannot target 36
+    // while compiling against 35, and the repo otherwise inherits it from a
+    // prebuild template that is not checked in.
+    set('android.targetSdkVersion', '36');
+    set('android.compileSdkVersion', '36');
     return config;
   });
 };
