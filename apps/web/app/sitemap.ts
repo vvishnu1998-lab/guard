@@ -10,5 +10,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${base}/security`, changeFrequency: 'monthly', priority: 0.5 },
     { url: `${base}/privacy`, changeFrequency: 'yearly', priority: 0.3 },
     { url: `${base}/terms`, changeFrequency: 'yearly', priority: 0.3 },
+    // Referenced from the Play Console Data safety form, so it must stay
+    // crawlable and must not move without updating that field.
+    { url: `${base}/data-deletion`, changeFrequency: 'yearly', priority: 0.3 },
   ];
 }
