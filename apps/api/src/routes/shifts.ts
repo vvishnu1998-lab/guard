@@ -3131,8 +3131,58 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
     // shift, plus live elapsed since clocked_in_at for any still-open session.
     // Replaces the mobile profile's old (scheduled_end - scheduled_start)
     // calculation, which credited no-show shifts with the full scheduled time.
+    //
+    // ── WHY THE LIMIT IS INSIDE A SUBQUERY AND THE ORDER FLIPS TWICE ──────
+    //
+    // This used to be a bare `ORDER BY s.scheduled_start DESC LIMIT 50`, which
+    // returns the fifty FURTHEST-FUTURE shifts — not the next fifty. A guard
+    // with more than 50 rows therefore lost the PRESENT off the bottom of the
+    // payload. Observed on a Star Guard guard with 98 rows (74 of them
+    // cancelled residue from repeated reschedules): their live shift fell past
+    // row 50, home.tsx picked the earliest row it could see, and the home
+    // screen offered a shift two weeks out with CLOCK IN disabled. Silent —
+    // no error, no empty state, just a confidently wrong date.
+    //
+    // The inner query orders ASCENDING so the LIMIT truncates the far future
+    // instead of the present. KEEP THE SUBQUERY EVEN THOUGH NOTHING TRUNCATES
+    // AT 200 TODAY — it is the guarantee that when a guard does cross the cap,
+    // the row that survives is the one they are standing in, not the one
+    // furthest away. Collapsing it back to a bare ORDER BY ... DESC LIMIT
+    // reintroduces the original bug the moment the fleet grows into it.
+    //
+    // The cap is 200, not the historical 50. Fifty was a payload backstop, not
+    // a product requirement, and it had quietly become an active truncator: at
+    // 50 the ascending order lopped rows off the RECENT end for anyone over
+    // the cap, which cost one real guard two shifts from their profile hours
+    // view. Measured across the fleet inside the 120-day window, the worst
+    // case is 98 rows and the 95th percentile is 77; nobody exceeds 100. So
+    // 200 leaves every current guard whole while staying a tight bound.
+    //
+    // The outer re-sorts DESCENDING because the wire order is load-bearing for
+    // a client we cannot roll back:
+    // apps/mobile/app/(tabs)/profile.tsx:85 does `completedShifts.slice(0, 20)`
+    // with NO sort of its own, so it renders whatever the server sent first.
+    // Flip this to ascending on the wire and every guard's "recent shifts"
+    // silently becomes their twenty OLDEST. home.tsx re-sorts ascending itself
+    // and schedule.tsx buckets by day, so those two do not care — profile does.
+    //
+    // The 120-day anchor is sized from that same profile screen, which renders
+    // from the first day of the month three months back (profile.tsx:79) —
+    // 109 days today, up to 120 at month end. Seven days, the first proposal,
+    // would have emptied the profile's three-month view and zeroed its month
+    // total for every guard.
+    //
+    // Cancelled rows are deliberately NOT excluded here. They are dead weight
+    // for home and profile, which filter them out, but schedule.tsx renders
+    // every status it receives with a badge (:249). Dropping them server-side
+    // is a visible change to the schedule tab on handsets outside the current
+    // OTA group's reach, so it rides the next mobile batch instead, where the
+    // client can be taught to render them deliberately. The subquery alone
+    // fixes the truncation bug; excluding cancelled is an optimisation, not
+    // part of the fix.
     result = await pool.query(
-      `SELECT s.*, si.name as site_name, si.timezone AS site_tz,
+      `SELECT * FROM (
+       SELECT s.*, si.name as site_name, si.timezone AS site_tz,
               si.is_active AS site_is_active, si.instructions_pdf_url,
               COALESCE(si.photo_limit_override, co.default_photo_limit, 5) AS effective_photo_limit,
               COALESCE(ss_agg.sum_completed_hours, 0)
@@ -3168,7 +3218,12 @@ router.get('/', requireAuth('guard', 'company_admin', 'vishnu'), async (req, res
          WHERE ss.guard_id = $1
          GROUP BY ss.shift_id
        ) ss_hrs ON ss_hrs.shift_id = s.id
-       WHERE s.guard_id = $1 ORDER BY s.scheduled_start DESC LIMIT 50`,
+       WHERE s.guard_id = $1
+         AND s.scheduled_end > NOW() - INTERVAL '120 days'
+       ORDER BY s.scheduled_start ASC
+       LIMIT 200
+     ) t
+     ORDER BY t.scheduled_start DESC`,
       [user!.sub]
     );
   } else {
