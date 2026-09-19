@@ -145,7 +145,14 @@ export async function runOrphanedSessionCheck(): Promise<number> {
   }
 }
 
-// :10 past the hour — chatRetention already holds '0 * * * *', and
-// locationIntegrityCron set the precedent of offsetting so two jobs never
-// contend. :10 is also clear of nightlyPurge (00:00) and its 00:20 scan.
+// :10 past the hour. The original reason was that chatRetention held
+// '0 * * * *'; it moved to '37 4 * * *' on 2026-09-19, so the top of the
+// hour is now free and this offset no longer separates the two. :10 is KEPT
+// because moving a working hourly job buys nothing, not because it still
+// avoids what it was chosen to avoid. Still clear of nightlyPurge (00:00)
+// and its 00:20 scan.
+//
+// Worth knowing if this is ever revisited: :10 is a multiple of 5, so this
+// job co-fires with all eleven five-minute jobs anyway. The separation it
+// achieves is from the two other HOURLY-or-longer jobs, not from the bulk.
 runJob('orphanedSessionCheck', '10 * * * *', runOrphanedSessionCheck, { sentryMonitor: false });

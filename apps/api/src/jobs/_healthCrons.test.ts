@@ -57,14 +57,25 @@ function test(name: string, fn: () => void): void {
 }
 
 /**
- * The 19 expressions actually in use, copied from the runJob call sites.
- * If a job's schedule changes and this table is not updated, the mismatch
- * assertion at the bottom fails.
+ * The 20 expressions actually in use, copied by hand from the runJob call
+ * sites.
+ *
+ * NOTHING ENFORCES THAT COPY. This table is consumed only by the
+ * cronIntervalSeconds loop below, which asserts a pure function against the
+ * literals written here — so a stale row asserts the OLD expression's
+ * interval, passes, and proves nothing about the job. There is no mismatch
+ * assertion against the live registry; the sentence that used to claim one
+ * was wrong, and chatRetention's move from '0 * * * *' to '30 4 * * *' on
+ * 2026-09-19 is the change that found it. Updating this table is a manual
+ * step, and it had already drifted: unstaffedPostWarning (added 2026-09-11)
+ * was missing entirely, so the table listed 19 jobs where 20 register. A
+ * real check would have to import the jobs for their registration
+ * side-effects, which starts 20 cron schedules inside the test process.
  */
 const LIVE_JOBS: Array<[string, string, number]> = [
   ['autoCompleteShifts',    '*/5 * * * *',  300],
   ['breakExpiryCron',       '* * * * *',     60],
-  ['chatRetention',         '0 * * * *',   3600],
+  ['chatRetention',         '37 4 * * *', 86400],
   ['clockOutReminder',      '*/5 * * * *',  300],
   ['dailyShiftEmail',       '0 9 * * *',  86400],
   ['expireSwapRequests',    '* * * * *',     60],
@@ -81,6 +92,7 @@ const LIVE_JOBS: Array<[string, string, number]> = [
   ['preShiftReminder',      '*/5 * * * *',  300],
   ['shiftStartReminder',    '*/5 * * * *',  300],
   ['taskDueCron',           '*/5 * * * *',  300],
+  ['unstaffedPostWarning',  '*/5 * * * *',  300],
 ];
 
 console.log('cronIntervalSeconds + computeStaleJobs\n');
