@@ -76,10 +76,74 @@ export function createPresignedUploadPost(
   });
 }
 
-/** Delete a single S3 object — called by nightly purge job */
-export async function deleteS3Object(url: string): Promise<void> {
-  const key = new URL(url).pathname.replace(/^\//, '');
-  await s3.deleteObject({ Bucket: BUCKET, Key: key }).promise();
+/**
+ * The outcome of one delete attempt. Returned, never thrown, so the caller
+ * can count each class instead of discovering them through a catch.
+ *
+ *   deleted — the object is gone (or was already gone; S3 DELETE is idempotent)
+ *   skipped — we declined to act. NOT a failure: nothing was wrong except the
+ *             stored value, and retrying will not change that
+ *   failed  — a well-formed key we should have deleted and could not. Retryable
+ */
+export type S3DeleteOutcome =
+  | { status: 'deleted' }
+  | { status: 'skipped'; reason: 'malformed' | 'not-our-bucket'; value: string }
+  | { status: 'failed'; error: string };
+
+/**
+ * Delete a single S3 object — called by the nightly purge job.
+ *
+ * ── WHAT THIS REPLACED ──────────────────────────────────────────────────
+ *
+ * The body was `new URL(url).pathname` fed straight to deleteObject. Two
+ * things are wrong with that, and only one of them is hypothetical.
+ *
+ * THE ONE THAT BITES TODAY: `new URL()` THROWS on a value that is not a URL,
+ * and all four call sites wrapped it in a bare `catch { /* already gone *\/ }`.
+ * 11 clock_in_verifications rows hold the literal string `pending` (measured
+ * 2026-09-19). Under the old shape each one raised a TypeError that was
+ * swallowed as if the object had been cleaned up. Now it returns
+ * `skipped:'malformed'` and lands in a counter.
+ *
+ * THE ONE THAT DOES NOT, YET: taking the PATH of whatever is stored and
+ * deleting that key from OUR bucket means a row holding some other host's URL
+ * makes us delete the same path out of guard-media-prod. Measured across all
+ * 15 pointer columns, 3,979 values: every single one is either the configured
+ * bucket host or one of those 11 `pending` literals, so there is no such row
+ * in production. Nor is there an obvious route that would write one — every
+ * client-supplied pointer is already gated on THIS SAME VALIDATOR at
+ * routes/reports.ts:437, routes/inspections.ts:98, and
+ * services/photoValidation.ts (used by the ping and clock-out paths). The
+ * remaining columns are server-generated.
+ *
+ * So the host check here is defence in depth at the destructive end of the
+ * system rather than a fix for a live hole: it costs one call, and it means
+ * the purge's correctness does not depend on every current and future writer
+ * getting its gate right.
+ *
+ * ── AND IT MUST BE THE STRICT VALIDATOR ─────────────────────────────────
+ *
+ * `extractS3Key` (below) deliberately falls back to a foreign host's pathname,
+ * with a warning, because a READ path would rather try and fail than refuse.
+ * That fallback is precisely the substitution described above, so a DELETE
+ * must use `s3KeyFromPublicUrl` and must treat null as "do not touch it".
+ */
+export async function deleteS3Object(url: string): Promise<S3DeleteOutcome> {
+  const key = s3KeyFromPublicUrl(url);
+  if (!key) {
+    // Distinguish the two reasons so a count is actionable: a bare key or a
+    // sentinel such as the literal 'pending' is a data-shape problem in the
+    // writer, while a foreign host is the substitution case above.
+    let reason: 'malformed' | 'not-our-bucket' = 'malformed';
+    try { new URL(url); reason = 'not-our-bucket'; } catch { /* stays malformed */ }
+    return { status: 'skipped', reason, value: url };
+  }
+  try {
+    await s3.deleteObject({ Bucket: BUCKET, Key: key }).promise();
+    return { status: 'deleted' };
+  } catch (err) {
+    return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /**
