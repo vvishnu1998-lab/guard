@@ -93,11 +93,24 @@ export interface OffPostEventInput {
   /** The break open at the time, when there was one. Requires schema_v61. */
   breakSessionId?: string | null;
   expiresAt: Date | string | null;
+  /**
+   * Hold inheritance, threaded from the caller rather than looked up here.
+   * This service is the ONE write path that holds no shift_sessions row, so
+   * the alternative was a round trip on a function that already runs inside
+   * the caller's transaction. REQUIRED, not optional: an omitted flag would
+   * silently mint an unheld row on a held session, which is the exact defect
+   * insert-time inheritance exists to close, so tsc is the gate.
+   */
+  legalHold: boolean;
+  /** The parent session's hold timestamp, inherited verbatim. Written only
+   *  where schema_v78 has landed — see the probe. */
+  legalHoldAt?: Date | null;
 }
 
 interface TableCapability {
   hasBreakSessionId: boolean;
   hasPositionSource: boolean;
+  hasLegalHoldAt: boolean;
   reasonMaxLen: number;
   coordsNullable: boolean;
 }
@@ -113,7 +126,7 @@ async function capability(db: Pool | PoolClient): Promise<TableCapability> {
   // Cache a fully-positive probe for the life of the process; re-probe a
   // partial one on the TTL so applying the missing migration heals a running
   // API within a minute instead of needing a restart.
-  const allPresent = cached?.hasBreakSessionId && cached?.hasPositionSource;
+  const allPresent = cached?.hasBreakSessionId && cached?.hasPositionSource && cached?.hasLegalHoldAt;
   const fresh = cached && (allPresent || Date.now() - cachedAt < PROBE_TTL_MS);
   if (cached && fresh) return cached;
   try {
@@ -121,19 +134,20 @@ async function capability(db: Pool | PoolClient): Promise<TableCapability> {
       `SELECT column_name, is_nullable, character_maximum_length
          FROM information_schema.columns
         WHERE table_name = 'off_post_events'
-          AND column_name IN ('break_session_id', 'reason', 'lat', 'position_source')`,
+          AND column_name IN ('break_session_id', 'reason', 'lat', 'position_source', 'legal_hold_at')`,
     );
     const reason = rows.find((r) => r.column_name === 'reason');
     const lat    = rows.find((r) => r.column_name === 'lat');
     cached = {
       hasBreakSessionId: rows.some((r) => r.column_name === 'break_session_id'),
       hasPositionSource: rows.some((r) => r.column_name === 'position_source'),
+      hasLegalHoldAt:    rows.some((r) => r.column_name === 'legal_hold_at'),
       reasonMaxLen:      reason?.character_maximum_length ?? 16,
       coordsNullable:    lat?.is_nullable === 'YES',
     };
     cachedAt = Date.now();
   } catch {
-    cached = { hasBreakSessionId: false, hasPositionSource: false, reasonMaxLen: 16, coordsNullable: false };
+    cached = { hasBreakSessionId: false, hasPositionSource: false, hasLegalHoldAt: false, reasonMaxLen: 16, coordsNullable: false };
     cachedAt = Date.now();
   }
   return cached;
@@ -178,12 +192,21 @@ export async function recordOffPostEvent(
       ? null
       : input.reason.slice(0, cap.reasonMaxLen);
 
+    // legal_hold is unconditional: the column is NOT NULL DEFAULT false and
+    // predates schema_v78, so it exists on every database this runs against.
+    // legal_hold_at is v78-only and therefore probed below — referencing it
+    // unconditionally on an older schema raises 42703, and because this
+    // function swallows everything that would SILENTLY stop recording every
+    // off-post row. That is the regression this module's header warns about,
+    // and it is why the push below is paired with its value, never split.
     const cols = ['shift_session_id', 'guard_id', 'site_id', 'source',
-                  'lat', 'lng', 'accuracy_m', 'distance_m', 'reason', 'expires_at'];
+                  'lat', 'lng', 'accuracy_m', 'distance_m', 'reason', 'expires_at',
+                  'legal_hold'];
     const vals: unknown[] = [
       input.shiftSessionId, input.guardId, input.siteId, input.source,
       input.lat, input.lng, input.accuracyM ?? null, input.distanceM ?? null,
       reason, input.expiresAt,
+      input.legalHold,
     ];
 
     // Probed, not assumed — for the same reason break_session_id is. An
@@ -199,6 +222,17 @@ export async function recordOffPostEvent(
         `[off_post_events.position_source_dropped] source=${input.source} ` +
         `session=${input.shiftSessionId} value=${input.positionSource} — column absent ` +
         `(schema_v65 not applied); row still written without provenance`,
+      );
+    }
+
+    if (cap.hasLegalHoldAt) {
+      cols.push('legal_hold_at');
+      vals.push(input.legalHoldAt ?? null);
+    } else if (input.legalHold) {
+      console.warn(
+        `[off_post_events.hold_at_dropped] source=${input.source} session=${input.shiftSessionId} ` +
+        `— legal_hold_at column absent (schema_v78 not applied); row still written and still HELD, ` +
+        `without the timestamp`,
       );
     }
 

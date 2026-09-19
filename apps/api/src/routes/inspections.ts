@@ -26,6 +26,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { expiresAtFor } from '../services/retention';
+import { INHERIT_HOLD_COLUMNS, INHERIT_HOLD_FROM_SESSION_SQL } from '../services/legalHold';
 import { getS3ObjectHead, s3KeyFromPublicUrl, urlOrPresign } from '../services/s3';
 import { isAllowedContentType, magicMatches, describeMagic } from '../services/imageMagic';
 import { siteLocalDayRange } from '../services/dateRange';
@@ -173,8 +174,9 @@ router.post('/', requireAuth('guard'), async (req, res) => {
   if (!vehicleResult.rows[0]) return res.status(404).json({ error: 'Vehicle not found at this site' });
 
   const inserted = await pool.query(
-    `INSERT INTO vehicle_inspections (shift_session_id, vehicle_id, expires_at)
-     VALUES ($1, $2, $3)
+    `INSERT INTO vehicle_inspections (shift_session_id, vehicle_id, expires_at,
+                                      ${INHERIT_HOLD_COLUMNS})
+     VALUES ($1, $2, $3, ${INHERIT_HOLD_FROM_SESSION_SQL('$1')})
      ON CONFLICT (shift_session_id) DO NOTHING
      RETURNING *`,
     [shift_session_id, vehicle_id, expiresAtFor('vehicle_inspection')]
