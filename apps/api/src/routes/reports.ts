@@ -7,6 +7,7 @@ import { isAllowedContentType, magicMatches, describeMagic } from '../services/i
 import { validateAtSite } from '../services/geofence';
 import { presignAll } from '../services/s3';
 import { expiresAtFor, expiresAtForReport } from '../services/retention';
+import { INHERIT_HOLD_COLUMNS, INHERIT_HOLD_FROM_SESSION_SQL } from '../services/legalHold';
 import { fireBreachAlerts } from './locations';
 import { Sentry } from '../services/sentry';
 import { readShadowSignals } from '../services/shadowSignals';
@@ -325,12 +326,16 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
   }
 
   // Verify session belongs to guard and is still open
-  const sessionResult = await pool.query(
-    'SELECT site_id FROM shift_sessions WHERE id = $1 AND guard_id = $2 AND clocked_out_at IS NULL',
+  const sessionResult = await pool.query<{
+    site_id: string; legal_hold: boolean; legal_hold_at: Date | null;
+  }>(
+    // legal_hold/_at added for the incident_break off-post row below; the
+    // reports and geofence_violations INSERTs inherit inside the INSERT.
+    'SELECT site_id, legal_hold, legal_hold_at FROM shift_sessions WHERE id = $1 AND guard_id = $2 AND clocked_out_at IS NULL',
     [shift_session_id, req.user!.sub]
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Active session not found' });
-  const { site_id } = sessionResult.rows[0];
+  const { site_id, legal_hold: sessionHold, legal_hold_at: sessionHoldAt } = sessionResult.rows[0];
 
   // Mock-location gate. This route has NO transaction (plain pool.query
   // throughout), so a reject is a plain early return with nothing to unwind.
@@ -659,11 +664,19 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
     }
 
     const reportResult = await client.query(
+      // legal_hold inherited from the session (see services/legalHold.ts).
+      // `reports` is itself a hold ORIGIN, so a report born held becomes an
+      // origin the release predicate will honour — see the note in
+      // routes/admin.ts. That is deliberate: the alternative is that the
+      // most evidence-heavy table on a frozen session is the one table that
+      // keeps producing unprotected rows.
       `INSERT INTO reports
          (shift_session_id, site_id, report_type, description, severity, expires_at,
           latitude, longitude, accuracy_meters, is_within_geofence,
-          window_label, submitted_late, location_mocked, fix_age_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+          window_label, submitted_late, location_mocked, fix_age_ms,
+          ${INHERIT_HOLD_COLUMNS})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+               ${INHERIT_HOLD_FROM_SESSION_SQL('$1')}) RETURNING *`,
       [
         shift_session_id, site_id, report_type, description, severity || null, expiresAt,
         haveCoords ? latitude  : null,
@@ -742,8 +755,9 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
           // 'site' default wrong (schema_v65 header).
           `INSERT INTO geofence_violations
              (shift_session_id, guard_id, site_id, violation_lat, violation_lng, expires_at,
-              position_source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+              position_source, ${INHERIT_HOLD_COLUMNS})
+           VALUES ($1, $2, $3, $4, $5, $6, $7,
+                   ${INHERIT_HOLD_FROM_SESSION_SQL('$1')})
            ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
            RETURNING id`,
           [shift_session_id, req.user!.sub, site_id, latitude, longitude,
@@ -814,6 +828,8 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
         reason:         'off-post incident during active break',
         breakSessionId: onBreakId,
         expiresAt:      expiresAtFor('off_post_event'),
+        legalHold:      sessionHold ?? false,
+        legalHoldAt:    sessionHoldAt ?? null,
       });
     } else {
       console.log(

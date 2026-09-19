@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import type { PoolClient } from 'pg';
 import jwt from 'jsonwebtoken';
 import PDFDocument from 'pdfkit';
 import { requireAuth } from '../middleware/auth';
@@ -308,6 +309,119 @@ router.get('/all-sites', requireAuth('vishnu'), async (_req, res) => {
 // data_retention_log. Per-row expires_at + legal_hold on individual
 // tables replace the site-scoped countdown.
 
+/** One table's outcome from a cascade pass. `skipped` means the row was
+ *  deliberately left held because another origin still depends on it. */
+interface CascadeRow {
+  table:   string;
+  applied: boolean;
+  rows:    number;
+}
+
+/**
+ * Cascade a legal hold onto — or off — the evidence chain hanging off one
+ * shift_session.
+ *
+ * ── WHY RELEASE IS NOT JUST "SET IT BACK TO FALSE" ──────────────────────
+ *
+ * There are TWO hold origins (reports, geofence_violations) and both
+ * cascade onto the SAME four rows. A session's flag is therefore shared:
+ * measured 2026-09-19, 129 of 245 sessions carrying any origin carry more
+ * than one, one session carries 17 reports, and 25 sessions carry both a
+ * report and a violation. Clearing the parents whenever any single origin
+ * is released would strip a flag another held origin still needs — on the
+ * majority of sessions, not on an edge case.
+ *
+ * So release clears a parent only when NO OTHER HELD ORIGIN still depends
+ * on it, checked across both origin tables and at both levels: the session
+ * (for its own flag and its pings / task_completions) and the shift (whose
+ * flag can be owed by a second session — 1 such shift exists in prod).
+ *
+ * ── WHY THE PREDICATE RUNS ON `conn` ────────────────────────────────────
+ *
+ * It must see the caller's own origin UPDATE, which is why it is issued on
+ * the transaction client and not on `pool`. Running it on `pool` would
+ * read pre-transaction state and count the origin being released as still
+ * held, so release would never clear anything. It would also be a
+ * check-then-act race between two concurrent releases under READ
+ * COMMITTED — the hazard `deviceRegistry.ts` documents for another table.
+ * CALLER CONTRACT: clear/set the origin row BEFORE calling this.
+ *
+ * ── legal_hold_at ───────────────────────────────────────────────────────
+ *
+ * Added to these tables in schema_v78. On set it is COALESCEd, not
+ * overwritten: a cascade row shared by several origins keeps the EARLIEST
+ * hold time, because "held since" is the question the column exists to
+ * answer and the second origin did not start the hold. This differs from
+ * the origin rows (reports / geofence_violations), which overwrite with
+ * NOW() — correct there, since re-holding a released report genuinely
+ * starts a new hold. On clear it is NULLed, matching the origin.
+ */
+async function cascadeLegalHold(
+  conn: PoolClient,
+  hold: boolean,
+  shiftSessionId: string,
+  shiftId: string,
+): Promise<CascadeRow[]> {
+  let sessionApplies = true;
+  let shiftApplies   = true;
+
+  if (!hold) {
+    // One round trip for both levels. Runs after the origin UPDATE, so the
+    // origin being released is already false and does not count itself.
+    const deps = await conn.query<{ session_still_held: boolean; shift_still_held: boolean }>(
+      `SELECT
+         (    EXISTS (SELECT 1 FROM reports             r WHERE r.shift_session_id = $1 AND r.legal_hold)
+           OR EXISTS (SELECT 1 FROM geofence_violations g WHERE g.shift_session_id = $1 AND g.legal_hold)
+         ) AS session_still_held,
+         (    EXISTS (SELECT 1 FROM reports r
+                        JOIN shift_sessions s ON s.id = r.shift_session_id
+                       WHERE s.shift_id = $2 AND r.legal_hold)
+           OR EXISTS (SELECT 1 FROM geofence_violations g
+                        JOIN shift_sessions s ON s.id = g.shift_session_id
+                       WHERE s.shift_id = $2 AND g.legal_hold)
+         ) AS shift_still_held`,
+      [shiftSessionId, shiftId],
+    );
+    sessionApplies = !deps.rows[0].session_still_held;
+    shiftApplies   = !deps.rows[0].shift_still_held;
+  }
+
+  const results: CascadeRow[] = [];
+
+  const run = async (table: string, where: string, param: string, applies: boolean) => {
+    if (!applies) { results.push({ table, applied: false, rows: 0 }); return; }
+    const r = await conn.query(
+      `UPDATE ${table}
+          SET legal_hold    = $1,
+              legal_hold_at = CASE WHEN $1 THEN COALESCE(legal_hold_at, NOW()) ELSE NULL END
+        WHERE ${where} = $2`,
+      [hold, param],
+    );
+    results.push({ table, applied: true, rows: r.rowCount ?? 0 });
+  };
+
+  // Session level first, then the shift: a reader following the log sees
+  // the chain in the order the evidence hangs off it.
+  await run('shift_sessions',   'id',               shiftSessionId, sessionApplies);
+  await run('location_pings',   'shift_session_id', shiftSessionId, sessionApplies);
+  await run('task_completions', 'shift_session_id', shiftSessionId, sessionApplies);
+  await run('shifts',           'id',               shiftId,        shiftApplies);
+
+  return results;
+}
+
+/** Single structured line per cascade. Before this, `rowCount` appeared
+ *  zero times in the whole file and the handler returned success:true on a
+ *  zero-row cascade with no trace anywhere — which is how the one held
+ *  report in production came to have an unheld ping for 68 days without
+ *  anyone noticing. */
+function logCascade(origin: string, originId: string, hold: boolean, rows: CascadeRow[]): void {
+  const detail = rows
+    .map((r) => (r.applied ? `${r.table}=${r.rows}` : `${r.table}=SKIPPED(still_held)`))
+    .join(' ');
+  console.log(`[legal-hold] origin=${origin} id=${originId} hold=${hold} ${detail}`);
+}
+
 // ── PATCH /api/admin/reports/:id/legal-hold ─────────────────────────────────
 //
 // Places a report on legal hold (hold=true) or releases the hold
@@ -316,9 +430,22 @@ router.get('/all-sites', requireAuth('vishnu'), async (_req, res) => {
 //                and task_completions belonging to the report's session.
 //                Keeps the entire chain of related evidence in the DB past
 //                its normal expires_at.
-//   hold=false → releases *only* the specific report. Cascaded parents
-//                stay held. Vishnu / admin walks back through each layer
-//                manually to reduce accidental release surface (RC4).
+//   hold=false → releases the report AND clears each cascaded row, but
+//                ONLY where no other held origin still depends on it.
+//                See cascadeLegalHold() for why that check exists and why
+//                it runs inside the transaction.
+//
+// This REVERSES the earlier behaviour, which released the report alone and
+// left every cascaded row held forever — the four cascade UPDATEs bound the
+// literal `true`, so no code path could clear them. The old prose called
+// that a deliberate reduction of "accidental release surface (RC4)"; what it
+// actually produced was holds that could only be lifted by hand-written SQL,
+// on rows that no admin UI lists.
+//
+// NOT covered, deliberately: rows written to the session AFTER the hold is
+// stamped are still not held. That is a separate defect with its own fix
+// (insert-time inheritance); this handler only governs rows that exist when
+// it runs.
 //
 // Auth: company_admin scoped to their company; vishnu bypasses the
 // scope check and can hold any report.
@@ -364,17 +491,14 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
       [hold, id],
     );
 
-    if (hold) {
-      // Cascade UP + across children of the same session. Release does
-      // NOT reverse the cascade (see docstring).
-      await conn.query('UPDATE shift_sessions   SET legal_hold = true WHERE id = $1',                [shift_session_id]);
-      await conn.query('UPDATE shifts           SET legal_hold = true WHERE id = $1',                [shift_id]);
-      await conn.query('UPDATE location_pings   SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-      await conn.query('UPDATE task_completions SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-    }
+    // Cascade UP + across children of the same session, in BOTH directions.
+    // Runs after the origin UPDATE above so the release predicate inside
+    // cascadeLegalHold() does not count this report as still holding.
+    const cascade = await cascadeLegalHold(conn, hold, shift_session_id, shift_id);
+    logCascade('report', id, hold, cascade);
 
     await conn.query('COMMIT');
-    res.json({ success: true, hold });
+    res.json({ success: true, hold, cascade });
   } catch (err) {
     await conn.query('ROLLBACK').catch(() => {});
     throw err;
@@ -389,7 +513,16 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
 // (Vishnu Portal v2). Same cascade / release semantics:
 //   hold=true  → also flips the parent shift_session, shift, and the
 //                sibling location_pings + task_completions.
-//   hold=false → releases only the specific violation; parents stay held.
+//   hold=false → releases the violation AND clears each cascaded row,
+//                but only where no other held origin still depends on it.
+//
+// The two endpoints share cascadeLegalHold(), which is what makes the
+// release predicate correct across BOTH of them: 25 sessions in production
+// carry a report and a violation at once, so releasing a violation has to
+// see a held report on the same session and decline to clear the parents.
+// Two hand-duplicated copies of this block could not do that reliably —
+// they were byte-identical before this change, which is how both acquired
+// the same literal-`true` defect.
 //
 // Auth: company_admin scoped to their company; vishnu bypasses scope.
 router.patch('/violations/:id/legal-hold', requireAuth('company_admin', 'vishnu'), async (req, res) => {
@@ -430,15 +563,11 @@ router.patch('/violations/:id/legal-hold', requireAuth('company_admin', 'vishnu'
       [hold, id],
     );
 
-    if (hold) {
-      await conn.query('UPDATE shift_sessions   SET legal_hold = true WHERE id = $1',                [shift_session_id]);
-      await conn.query('UPDATE shifts           SET legal_hold = true WHERE id = $1',                [shift_id]);
-      await conn.query('UPDATE location_pings   SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-      await conn.query('UPDATE task_completions SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-    }
+    const cascade = await cascadeLegalHold(conn, hold, shift_session_id, shift_id);
+    logCascade('violation', id, hold, cascade);
 
     await conn.query('COMMIT');
-    res.json({ success: true, hold });
+    res.json({ success: true, hold, cascade });
   } catch (err) {
     await conn.query('ROLLBACK').catch(() => {});
     throw err;

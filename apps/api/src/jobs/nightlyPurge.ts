@@ -31,7 +31,11 @@
  * expired parent.
  *
  * Ping photos (step 1) are a separate 7-day sweep that's independent
- * of the retention tier — they stay unchanged from the old cron.
+ * of the retention tier — they key on `photo_delete_at`, not `expires_at`.
+ * They DO honour `legal_hold` like every other step; until 2026-09-19 they
+ * did not, which is the only reason the sentence above could be written
+ * while one step ignored the flag. The row that proved it: ping de9aa0b0
+ * on a held session, unheld, and in this step's candidate set for 68 days.
  */
 
 import { runJob } from './_run';
@@ -113,10 +117,21 @@ async function step1_pingPhotos(): Promise<StepResult> {
   const step = 'step1_ping_photos';
   try {
     const candidateQ = await pool.query<{ id: string; photo_url: string }>(
+      // legal_hold, NOT retain_as_evidence. This step was the only one of the
+      // nine that ignored the hold flag, and the clause it used instead is
+      // dead: `retain_as_evidence` is written by nothing in the codebase, so
+      // it is false on every row and excluded nothing. The admin cascade
+      // (admin.ts) sets `legal_hold` on location_pings — that is the flag a
+      // hold actually produces, and now the one this step reads.
+      //
+      // The column retain_as_evidence is deliberately LEFT IN PLACE, inert:
+      // schema_v2.sql:40 carries a partial index predicated on it, and
+      // dropping the column drops the index with it. Removing both is a
+      // contract-phase change with no functional gain.
       `SELECT id, photo_url FROM location_pings
        WHERE photo_url IS NOT NULL
          AND photo_delete_at < NOW()
-         AND retain_as_evidence = false`,
+         AND legal_hold = false`,
     );
     const candidate = candidateQ.rows.length;
 

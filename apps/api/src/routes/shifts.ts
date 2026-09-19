@@ -2783,6 +2783,10 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
        *  this adds no round trip and changes no locking. */
       scheduled_end: string;
       from_session_id: string | null;
+      /** shifts.legal_hold / legal_hold_at — inherited onto B's new session
+       *  so a handoff into a held shift does not mint an unheld session. */
+      legal_hold: boolean;
+      legal_hold_at: Date | null;
       /** sites.ping_interval_minutes — the site's configured cadence, read
        *  here only so the capability gate can decide what to snapshot onto
        *  the new session. NOT read back out of the session anywhere yet. */
@@ -2798,6 +2802,12 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
               sh.scheduled_start,
               sh.scheduled_end,
               si.name           AS site_name,
+              -- Hold inheritance source. sh is ALREADY joined AND already in
+              -- the FOR UPDATE list below, so these add no round trip and no
+              -- locking whatsoever — the same reasoning the scheduled_end
+              -- comment above records.
+              sh.legal_hold,
+              sh.legal_hold_at,
               -- schema_v68 snapshot source. sites is ALREADY joined here, so
               -- this costs no extra round trip. It is deliberately NOT added
               -- to the FOR UPDATE list below: locking the site row would
@@ -2959,15 +2969,18 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       const inserted = await client.query(
         `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at,
                                      clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms,
-                                     ping_interval_minutes)
-         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING *`,
+                                     ping_interval_minutes, legal_hold, legal_hold_at)
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
         [id, user!.sub, hist.site_id, coords, expiresAtFor('shift_session'),
          shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs,
          // schema_v68 — immutable cadence snapshot. Gated: a handset that
          // cannot honour a non-30 cadence is stamped 30 regardless of the
          // site value, or it would be judged on a grid its own countdown
          // never showed. Every client in the field returns 30 today.
-         pingIntervalForNewSession(req, hist.ping_interval_minutes)],
+         pingIntervalForNewSession(req, hist.ping_interval_minutes),
+         // Fail-safe, as at clock-in: absent column → born unheld, never a
+         // 23502 that would block B from taking over the post.
+         hist.legal_hold ?? false, hist.legal_hold_at ?? null],
       );
       newSession = inserted.rows[0];
     } catch (err: any) {
@@ -4294,17 +4307,29 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
     );
 
     const sessionResult = await client.query(
+      // legal_hold inherited from the parent SHIFT, not a session — a session
+      // IS the child here. Taken from `shift`, which the SELECT ... FOR UPDATE
+      // at the top of this transaction already returned via SELECT *: the row
+      // is locked, so the value cannot change under us and no subquery is
+      // needed. Deliberately NOT reached by adding a JOIN to that SELECT —
+      // it carries a bare FOR UPDATE, and joining would take a row lock on the
+      // joined table and serialise clock-ins across every guard at the site
+      // (see the note at the siteCadence query above).
       `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords, expires_at,
                                    clock_in_accuracy_meters, clock_in_location_mocked, clock_in_fix_age_ms,
-                                   ping_interval_minutes)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING *`,
+                                   ping_interval_minutes, legal_hold, legal_hold_at)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
       [id, req.user!.sub, shift.site_id, coords, expiresAtFor('shift_session'),
        shadow.accuracyMeters, shadow.locationMocked, shadow.fixAgeMs,
        // Immutable cadence snapshot. Gated on the caller's runtime: a
        // handset that cannot honour a non-30 cadence is stamped 30 whatever
        // the site says. Every client in the field returns 30 today, so this
        // writes 30 for every session until the mobile side ships.
-       pingIntervalForNewSession(req, siteCadence.rows[0]?.ping_interval_minutes)]
+       pingIntervalForNewSession(req, siteCadence.rows[0]?.ping_interval_minutes),
+       // `?? false` is the fail-safe: a shift row without the column (pre-v78)
+       // yields undefined, and the session is born unheld rather than the
+       // INSERT raising 23502 and blocking the clock-in.
+       shift.legal_hold ?? false, shift.legal_hold_at ?? null]
     );
 
     // Accepted clock-ins previously logged NOTHING — geofence.reject fires

@@ -9,6 +9,7 @@ import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
 import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { expiresAtFor } from '../services/retention';
+import { INHERIT_HOLD_COLUMNS, INHERIT_HOLD_FROM_SESSION_SQL } from '../services/legalHold';
 import { scheduleWindows } from '../services/pingWindows';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
@@ -313,10 +314,17 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
      *  against the cadence in force when the session started, not against a
      *  site value an admin may have edited mid-shift. */
     ping_interval_minutes: number | null;
+    /** Hold state, read here ONLY for the off-post reject row below, which
+     *  is written by a service that holds no session of its own. The ping
+     *  INSERT deliberately does NOT use this value — it re-reads the flag
+     *  inside the INSERT, because this SELECT is 200 lines and one S3 HEAD
+     *  call away from that write. See services/legalHold.ts. */
+    legal_hold: boolean;
+    legal_hold_at: Date | null;
   }>(
     `SELECT ss.site_id, ss.clocked_in_at, ss.clocked_out_at,
             sh.scheduled_start, sh.scheduled_end, si.timezone AS site_tz,
-            ss.ping_interval_minutes
+            ss.ping_interval_minutes, ss.legal_hold, ss.legal_hold_at
        FROM shift_sessions ss
        JOIN shifts sh ON sh.id = ss.shift_id
        JOIN sites  si ON si.id = ss.site_id
@@ -331,6 +339,8 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     scheduled_end:   pingScheduledEnd,
     site_tz:         pingSiteTz,
     ping_interval_minutes: pingIntervalMinutes,
+    legal_hold:      pingSessionHold,
+    legal_hold_at:   pingSessionHoldAt,
   } = sessionResult.rows[0];
 
   // Liveness gate — same shape as POST /violation (5a6de20). A ping against
@@ -463,6 +473,8 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       reason:         fence.reason,
       breakSessionId: pingBreakId,
       expiresAt:      expiresAtFor('off_post_event'),
+      legalHold:      pingSessionHold ?? false,
+      legalHoldAt:    pingSessionHoldAt ?? null,
     });
     console.log(
       `[ping.reject] session=${shift_session_id} distance=${fence.distance_m?.toFixed(1) ?? 'null'}m ` +
@@ -532,8 +544,10 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       `INSERT INTO location_pings
          (shift_session_id, guard_id, site_id, latitude, longitude, accuracy_meters,
           is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason, expires_at,
-          window_label, submitted_late, location_mocked, fix_age_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          window_label, submitted_late, location_mocked, fix_age_ms,
+          ${INHERIT_HOLD_COLUMNS})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+               ${INHERIT_HOLD_FROM_SESSION_SQL('$1')})
        ON CONFLICT (shift_session_id, window_label)
          WHERE window_label IS NOT NULL
            AND pinged_at >= TIMESTAMPTZ '2026-08-21T00:00:00+00'
@@ -657,8 +671,13 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
     return res.status(400).json({ error: 'Invalid position_source.' });
   }
 
-  const sessionResult = await pool.query<{ site_id: string; clocked_out_at: Date | null }>(
-    'SELECT site_id, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+  const sessionResult = await pool.query<{
+    site_id: string; clocked_out_at: Date | null;
+    legal_hold: boolean; legal_hold_at: Date | null;
+  }>(
+    // legal_hold/_at added for the break_exit off-post row below; the
+    // geofence_violations INSERT on this route inherits inside the INSERT.
+    'SELECT site_id, clocked_out_at, legal_hold, legal_hold_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
     [shift_session_id, req.user!.sub]
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Session not found' });
@@ -751,6 +770,8 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
       reason:         'boundary exit during active break',
       breakSessionId: openBreak.rows[0].id,
       expiresAt:      expiresAtFor('off_post_event'),
+      legalHold:      sessionResult.rows[0].legal_hold ?? false,
+      legalHoldAt:    sessionResult.rows[0].legal_hold_at ?? null,
     });
     console.log('[violation.suppressed.on_break]', {
       shift_session_id,
@@ -767,8 +788,9 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
   const insertResult = await pool.query(
     `INSERT INTO geofence_violations
        (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at,
-        position_source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        position_source, ${INHERIT_HOLD_COLUMNS})
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+             ${INHERIT_HOLD_FROM_SESSION_SQL('$1')})
      ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
      RETURNING *`,
     [shift_session_id, guardId, siteId, latitude, longitude, photo_url || null,
