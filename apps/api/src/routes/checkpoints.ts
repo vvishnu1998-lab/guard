@@ -5,6 +5,7 @@ import { siteLocalDayRange } from '../services/dateRange';
 import { validateAtCheckpoint } from '../services/geofence';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
+import { INHERIT_HOLD_COLUMNS, INHERIT_HOLD_FROM_SESSION_SQL } from '../services/legalHold';
 
 const router = Router();
 
@@ -193,6 +194,8 @@ router.delete('/:id', requireAuth('company_admin'), async (req, res) => {
   );
   const scanCount = countResult.rows[0].scan_count;
 
+  // ── THIS COUNT DOES NOT FILTER legal_hold, AND AS OF THIS COMMIT THAT
+  //    MATTERS. NOT FIXED HERE — see the note before the DELETE below.
   if (req.query.confirm !== 'delete_scans') {
     return res.status(409).json({
       error: `Deleting this checkpoint destroys ${scanCount} scan record(s). ` +
@@ -201,6 +204,32 @@ router.delete('/:id', requireAuth('company_admin'), async (req, res) => {
     });
   }
 
+  // ── OPEN: THIS DESTROYS LEGALLY HELD SCANS, AND THIS COMMIT IS WHAT MAKES
+  //    THAT POSSIBLE ──────────────────────────────────────────────────────
+  //
+  // checkpoint_scans_checkpoint_id_fkey is ON DELETE CASCADE, so this one
+  // statement takes every scan on the checkpoint. It does not read
+  // legal_hold, and until this commit it did not need to: nothing wrote
+  // that column, so all 585 rows were false and the flag was inert.
+  //
+  // The INSERT below and the cascade line in routes/admin.ts are jointly
+  // the first writers of it. 19 of the 20 sessions carrying scans also
+  // carry a report, so a report-origin hold on any of them now pulls scans
+  // into the held set — and this route would still delete them. Scans are
+  // not evenly spread: the per-checkpoint distribution is
+  // 182/182/127/89/2/1/1/1, so the worst single call destroys 182.
+  //
+  // Every other destroyer in the system does filter the flag — all nine
+  // nightlyPurge steps carry `AND legal_hold = false`. This is the only
+  // admin-reachable path that does not.
+  //
+  // DELIBERATELY NOT FIXED IN THIS PR, which is scoped to "nothing is
+  // enforced": adding a refusal here is enforcement, and it is not a
+  // one-liner. apps/web/app/admin/sites/[id]/page.tsx:1226-1229 treats ANY
+  // 409 on the unconfirmed call as "show the confirm modal", so reusing 409
+  // for a held-scan refusal would show an admin a delete-confirmation
+  // dialog before the hold message ever appears. The fix needs its own
+  // status code or a client change, which is a decision, not a patch.
   await pool.query('DELETE FROM site_checkpoints WHERE id = $1', [req.params.id]);
   res.json({ success: true, scans_deleted: scanCount });
 });
@@ -511,12 +540,48 @@ router.post('/scan', requireAuth('guard'), async (req, res) => {
 
   // round_window computed inside the INSERT (no read-then-write race);
   // expires_at intentionally omitted — column DEFAULT applies.
+  //
+  // ── LEGAL HOLD IS INHERITED HERE, INSIDE THE STATEMENT ──────────────────
+  //
+  // Same reasoning as the round_window line above, applied to a different
+  // column. The session is resolved by activeSession() at :446 and the row
+  // lands here, ~95 lines later, with a checkpoint lookup and a geofence
+  // computation in between — so a hold flag read up there would be stale by
+  // an unbounded interval by the time the row is written, and a hold placed
+  // inside that window would be missed by the very mechanism meant to catch
+  // it. That is exactly how ping de9aa0b0 came to sit unheld on a held
+  // session for 68 days.
+  //
+  // Here the argument is stronger than "stale": activeSession() SELECTs
+  // `id, site_id` and nothing else (:291-297), so this handler never had a
+  // hold value in scope at all. Reading it inside the INSERT is not an
+  // optimisation over a value we already had — it is the only read.
+  //
+  // THIS IS THE ONLY CALL SITE WHERE THE FRAGMENT LANDS IN A SELECT LIST
+  // RATHER THAN A VALUES LIST. The other six (locations.ts ×2, reports.ts
+  // ×2, inspections.ts, tasks.ts) are all INSERT ... VALUES; this statement
+  // has to be INSERT ... SELECT because ROUND_WINDOW_SQL reads s.timezone.
+  // Scalar subqueries are legal in either, and they do not change the row
+  // count — verified against production 2026-09-19: the source SELECT
+  // returns one row before and after, the held session yields
+  // legal_hold = true with legal_hold_at = 2026-07-13T20:27:58.744Z
+  // (the parent's own hold time, not NOW()), and a session id matching
+  // nothing yields false rather than NULL, so the COALESCE prevents the
+  // 23502 that would otherwise cost a guard their scan.
+  //
+  // $2 carries shift_session_id and is now read three times in one
+  // statement — once as the inserted value, twice inside the fragment. All
+  // three resolve to uuid, so the parameter type stays unambiguous.
+  //
+  // On ON CONFLICT DO NOTHING nothing is written, inherited flag included;
+  // the existing row already carries whatever it was born with.
   const inserted = await pool.query(
     `INSERT INTO checkpoint_scans
        (checkpoint_id, shift_session_id, guard_id, site_id, round_window,
         scan_lat, scan_lng, accuracy_m, distance_m, note,
-        location_mocked, fix_age_ms)
-     SELECT $1, $2, $3, $4, ${ROUND_WINDOW_SQL}, $5, $6, $7, $8, $9, $10, $11
+        location_mocked, fix_age_ms, ${INHERIT_HOLD_COLUMNS})
+     SELECT $1, $2, $3, $4, ${ROUND_WINDOW_SQL}, $5, $6, $7, $8, $9, $10, $11,
+            ${INHERIT_HOLD_FROM_SESSION_SQL('$2')}
      FROM sites s WHERE s.id = $4
      ON CONFLICT (checkpoint_id, shift_session_id, round_window) DO NOTHING
      RETURNING scanned_at`,

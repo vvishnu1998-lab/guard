@@ -25,15 +25,30 @@
  * the platform — to fetch a value the same statement can read for free.
  *
  * The fragment also closes a race a helper cannot. On the ping path the
- * session is SELECTed at `locations.ts:304` and the row is INSERTed at
- * `:532` — 188 lines apart, on a different connection, with a geofence
+ * session is SELECTed at `locations.ts:305` and the row is INSERTed at
+ * `:544` — 239 lines apart, on a different connection, with a geofence
  * query and an S3 HEAD network call in between. A `legal_hold` read at the
  * top is stale by an unbounded interval by the time the write happens, and
  * a hold placed inside that window would be missed by the very mechanism
  * meant to catch it. Reading it INSIDE the INSERT makes the read and the
- * write one statement. `checkpoints.ts:512` already applies this reasoning
- * to a different column: "round_window computed inside the INSERT (no
- * read-then-write race)".
+ * write one statement.
+ *
+ * The checkpoint scan path had already reached the same conclusion for a
+ * different column — "round_window computed inside the INSERT (no
+ * read-then-write race)" at `checkpoints.ts:513` — before it became a call
+ * site of this fragment.
+ *
+ * ── ONE CALL SITE IS AN INSERT ... SELECT, NOT INSERT ... VALUES ────────
+ *
+ * `checkpoints.ts:556` interpolates this into a SELECT list, because its
+ * statement must read `s.timezone` from a joined `sites` row to compute
+ * round_window. Scalar subqueries are valid in both forms and neither
+ * changes the source row count. Verified against production 2026-09-19 by
+ * extracting the rendered statement from the file and running its source
+ * SELECT: one row in, one row out, 14 columns to 14 SELECT items, and the
+ * one held session yields legal_hold = true with legal_hold_at =
+ * 2026-07-13T20:27:58.744Z. Nothing here assumes a VALUES list, so do not
+ * add such an assumption.
  *
  * ── THE COALESCE IS LOAD-BEARING, NOT DEFENSIVE ─────────────────────────
  *
