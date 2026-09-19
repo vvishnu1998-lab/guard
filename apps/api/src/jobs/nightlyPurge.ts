@@ -156,7 +156,7 @@ async function sweepS3(step: string, rawUrls: Array<string | null | undefined>):
       continue;
     }
     out.failed++;
-    console.error(`[retention.${step}] S3 delete FAILED, object orphaned: ${r.error}`);
+    console.error(`[retention.${step}] S3 delete FAILED, object orphaned: ${r.detail}`);
   }
 
   if (out.failed > 0 || out.skipped > 0) {

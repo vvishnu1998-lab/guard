@@ -84,11 +84,21 @@ export function createPresignedUploadPost(
  *   skipped — we declined to act. NOT a failure: nothing was wrong except the
  *             stored value, and retrying will not change that
  *   failed  — a well-formed key we should have deleted and could not. Retryable
+ *
+ * THE DRIVER STRING FIELD IS `detail`, NOT `error`, AND THAT IS DELIBERATE.
+ * The only consumer is nightlyPurge's sweepS3, which console.errors it — this
+ * value never reaches an HTTP response. But `error: <driver string>` is the
+ * exact shape N78/N91 exists to forbid, because apps/web puts `body.error`
+ * into ApiError.message and renders it verbatim, and .github/workflows/
+ * typecheck.yml enforces that with a line-based grep that cannot tell an
+ * internal result from a response body. It caught this on 2026-09-19. Naming
+ * the field `error` would be a rule this type dares a future reader to break;
+ * naming it `detail` makes the type say what it is. Do not rename it back.
  */
 export type S3DeleteOutcome =
   | { status: 'deleted' }
   | { status: 'skipped'; reason: 'malformed' | 'not-our-bucket'; value: string }
-  | { status: 'failed'; error: string };
+  | { status: 'failed'; detail: string };
 
 /**
  * Delete a single S3 object — called by the nightly purge job.
@@ -142,7 +152,7 @@ export async function deleteS3Object(url: string): Promise<S3DeleteOutcome> {
     await s3.deleteObject({ Bucket: BUCKET, Key: key }).promise();
     return { status: 'deleted' };
   } catch (err) {
-    return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+    return { status: 'failed', detail: err instanceof Error ? err.message : String(err) };
   }
 }
 
