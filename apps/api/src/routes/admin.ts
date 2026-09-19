@@ -324,7 +324,7 @@ interface CascadeRow {
  * ── WHY RELEASE IS NOT JUST "SET IT BACK TO FALSE" ──────────────────────
  *
  * There are TWO hold origins (reports, geofence_violations) and both
- * cascade onto the SAME four rows. A session's flag is therefore shared:
+ * cascade onto the SAME five row sets. A session's flag is therefore shared:
  * measured 2026-09-19, 129 of 245 sessions carrying any origin carry more
  * than one, one session carries 17 reports, and 25 sessions carry both a
  * report and a violation. Clearing the parents whenever any single origin
@@ -333,8 +333,9 @@ interface CascadeRow {
  *
  * So release clears a parent only when NO OTHER HELD ORIGIN still depends
  * on it, checked across both origin tables and at both levels: the session
- * (for its own flag and its pings / task_completions) and the shift (whose
- * flag can be owed by a second session — 1 such shift exists in prod).
+ * (for its own flag and its pings / task_completions / checkpoint_scans)
+ * and the shift (whose flag can be owed by a second session — 1 such shift
+ * exists in prod).
  *
  * ── WHY THE PREDICATE RUNS ON `conn` ────────────────────────────────────
  *
@@ -402,9 +403,37 @@ async function cascadeLegalHold(
 
   // Session level first, then the shift: a reader following the log sees
   // the chain in the order the evidence hangs off it.
+  //
+  // checkpoint_scans is gated on sessionApplies, like the other two child
+  // tables and unlike `shifts`: a scan hangs off exactly one session, so
+  // the only question that can keep it held is whether THAT session still
+  // owes a hold to some other origin.
+  //
+  // WITHOUT THIS LINE THE HOLD WOULD BE ONE-WAY. checkpoints.ts now
+  // inherits the flag at INSERT, so a scan taken on a held session is born
+  // held — but nothing would ever clear it again, and release is supposed
+  // to be symmetric. An FK does not help: legal_hold is an UPDATE, and
+  // ON DELETE CASCADE propagates deletes, not column writes. Every table
+  // in this chain needs its own line whatever its FK says.
+  //
+  // TWO TABLES ARE STILL MISSING ONE, and that is a known gap rather than
+  // an oversight in this function: off_post_events (threaded field,
+  // services/offPostEvents.ts:209/230) and vehicle_inspections (fragment,
+  // routes/inspections.ts:179) both inherit a hold at INSERT and have no
+  // run() line here, so a hold they inherit is never released. Neither is
+  // in scope for this change.
   await run('shift_sessions',   'id',               shiftSessionId, sessionApplies);
   await run('location_pings',   'shift_session_id', shiftSessionId, sessionApplies);
   await run('task_completions', 'shift_session_id', shiftSessionId, sessionApplies);
+  // Ships UNEXERCISED, and the log will not say so. The only held session
+  // in production ran 2026-07-13 20:21-21:25; the earliest row in
+  // checkpoint_scans is 2026-08-05. That session cannot ever acquire a
+  // scan, so a hold placed today logs `checkpoint_scans=0` — which is
+  // equally the output of a correct line and of one that was never
+  // reached. Do not read that zero as a pass. This function's own history
+  // is the warning: a zero-row cascade that logged nothing is how a ping
+  // sat unheld on a held session for 68 days.
+  await run('checkpoint_scans', 'shift_session_id', shiftSessionId, sessionApplies);
   await run('shifts',           'id',               shiftId,        shiftApplies);
 
   return results;
@@ -427,9 +456,9 @@ function logCascade(origin: string, originId: string, hold: boolean, rows: Casca
 // Places a report on legal hold (hold=true) or releases the hold
 // (hold=false). Cascade rules:
 //   hold=true  → also flips shift_sessions, shifts, location_pings,
-//                and task_completions belonging to the report's session.
-//                Keeps the entire chain of related evidence in the DB past
-//                its normal expires_at.
+//                task_completions and checkpoint_scans belonging to the
+//                report's session. Keeps the entire chain of related
+//                evidence in the DB past its normal expires_at.
 //   hold=false → releases the report AND clears each cascaded row, but
 //                ONLY where no other held origin still depends on it.
 //                See cascadeLegalHold() for why that check exists and why
@@ -512,7 +541,8 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
 // Mirror of the reports legal-hold endpoint for geofence_violations
 // (Vishnu Portal v2). Same cascade / release semantics:
 //   hold=true  → also flips the parent shift_session, shift, and the
-//                sibling location_pings + task_completions.
+//                sibling location_pings + task_completions +
+//                checkpoint_scans.
 //   hold=false → releases the violation AND clears each cascaded row,
 //                but only where no other held origin still depends on it.
 //

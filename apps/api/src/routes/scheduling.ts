@@ -981,7 +981,12 @@ router.post('/site/:siteId/assign-slots', requireAuth('company_admin', 'vishnu')
                       AND x.status NOT IN ('cancelled','unassigned')) < $8
            RETURNING id, guard_id, site_id, scheduled_start, scheduled_end`,
           [guardId, req.params.siteId, slotStart, slot.slot_end.toISOString(),
-           expiresAtFor('shift'), req.user!.sub, req.user!.role, slot.guards_needed],
+           // Anchored on this shift's OWN scheduled_start (the same value as $3),
+           // not on insert time. Shifts are created a mean of 11 days and up to
+           // 35.8 days before they start, so an insert-time stamp under-runs the
+           // 1500d tier by that much — and shifts/shift_sessions being equal is
+           // load-bearing for the CASCADE (services/retention.ts:13-31).
+           expiresAtFor('shift', new Date(slotStart)), req.user!.sub, req.user!.role, slot.guards_needed],
         );
       } catch (err) {
         if (isGuardOverlapViolation(err)) {

@@ -197,7 +197,8 @@ runJob('missedReportCron', '*/5 * * * *', async () => {
           [
             s.session_id, s.site_id, s.guard_id,
             w.windowStart, w.windowEnd, label,
-            expiresAtFor('missed_report'),
+            // Anchored on window_end, matching schema_v79. See missedPingCron.
+            expiresAtFor('missed_report', w.windowEnd),
           ],
         );
         const mrId = inserted.rows[0]?.id;

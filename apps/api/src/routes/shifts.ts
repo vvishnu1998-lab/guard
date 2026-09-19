@@ -18,7 +18,7 @@ import {
   isGuardOverlapViolation, resolveOverlapAfterRace, guardOverlapRaceBody,
 } from '../services/shiftOverlap';
 import { findOpenSession, clockedInAtPacific, OpenSessionConflictBody } from '../services/openSession';
-import { expiresAtFor } from '../services/retention';
+import { expiresAtFor, RETENTION } from '../services/retention';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
 import { pingIntervalForNewSession } from '../services/pingIntervalGate';
@@ -308,6 +308,17 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
           }
         }
         const insert = await client.query(
+          // expires_at is computed IN SQL from the SAME expression that builds
+          // scheduled_start, so the two cannot drift apart. This site is the one
+          // shift-create path where scheduled_start does not exist as a JS value
+          // — it is assembled here from date + time + site timezone, and on the
+          // unassigned branch the windowByDate entry that would hold it is never
+          // computed (it is gated on `if (guard_id)` above). Passing `from` is
+          // therefore not available; repeating the expression is.
+          //
+          // The interval is interpolated from RETENTION, never retyped: the tier
+          // lives in one place and a SQL literal here would be a second copy
+          // that silently outlives the next tier change.
           `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
                                created_by, created_by_role, source)
            VALUES (
@@ -316,13 +327,13 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
              ($3::date + $4::time) AT TIME ZONE $8,
              ($3::date + $6::interval + $5::time) AT TIME ZONE $8,
              $7,
+             ($3::date + $4::time) AT TIME ZONE $8 + INTERVAL '${RETENTION.SHIFT_DAYS} days',
              $9,
              $10,
-             $11,
-             $12
+             $11
            ) RETURNING id, guard_id, site_id, scheduled_start, scheduled_end`,
           [guard_id || null, site_id, d, start_time, end_time, overnightInterval, status, siteTz,
-           expiresAtFor('shift'), req.user!.sub, req.user!.role, 'manual']
+           req.user!.sub, req.user!.role, 'manual']
         );
         const row = insert.rows[0];
         ids.push(row.id);
@@ -501,7 +512,10 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
           `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
                                created_by, created_by_role, source)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-          [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status, expiresAtFor('shift'),
+          [guard_id || null, site_id, p.start.toISOString(), p.end.toISOString(), status,
+           // Anchored on this shift's OWN scheduled_start, not insert time. See
+           // the note at the batch-create INSERT above.
+           expiresAtFor('shift', p.start),
            req.user!.sub, req.user!.role, 'manual']
         );
         created.push(r.rows[0]);
@@ -577,7 +591,9 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       `INSERT INTO shifts (guard_id, site_id, scheduled_start, scheduled_end, status, expires_at,
                            created_by, created_by_role, source)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [guard_id || null, site_id, scheduled_start, scheduled_end, status, expiresAtFor('shift'),
+      [guard_id || null, site_id, scheduled_start, scheduled_end, status,
+       // Anchored on this shift's OWN scheduled_start, not insert time.
+       expiresAtFor('shift', new Date(scheduled_start)),
        req.user!.sub, req.user!.role, 'manual']
     );
   } catch (err: any) {
@@ -1746,12 +1762,18 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     await clearScheduleDerivedLatches(id, client);
 
     const updated = await client.query(
+      // expires_at moves WITH the schedule. Without this the row keeps a
+      // retention date anchored on the OLD scheduled_start, so rescheduling a
+      // shift silently changed how long it is kept — forward by the same
+      // amount the shift moved back, and vice versa. Not an expiresAtFor call
+      // site, so it was outside the 17 the census found.
       `UPDATE shifts
           SET scheduled_start = $1,
-              scheduled_end   = $2
+              scheduled_end   = $2,
+              expires_at      = $4
         WHERE id = $3
         RETURNING *`,
-      [newStart.toISOString(), newEnd.toISOString(), id],
+      [newStart.toISOString(), newEnd.toISOString(), id, expiresAtFor('shift', newStart)],
     );
 
     // Narrow before/after — the mutable schedule columns only, never a

@@ -158,7 +158,11 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
           [
             s.session_id, s.site_id, s.guard_id,
             w.windowStart, w.windowEnd, label,
-            expiresAtFor('missed_ping'),
+            // Anchored on the row's OWN window_end — the same value going into
+            // $5 — not on insert time. schema_v79 recomputed every existing row
+            // that way; without `from` here each new row would be stamped from
+            // the cron tick instead and drift straight back out of agreement.
+            expiresAtFor('missed_ping', w.windowEnd),
           ],
         );
         const mpId = inserted.rows[0]?.id;
