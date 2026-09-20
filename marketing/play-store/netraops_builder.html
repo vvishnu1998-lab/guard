@@ -105,15 +105,20 @@ const SB_HEIGHT = 22;
 const C_TOP_LIMIT = 152, C_BOTTOM_LIMIT = 632, C_CENTER_Y = 392;
 const C_BASE_INNER_W = 196;
 
+// `clock` is per frame because a single hardcoded time contradicted the app.
+// Home renders its own 8:56 AM in the header and Chat carries an 8:59 AM
+// message timestamp, so one shared 12:00 put two different times on screen.
+// These run 8:55 -> 9:00 across the strip, which reads as one continuous
+// shift. No AM/PM: a real status bar on a 12-hour phone shows neither.
 const DEFAULTS = {
     statusBar: true,
     bleed: true,
     screens: [
-        { title: 'NETRAOPS.',    sub: 'Security guard management, simplified.', hideTop: 8 },
-        { title: 'EVERY SHIFT.', sub: 'Verified.',                              hideTop: 8 },
-        { title: 'YOUR WEEK.',   sub: 'At a glance.',                           hideTop: 8 },
-        { title: 'REPORTS.',     sub: 'Filed in seconds.',                      hideTop: 8 },
-        { title: 'DIRECT LINE.', sub: 'To your admin.',                         hideTop: 8 }
+        { title: 'NETRAOPS.',    sub: 'Security guard management, simplified.', hideTop: 8, clock: '8:55' },
+        { title: 'EVERY SHIFT.', sub: 'Verified.',                              hideTop: 8, clock: '8:56' },
+        { title: 'YOUR WEEK.',   sub: 'At a glance.',                           hideTop: 8, clock: '8:57' },
+        { title: 'REPORTS.',     sub: 'Filed in seconds.',                      hideTop: 8, clock: '8:58' },
+        { title: 'DIRECT LINE.', sub: 'To your admin.',                         hideTop: 8, clock: '9:00' }
     ]
 };
 
@@ -147,7 +152,7 @@ function saveSettings() {
         localStorage.setItem(LS_KEY, JSON.stringify({
             statusBar: state.statusBar,
             bleed: state.bleed,
-            screens: state.screens.map(sc => ({ title: sc.title, sub: sc.sub, hideTop: sc.hideTop }))
+            screens: state.screens.map(sc => ({ title: sc.title, sub: sc.sub, hideTop: sc.hideTop, clock: sc.clock }))
         }));
     } catch (e) { /* private mode, quota, blocked storage -- the tool still works */ }
 }
@@ -163,6 +168,7 @@ function loadSettings() {
             if (!s || !state.screens[i]) return;
             if (typeof s.title === 'string') state.screens[i].title = s.title;
             if (typeof s.sub === 'string') state.screens[i].sub = s.sub;
+            if (typeof s.clock === 'string') state.screens[i].clock = s.clock;
             if (Number.isFinite(s.hideTop)) state.screens[i].hideTop = Math.max(0, Math.min(50, s.hideTop));
         });
     }
@@ -253,7 +259,7 @@ window.copySettings = function() {
     const settings = {
         statusBar: state.statusBar,
         bleed: state.bleed,
-        screens: state.screens.map(sc => ({ hideTop: sc.hideTop, title: sc.title, sub: sc.sub }))
+        screens: state.screens.map(sc => ({ hideTop: sc.hideTop, title: sc.title, sub: sc.sub, clock: sc.clock }))
     };
     const io = document.getElementById('json-io');
     io.value = JSON.stringify(settings);
@@ -332,6 +338,7 @@ function buildControls() {
             <div class="text-slate-400 mb-1 border-b border-slate-700 pb-1">App UI Adjustments</div>
             <div class="flex flex-col gap-2 mt-2 text-[10px]">
                 <label>Hide Top (Ver B) (${sc.hideTop}px) <input type="range" min="0" max="50" value="${sc.hideTop}" oninput="state.screens[${i}].hideTop=parseInt(this.value); this.previousSibling.textContent='Hide Top (Ver B) ('+this.value+'px) '; saveSettings(); updatePreviews()"></label>
+                <label class="flex items-center gap-2">Status Bar Clock <input type="text" value="${esc(sc.clock)}" oninput="state.screens[${i}].clock=this.value; saveSettings(); updatePreviews()" class="text-[10px] p-1 text-black rounded w-[64px] font-mono" placeholder="8:56"></label>
                 <div class="text-slate-500 leading-snug">Ver C status bar is a fixed ${SB_HEIGHT}px row above the screenshot &mdash; one global toggle, no per-screen height.</div>
             </div>
         </div>`;
@@ -344,7 +351,7 @@ function getFakeStatus(sc) {
     // Background is the band colour sampled from the screenshot's own top-left,
     // so the row reads as a continuation of the app rather than a stripe.
     return `<div class="status-bar text-white" style="height: ${SB_HEIGHT}px; background-color: ${sc.color};">
-        <span>12:00</span>
+        <span>${esc(sc.clock)}</span>
         <div class="flex gap-1 items-center">
             <svg width="14" height="10" viewBox="0 0 14 10" fill="currentColor"><path d="M1 9h2V5H1v4zm3 0h2V3H4v6zm3 0h2V1H7v8zm3 0h2V7h-2v2z"/></svg>
             <svg width="18" height="10" viewBox="0 0 24 10" fill="currentColor"><path d="M2 3h16v6H2zM20 5h2v2h-2z"/></svg>
