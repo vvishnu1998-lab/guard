@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetraOps Screenshot Builder</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #fff; }
+        .font-condensed { font-family: 'Barlow Condensed', sans-serif; letter-spacing: 0.05em; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        .device-wrapper {
+            position: absolute; background: #000; overflow: hidden; transform-origin: center; box-sizing: border-box;
+            border-style: solid;
+        }
+        .device-inner {
+            position: relative; margin: 0; overflow: hidden; 
+            background-size: 100% 100%; background-position: 0 0; background-repeat: no-repeat;
+        }
+        
+        .status-bar {
+            position: absolute; top: 0; left: 0; width: 100%;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 0 14px; font-size: 10px; font-weight: 600; z-index: 10;
+        }
+        
+        .ver-c-world { background: linear-gradient(115deg, #0A1B33 0%, #0F4C75 30%, #1B86C4 55%, #0F4C75 80%, #0A1B33 100%); }
+        .ver-c-band {
+            position: absolute; top: -200px; bottom: -200px; width: 220px;
+            background: rgba(0,200,255,0.18); border-right: 4px solid #00C8FF;
+            transform: skewX(-25deg); pointer-events: none;
+        }
+        .ver-b-bg { background: linear-gradient(135deg, #f8fafc, #e2e8f0); }
+
+        input[type=range] { width: 100%; accent-color: #00C8FF; height: 4px; }
+        .btn { background: #00C8FF; color: #050A18; font-weight: 700; padding: 6px 16px; border-radius: 6px; cursor: pointer; text-transform: uppercase; font-size: 12px; transition: opacity 0.2s; }
+        .btn:hover { opacity: 0.9; }
+    </style>
+</head>
+<body>
+
+<div class="max-w-[1900px] mx-auto pb-20 p-4">
+    <div class="text-sm text-slate-400 mb-4 font-semibold">1. Upload 5 screenshots. 2. Adjust settings. 3. Export.</div>
+    <div id="controls-panel"></div>
+    <div id="previews-panel"></div>
+</div>
+
+<script>
+const worldXPos = [265, 625, 985, 1345, 1645];
+const localCX = [265, 265, 265, 265, 205];
+const tilts = [5, -5, 5, -5, 5];
+const fileNames = ['1_Login', '2_Home', '3_Schedule', '4_Reports', '5_Chat'];
+
+const state = {
+    panelOpen: true, usePng: false, showGuides: false, errorMsg: '',
+    screens: [
+        { id: 'login', name: 'Login', title: 'NETRAOPS.', sub: 'Security guard management, simplified.', ratio: 2.22258, statusBarHeight: 22, hideTop: 27 },
+        { id: 'home', name: 'Home', title: 'EVERY SHIFT.', sub: 'Verified.', ratio: 2.22258, statusBarHeight: 22, hideTop: 27 },
+        { id: 'schedule', name: 'Schedule', title: 'YOUR WEEK.', sub: 'At a glance.', ratio: 2.22258, statusBarHeight: 22, hideTop: 27 },
+        { id: 'menu', name: 'Menu', title: 'REPORTS.', sub: 'Filed in seconds.', ratio: 2.22258, statusBarHeight: 22, hideTop: 27 },
+        { id: 'chat', name: 'Chat', title: 'DIRECT LINE.', sub: 'To your admin.', ratio: 2.22258, statusBarHeight: 22, hideTop: 27 }
+    ]
+};
+
+state.screens.forEach((sc) => {
+    sc.img = ''; sc.color = '#050A18'; sc.bgColor = '#111';
+});
+
+function handleUpload(index, file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const src = e.target.result;
+        state.screens[index].img = src;
+        const img = new Image();
+        img.onload = () => {
+            state.screens[index].ratio = img.naturalHeight / img.naturalWidth;
+            
+            const cvs = document.createElement('canvas'); cvs.width = 1; cvs.height = 1;
+            const ctx = cvs.getContext('2d');
+            ctx.drawImage(img, 10, 10, 1, 1, 0, 0, 1, 1);
+            let [r, g, b] = ctx.getImageData(0,0,1,1).data;
+            state.screens[index].color = `rgb(${r},${g},${b})`;
+            
+            ctx.clearRect(0, 0, 1, 1);
+            ctx.drawImage(img, 10, img.naturalHeight - 10, 1, 1, 0, 0, 1, 1);
+            let [r2, g2, b2] = ctx.getImageData(0,0,1,1).data;
+            state.screens[index].bgColor = `rgb(${r2},${g2},${b2})`;
+            
+            if (state.screens.every(s => s.img !== '')) state.panelOpen = false;
+            updateControls(); updatePreviews();
+        };
+        img.src = src;
+    };
+    reader.readAsDataURL(file);
+}
+
+function updateControls() { document.getElementById('controls-panel').innerHTML = buildControls(); }
+function updatePreviews() { document.getElementById('previews-panel').innerHTML = buildVersionC() + buildVersionB(); }
+
+window.copySettings = function() {
+    const settings = state.screens.map(sc => ({
+        statusBarHeight: sc.statusBarHeight, hideTop: sc.hideTop, title: sc.title, sub: sc.sub
+    }));
+    const io = document.getElementById('json-io');
+    io.value = JSON.stringify(settings);
+    io.select();
+    document.getElementById('settings-msg').innerText = 'Copied!';
+};
+
+window.pasteSettings = function() {
+    const val = document.getElementById('json-io').value;
+    try {
+        JSON.parse(val).forEach((s, i) => Object.assign(state.screens[i], s));
+        document.getElementById('settings-msg').innerText = 'Applied!';
+        updateControls(); updatePreviews();
+    } catch(e) { document.getElementById('settings-msg').innerText = 'Invalid JSON'; }
+};
+
+function buildControls() {
+    if (!state.panelOpen) {
+        return `<div class="bg-slate-800 p-4 rounded-xl flex justify-between items-center mb-8 border border-slate-700 shadow-lg">
+            <h2 class="font-bold text-lg">NetraOps Controls <span class="text-slate-400 text-sm font-normal ml-2">(${state.screens.filter(s=>s.img).length}/5 Uploaded)</span></h2>
+            <div class="flex gap-4 items-center">
+                <label class="text-sm flex items-center gap-2 ml-4 text-cyan-400 font-bold"><input type="checkbox" ${state.showGuides ? 'checked' : ''} onchange="state.showGuides=this.checked; updatePreviews();"> Show Guides</label>
+                <label class="text-sm flex items-center gap-2 ml-4"><input type="checkbox" ${state.usePng ? 'checked' : ''} onchange="state.usePng=this.checked; updateControls();"> Use PNG</label>
+                <button class="btn bg-slate-600 text-white" onclick="state.panelOpen=true; updateControls();">Edit Settings</button>
+                <button id="dl-btn-top" class="btn" onclick="downloadAll()">Download All 10</button>
+            </div>
+        </div>`;
+    }
+
+    let html = `<div class="bg-slate-800 p-6 rounded-xl mb-8 border border-slate-700 shadow-lg">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="font-bold text-xl">NetraOps Controls</h2>
+            <div class="flex gap-4 items-center">
+                <label class="text-sm flex items-center gap-2 text-cyan-400 font-bold"><input type="checkbox" ${state.showGuides ? 'checked' : ''} onchange="state.showGuides=this.checked; updatePreviews();"> Show Guides</label>
+                <label class="text-sm flex items-center gap-2"><input type="checkbox" ${state.usePng ? 'checked' : ''} onchange="state.usePng=this.checked; updateControls();"> Use PNG</label>
+                <button class="btn bg-slate-600 text-white" onclick="state.panelOpen=false; updateControls();">Collapse</button>
+                <button id="dl-btn-top" class="btn" onclick="downloadAll()">Download All 10</button>
+            </div>
+        </div>
+        <div class="mb-6 bg-slate-900 p-3 rounded flex gap-3 items-center">
+            <textarea id="json-io" class="w-[300px] h-[36px] text-[10px] text-black p-1 font-mono rounded" placeholder="Paste JSON here..."></textarea>
+            <button class="btn bg-slate-700 text-white text-[10px]" onclick="copySettings()">Copy Settings</button>
+            <button class="btn bg-slate-700 text-white text-[10px]" onclick="pasteSettings()">Apply Settings</button>
+            <span id="settings-msg" class="text-xs text-cyan-400"></span>
+        </div>`;
+        
+    if(state.errorMsg) html += `<div class="bg-red-500 text-white p-2 text-sm rounded mb-4">${state.errorMsg}</div>`;
+    html += `<div class="grid grid-cols-5 gap-4">`;
+    
+    state.screens.forEach((sc, i) => {
+        html += `<div class="bg-slate-900 p-4 rounded-lg border border-slate-700 text-xs">
+            <h3 class="font-bold text-cyan-400 mb-2 text-sm uppercase">Frame ${i+1}: ${sc.name}</h3>
+            <div class="mb-3 flex flex-col gap-1">
+                <input type="text" value="${sc.title.replace(/"/g, '&quot;')}" oninput="state.screens[${i}].title=this.value; updatePreviews()" class="text-xs p-1 text-black rounded font-bold" placeholder="Title">
+                <input type="text" value="${sc.sub.replace(/"/g, '&quot;')}" oninput="state.screens[${i}].sub=this.value; updatePreviews()" class="text-xs p-1 text-black rounded" placeholder="Subline">
+            </div>
+            <label class="block mb-4"><input type="file" class="w-full text-xs text-slate-300" accept="image/*" onchange="handleUpload(${i}, this.files[0])"></label>
+            <div class="text-slate-400 mb-1 border-b border-slate-700 pb-1">App UI Adjustments</div>
+            <div class="flex flex-col gap-2 mt-2 text-[10px]">
+                <label>Status Bar Height (${sc.statusBarHeight}px) <input type="range" min="0" max="40" value="${sc.statusBarHeight}" oninput="state.screens[${i}].statusBarHeight=parseInt(this.value); this.previousSibling.textContent='Status Bar Height ('+this.value+'px) '; updatePreviews()"></label>
+                <label>Hide Top (Ver B) (${sc.hideTop}px) <input type="range" min="0" max="50" value="${sc.hideTop}" oninput="state.screens[${i}].hideTop=parseInt(this.value); this.previousSibling.textContent='Hide Top (Ver B) ('+this.value+'px) '; updatePreviews()"></label>
+            </div>
+        </div>`;
+    });
+    return html + `</div></div>`;
+}
+
+function getFakeStatus(sc) {
+    if (sc.statusBarHeight <= 0) return '';
+    return `<div class="status-bar text-white" style="height: ${sc.statusBarHeight}px; background-color: ${sc.color};">
+        <span>12:00</span>
+        <div class="flex gap-1 items-center">
+            <svg width="14" height="10" viewBox="0 0 14 10" fill="currentColor"><path d="M1 9h2V5H1v4zm3 0h2V3H4v6zm3 0h2V1H7v8zm3 0h2V7h-2v2z"/></svg>
+            <svg width="18" height="10" viewBox="0 0 24 10" fill="currentColor"><path d="M2 3h16v6H2zM20 5h2v2h-2z"/></svg>
+        </div>
+    </div>`;
+}
+
+function getHeadlineHTML(sc, index, isVerB) {
+    const subSize = index === 0 ? '15px' : (sc.sub.length > 24 ? '16px' : '18px');
+    if (isVerB) {
+        return `<div class="absolute w-full px-6 text-center z-30 bottom-[20px] pointer-events-none flex flex-col items-center">
+            <div class="font-condensed text-[48px] uppercase tracking-wide leading-none text-[#050A18]">${sc.title}</div>
+            <div class="w-[56px] h-[5px] bg-[#00C8FF] mx-auto my-2"></div>
+            <div class="font-sans font-semibold text-[${subSize}] text-[#475569] whitespace-nowrap">${sc.sub}</div>
+        </div>`;
+    } else {
+        const titleColor = index === 0 ? 'text-[#00C8FF]' : 'text-white';
+        return `<div class="absolute w-full px-6 text-center z-30 top-[28px] pointer-events-none flex flex-col items-center justify-start h-[92px]">
+            <div class="font-condensed text-[48px] uppercase tracking-wide leading-none ${titleColor}">${sc.title}</div>
+            <div class="font-sans font-semibold text-[${subSize}] text-slate-300 mt-2 whitespace-nowrap">${sc.sub}</div>
+        </div>`;
+    }
+}
+
+function buildVersionC() {
+    let html = `<div class="mb-12"><div class="flex items-center mb-2"><h3 class="text-xl font-bold text-white border-l-4 border-[#00C8FF] pl-3">Version C: Bold Panoramic</h3><button id="dl-btn-C" class="btn text-[10px] ml-4 bg-slate-700" onclick="downloadVersion('C')">Download Version C (5)</button></div>
+    <div class="flex gap-0 overflow-x-auto pb-4 no-scrollbar w-full">`;
+    
+    state.screens.forEach((sc, i) => {
+        const frameCenter = (i * 360) + 180;
+        let innerW = 196; let innerH = 196 * sc.ratio;
+        if (innerH > 436) { innerH = 436; innerW = 436 / sc.ratio; }
+        const outerW = innerW + 16; const outerH = innerH + 16;
+        
+        let guideHTML = '';
+        if (state.showGuides) {
+            const innerX = localCX[i] - (innerW / 2);
+            const innerY = 392 - (innerH / 2);
+            guideHTML = `<div class="absolute border border-red-500 z-50 pointer-events-none flex items-center justify-center" 
+                 style="left: ${innerX}px; top: ${innerY}px; width: ${innerW}px; height: ${innerH}px; background: rgba(255,0,0,0.1);">
+                <div class="bg-red-600 text-white text-[10px] p-1 rounded font-mono">X ${Math.round(innerX)}, Y ${Math.round(innerY)}<br>W ${Math.round(innerW)}, H ${Math.round(innerH)}</div>
+            </div>`;
+        }
+
+        html += `<div class="flex-none flex flex-col items-center pr-4">
+            <div id="C_${i}" class="relative w-[360px] h-[640px] overflow-hidden bg-[#0A1B33]">
+                <div class="absolute top-0 left-0 w-full h-[150px]" style="background: linear-gradient(to bottom, rgba(5,10,24,0.55), transparent); z-index: 5;"></div>
+                ${getHeadlineHTML(sc, i, false)}
+                ${guideHTML}
+                <div class="absolute top-0 left-0 w-[1800px] h-[640px] ver-c-world" style="transform: translateX(-${i * 360}px);">
+                    <div class="ver-c-band" style="left: 300px;"></div><div class="ver-c-band" style="left: 900px;"></div><div class="ver-c-band" style="left: 1500px;"></div>
+                    ${state.screens.map((worldSc, wi) => {
+                        if (Math.abs(worldXPos[wi] - frameCenter) > 420) return '';
+                        let w_innerW = 196; let w_innerH = 196 * worldSc.ratio;
+                        if (w_innerH > 436) { w_innerH = 436; w_innerW = 436 / worldSc.ratio; }
+                        return `<div class="device-wrapper" 
+                             style="left: ${worldXPos[wi]}px; top: 392px; width: ${w_innerW+16}px; height:${w_innerH+16}px; border-width: 8px; border-color: #0B1220; border-radius: 32px; box-shadow: 0 0 0 2px rgba(0,200,255,0.5), -15px 15px 30px rgba(0,0,0,0.6); transform: translate(-50%, -50%) rotate(${tilts[wi]}deg);">
+                            <div class="device-inner" style="width: ${w_innerW}px; height: ${w_innerH}px; border-radius: 24px; ${worldSc.img ? `background-image: url('${worldSc.img}');` : ''} background-color: ${worldSc.bgColor};">
+                                ${getFakeStatus(worldSc)}
+                            </div>
+                        </div>`;
+                    }).join('')}
+                </div>
+            </div>
+            <button class="btn w-full bg-slate-700 text-white mt-2 max-w-[360px]" onclick="exportSingle('C_${i}', 'NetraOps_C_${fileNames[i]}')">Export Frame</button>
+        </div>`;
+    });
+    return html + `</div></div>`;
+}
+
+function buildVersionB() {
+    let html = `<div class="mb-12"><div class="flex items-center mb-2"><h3 class="text-xl font-bold text-white border-l-4 border-[#00C8FF] pl-3">Version B: Light Contrast</h3><button id="dl-btn-B" class="btn text-[10px] ml-4 bg-slate-700" onclick="downloadVersion('B')">Download Version B (5)</button></div>
+    <div class="flex gap-4 overflow-x-auto pb-4 no-scrollbar">`;
+    
+    state.screens.forEach((sc, i) => {
+        let maxInnerH = 474 + sc.hideTop;
+        let innerW = 224; let innerH = 224 * sc.ratio;
+        if (innerH > maxInnerH) { innerH = maxInnerH; innerW = maxInnerH / sc.ratio; }
+        const outerW = innerW + 16; const outerH = innerH + 16;
+        const outerLeft = 180 - (outerW / 2);
+        const outerTop = -(8 + sc.hideTop);
+        const innerX = 180 - (innerW / 2);
+        const innerY = -sc.hideTop;
+
+        let guideHTML = '';
+        if (state.showGuides) {
+            guideHTML = `<div class="absolute border border-red-500 z-50 pointer-events-none flex items-center justify-center" 
+                 style="left: ${innerX}px; top: ${innerY}px; width: ${innerW}px; height: ${innerH}px; background: rgba(255,0,0,0.1);">
+                <div class="bg-red-600 text-white text-[10px] p-1 rounded font-mono">X ${Math.round(innerX)}, Y ${Math.round(innerY)}<br>W ${Math.round(innerW)}, H ${Math.round(innerH)}</div>
+            </div>`;
+        }
+
+        html += `<div class="flex-none flex flex-col items-center gap-2">
+            <div id="B_${i}" class="ver-b-bg relative w-[360px] h-[640px] overflow-hidden">
+                <div class="device-wrapper shadow-[0_20px_40px_rgba(0,0,0,0.15)]" 
+                     style="left: ${outerLeft}px; top: ${outerTop}px; width: ${outerW}px; height: ${outerH}px; border-radius: 34px; border-width: 8px; border-color: #cbd5e1;">
+                    <div class="device-inner" style="width: ${innerW}px; height: ${innerH}px; border-radius: 26px; ${sc.img ? `background-image: url('${sc.img}');` : ''} background-color: ${sc.bgColor};"></div>
+                </div>
+                ${getHeadlineHTML(sc, i, true)}
+                ${guideHTML}
+            </div>
+            <button class="btn w-full bg-slate-700 text-white" onclick="exportSingle('B_${i}', 'NetraOps_B_${fileNames[i]}')">Export Frame</button>
+        </div>`;
+    });
+    return html + `</div></div>`;
+}
+
+async function captureNode(nodeId, filename, returnBlob = false) {
+    const node = document.getElementById(nodeId);
+    if (!node) return;
+    const clone = node.cloneNode(true);
+    const container = document.createElement('div');
+    container.style.position = 'fixed'; container.style.top = '-10000px'; container.style.left = '0';
+    container.style.width = '360px'; container.style.height = '640px';
+    container.appendChild(clone); document.body.appendChild(container);
+
+    const ext = state.usePng ? 'png' : 'jpg';
+    const options = {
+        quality: 0.95, pixelRatio: 3, width: 360, height: 640,
+        backgroundColor: nodeId.startsWith('C') ? '#0A1B33' : '#f8fafc', style: { transform: 'none' }
+    };
+
+    try {
+        if(state.usePng) await htmlToImage.toCanvas(clone, options);
+        else await htmlToImage.toJpeg(clone, options);
+
+        let blob;
+        if (state.usePng) blob = await htmlToImage.toBlob(clone, options);
+        else {
+            const dataUrl = await htmlToImage.toJpeg(clone, options);
+            blob = await (await fetch(dataUrl)).blob();
+        }
+        
+        const img = new Image(); const url = URL.createObjectURL(blob);
+        img.onload = () => {
+            if(img.naturalWidth !== 1080 || img.naturalHeight !== 1920) {
+                state.errorMsg = `Warning: ${filename} exported at ${img.naturalWidth}x${img.naturalHeight}. Should be 1080x1920.`;
+                updateControls();
+            }
+            URL.revokeObjectURL(url);
+        }; img.src = url;
+
+        if (returnBlob) return { blob, filename: `${filename}.${ext}` };
+        saveAs(blob, `${filename}.${ext}`);
+    } catch (e) {
+        state.errorMsg = 'Export failed: ' + e.message; updateControls();
+    } finally {
+        document.body.removeChild(container);
+    }
+}
+
+async function exportSingle(id, filename) {
+    state.errorMsg = ''; updateControls();
+    await captureNode(id, filename, false);
+}
+
+async function downloadVersion(ver) {
+    state.errorMsg = ''; updateControls();
+    const zip = new JSZip();
+    const ids = [];
+    for(let i=0; i<5; i++) ids.push({ id: `${ver}_${i}`, name: `NetraOps_${ver}_${fileNames[i]}` });
+    
+    let count = 0;
+    const btn = document.getElementById(`dl-btn-${ver}`);
+    for (const item of ids) {
+        count++;
+        if (btn) btn.innerText = `Rendering ${count}/5...`;
+        const result = await captureNode(item.id, item.name, true);
+        if (result && result.blob) zip.file(result.filename, result.blob);
+        await new Promise(r => setTimeout(r, 150));
+    }
+    const content = await zip.generateAsync({type:"blob"});
+    saveAs(content, `NetraOps_Version_${ver}.zip`);
+    if (btn) btn.innerText = `Download Version ${ver} (5)`;
+    if (state.errorMsg) updateControls();
+}
+
+async function downloadAll() {
+    state.errorMsg = ''; updateControls();
+    const zip = new JSZip();
+    const ids = [];
+    ['C', 'B'].forEach(ver => { for(let i=0; i<5; i++) ids.push({ id: `${ver}_${i}`, name: `NetraOps_${ver}_${fileNames[i]}` }); });
+    
+    let count = 0;
+    const dlBtns = document.querySelectorAll('[id^="dl-btn-top"]');
+    for (const item of ids) {
+        count++;
+        dlBtns.forEach(btn => btn.innerText = `Rendering ${count}/10...`);
+        const result = await captureNode(item.id, item.name, true);
+        if (result && result.blob) zip.file(result.filename, result.blob);
+        await new Promise(r => setTimeout(r, 150));
+    }
+    const content = await zip.generateAsync({type:"blob"});
+    saveAs(content, "NetraOps_Screenshots.zip");
+    dlBtns.forEach(btn => btn.innerText = `Download All 10`);
+    if(state.errorMsg) updateControls();
+}
+
+updateControls();
+updatePreviews();
+</script>
+</body>
+</html>
