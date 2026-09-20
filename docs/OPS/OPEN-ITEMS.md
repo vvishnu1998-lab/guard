@@ -3622,41 +3622,34 @@ it is not a one-line change despite looking like one.
 
 ---
 
-**N101. `triage-raw.json` is never uploaded, so a failed run's own payload is only recoverable from the report banner that truncates it.**
-verified: YES — found while fixing the 09-19/09-20 triage failures at `84b012b`, and the
-verification for that fix is itself the evidence.
+**N101. CLOSED 2026-09-20 — the model's tool-call stream is now uploaded, filtered.**
+verified: YES — shipped in the same change that moved the pack to stdin.
 
-`scripts/ops/triage.sh` writes claude's full JSON payload to `${TRIAGE_RAW:-/tmp/triage-raw.json}`
-and the workflow uploads three artifacts — `triage-context`, `triage-cost`, `triage-report`. The
-raw payload is not among them. On a SUCCESS that costs nothing: `.result` is the report, so
-`report.md` is the same bytes. On a FAILURE it is the only copy of `num_turns`, `errors`,
-`permission_denials`, `usage` and `modelUsage`, and the banner quotes it only as far as the
-report's own truncation allows.
+Was: `scripts/ops/triage.sh` wrote claude's payload to `/tmp/triage-raw.json` and the workflow
+uploaded three artifacts, none of them that. On a SUCCESS that cost nothing — `.result` is the
+report. On a FAILURE it was the only copy of `num_turns`, `errors`, `permission_denials` and
+`usage`, recoverable only as far as the report banner's truncation.
 
-**What that cost, concretely.** Replaying the 09-20 failure through the fixed parse path needed
-the real payload, and it survived only because the failure banner happened to embed it. The
-matching SUCCESS replay had no such luck: the 09-18 green envelope had to be RECONSTRUCTED from
-`cost.json` (derived fields) and `report.md` (`.result`) because the original was gone. The shape
-was faithful; it was not the original bytes, and that limitation is stated in the PR.
+**What shipped is more than was filed.** The run now uses `--output-format stream-json --verbose`,
+so the artifact is the whole EVENT STREAM, not just the final envelope: every `tool_use` with its
+target and every `tool_result` with its size. `$RAW` is derived from it by selecting
+`type == "result"` — by type, never `tail -1`, because a `system/task_summary` event trails the
+result and would otherwise be handed downstream as the verdict.
 
-Fix shape: an eighth step mirroring the three existing uploads — roughly eight lines of YAML, not
-one. **Do not upload the file unfiltered.** `permission_denials[].tool_input.command` echoes
-whatever the model typed, which is the one field in the payload that is unconstrained model output
-rather than curated collector text, and uploading it archives that for the retention window. Drop
-the input and keep the shape:
+Uploaded as `triage-stream-<run_id>`, 30 days, filtered in `triage.sh` before upload:
 
-```
-jq 'if has("permission_denials") then .permission_denials |= map(del(.tool_input)) else . end' \
-  "$RAW" > triage-raw.json
-```
+- `permission_denials[].tool_input` dropped — it echoes whatever the model typed, the one
+  unconstrained field in an otherwise curated payload. `tool_name` survives.
+- `tool_result` content cut to 2,000 characters, with the original length recorded first as
+  `orig_content_length`. Truncating without that would destroy the number the file exists to
+  provide: a 65,607-byte read and a 286-byte one must stay distinguishable.
 
-That keeps `tool_name` — which is what says a denial happened and which tool it was, the thing
-worth having — and discards the free text. The two turns lost to denials on 09-19 would still be
-diagnosable from it.
+If the filter fails the file is deleted rather than falling back to the unfiltered stream, so the
+upload step's `if-no-files-found: warn` is the intended path.
 
-**Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema, no secret in the payload.
-
----
+The gap this closes, concretely: run 35528838218 used 22 of 25 turns and nothing on the runner
+recorded why. Diagnosing it required a local replay, and the local harness did not reproduce the
+session — 11 turns at 35.7k cache-read per turn against CI's 22 at 91.9k.
 
 **N102. [VISHNU] `@anthropic-ai/claude-code` is pinned to 2.1.270 in ops-triage, and the pin needs a deliberate bump with a sentinel re-test.**
 verified: YES — pinned 2026-09-20 in the same change that moved the context pack to stdin.

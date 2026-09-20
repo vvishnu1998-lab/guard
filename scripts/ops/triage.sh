@@ -1078,6 +1078,9 @@ printf 'starting claude -p (model=%s, max-turns %s)\n' "$MODEL" "$MAX_TURNS"
 # carries `result` (the report text) and `total_cost_usd`; text format carries
 # neither, which is why every cost figure so far has been UNVERIFIED (N21).
 RAW="${TRIAGE_RAW:-/tmp/triage-raw.json}"
+# The full event stream. $RAW is derived from it below; this file is what gets
+# uploaded (filtered) so a failed run's tool calls are recoverable at all.
+STREAM="${TRIAGE_STREAM:-/tmp/triage-stream.jsonl}"
 
 set +e
 # THE PACK GOES IN ON STDIN, NOT AS A PATH.
@@ -1091,15 +1094,86 @@ set +e
 #
 # This replaces a choice the model was making badly. See the allowlist note.
 claude -p "$PROMPT_BODY" \
-  --output-format json \
+  --output-format stream-json --verbose \
   --max-turns "$MAX_TURNS" \
   --model "$MODEL" \
   --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
   < "$CONTEXT" \
-  > "$RAW"
+  > "$STREAM"
 CLAUDE_EXIT=$?
 set -e
+
+# ── $RAW IS SELECTED BY TYPE, NEVER BY POSITION ────────────────────────────
+#
+# stream-json emits one JSON object per line and the result envelope is NOT
+# the last one: a {"type":"system","subtype":"task_summary"} event trails it
+# (observed 2026-09-20). `tail -1` would silently hand the rest of this script
+# a summary object with no subtype, no cost and no result, and every check
+# below would then describe the wrong thing.
+#
+# Verified the same day: the result event's shape under stream-json is
+# IDENTICAL to what --output-format json produced -- 25 keys, no differences
+# either way -- so everything downstream of here runs unchanged.
+#
+# `last` rather than `first`: one result event is expected, and if a future
+# CLI emitted more than one the final verdict is the one that counts.
+if ! jq -s 'map(select(.type == "result")) | last | select(. != null)' \
+     "$STREAM" > "$RAW" 2>/dev/null || [ ! -s "$RAW" ]; then
+  # No result envelope at all -- an auth failure or a crash. Keep the stream
+  # itself so the failure banner has something to quote, and let the
+  # not-the-documented-JSON branch below do its job.
+  cp "$STREAM" "$RAW"
+fi
+
+# ── THE UPLOADABLE COPY OF THE STREAM ─────────────────────────────────────
+#
+# The stream is the only record of what the model actually did -- which files
+# it opened, in what order, and how much came back. Without it, diagnosing a
+# turn-budget or context problem means replaying locally and hoping the local
+# harness behaves like the runner, which on 2026-09-20 it did not.
+#
+# TWO FILTERS, AND NEITHER IS COSMETIC.
+#
+# 1. permission_denials[].tool_input is dropped. It echoes whatever the model
+#    typed, which is the one unconstrained field in an otherwise curated
+#    payload, and this file is retained for thirty days. tool_name survives,
+#    because that is what says a denial happened and to which tool -- the two
+#    turns lost to denials on 2026-09-19 stay diagnosable from it.
+#
+# 2. tool_result content is cut to 2,000 characters, and the ORIGINAL LENGTH
+#    IS RECORDED FIRST as orig_content_length. Truncating without that would
+#    destroy the number this file exists to provide: a 65,607-byte read of
+#    OPEN-ITEMS.md and a 286-byte git diff must stay distinguishable. Tool
+#    names and targets live in the assistant events and are untouched.
+#
+# Non-string content is normalised with tojson before truncation. This file is
+# an archive for diagnosis, not a replay input, so a uniform string is worth
+# more than a faithful nested shape.
+FILTERED_STREAM="${TRIAGE_FILTERED_STREAM:-triage-stream.jsonl}"
+if [ -s "$STREAM" ]; then
+  if jq -c '
+        if .type == "result" then
+          (if has("permission_denials")
+             then .permission_denials |= map(del(.tool_input)) else . end)
+        elif .type == "user" and ((.message.content? | type) == "array") then
+          .message.content |= map(
+            if .type == "tool_result" then
+              ((.content // "") | if type == "string" then . else tojson end) as $t
+              | .orig_content_length = ($t | length)
+              | .content = ($t[0:2000])
+            else . end)
+        else . end
+      ' "$STREAM" > "$FILTERED_STREAM" 2>/dev/null; then
+    printf 'stream: %s (%s events, %s bytes filtered from %s)\n' \
+      "$FILTERED_STREAM" "$(wc -l < "$FILTERED_STREAM" | tr -d ' ')" \
+      "$(wc -c < "$FILTERED_STREAM" | tr -d ' ')" "$(wc -c < "$STREAM" | tr -d ' ')"
+  else
+    # A filter that fails must not upload the UNFILTERED stream in its place.
+    rm -f "$FILTERED_STREAM"
+    printf 'WARNING: stream filter failed; no stream artifact will be uploaded.\n' >&2
+  fi
+fi
 
 # Unwrap to the shape the rest of this script expects.
 #
@@ -1154,9 +1228,39 @@ if jq -e '.type == "result"' "$RAW" >/dev/null 2>&1; then
   # a sentinel and a second call, which the brief for this change ruled out.
   PACK_BYTES="$(wc -c < "$CONTEXT" | tr -d ' ')"
   MIN_INPUT_TOKENS=$(( PACK_BYTES / 4 ))
-  GOT_INPUT="$(jq -r '((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0))' \
-                 "$RAW" 2>/dev/null || printf '0')"
-  case "$GOT_INPUT" in *[!0-9]*) GOT_INPUT=0 ;; esac
+  # MEASURED AT TURN 1, NOT OVER THE RUN. The first version of this check read
+  # the result envelope's run-total cache_creation, which also accumulates
+  # every tool result -- so a run that lost the pack and fell back to reading
+  # the six docs/OPS files from disk would have cleared the floor on the
+  # fallback alone and reported OK. The first assistant event predates any
+  # tool call: whatever it counts is prompt prefix and nothing else.
+  #
+  # cache_read IS EXCLUDED, AND THAT WAS SETTLED BY MEASUREMENT, NOT TASTE.
+  #
+  # Including it is the intuitive choice: at turn 1 there are no prior turns,
+  # so whatever it counts must be prompt prefix. That is true and it is
+  # exactly why it must not be counted -- the prefix is there whether or not
+  # the pack arrived, so it adds a constant that carries no delivery signal.
+  #
+  # Measured 2026-09-20, same prompt, same model, one variable:
+  #     pack on stdin     input 2  creation 120957  read 45809
+  #     stdin /dev/null   input 2  creation  28324  read 45809
+  # The floor for that pack is 56493. Summing all three, the run that got NO
+  # PACK scores 74135 and PASSES on the read constant alone. Summing input and
+  # creation, it scores 28326 and fails, while the delivered run scores 120959
+  # and passes. creation is where a pack lands; read is where the harness
+  # preamble lands.
+  #
+  # The residual: a manual dispatch inside the cache TTL could read a pack it
+  # would otherwise create, scoring low and alarming falsely. At daily cadence
+  # that cannot happen, and the direction is the safe one -- a false alarm
+  # costs a loud failure, a missed detection costs a brief written from
+  # nothing.
+  GOT_INPUT="$(jq -s 'map(select(.type == "assistant")) | first | .message.usage
+                      | ((.input_tokens // 0)
+                         + (.cache_creation_input_tokens // 0))' \
+                 "$STREAM" 2>/dev/null || printf '0')"
+  case "$GOT_INPUT" in ''|*[!0-9]*) GOT_INPUT=0 ;; esac
   if [ "$GOT_INPUT" -lt "$MIN_INPUT_TOKENS" ]; then
     PACK_DELIVERY='suspect'
     printf 'PACK DELIVERY SUSPECT: %s input tokens reported, floor %s for a %s-byte pack.\n' \

@@ -153,6 +153,26 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+      # The tool-call stream: which files the model opened, in what order, and
+      # how much came back. Written by scripts/ops/triage.sh AFTER filtering --
+      # permission_denials[].tool_input dropped, tool_result content cut to
+      # 2,000 chars with the original length recorded. The script deletes the
+      # file rather than fall back to the unfiltered stream if the filter
+      # fails, so `if-no-files-found: warn` is the intended behaviour and not
+      # laziness.
+      #
+      # Exists because run 35528838218 used 22 of 25 turns and nothing on the
+      # runner recorded why. Diagnosing it needed a local replay, and the local
+      # harness did not reproduce the session.
+      - name: Upload tool-call stream
+        if: always() && !inputs.dry_run
+        uses: actions/upload-artifact@v7
+        with:
+          name: triage-stream-${{ github.run_id }}
+          path: triage-stream.jsonl
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Upload report
         if: always() && !inputs.dry_run
         uses: actions/upload-artifact@v7
