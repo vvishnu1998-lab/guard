@@ -164,8 +164,10 @@ COMMENT ON COLUMN shift_sessions.clock_out_photo_delete_at IS
 
 -- Serves BOTH new clock_in_verifications steps — the 30d photo sweep and the
 -- 365d row delete — because both lead on verified_at and both filter
--- legal_hold = false. Same shape as idx_checkpoint_scans_expires_at and the
--- six other tier indexes. The photo step additionally filters
+-- legal_hold = false. Same shape as the EIGHT existing partial tier indexes
+-- (checkpoint_scans, geofence_violations, location_pings, reports,
+-- shift_sessions, shifts, task_completions, vehicle_inspections — counted
+-- 2026-09-19, not recalled). The photo step additionally filters
 -- `selfie_url IS NOT NULL`; that stays a heap filter rather than a second
 -- index, because verified_at is the selective half and one index that serves
 -- two steps beats two that each serve one.

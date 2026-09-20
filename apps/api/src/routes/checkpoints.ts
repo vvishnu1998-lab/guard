@@ -205,8 +205,8 @@ router.delete('/:id', requireAuth('company_admin'), async (req, res) => {
   // 585 rows were false. PR #70 made the column live — insert-time
   // inheritance in this file and the fifth cascade line in routes/admin.ts —
   // which turned this into the only admin-reachable path that destroys held
-  // rows. Every other destroyer filters the flag: all nine nightlyPurge steps
-  // carry `AND legal_hold = false`.
+  // rows. Every other destroyer that CAN filter the flag does: every
+  // nightlyPurge step whose table carries a legal_hold column reads it.
   //
   // ORDER IS LOAD-BEARING. The confirm branch below returns 409 and the
   // handler ends there, so a refusal placed after it is unreachable on the

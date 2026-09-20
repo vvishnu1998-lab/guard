@@ -20,15 +20,32 @@
  *
  * ── THE CAP IS A DEADLOCK FOR ONE STEP, AND IT HAS A DATE ───────────────
  *
- * `notifications` is the only high-volume table here: 16,010 rows growing at
- * ~232/day, of which 1,452 were past 30 days on 2026-09-19. While the step
- * is in dry-run the due set grows by a day's writes every day, so it crosses
- * STEP_ROW_CAP around 2026-10-26 — after which haltStep fires, nothing is
- * deleted, the backlog keeps growing, and it halts every night forever. The
- * guardrail becomes the thing it was meant to guard against.
+ * `notifications` is the only high-volume table here: 16,010 rows, of which
+ * 1,452 were past 30 days on 2026-09-19. While the step is in dry-run the due
+ * set grows every day, so it crosses STEP_ROW_CAP — after which haltStep
+ * fires, nothing is deleted, the backlog keeps growing, and it halts every
+ * night forever. The guardrail becomes the thing it was meant to guard
+ * against.
  *
- * Enable this step before that date, or raise the cap for it. No other step
- * is within three orders of magnitude of the cap.
+ * ENABLE THIS STEP BEFORE 2026-10-10.
+ *
+ * That date is computed, not projected. The due count on any day within 30
+ * days is already determined by rows that exist now — due(D) = rows created
+ * before D minus 30 days — so it was read straight out of production rather
+ * than extrapolated: 8,648 on 10-08, 9,447 on 10-09, 10,149 on 10-10, which
+ * is the first run whose candidate exceeds the cap.
+ *
+ * An earlier draft of this comment said 2026-10-26, sixteen days late and in
+ * the unsafe direction, because it divided the table by its whole lifetime
+ * and got ~232/day. The due set does not grow at the lifetime average; it
+ * grows at the insertion rate of THIRTY DAYS AGO, and notifications have been
+ * accelerating — the last seven days average 487/day. Any growth number in a
+ * comment here should be a measured recent rate or, better, a date read out
+ * of the data like the one above.
+ *
+ * The other 28 steps are nowhere near the cap: the largest is revoked_tokens
+ * at 103 due, and the largest table without an expires_at column is
+ * missed_pings at 4,157 rows, none of them due.
  *
  * Dry-run: `RETENTION_DRY_RUN` env var, code-default = TRUE. Only the
  * literal string 'false' flips it off. During the initial 30-day
@@ -40,9 +57,17 @@
  * window is a manual toggle (deliberately not a code change).
  *
  * Legal hold: partial indexes (schema_v33) exclude held rows from the
- * purge scan. All delete-eligible tables read
- * `WHERE expires_at < NOW() AND legal_hold = false` so held rows are
- * skipped even if the index changes. The cascade endpoint
+ * purge scan. Every table that HAS a legal_hold column reads it in its
+ * predicate, so held rows are skipped even if the index changes.
+ *
+ * MOST TABLES DO NOT HAVE ONE. Ten of the platform's fifty carry legal_hold;
+ * the other nineteen steps added in 2026-09 purge tables that cannot be held
+ * at all — notifications, auth_events, the audit trail, the token windows.
+ * That is a property of what those tables are, not an oversight, and the one
+ * case where it mattered was fixed rather than accepted: schema_v80 gave
+ * clock_in_verifications the column precisely because a step there destroys
+ * an S3 object. The standing rule is about media, not about tables: no step
+ * that destroys an S3 object ships without a hold predicate. The cascade endpoint
  * (PATCH /api/admin/reports/:id/legal-hold) walks parent + child rows
  * so no child of a held report escapes via ON DELETE CASCADE from an
  * expired parent.
@@ -295,8 +320,14 @@ async function runSimpleStep(s: SimpleStep): Promise<StepResult> {
 // deleted the clock-in selfie of the only legal hold on the platform, on its
 // first live night. No step that destroys an S3 object ships without one.
 //
-// selfie_url is nullable only because v80 dropped the NOT NULL. Against a
-// database without that migration this raises 23502 on the first candidate.
+// ORDERING AGAINST schema_v80: this step both READS legal_hold and WRITES
+// NULL into selfie_url, and v80 is what provides each. Against a database
+// without it the SELECT raises 42703 on the missing column — so it fails at
+// the read, before the write, and the 23502 from the NOT NULL is never
+// reached. Both are unreachable while DRY_RUN is true, which it is: the step
+// returns at dryRunStep before either statement runs. The hazard is real
+// only in the window where the code is deployed, the migration is not
+// applied, and the step has been named in the enablement allowlist.
 async function stepClockInPhoto30d(): Promise<StepResult> {
   const step = 'clock_in_photo_30d';
   try {
@@ -353,6 +384,50 @@ async function stepClockOutPhoto90d(): Promise<StepResult> {
       [rowsQ.rows.map((r) => r.id)],
     );
     const s3 = await sweepS3(step, rowsQ.rows.map((r) => r.clock_out_photo_url));
+    return finishStep(step, candidate, del.rowCount ?? 0, s3);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── NEW ── Clock-in verification rows at 365 days (DELETE then S3 sweep) ────
+//
+// THE ROW HALF OF THE PAIR, AND IT MUST SWEEP. stepClockInPhoto30d above is
+// supposed to have nulled selfie_url eleven months earlier, so it is tempting
+// to treat this as a plain row delete. It is not, for two reasons:
+//
+//   1. The 30d step is gated independently. Until it is enabled — and it is
+//      dry-run like everything else — it nulls nothing, so every row reaching
+//      365 days still holds its pointer. Measured 2026-09-19: 347 of 347 rows
+//      have a selfie_url. Not an edge case; currently the whole table.
+//   2. A row held at day 30 keeps its photo, and a hold released at day 200
+//      leaves the pointer live with no second chance to null it.
+//
+// clock_in_verifications owns POINTER_COLUMNS entries 1 and 2 (selfie_url and
+// site_photo_url), so a bare DELETE here orphans both — the exact defect
+// PR #70 existed to remove from the original nine steps. site_photo_url is NULL
+// on all 347 rows today and is collected anyway: sweepS3 filters nulls, and a
+// column that is unused today is not a column that stays unused.
+async function stepClockInVerifications365d(): Promise<StepResult> {
+  const step = 'clock_in_verifications';
+  try {
+    const rowsQ = await pool.query<{
+      id: string; selfie_url: string | null; site_photo_url: string | null;
+    }>(
+      `SELECT id, selfie_url, site_photo_url FROM clock_in_verifications
+        WHERE verified_at < NOW() - INTERVAL '${PURGE_DAYS.CLOCK_IN_ROW} days'
+          AND legal_hold = false`,
+    );
+    const candidate = rowsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      'DELETE FROM clock_in_verifications WHERE id = ANY($1::uuid[])',
+      [rowsQ.rows.map((r) => r.id)],
+    );
+    const s3 = await sweepS3(step, rowsQ.rows.flatMap((r) => [r.selfie_url, r.site_photo_url]));
     return finishStep(step, candidate, del.rowCount ?? 0, s3);
   } catch (err) {
     return errorStep(step, err);
@@ -511,23 +586,27 @@ const STEP_ORDER: readonly OrderedStep[] = [
          + 'THE ONLY HIGH-VOLUME STEP: 16,010 rows at ~232/day, 1,452 due. '
          + 'See the STEP_ROW_CAP note in the header.',
   },
-  {
-    step:  'clock_in_verifications',
-    table: 'clock_in_verifications',
-    where: `verified_at < NOW() - INTERVAL '${PURGE_DAYS.CLOCK_IN_ROW} days' `
-         + 'AND legal_hold = false',
-    why:   'PREFERRED — CASCADE child. The ROW half of the pair; the selfie '
-         + 'went at 30 days in stepClockInPhoto30d above. legal_hold exists '
-         + 'here only as of schema_v80.',
-  },
+  stepClockInVerifications365d,
 
   // ── C/D. The parents. Both match zero rows until 2030-08-21.
   step6_expiredShiftSessions,
   step7_expiredShifts,
 
-  // ── E. Independent of the shift chain. Order among these is ARBITRARY —
-  //       no FK connects any of them to another, verified against
-  //       pg_constraint. Listed alphabetically so a reader can find one.
+  // ── E. Order among these is ARBITRARY: no NO ACTION or RESTRICT FK
+  //       connects any of them to another or to the shift chain, verified
+  //       against pg_constraint, so none can block or be blocked.
+  //
+  //       "Independent" would be too strong. THREE ARE CASCADE CHILDREN of
+  //       tables that have steps — location_integrity_flags and chat_rooms'
+  //       children, plus shift_reassignments and shift_schedule_audit off
+  //       shifts — so they can be deleted by a parent before their own step
+  //       runs. That costs nothing, because a CASCADE delete needs no
+  //       cooperation from this list; it is only the NO ACTION ones that
+  //       dictate position.
+  //
+  //       Roughly alphabetical, so a reader can find one. Not exactly:
+  //       stepMonthlyHoursReports is a thunk and sits where its name would
+  //       put it, and guard_devices precedes guard_assignment_audit.
   {
     step:  'admin_client_previews',
     table: 'admin_client_previews',
@@ -571,9 +650,14 @@ const STEP_ORDER: readonly OrderedStep[] = [
     step:  'location_integrity_flags',
     table: 'location_integrity_flags',
     where: `detected_at < NOW() - INTERVAL '${PURGE_DAYS.LOCATION_INTEGRITY_FLAGS} days'`,
-    why:   'ARBITRARY. Anchors on detected_at (the event) rather than '
-         + 'created_at (the insert); first_event_at, last_event_at and '
-         + 'reviewed_at are all nullable state.',
+    why:   'ARBITRARY for position, but NOT independent: '
+         + 'location_integrity_flags_shift_session_id_fkey is CASCADE on a '
+         + 'NOT NULL column, so all 29 rows die with their session at step 6 '
+         + 'if they have not aged out first. Anchors on detected_at because '
+         + 'first_event_at, last_event_at and reviewed_at are nullable state. '
+         + 'detected_at and created_at are IDENTICAL on all 29 rows today '
+         + '(max gap 0.000000s) — the writer sets both — so this is a choice '
+         + 'about which column MEANS the event, not a measurable difference.',
   },
   stepMonthlyHoursReports,
   {
@@ -818,12 +902,15 @@ async function step5_expiredGeofenceViolations(): Promise<StepResult> {
 // ordering as geofence_violations (the FK cascade would catch them anyway,
 // but off_post_events expire at 365d vs the session's 1500d).
 //
-// THE ONLY STEP THAT DELETES ROWS AND SWEEPS NOTHING, and that is correct:
-// off_post_events has no media pointer column. Verified against
-// POINTER_COLUMNS in services/mediaOwnership.ts, which is itself drift-checked
-// against pg_attribute by assertPointerColumnsCurrent(). If a photo column is
-// ever added to this table it lands in that list first, and this comment stops
-// being true — which is the point of keeping the enumeration in one place.
+// Deletes rows and sweeps nothing, which is correct: off_post_events has no
+// media pointer column. It was the ONLY such step until 2026-09-19; the
+// sixteen runSimpleStep tables are now in the same position, and for the same
+// reason — none of them appears in POINTER_COLUMNS. That list in
+// services/mediaOwnership.ts is drift-checked against pg_attribute by
+// assertPointerColumnsCurrent(), so a photo column added to any of them lands
+// there first. THE RULE THAT FOLLOWS: a table in POINTER_COLUMNS may not be
+// purged by runSimpleStep, because runSimpleStep cannot sweep. Four tables
+// are on the media side of that line and all four have their own function.
 async function step5b_expiredOffPostEvents(): Promise<StepResult> {
   const step = 'step5b_off_post_events';
   try {
@@ -942,17 +1029,31 @@ async function sessionMediaUrls(sessionIds: string[]): Promise<Array<string | nu
 
 // ── Step 6 ── Expired shift_sessions ─────────────────────────────────────────
 //
-// FK NOTE — THIS STEP CAN RAISE 23503 AND THAT IS NOT HANDLED HERE.
-// checkpoint_scans, vehicle_inspections and task_completions reference
-// shift_sessions with NO ACTION, so a session whose scans outlive it blocks
-// the DELETE, and one blocked session aborts the whole statement — every
-// session in the batch, every night. Measured 2026-09-19: 20 of 345 sessions
-// carry checkpoint_scans, and checkpoint_scans has no purge step at all yet,
-// so that block is permanent rather than a timing window. The step that
-// clears it belongs to PR 2; leaving the error loud is deliberate (see the
-// step 5c header). What this PR fixes is the consequence: with the sweep
-// AFTER the DELETE, a 23503 now throws before any S3 call, so a blocked
-// session keeps its media instead of losing it to a delete that rolled back.
+// FK NOTE — STEP 6 AND STEP 7 CAN BOTH RAISE 23503, AND NEITHER HANDLES IT.
+// Five NO ACTION FKs point at shift_sessions: checkpoint_scans,
+// shift_swap_requests (twice), task_completions and vehicle_inspections. A
+// session with a surviving child of any of those blocks the DELETE, and one
+// blocked session aborts the whole statement — every session in the batch.
+//
+// STEP 7 IS EXPOSED THE SAME WAY, which is easy to miss because its own
+// header talks only about task_completions. shifts -> shift_sessions is
+// CASCADE, so deleting a shift tries to delete its sessions and hits the
+// identical end-of-statement check. task_completions escapes it via the
+// task_instances leg; checkpoint_scans and vehicle_inspections have no leg
+// reaching shifts and so block step 7 exactly as they block step 6.
+//
+// All four child tables now have steps ahead of both parents in STEP_ORDER,
+// which is what clears the block — checkpoint_scans got its step in this
+// commit. It does not clear immediately: scans expire from 2027-08-05 while
+// sessions expire from 2030-08-21, so by the time either parent matches a
+// row the children are three years gone. Until 2030 both parents match zero
+// rows and no 23503 is reachable at all.
+//
+// What is still deliberate is leaving the error LOUD if one ever does fire
+// (see the step 5c header). What this PR changed is the consequence: with
+// the sweep AFTER the DELETE, a 23503 throws before any S3 call, so a
+// blocked session keeps its media instead of losing it to a rolled-back
+// delete.
 async function step6_expiredShiftSessions(): Promise<StepResult> {
   const step = 'step6_shift_sessions';
   try {
