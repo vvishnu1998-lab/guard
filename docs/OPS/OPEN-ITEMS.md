@@ -3678,3 +3678,44 @@ The pin is the lock.
 Do not bump it incidentally inside an unrelated change.
 
 **Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema.
+
+---
+
+**N103. The pack's `OPEN-ITEMS.md` body is 68% of the context; a headings-only index would cut the pack ~65% — but it breaks the delivery floor.**
+verified: YES — measured 2026-09-20 on run 35528838218's pack while moving the pack to stdin.
+Deliberately NOT implemented in that change: the two halves must ship together and the second
+half is not designed.
+
+**The size.** The pack is 225,974 B and **~109,000 tokens** — measured, not estimated, from the
+`cache_creation` of a run that consumed it (2.07 B/token, because it is dense with tables, UUIDs
+and SQL). An earlier note in this file said ~56k by dividing bytes by four; that was wrong by 2x
+and the correction matters, because the pack is most of a triage session's context rather than
+half of it.
+
+`docs/OPS/OPEN-ITEMS.md` inside the pack is **154,559 B of that 225,974 — 68%** — already trimmed
+to open items only. 84 items, averaging 1,830 B each.
+
+**The proposal.** Replace the bodies with a headings-only index: one line per item, number plus
+heading. Measured: **7,766 B, 5.0% of the current section.** Pack goes 225,974 B -> 77,879 B, a
+**65% cut**, and roughly 109k tokens -> 38k.
+
+It is defensible on purpose, not just on size. What the model needs `OPEN-ITEMS` for is "do not
+re-report a known finding", and that needs the NUMBER and the HEADING, not 1,830 bytes of body.
+`triage-prompt.md` already carries the escape hatch: Grep one item's heading, Read only that range.
+
+**WHY IT CANNOT SHIP ALONE.** `scripts/ops/triage.sh` asserts the pack arrived by requiring the
+first assistant turn to report at least `PACK_BYTES/4` input tokens. Measured on the same day:
+
+    pack on stdin     turn-1 input 2 + cache_creation 120957
+    stdin /dev/null   turn-1 input 2 + cache_creation  28324
+
+A 77,879-byte pack gives a floor of **19,469**. The no-pack case creates **28,324** — so with the
+index in place **a run that received NO PACK AT ALL would clear the floor and report OK.** That is
+precisely the failure the turn-1 rework was written to remove, reintroduced by shrinking the thing
+being measured.
+
+Any implementation must therefore also rework the floor. Sketch, not a design: compare against a
+measured no-pack baseline rather than a ratio of pack size, or assert on a cheap structural
+property of the pack's content instead of on token volume. Both need their own measurement pass.
+
+**Size S** — the trim itself is small; the floor rework is the work. **Tier 1**, CI-only.

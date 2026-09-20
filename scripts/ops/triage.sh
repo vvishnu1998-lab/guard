@@ -1150,10 +1150,26 @@ fi
 # Non-string content is normalised with tojson before truncation. This file is
 # an archive for diagnosis, not a replay input, so a uniform string is worth
 # more than a faithful nested shape.
+#
+# 3. system/thinking_tokens events are dropped. Measured on a real stream:
+#    82 of 94 events, 87% of the LINES but only 19.4% of the bytes -- so they
+#    cost little to keep and a great deal to read past. This artifact exists
+#    to be read by a human working out where a turn budget went, and 87% noise
+#    works against exactly that. The count is recorded rather than silently
+#    discarded: the first line of the file is a _filter_note saying how many
+#    went and why, so nobody later mistakes a quiet stream for a short session.
 FILTERED_STREAM="${TRIAGE_FILTERED_STREAM:-triage-stream.jsonl}"
 if [ -s "$STREAM" ]; then
-  if jq -c '
-        if .type == "result" then
+  THINKING_DROPPED="$(jq -s 'map(select(.type == "system" and .subtype == "thinking_tokens"))
+                             | length' "$STREAM" 2>/dev/null || printf '0')"
+  case "$THINKING_DROPPED" in ''|*[!0-9]*) THINKING_DROPPED=0 ;; esac
+  if { printf '{"type":"_filter_note","dropped_thinking_tokens":%s,' "$THINKING_DROPPED"
+       printf '"tool_result_truncated_to":2000,"permission_denials_tool_input":"dropped",'
+       printf '"why":"thinking_tokens are 87%% of lines and 19%% of bytes; dropped for legibility. '
+       printf 'Original tool_result sizes are preserved as orig_content_length."}\n'
+       jq -c '
+        select((.type == "system" and .subtype == "thinking_tokens") | not)
+        | if .type == "result" then
           (if has("permission_denials")
              then .permission_denials |= map(del(.tool_input)) else . end)
         elif .type == "user" and ((.message.content? | type) == "array") then
@@ -1164,10 +1180,12 @@ if [ -s "$STREAM" ]; then
               | .content = ($t[0:2000])
             else . end)
         else . end
-      ' "$STREAM" > "$FILTERED_STREAM" 2>/dev/null; then
-    printf 'stream: %s (%s events, %s bytes filtered from %s)\n' \
+      ' "$STREAM"
+     } > "$FILTERED_STREAM" 2>/dev/null; then
+    printf 'stream: %s (%s lines, %s thinking_tokens dropped, %s bytes from %s)\n' \
       "$FILTERED_STREAM" "$(wc -l < "$FILTERED_STREAM" | tr -d ' ')" \
-      "$(wc -c < "$FILTERED_STREAM" | tr -d ' ')" "$(wc -c < "$STREAM" | tr -d ' ')"
+      "$THINKING_DROPPED" "$(wc -c < "$FILTERED_STREAM" | tr -d ' ')" \
+      "$(wc -c < "$STREAM" | tr -d ' ')"
   else
     # A filter that fails must not upload the UNFILTERED stream in its place.
     rm -f "$FILTERED_STREAM"
