@@ -47,6 +47,14 @@ LOCAL="${TRIAGE_LOCAL:-0}"
 DRY_RUN="${TRIAGE_DRY_RUN:-0}"
 COST_FILE="${TRIAGE_COST_FILE:-cost.json}"
 
+# Raised from 15 on 2026-09-20. Both failures that week ended
+# `error_max_turns` at num_turns 16; the last green run before them used 12 of
+# 15, so the ceiling had roughly one collector failure of headroom and the
+# 09-19 schema-applied failure consumed it. ONE VARIABLE, read by the flag and
+# by the log line: they disagreed before, with 15 hardcoded in each, so a
+# change to one would have left the log claiming a limit that was not in force.
+MAX_TURNS="${TRIAGE_MAX_TURNS:-25}"
+
 STARNET='27c4d404-8769-49ca-bfd6-93cb9b890067'
 BETHEL='53c71c64-1973-4f82-be9c-98e4800beece'
 API='https://api.netraops.com'
@@ -347,13 +355,37 @@ c_git_log() { git log -10 --oneline; }
 c_schema_applied() {
   local map file tip v kind name sql out rc
   local n_checked=0 n_present=0 missing=''
+  local tip_entries=0 tip_probeable=0 best='' probe_v='' dataonly_note=''
 
-  # <version>|<kind>|<object>     kind = constraint|index|table|column|extension
+  # <version>|<kind>|<object>
+  #   kind = constraint|index|table|column|extension|dataonly
   #
   # ADD A LINE WHEN YOU ADD A MIGRATION. A file name does not say what it
   # created, so each tip needs one object that is present if and only if that
   # migration ran. More than one line per version is fine; all must pass.
+  #
+  # `dataonly` IS FOR A MIGRATION THAT CREATES NOTHING TO PROBE. schema_v79 is
+  # the first: twelve statements, every one an UPDATE recomputing expires_at,
+  # zero DDL. There is no catalog object that is present if and only if it ran,
+  # so demanding one would mean either an UNMAPPED tip forever or a fabricated
+  # probe that passes without asking anything -- and a probe that cannot fail
+  # is the exact class this collector was written to remove.
+  #
+  # A dataonly line COUNTS AS MAPPED, so the tip is not UNMAPPED. It is never
+  # itself a verdict: when the tip is dataonly the collector probes the nearest
+  # EARLIER version that does carry an object and says so in the label, so the
+  # APPLIED still rests on a real question put to the database.
+  #
+  # What that verdict does and does not mean: it proves the chain was replayed
+  # at least as far as the probed version. It cannot prove the data-only tip's
+  # UPDATEs ran. Nothing in this repository can -- migrate.ts keeps no ledger
+  # (no migrations table exists in production, checked 2026-09-20), it simply
+  # replays every file in array order on each invocation, so reaching vM
+  # implies running vN only because the loop has no way to skip one.
   map="$(cat <<'MAP'
+v80|index|idx_clock_in_verifications_verified_at
+v79|dataonly|recomputes expires_at onto the locked tiers; creates no catalog object
+v78|column|checkpoint_scans.legal_hold_at
 v77|constraint|shifts_no_guard_overlap
 v77|extension|btree_gist
 v76|column|shifts.unstaffed_warning_sent_at
@@ -377,11 +409,61 @@ MAP
   tip="v${file#schema_v}"; tip="${tip%.sql}"
   printf 'migrate_ts_tip: %s (%s)\n' "$tip" "$file"
 
+  # ── PASS 1: what does the map know about the tip? ─────────────────────────
+  #
+  # Two questions, and they are separate: does the tip appear at all (if not,
+  # UNMAPPED), and does any of its entries carry something probeable (if not,
+  # the tip is data-only and the probe has to fall back to an earlier version).
+  # `best` collects the highest version strictly below the tip that is not
+  # itself data-only -- the nearest thing to the tip that can actually be asked.
+  #
   # Fed by heredoc, NOT by a pipe: a pipe would put the loop in a subshell and
   # `return 1` below would exit only that subshell, leaving the function at 0.
-  # That is precisely the masked-failure class this commit exists to remove.
+  # That is precisely the masked-failure class this collector exists to remove.
   while IFS='|' read -r v kind name; do
-    [ "$v" = "$tip" ] || continue
+    [ -n "$v" ] || continue
+    if [ "$v" = "$tip" ]; then
+      tip_entries=$((tip_entries + 1))
+      [ "$kind" = 'dataonly' ] || tip_probeable=$((tip_probeable + 1))
+      continue
+    fi
+    [ "$kind" = 'dataonly' ] && continue
+    # Numeric compare, guarded: a malformed version must not crash the probe.
+    case "${v#v}${tip#v}" in
+      *[!0-9]*) continue ;;
+    esac
+    if [ "${v#v}" -lt "${tip#v}" ] && { [ -z "$best" ] || [ "${v#v}" -gt "${best#v}" ]; }; then
+      best="$v"
+    fi
+  done <<MAPEOF0
+$map
+MAPEOF0
+
+  if [ "$tip_entries" -eq 0 ]; then
+    printf 'UNMAPPED -- tip %s has no object in the mapping table. Add one line to\n' "$tip"
+    printf 'c_schema_applied. UNMAPPED is not APPLIED and not UNVERIFIED: the database\n'
+    printf 'was reachable and nothing was asked of it.\n'
+    return 1
+  fi
+
+  probe_v="$tip"
+  if [ "$tip_probeable" -eq 0 ]; then
+    # The tip is data-only. Probe the nearest earlier version that is not, and
+    # SAY SO in the verdict -- an APPLIED that silently described a different
+    # version than the one named would be worse than UNMAPPED.
+    if [ -z "$best" ]; then
+      printf 'UNMAPPED -- tip %s is data-only and no earlier version in the mapping\n' "$tip"
+      printf 'table carries a probeable object. Add one for an earlier migration.\n'
+      return 1
+    fi
+    probe_v="$best"
+    dataonly_note=" (tip ${tip} data-only; probed ${probe_v})"
+  fi
+
+  # ── PASS 2: ask the database about probe_v's objects ──────────────────────
+  while IFS='|' read -r v kind name; do
+    [ "$v" = "$probe_v" ] || continue
+    [ "$kind" = 'dataonly' ] && continue
     case "$kind" in
       constraint) sql="SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = '$name'" ;;
       index)      sql="SELECT indexdef FROM pg_indexes WHERE indexname = '$name'" ;;
@@ -422,9 +504,10 @@ MAPEOF
   fi
 
   if [ -n "$missing" ]; then
-    printf 'schema_applied: MISSING -- %s\n' "$missing"
+    printf 'schema_applied: MISSING%s -- %s\n' "$dataonly_note" "$missing"
   else
-    printf 'schema_applied: APPLIED (%s/%s mapped objects present)\n' "$n_present" "$n_checked"
+    printf 'schema_applied: APPLIED%s -- %s/%s mapped objects present\n' \
+      "$dataonly_note" "$n_present" "$n_checked"
   fi
 
   # Explicit, not incidental. Every failure path above returns 1 before it can
@@ -925,7 +1008,25 @@ fi
 # requests are denied either way, so it buys nothing here and would break on
 # older CLIs.
 # ---------------------------------------------------------------------------
-ALLOWED_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(cat ${CONTEXT})"
+# grep and wc were added 2026-09-20. On 09-19 the model spent two of its
+# fifteen turns being denied `grep -n "^# FILE: ..." ${CONTEXT}` and
+# `wc -l ${CONTEXT} <repo>/docs/OPS/OPEN-ITEMS.md`, then hit the ceiling.
+#
+# THIS WIDENS NOTHING. Read, Grep and Glob are already on this list with no
+# path restriction, so the model can already read any file on the runner; the
+# denials cost turns without protecting anything. Both commands are read-only:
+# neither grep nor wc has a mode that writes.
+#
+# ON SCOPING, HONESTLY: the brief asked for these to be pinned to ${CONTEXT}
+# and the repo, and the permission syntax cannot express that. A rule matches a
+# command PREFIX -- `:*` is recognised only at the end of a pattern -- and in
+# both `grep <pattern> <path>` and `wc -l <paths>` the path is the LAST
+# argument, so no prefix can constrain it. `Bash(grep ${CONTEXT}:*)` would
+# match only a grep whose first argument is the pack, which is not a form
+# anyone types. The scoping that does exist is the same as for the git rules
+# above and rests on the same two facts: the runner is ephemeral, and every
+# credential in this job is read-only.
+ALLOWED_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(grep:*),Bash(wc:*),Bash(cat ${CONTEXT})"
 
 PROMPT_BODY="$(cat .github/ops/triage-prompt.md)"
 if [ -n "${TRIAGE_FOCUS:-}" ]; then
@@ -956,7 +1057,7 @@ Read that file first. Do not attempt to collect anything yourself."
 # local run working.
 MODEL="${MODEL:-claude-sonnet-5}"
 
-printf 'starting claude -p (model=%s, max-turns 15)\n' "$MODEL"
+printf 'starting claude -p (model=%s, max-turns %s)\n' "$MODEL" "$MAX_TURNS"
 
 # --output-format json so the run's own cost is recoverable. The payload
 # carries `result` (the report text) and `total_cost_usd`; text format carries
@@ -966,7 +1067,7 @@ RAW="${TRIAGE_RAW:-/tmp/triage-raw.json}"
 set +e
 claude -p "$PROMPT_BODY" \
   --output-format json \
-  --max-turns 15 \
+  --max-turns "$MAX_TURNS" \
   --model "$MODEL" \
   --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
@@ -974,13 +1075,43 @@ claude -p "$PROMPT_BODY" \
 CLAUDE_EXIT=$?
 set -e
 
-# Unwrap to the shape the rest of this script expects. If the payload is not
-# the documented JSON -- an auth failure writes a bare line to stdout -- keep
-# whatever arrived rather than silently producing an empty report.
-if jq -e '.result' "$RAW" >/dev/null 2>&1; then
-  jq -r '.result' "$RAW" > "$OUT"
-  jq '{total_cost_usd, session_id, num_turns, model: (.modelUsage // null)}' "$RAW" > "$COST_FILE" 2>/dev/null || true
-  printf 'cost: %s\n' "$(jq -r '.total_cost_usd // "unknown"' "$RAW" 2>/dev/null)"
+# Unwrap to the shape the rest of this script expects.
+#
+# THREE SHAPES, NOT TWO. This gated on `.result` until 2026-09-20, which
+# quietly treated an ERROR result as though claude had emitted garbage. An
+# `error_max_turns` payload is `{"type":"result","subtype":"error_max_turns",
+# ...}` with no `.result` key -- documented JSON, carrying num_turns, the
+# errors array and total_cost_usd -- so the old test sent it down the "not the
+# documented JSON" path and threw the cost away with it. Both failures that
+# week uploaded no cost artifact while the figure sat in the payload.
+#
+# So the envelope test is `.type == "result"`, and the report-body test is
+# `has("result")`, because they are different questions. is_error drives the
+# exit status independently: a result that says it failed is a failure even
+# when a body is present.
+RESULT_SUBTYPE=''
+if jq -e '.type == "result"' "$RAW" >/dev/null 2>&1; then
+  RESULT_SUBTYPE="$(jq -r '.subtype // "unknown"' "$RAW" 2>/dev/null || printf 'unknown')"
+
+  # Cost is written for EVERY result envelope. subtype and is_error go in too:
+  # a cost figure with no verdict beside it invites reading a failed run's
+  # spend as a successful one's.
+  jq '{total_cost_usd, session_id, num_turns, subtype, is_error,
+       model: (.modelUsage // null)}' "$RAW" > "$COST_FILE" 2>/dev/null || true
+  printf 'cost: %s (subtype=%s)\n' \
+    "$(jq -r '.total_cost_usd // "unknown"' "$RAW" 2>/dev/null)" "$RESULT_SUBTYPE"
+
+  if jq -e 'has("result")' "$RAW" >/dev/null 2>&1; then
+    jq -r '.result' "$RAW" > "$OUT"
+  else
+    # An error result has no body. Keep the envelope so the banner below can
+    # quote the evidence rather than reporting an empty file.
+    cp "$RAW" "$OUT"
+  fi
+
+  if jq -e '.is_error == true' "$RAW" >/dev/null 2>&1; then
+    CLAUDE_EXIT=$(( CLAUDE_EXIT == 0 ? 1 : CLAUDE_EXIT ))
+  fi
 else
   cp "$RAW" "$OUT"
   printf 'WARNING: claude output was not the documented JSON; passing it through verbatim.\n' >&2
@@ -1031,7 +1162,36 @@ BODY="$(awk '/^## Slack brief[[:space:]]*$/{flag=1; next} flag' "$OUT" | sed '/^
 
 if [ -z "$BODY" ]; then
   printf 'WARNING: no "## Slack brief" section in the report\n' >&2
-  BODY="BRIEF MISSING — runner format regression
+
+  # NAME THE CAUSE. Until 2026-09-20 every briefless report was posted as
+  # "runner format regression", including two max-turns failures -- so the
+  # header blamed the runner's output format for a budget the model exhausted,
+  # and whoever read it in Slack was pointed at the wrong thing twice.
+  #
+  # "runner format regression" now means only what it says: the output was not
+  # a result envelope at all, or it was a SUCCESS that somehow lacked the
+  # brief section. Any error subtype is named as itself.
+  _lim=''
+  case "$RESULT_SUBTYPE" in
+    error_max_turns)
+      # The ceiling THAT run hit, read from the payload's own sentence
+      # ("Reached maximum number of turns (15)") rather than from MAX_TURNS --
+      # replaying or re-reading an old result must report the limit that was
+      # actually in force, not today's value.
+      _lim="$(jq -r '(.errors // [])[]' "$RAW" 2>/dev/null \
+              | sed -n 's/.*maximum number of turns (\([0-9][0-9]*\)).*/\1/p' \
+              | head -1 || true)"
+      [ -n "$_lim" ] || _lim="$MAX_TURNS"
+      BRIEF_LABEL="BRIEF MISSING — max turns (${_lim})" ;;
+    ''|success)
+      BRIEF_LABEL='BRIEF MISSING — runner format regression' ;;
+    unknown)
+      BRIEF_LABEL='BRIEF MISSING — result envelope with no subtype' ;;
+    *)
+      BRIEF_LABEL="BRIEF MISSING — ${RESULT_SUBTYPE}" ;;
+  esac
+
+  BODY="$BRIEF_LABEL
 
 $(head -c 3500 "$OUT")"
 fi

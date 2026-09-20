@@ -3586,3 +3586,72 @@ geofence guard so a shiftless mount costs nothing, and give the no-shift state a
 **Both halves touch the off-post takeover, which is guard-facing enforcement — do not
 "simplify" the back-button block while here.**
 **Size S. Tier 2** — any change to guard-facing enforcement logic.
+
+---
+
+**N100. `claude -p` in ops-triage inherits every secret in the step environment, including four it never uses.**
+verified: YES — read from source at `7bdab46` while fixing the 09-19/09-20 triage failures.
+Deliberately NOT fixed in that branch: it is a scoping change to a job that was failing for
+unrelated reasons, and mixing the two would have made the fix unreviewable.
+
+`.github/workflows/ops-triage.yml:99-105` sets six secrets as `env:` on the "Run triage" step —
+`ANTHROPIC_API_KEY`, `SENTRY_AUTH_TOKEN`, `RAILWAY_TOKEN`, `DATABASE_READONLY_URL`,
+`SLACK_WEBHOOK_URL`, `GITHUB_TOKEN`. `:118` invokes `bash scripts/ops/triage.sh`, which inherits
+all six. `scripts/ops/triage.sh:1068` then invokes `claude -p` with **no `env -i`, no `unset`,
+and no scrubbing of any kind** — grep for `env -i`/`unset` across the file returns nothing. So
+the model process holds all six in its environment.
+
+**Only `ANTHROPIC_API_KEY` is needed there.** The other four belong to the COLLECTORS, which run
+earlier in the same script and have finished by the time the model starts — Phase 4.2 moved every
+live signal into the pack precisely so the model would not touch psql, curl or railway.
+
+**What this is and is not.** It is not a new exposure created by any recent change: `Read`, `Grep`
+and `Glob` have been allowlisted without a path restriction since Phase 4.2, so a model that
+wanted the environment could already read `/proc/self/environ`. Adding `Bash(grep:*)` in `7bdab46`
+did not widen it either, for the same reason. It is a standing violation of least privilege in the
+one process on the runner that is not fully deterministic, and the four unused secrets are exactly
+the ones whose loss would matter — a Railway token, a database URL and a Slack webhook.
+
+Fix shape: wrap the invocation so only what it needs crosses the boundary, e.g.
+`env -i PATH="$PATH" HOME="$HOME" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" claude -p ...`.
+The care needed is in what else `claude` reads from the environment — `HOME` for its config,
+`PATH` for node — so this wants one dispatch run to confirm before it is trusted, which is why
+it is not a one-line change despite looking like one.
+
+**Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema.
+
+---
+
+**N101. `triage-raw.json` is never uploaded, so a failed run's own payload is only recoverable from the report banner that truncates it.**
+verified: YES — found while fixing the 09-19/09-20 triage failures at `84b012b`, and the
+verification for that fix is itself the evidence.
+
+`scripts/ops/triage.sh` writes claude's full JSON payload to `${TRIAGE_RAW:-/tmp/triage-raw.json}`
+and the workflow uploads three artifacts — `triage-context`, `triage-cost`, `triage-report`. The
+raw payload is not among them. On a SUCCESS that costs nothing: `.result` is the report, so
+`report.md` is the same bytes. On a FAILURE it is the only copy of `num_turns`, `errors`,
+`permission_denials`, `usage` and `modelUsage`, and the banner quotes it only as far as the
+report's own truncation allows.
+
+**What that cost, concretely.** Replaying the 09-20 failure through the fixed parse path needed
+the real payload, and it survived only because the failure banner happened to embed it. The
+matching SUCCESS replay had no such luck: the 09-18 green envelope had to be RECONSTRUCTED from
+`cost.json` (derived fields) and `report.md` (`.result`) because the original was gone. The shape
+was faithful; it was not the original bytes, and that limitation is stated in the PR.
+
+Fix shape: an eighth step mirroring the three existing uploads — roughly eight lines of YAML, not
+one. **Do not upload the file unfiltered.** `permission_denials[].tool_input.command` echoes
+whatever the model typed, which is the one field in the payload that is unconstrained model output
+rather than curated collector text, and uploading it archives that for the retention window. Drop
+the input and keep the shape:
+
+```
+jq 'if has("permission_denials") then .permission_denials |= map(del(.tool_input)) else . end' \
+  "$RAW" > triage-raw.json
+```
+
+That keeps `tool_name` — which is what says a denial happened and which tool it was, the thing
+worth having — and discards the free text. The two turns lost to denials on 09-19 would still be
+diagnosable from it.
+
+**Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema, no secret in the payload.
