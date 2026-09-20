@@ -3586,3 +3586,36 @@ geofence guard so a shiftless mount costs nothing, and give the no-shift state a
 **Both halves touch the off-post takeover, which is guard-facing enforcement — do not
 "simplify" the back-button block while here.**
 **Size S. Tier 2** — any change to guard-facing enforcement logic.
+
+---
+
+**N100. `claude -p` in ops-triage inherits every secret in the step environment, including four it never uses.**
+verified: YES — read from source at `7bdab46` while fixing the 09-19/09-20 triage failures.
+Deliberately NOT fixed in that branch: it is a scoping change to a job that was failing for
+unrelated reasons, and mixing the two would have made the fix unreviewable.
+
+`.github/workflows/ops-triage.yml:99-105` sets six secrets as `env:` on the "Run triage" step —
+`ANTHROPIC_API_KEY`, `SENTRY_AUTH_TOKEN`, `RAILWAY_TOKEN`, `DATABASE_READONLY_URL`,
+`SLACK_WEBHOOK_URL`, `GITHUB_TOKEN`. `:118` invokes `bash scripts/ops/triage.sh`, which inherits
+all six. `scripts/ops/triage.sh:1068` then invokes `claude -p` with **no `env -i`, no `unset`,
+and no scrubbing of any kind** — grep for `env -i`/`unset` across the file returns nothing. So
+the model process holds all six in its environment.
+
+**Only `ANTHROPIC_API_KEY` is needed there.** The other four belong to the COLLECTORS, which run
+earlier in the same script and have finished by the time the model starts — Phase 4.2 moved every
+live signal into the pack precisely so the model would not touch psql, curl or railway.
+
+**What this is and is not.** It is not a new exposure created by any recent change: `Read`, `Grep`
+and `Glob` have been allowlisted without a path restriction since Phase 4.2, so a model that
+wanted the environment could already read `/proc/self/environ`. Adding `Bash(grep:*)` in `7bdab46`
+did not widen it either, for the same reason. It is a standing violation of least privilege in the
+one process on the runner that is not fully deterministic, and the four unused secrets are exactly
+the ones whose loss would matter — a Railway token, a database URL and a Slack webhook.
+
+Fix shape: wrap the invocation so only what it needs crosses the boundary, e.g.
+`env -i PATH="$PATH" HOME="$HOME" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" claude -p ...`.
+The care needed is in what else `claude` reads from the environment — `HOME` for its config,
+`PATH` for node — so this wants one dispatch run to confirm before it is trusted, which is why
+it is not a one-line change despite looking like one.
+
+**Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema.

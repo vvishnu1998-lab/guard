@@ -1075,13 +1075,43 @@ claude -p "$PROMPT_BODY" \
 CLAUDE_EXIT=$?
 set -e
 
-# Unwrap to the shape the rest of this script expects. If the payload is not
-# the documented JSON -- an auth failure writes a bare line to stdout -- keep
-# whatever arrived rather than silently producing an empty report.
-if jq -e '.result' "$RAW" >/dev/null 2>&1; then
-  jq -r '.result' "$RAW" > "$OUT"
-  jq '{total_cost_usd, session_id, num_turns, model: (.modelUsage // null)}' "$RAW" > "$COST_FILE" 2>/dev/null || true
-  printf 'cost: %s\n' "$(jq -r '.total_cost_usd // "unknown"' "$RAW" 2>/dev/null)"
+# Unwrap to the shape the rest of this script expects.
+#
+# THREE SHAPES, NOT TWO. This gated on `.result` until 2026-09-20, which
+# quietly treated an ERROR result as though claude had emitted garbage. An
+# `error_max_turns` payload is `{"type":"result","subtype":"error_max_turns",
+# ...}` with no `.result` key -- documented JSON, carrying num_turns, the
+# errors array and total_cost_usd -- so the old test sent it down the "not the
+# documented JSON" path and threw the cost away with it. Both failures that
+# week uploaded no cost artifact while the figure sat in the payload.
+#
+# So the envelope test is `.type == "result"`, and the report-body test is
+# `has("result")`, because they are different questions. is_error drives the
+# exit status independently: a result that says it failed is a failure even
+# when a body is present.
+RESULT_SUBTYPE=''
+if jq -e '.type == "result"' "$RAW" >/dev/null 2>&1; then
+  RESULT_SUBTYPE="$(jq -r '.subtype // "unknown"' "$RAW" 2>/dev/null || printf 'unknown')"
+
+  # Cost is written for EVERY result envelope. subtype and is_error go in too:
+  # a cost figure with no verdict beside it invites reading a failed run's
+  # spend as a successful one's.
+  jq '{total_cost_usd, session_id, num_turns, subtype, is_error,
+       model: (.modelUsage // null)}' "$RAW" > "$COST_FILE" 2>/dev/null || true
+  printf 'cost: %s (subtype=%s)\n' \
+    "$(jq -r '.total_cost_usd // "unknown"' "$RAW" 2>/dev/null)" "$RESULT_SUBTYPE"
+
+  if jq -e 'has("result")' "$RAW" >/dev/null 2>&1; then
+    jq -r '.result' "$RAW" > "$OUT"
+  else
+    # An error result has no body. Keep the envelope so the banner below can
+    # quote the evidence rather than reporting an empty file.
+    cp "$RAW" "$OUT"
+  fi
+
+  if jq -e '.is_error == true' "$RAW" >/dev/null 2>&1; then
+    CLAUDE_EXIT=$(( CLAUDE_EXIT == 0 ? 1 : CLAUDE_EXIT ))
+  fi
 else
   cp "$RAW" "$OUT"
   printf 'WARNING: claude output was not the documented JSON; passing it through verbatim.\n' >&2
@@ -1132,7 +1162,36 @@ BODY="$(awk '/^## Slack brief[[:space:]]*$/{flag=1; next} flag' "$OUT" | sed '/^
 
 if [ -z "$BODY" ]; then
   printf 'WARNING: no "## Slack brief" section in the report\n' >&2
-  BODY="BRIEF MISSING — runner format regression
+
+  # NAME THE CAUSE. Until 2026-09-20 every briefless report was posted as
+  # "runner format regression", including two max-turns failures -- so the
+  # header blamed the runner's output format for a budget the model exhausted,
+  # and whoever read it in Slack was pointed at the wrong thing twice.
+  #
+  # "runner format regression" now means only what it says: the output was not
+  # a result envelope at all, or it was a SUCCESS that somehow lacked the
+  # brief section. Any error subtype is named as itself.
+  _lim=''
+  case "$RESULT_SUBTYPE" in
+    error_max_turns)
+      # The ceiling THAT run hit, read from the payload's own sentence
+      # ("Reached maximum number of turns (15)") rather than from MAX_TURNS --
+      # replaying or re-reading an old result must report the limit that was
+      # actually in force, not today's value.
+      _lim="$(jq -r '(.errors // [])[]' "$RAW" 2>/dev/null \
+              | sed -n 's/.*maximum number of turns (\([0-9][0-9]*\)).*/\1/p' \
+              | head -1 || true)"
+      [ -n "$_lim" ] || _lim="$MAX_TURNS"
+      BRIEF_LABEL="BRIEF MISSING — max turns (${_lim})" ;;
+    ''|success)
+      BRIEF_LABEL='BRIEF MISSING — runner format regression' ;;
+    unknown)
+      BRIEF_LABEL='BRIEF MISSING — result envelope with no subtype' ;;
+    *)
+      BRIEF_LABEL="BRIEF MISSING — ${RESULT_SUBTYPE}" ;;
+  esac
+
+  BODY="$BRIEF_LABEL
 
 $(head -c 3500 "$OUT")"
 fi
