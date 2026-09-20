@@ -347,13 +347,37 @@ c_git_log() { git log -10 --oneline; }
 c_schema_applied() {
   local map file tip v kind name sql out rc
   local n_checked=0 n_present=0 missing=''
+  local tip_entries=0 tip_probeable=0 best='' probe_v='' dataonly_note=''
 
-  # <version>|<kind>|<object>     kind = constraint|index|table|column|extension
+  # <version>|<kind>|<object>
+  #   kind = constraint|index|table|column|extension|dataonly
   #
   # ADD A LINE WHEN YOU ADD A MIGRATION. A file name does not say what it
   # created, so each tip needs one object that is present if and only if that
   # migration ran. More than one line per version is fine; all must pass.
+  #
+  # `dataonly` IS FOR A MIGRATION THAT CREATES NOTHING TO PROBE. schema_v79 is
+  # the first: twelve statements, every one an UPDATE recomputing expires_at,
+  # zero DDL. There is no catalog object that is present if and only if it ran,
+  # so demanding one would mean either an UNMAPPED tip forever or a fabricated
+  # probe that passes without asking anything -- and a probe that cannot fail
+  # is the exact class this collector was written to remove.
+  #
+  # A dataonly line COUNTS AS MAPPED, so the tip is not UNMAPPED. It is never
+  # itself a verdict: when the tip is dataonly the collector probes the nearest
+  # EARLIER version that does carry an object and says so in the label, so the
+  # APPLIED still rests on a real question put to the database.
+  #
+  # What that verdict does and does not mean: it proves the chain was replayed
+  # at least as far as the probed version. It cannot prove the data-only tip's
+  # UPDATEs ran. Nothing in this repository can -- migrate.ts keeps no ledger
+  # (no migrations table exists in production, checked 2026-09-20), it simply
+  # replays every file in array order on each invocation, so reaching vM
+  # implies running vN only because the loop has no way to skip one.
   map="$(cat <<'MAP'
+v80|index|idx_clock_in_verifications_verified_at
+v79|dataonly|recomputes expires_at onto the locked tiers; creates no catalog object
+v78|column|checkpoint_scans.legal_hold_at
 v77|constraint|shifts_no_guard_overlap
 v77|extension|btree_gist
 v76|column|shifts.unstaffed_warning_sent_at
@@ -377,11 +401,61 @@ MAP
   tip="v${file#schema_v}"; tip="${tip%.sql}"
   printf 'migrate_ts_tip: %s (%s)\n' "$tip" "$file"
 
+  # ── PASS 1: what does the map know about the tip? ─────────────────────────
+  #
+  # Two questions, and they are separate: does the tip appear at all (if not,
+  # UNMAPPED), and does any of its entries carry something probeable (if not,
+  # the tip is data-only and the probe has to fall back to an earlier version).
+  # `best` collects the highest version strictly below the tip that is not
+  # itself data-only -- the nearest thing to the tip that can actually be asked.
+  #
   # Fed by heredoc, NOT by a pipe: a pipe would put the loop in a subshell and
   # `return 1` below would exit only that subshell, leaving the function at 0.
-  # That is precisely the masked-failure class this commit exists to remove.
+  # That is precisely the masked-failure class this collector exists to remove.
   while IFS='|' read -r v kind name; do
-    [ "$v" = "$tip" ] || continue
+    [ -n "$v" ] || continue
+    if [ "$v" = "$tip" ]; then
+      tip_entries=$((tip_entries + 1))
+      [ "$kind" = 'dataonly' ] || tip_probeable=$((tip_probeable + 1))
+      continue
+    fi
+    [ "$kind" = 'dataonly' ] && continue
+    # Numeric compare, guarded: a malformed version must not crash the probe.
+    case "${v#v}${tip#v}" in
+      *[!0-9]*) continue ;;
+    esac
+    if [ "${v#v}" -lt "${tip#v}" ] && { [ -z "$best" ] || [ "${v#v}" -gt "${best#v}" ]; }; then
+      best="$v"
+    fi
+  done <<MAPEOF0
+$map
+MAPEOF0
+
+  if [ "$tip_entries" -eq 0 ]; then
+    printf 'UNMAPPED -- tip %s has no object in the mapping table. Add one line to\n' "$tip"
+    printf 'c_schema_applied. UNMAPPED is not APPLIED and not UNVERIFIED: the database\n'
+    printf 'was reachable and nothing was asked of it.\n'
+    return 1
+  fi
+
+  probe_v="$tip"
+  if [ "$tip_probeable" -eq 0 ]; then
+    # The tip is data-only. Probe the nearest earlier version that is not, and
+    # SAY SO in the verdict -- an APPLIED that silently described a different
+    # version than the one named would be worse than UNMAPPED.
+    if [ -z "$best" ]; then
+      printf 'UNMAPPED -- tip %s is data-only and no earlier version in the mapping\n' "$tip"
+      printf 'table carries a probeable object. Add one for an earlier migration.\n'
+      return 1
+    fi
+    probe_v="$best"
+    dataonly_note=" (tip ${tip} data-only; probed ${probe_v})"
+  fi
+
+  # ── PASS 2: ask the database about probe_v's objects ──────────────────────
+  while IFS='|' read -r v kind name; do
+    [ "$v" = "$probe_v" ] || continue
+    [ "$kind" = 'dataonly' ] && continue
     case "$kind" in
       constraint) sql="SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = '$name'" ;;
       index)      sql="SELECT indexdef FROM pg_indexes WHERE indexname = '$name'" ;;
@@ -422,9 +496,10 @@ MAPEOF
   fi
 
   if [ -n "$missing" ]; then
-    printf 'schema_applied: MISSING -- %s\n' "$missing"
+    printf 'schema_applied: MISSING%s -- %s\n' "$dataonly_note" "$missing"
   else
-    printf 'schema_applied: APPLIED (%s/%s mapped objects present)\n' "$n_present" "$n_checked"
+    printf 'schema_applied: APPLIED%s -- %s/%s mapped objects present\n' \
+      "$dataonly_note" "$n_present" "$n_checked"
   fi
 
   # Explicit, not incidental. Every failure path above returns 1 before it can
