@@ -324,7 +324,7 @@ interface CascadeRow {
  * ── WHY RELEASE IS NOT JUST "SET IT BACK TO FALSE" ──────────────────────
  *
  * There are TWO hold origins (reports, geofence_violations) and both
- * cascade onto the SAME seven row sets. A session's flag is therefore shared:
+ * cascade onto the SAME eight row sets. A session's flag is therefore shared:
  * measured 2026-09-19, 129 of 245 sessions carrying any origin carry more
  * than one, one session carries 17 reports, and 25 sessions carry both a
  * report and a violation. Clearing the parents whenever any single origin
@@ -334,8 +334,9 @@ interface CascadeRow {
  * So release clears a parent only when NO OTHER HELD ORIGIN still depends
  * on it, checked across both origin tables and at both levels: the session
  * (for its own flag and its pings / task_completions / checkpoint_scans /
- * off_post_events / vehicle_inspections) and the shift (whose flag can be
- * owed by a second session — 1 such shift exists in prod).
+ * off_post_events / vehicle_inspections / clock_in_verifications) and the
+ * shift (whose flag can be owed by a second session — 1 such shift exists
+ * in prod).
  *
  * ── WHY THE PREDICATE RUNS ON `conn` ────────────────────────────────────
  *
@@ -446,6 +447,15 @@ async function cascadeLegalHold(
   await run('checkpoint_scans', 'shift_session_id', shiftSessionId, sessionApplies);
   await run('off_post_events',  'shift_session_id', shiftSessionId, sessionApplies);
   await run('vehicle_inspections', 'shift_session_id', shiftSessionId, sessionApplies);
+  // schema_v80. Unlike the other six child tables this one was added because
+  // a PURGE STEP needed it, not because a hold was escaping: the retention
+  // part-2 PR deletes the clock-in selfie at 30 days, and a step that
+  // destroys an S3 object must have a predicate that can spare held
+  // evidence. The one held session's verification is 68 days old and carries
+  // a real selfie, so without this the step's first live night would delete
+  // it. v80's backfill is what covers the row itself — this line only keeps
+  // it correct from here on.
+  await run('clock_in_verifications', 'shift_session_id', shiftSessionId, sessionApplies);
   await run('shifts',           'id',               shiftId,        shiftApplies);
 
   return results;
@@ -468,10 +478,10 @@ function logCascade(origin: string, originId: string, hold: boolean, rows: Casca
 // Places a report on legal hold (hold=true) or releases the hold
 // (hold=false). Cascade rules:
 //   hold=true  → also flips shift_sessions, shifts, location_pings,
-//                task_completions, checkpoint_scans, off_post_events and
-//                vehicle_inspections belonging to the report's session.
-//                Keeps the entire chain of related evidence in the DB past
-//                its normal expires_at.
+//                task_completions, checkpoint_scans, off_post_events,
+//                vehicle_inspections and clock_in_verifications belonging to
+//                the report's session. Keeps the entire chain of related
+//                evidence in the DB past its normal expires_at.
 //   hold=false → releases the report AND clears each cascaded row, but
 //                ONLY where no other held origin still depends on it.
 //                See cascadeLegalHold() for why that check exists and why
@@ -555,7 +565,8 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
 // (Vishnu Portal v2). Same cascade / release semantics:
 //   hold=true  → also flips the parent shift_session, shift, and the
 //                sibling location_pings + task_completions +
-//                checkpoint_scans + off_post_events + vehicle_inspections.
+//                checkpoint_scans + off_post_events + vehicle_inspections +
+//                clock_in_verifications.
 //   hold=false → releases the violation AND clears each cascaded row,
 //                but only where no other held origin still depends on it.
 //

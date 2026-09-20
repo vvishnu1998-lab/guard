@@ -956,11 +956,31 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
   logClientIdentity(req, 'clock-in-verification');
   const verifyShadow = readShadowSignals(req.body, 'clock-in-verification');
 
+  // ── HOLD INHERITED AT INSERT (schema_v80) ───────────────────────────────
+  //
+  // The second call site where the fragment lands in a SELECT list rather
+  // than a VALUES list; routes/checkpoints.ts is the other. Scalar
+  // subqueries are valid in both and neither changes the source row count.
+  //
+  // NOTE THE SHADOWED ALIAS, AND DO NOT "FIX" IT. This statement already
+  // joins `shift_sessions ss`, and the fragment declares its own `ss` inside
+  // each subquery. The inner one shadows the outer within the subquery, so
+  // `ss.id = $1` there resolves to the subquery's own table — which is the
+  // same row the outer join matched, because both are keyed on $1. The
+  // result is identical either way.
+  //
+  // Reading `ss.legal_hold` off the existing join would be shorter and would
+  // work. It is deliberately not done: the fragment is what keeps the column
+  // list and the values list in one place (INHERIT_HOLD_COLUMNS beside
+  // INHERIT_HOLD_FROM_SESSION_SQL in services/legalHold.ts), and a call site
+  // that hand-rolls the pair is the one that drifts when a third hold column
+  // is added.
   const result = await pool.query(
     `INSERT INTO clock_in_verifications
        (shift_session_id, guard_id, site_id, selfie_url, site_photo_url, verified_lat, verified_lng, is_within_geofence,
-        accuracy_meters, location_mocked, fix_age_ms)
-     SELECT $1, ss.guard_id, ss.site_id, $2, $3, $4, $5, $6, $7, $8, $9
+        accuracy_meters, location_mocked, fix_age_ms, ${INHERIT_HOLD_COLUMNS})
+     SELECT $1, ss.guard_id, ss.site_id, $2, $3, $4, $5, $6, $7, $8, $9,
+            ${INHERIT_HOLD_FROM_SESSION_SQL('$1')}
      FROM shift_sessions ss WHERE ss.id = $1
      RETURNING *`,
     [shift_session_id, selfie_url ?? null, site_photo_url ?? null, verified_lat, verified_lng, true,
