@@ -76,8 +76,20 @@ jobs:
         with:
           node-version: '20'
 
+      # PINNED 2026-09-20. `latest` was 2.1.278 that day; 2.1.270 is the build
+      # the pack-on-stdin behaviour was actually verified against -- a
+      # 226,023 B / 4,205-line pack piped in, sentinel on the last line and
+      # again in the middle, both returned verbatim.
+      #
+      # The pack now arrives as stdin rather than as a path the model opens,
+      # so a CLI change to stdin handling or to --input-format's default would
+      # not fail loudly: it would silently produce a brief written from no
+      # evidence. The floor check in scripts/ops/triage.sh catches that after
+      # the fact; pinning stops it happening on an unattended schedule.
+      #
+      # BUMP DELIBERATELY, AND RE-RUN THE SENTINEL TEST WHEN YOU DO. See N102.
       - name: Install Claude Code
-        run: npm i -g @anthropic-ai/claude-code
+        run: npm i -g @anthropic-ai/claude-code@2.1.270
 
       - name: Install Railway CLI
         run: npm i -g @railway/cli
@@ -139,6 +151,26 @@ jobs:
           name: triage-cost-${{ github.run_id }}
           path: cost.json
           retention-days: 90
+          if-no-files-found: warn
+
+      # The tool-call stream: which files the model opened, in what order, and
+      # how much came back. Written by scripts/ops/triage.sh AFTER filtering --
+      # permission_denials[].tool_input dropped, tool_result content cut to
+      # 2,000 chars with the original length recorded. The script deletes the
+      # file rather than fall back to the unfiltered stream if the filter
+      # fails, so `if-no-files-found: warn` is the intended behaviour and not
+      # laziness.
+      #
+      # Exists because run 35528838218 used 22 of 25 turns and nothing on the
+      # runner recorded why. Diagnosing it needed a local replay, and the local
+      # harness did not reproduce the session.
+      - name: Upload tool-call stream
+        if: always() && !inputs.dry_run
+        uses: actions/upload-artifact@v7
+        with:
+          name: triage-stream-${{ github.run_id }}
+          path: triage-stream.jsonl
+          retention-days: 30
           if-no-files-found: warn
 
       - name: Upload report

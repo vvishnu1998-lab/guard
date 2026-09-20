@@ -9,19 +9,27 @@ collect anything.** The shell has already gathered every live signal into the
 context pack; your allowlist is file reads plus `git log` / `git diff`. Your
 entire output is a report.
 
-## Read these first
+## The pack is the contract
 
-Read these first, in this order. They are the contract:
+Six `docs/OPS` files are the contract for this report. **All six are already
+inside the context pack**, embedded under `# FILE: <path>` headings. Do not
+open any of them from disk: you are holding them, and reading one again costs
+a turn and puts a second copy of it in your context.
 
 1. `docs/OPS/STATE.md` — what is deployed and what is known
 2. `docs/OPS/FREEZES.md` — entities you must not propose touching
 3. `docs/OPS/POLICY.md` — the tier ladder every proposed fix is graded against
-4. `docs/OPS/OPEN-ITEMS.md` — what is already known; do not re-report it as new.
-   The pack carries a TRIMMED copy: open items only, with closed items and the
-   "Carried items" archive omitted and the omission stated. If you need the
-   full list, read the file from the repo.
+4. `docs/OPS/OPEN-ITEMS.md` — what is already known; do not re-report it as new
 5. `docs/OPS/DECISIONS.md` — settled calls; do not relitigate
 6. `docs/OPS/REPORT-TEMPLATE.md` — the exact output format
+
+**One exception, and it is narrow.** The pack's copy of `OPEN-ITEMS.md` is
+TRIMMED — open items only, with closed items and the "Carried items" archive
+omitted, and the omission stated where it happens. If one item you need is
+cut short or absent, you may `Grep` for that single item's heading
+(`^\*\*N<number>\.`) and `Read` only that range. Never read the whole file:
+it is 3,600+ lines, the trimmed copy you already hold is most of them, and a
+full read has twice put this run over its turn budget.
 
 A finding already listed in `OPEN-ITEMS.md` is not a new finding. Reference its
 number and report only what changed.
@@ -47,8 +55,9 @@ collector and a finding in its own right.
 ## Everything you need is already collected
 
 **All live signals were gathered by the shell before you started and are in the
-context pack.** Read that file first. You have no psql, no curl, no railway and
-no WebFetch — and you do not need them. Do not attempt to gather anything
+context pack.** The pack was delivered to you on stdin, complete and
+untruncated — it is the first thing in your context, not a file to open. You
+have no psql, no curl, no railway and no WebFetch — and you do not need them. Do not attempt to gather anything
 yourself; a tool call outside your allowlist is denied, not queued.
 
 The pack contains these sections, each with a line count:
