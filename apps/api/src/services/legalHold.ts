@@ -38,7 +38,14 @@
  * read-then-write race)" at `checkpoints.ts:513` — before it became a call
  * site of this fragment.
  *
- * ── ONE CALL SITE IS AN INSERT ... SELECT, NOT INSERT ... VALUES ────────
+ * ── TWO CALL SITES ARE INSERT ... SELECT, NOT INSERT ... VALUES ────────
+ *
+ * `locations.ts` (clock_in_verifications, schema_v80) is the second. Its
+ * statement ALREADY joins `shift_sessions ss`, so the fragment's own `ss`
+ * shadows the outer alias inside each subquery — legal, and identical in
+ * result because both are keyed on the same parameter. Reading the joined
+ * row directly would work and is deliberately not done; see the note at
+ * that call site.
  *
  * `checkpoints.ts:556` interpolates this into a SELECT list, because its
  * statement must read `s.timezone` from a joined `sites` row to compute
@@ -52,7 +59,8 @@
  *
  * ── THE COALESCE IS LOAD-BEARING, NOT DEFENSIVE ─────────────────────────
  *
- * `legal_hold` is NOT NULL on all nine tables that carry it. A scalar
+ * `legal_hold` is NOT NULL on all ten tables that carry it (schema_v80 made
+ * clock_in_verifications the tenth). A scalar
  * subquery matching no row yields NULL, which would raise 23502 and abort
  * the INSERT — losing a guard's ping, report or scan to a parent lookup.
  * Fail-safe requirement (c) says the opposite must happen: on any doubt the

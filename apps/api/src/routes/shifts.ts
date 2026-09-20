@@ -4611,14 +4611,31 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
            clock_out_location_mocked = $8, clock_out_fix_age_ms = $9,
            clock_out_reason = $10,
            clock_out_photo_url = $11,
-           -- 365-day photo retention (schema_v55). Set together with the url
-           -- in ONE statement so the two can never disagree; NULL when no
-           -- photo was taken, because there is nothing to delete. Nothing
-           -- consumes this column yet — see its COMMENT ON for the three
-           -- things a future purge needs fixed first.
+           -- 90-day photo retention, the tier locked 2026-09-19. Set together
+           -- with the url in ONE statement so the two can never disagree;
+           -- NULL when no photo was taken, because there is nothing to delete.
+           --
+           -- THIS SAID 365 UNTIL 2026-09-19 AND WAS THE ONLY WRITER LEFT
+           -- DISAGREEING WITH THE LOCKED SCHEDULE. schema_v79.sql:237 moved
+           -- every existing row to clocked_out_at + INTERVAL '90 days' and
+           -- v79:226 names 90d "the locked tier"; all 45 rows in production
+           -- match it exactly (min = max = 90 days). This statement kept
+           -- stamping 365, so each new clock-out reopened the drift the
+           -- migration had just closed — the same defect class as PR #70's
+           -- writer-anchor commit 0ae2792, missed because this column was
+           -- not in that commit's scope.
+           --
+           -- Anchored on clocked_out_at, not NOW(), for the reason 0ae2792
+           -- gives: the row's own event timestamp is what the backfill used,
+           -- so using the same expression makes the writer and the migration
+           -- byte-identical rather than merely close. clocked_out_at is
+           -- already written by the UPDATE at :4489 earlier in this handler
+           -- and is read at :4597 below, so it cannot be NULL here — which
+           -- matters, because a NULL delete_at on a row that HAS a photo
+           -- would exempt that photo from every purge predicate forever.
            clock_out_photo_delete_at =
              CASE WHEN $11::varchar IS NULL THEN NULL
-                  ELSE NOW() + INTERVAL '365 days' END
+                  ELSE clocked_out_at + INTERVAL '90 days' END
        WHERE id = $7`,
       [
         netHours,

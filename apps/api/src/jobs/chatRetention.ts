@@ -4,7 +4,7 @@
  * ── THIS IS THE ONLY RETENTION JOB WITH NO DRY-RUN GATE ─────────────────
  *
  * nightlyPurge is gated behind RETENTION_DRY_RUN, which is unset, so every
- * one of its nine steps returns before its first write and always has. This
+ * one of its steps returns before its first write and always has. This
  * job has no such gate: a change to the number below takes effect on the
  * next tick after deploy, not after a flag flip. Treat edits here as
  * production writes.
