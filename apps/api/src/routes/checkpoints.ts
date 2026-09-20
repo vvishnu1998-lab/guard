@@ -188,14 +188,49 @@ router.delete('/:id', requireAuth('company_admin'), async (req, res) => {
   );
   if (!ownerCheck.rows[0]) return res.status(404).json({ error: 'Checkpoint not found' });
 
-  const countResult = await pool.query(
-    'SELECT COUNT(*)::int AS scan_count FROM checkpoint_scans WHERE checkpoint_id = $1',
+  const countResult = await pool.query<{ scan_count: number; held_count: number }>(
+    `SELECT COUNT(*)::int                           AS scan_count,
+            COUNT(*) FILTER (WHERE legal_hold)::int AS held_count
+       FROM checkpoint_scans WHERE checkpoint_id = $1`,
     [req.params.id]
   );
   const scanCount = countResult.rows[0].scan_count;
+  const heldCount = countResult.rows[0].held_count;
 
-  // ── THIS COUNT DOES NOT FILTER legal_hold, AND AS OF THIS COMMIT THAT
-  //    MATTERS. NOT FIXED HERE — see the note before the DELETE below.
+  // ── LEGAL HOLD IS CHECKED BEFORE THE CONFIRM BRANCH, NOT AFTER ─────────
+  //
+  // checkpoint_scans_checkpoint_id_fkey is ON DELETE CASCADE, so deleting the
+  // checkpoint takes every scan on it. Until PR #70 that could not destroy
+  // held evidence, because nothing wrote checkpoint_scans.legal_hold and all
+  // 585 rows were false. PR #70 made the column live — insert-time
+  // inheritance in this file and the fifth cascade line in routes/admin.ts —
+  // which turned this into the only admin-reachable path that destroys held
+  // rows. Every other destroyer filters the flag: all nine nightlyPurge steps
+  // carry `AND legal_hold = false`.
+  //
+  // ORDER IS LOAD-BEARING. The confirm branch below returns 409 and the
+  // handler ends there, so a refusal placed after it is unreachable on the
+  // UNCONFIRMED call — which is the only call the web client makes first.
+  //
+  // 423, NOT 409, AND THE HUMAN COPY GOES IN `error`. Two consumer facts,
+  // not taste. apps/web/app/admin/sites/[id]/page.tsx:1226 keys the
+  // destroy-confirmation modal on `res.status === 409` alone and :1228 reads
+  // only `scan_count`, discarding the body's message — so a 409 here would
+  // show an admin a "delete N scans" dialog for a delete that cannot happen.
+  // And :1234 and :1254 both do setCpError(body.error) / throw body.error,
+  // rendered verbatim at :1678 and :2682, so `error` is what an operator
+  // READS on this route. The enum-in-`error` shape at admin.ts:687 is right
+  // for ITS consumer and wrong for this one — the consumer decides.
+  if (heldCount > 0) {
+    return res.status(423).json({
+      error:
+        `${heldCount} of this checkpoint's ${scanCount} scan record(s) are under legal hold ` +
+        `and cannot be deleted. Release the hold first, or set the checkpoint inactive to hide it.`,
+      scan_count: scanCount,
+      held_count: heldCount,
+    });
+  }
+
   if (req.query.confirm !== 'delete_scans') {
     return res.status(409).json({
       error: `Deleting this checkpoint destroys ${scanCount} scan record(s). ` +
@@ -204,33 +239,29 @@ router.delete('/:id', requireAuth('company_admin'), async (req, res) => {
     });
   }
 
-  // ── OPEN: THIS DESTROYS LEGALLY HELD SCANS, AND THIS COMMIT IS WHAT MAKES
-  //    THAT POSSIBLE ──────────────────────────────────────────────────────
-  //
-  // checkpoint_scans_checkpoint_id_fkey is ON DELETE CASCADE, so this one
-  // statement takes every scan on the checkpoint. It does not read
-  // legal_hold, and until this commit it did not need to: nothing wrote
-  // that column, so all 585 rows were false and the flag was inert.
-  //
-  // The INSERT below and the cascade line in routes/admin.ts are jointly
-  // the first writers of it. 19 of the 20 sessions carrying scans also
-  // carry a report, so a report-origin hold on any of them now pulls scans
-  // into the held set — and this route would still delete them. Scans are
-  // not evenly spread: the per-checkpoint distribution is
-  // 182/182/127/89/2/1/1/1, so the worst single call destroys 182.
-  //
-  // Every other destroyer in the system does filter the flag — all nine
-  // nightlyPurge steps carry `AND legal_hold = false`. This is the only
-  // admin-reachable path that does not.
-  //
-  // DELIBERATELY NOT FIXED IN THIS PR, which is scoped to "nothing is
-  // enforced": adding a refusal here is enforcement, and it is not a
-  // one-liner. apps/web/app/admin/sites/[id]/page.tsx:1226-1229 treats ANY
-  // 409 on the unconfirmed call as "show the confirm modal", so reusing 409
-  // for a held-scan refusal would show an admin a delete-confirmation
-  // dialog before the hold message ever appears. The fix needs its own
-  // status code or a client change, which is a decision, not a patch.
-  await pool.query('DELETE FROM site_checkpoints WHERE id = $1', [req.params.id]);
+  // The NOT EXISTS is not a second opinion, it is the race. The count above
+  // and this statement are separate round trips, so a hold placed between
+  // them would be destroyed by a check that had already passed. Re-asking
+  // inside the DELETE makes the guard atomic; the count survives only because
+  // it is what produces a message worth reading.
+  const del = await pool.query(
+    `DELETE FROM site_checkpoints
+      WHERE id = $1
+        AND NOT EXISTS (SELECT 1 FROM checkpoint_scans c
+                         WHERE c.checkpoint_id = $1 AND c.legal_hold)`,
+    [req.params.id],
+  );
+  if (del.rowCount === 0) {
+    // Ownership was proven at the top of the handler, so a zero here means
+    // the NOT EXISTS fired: a hold landed inside the window.
+    return res.status(423).json({
+      error:
+        'A legal hold was placed on this checkpoint’s scan records while the delete was in ' +
+        'flight. Nothing was deleted. Release the hold first, or set the checkpoint inactive.',
+      scan_count: scanCount,
+      held_count: null,
+    });
+  }
   res.json({ success: true, scans_deleted: scanCount });
 });
 
