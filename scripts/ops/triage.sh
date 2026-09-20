@@ -47,6 +47,14 @@ LOCAL="${TRIAGE_LOCAL:-0}"
 DRY_RUN="${TRIAGE_DRY_RUN:-0}"
 COST_FILE="${TRIAGE_COST_FILE:-cost.json}"
 
+# Raised from 15 on 2026-09-20. Both failures that week ended
+# `error_max_turns` at num_turns 16; the last green run before them used 12 of
+# 15, so the ceiling had roughly one collector failure of headroom and the
+# 09-19 schema-applied failure consumed it. ONE VARIABLE, read by the flag and
+# by the log line: they disagreed before, with 15 hardcoded in each, so a
+# change to one would have left the log claiming a limit that was not in force.
+MAX_TURNS="${TRIAGE_MAX_TURNS:-25}"
+
 STARNET='27c4d404-8769-49ca-bfd6-93cb9b890067'
 BETHEL='53c71c64-1973-4f82-be9c-98e4800beece'
 API='https://api.netraops.com'
@@ -1000,7 +1008,25 @@ fi
 # requests are denied either way, so it buys nothing here and would break on
 # older CLIs.
 # ---------------------------------------------------------------------------
-ALLOWED_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(cat ${CONTEXT})"
+# grep and wc were added 2026-09-20. On 09-19 the model spent two of its
+# fifteen turns being denied `grep -n "^# FILE: ..." ${CONTEXT}` and
+# `wc -l ${CONTEXT} <repo>/docs/OPS/OPEN-ITEMS.md`, then hit the ceiling.
+#
+# THIS WIDENS NOTHING. Read, Grep and Glob are already on this list with no
+# path restriction, so the model can already read any file on the runner; the
+# denials cost turns without protecting anything. Both commands are read-only:
+# neither grep nor wc has a mode that writes.
+#
+# ON SCOPING, HONESTLY: the brief asked for these to be pinned to ${CONTEXT}
+# and the repo, and the permission syntax cannot express that. A rule matches a
+# command PREFIX -- `:*` is recognised only at the end of a pattern -- and in
+# both `grep <pattern> <path>` and `wc -l <paths>` the path is the LAST
+# argument, so no prefix can constrain it. `Bash(grep ${CONTEXT}:*)` would
+# match only a grep whose first argument is the pack, which is not a form
+# anyone types. The scoping that does exist is the same as for the git rules
+# above and rests on the same two facts: the runner is ephemeral, and every
+# credential in this job is read-only.
+ALLOWED_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(grep:*),Bash(wc:*),Bash(cat ${CONTEXT})"
 
 PROMPT_BODY="$(cat .github/ops/triage-prompt.md)"
 if [ -n "${TRIAGE_FOCUS:-}" ]; then
@@ -1031,7 +1057,7 @@ Read that file first. Do not attempt to collect anything yourself."
 # local run working.
 MODEL="${MODEL:-claude-sonnet-5}"
 
-printf 'starting claude -p (model=%s, max-turns 15)\n' "$MODEL"
+printf 'starting claude -p (model=%s, max-turns %s)\n' "$MODEL" "$MAX_TURNS"
 
 # --output-format json so the run's own cost is recoverable. The payload
 # carries `result` (the report text) and `total_cost_usd`; text format carries
@@ -1041,7 +1067,7 @@ RAW="${TRIAGE_RAW:-/tmp/triage-raw.json}"
 set +e
 claude -p "$PROMPT_BODY" \
   --output-format json \
-  --max-turns 15 \
+  --max-turns "$MAX_TURNS" \
   --model "$MODEL" \
   --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
