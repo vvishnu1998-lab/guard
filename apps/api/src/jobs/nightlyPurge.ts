@@ -98,10 +98,11 @@ import { runJob } from './_run';
 import { pool } from '../db/pool';
 import { deleteS3Object } from '../services/s3';
 import { keysStillReferenced, assertPointerColumnsCurrent } from '../services/mediaOwnership';
+import { globalDryRun, liveStepNames, isStepLive } from '../services/retentionEnforcement';
 import { Sentry } from '../services/sentry';
 
-const DRY_RUN = process.env.RETENTION_DRY_RUN !== 'false';
 const STEP_ROW_CAP = 10_000;
+
 
 /**
  * Day counts for the tables that have NO `expires_at` column.
@@ -145,13 +146,36 @@ const PURGE_DAYS = {
   LOCATION_INTEGRITY_FLAGS: 365,
   OFFLINE_DEAD_LETTERS:     90,
   MONTHLY_HOURS_REPORTS:    1460,
-  AUDIT_TRAIL:              1460, // the three audit tables + shift_swap_requests
+  AUDIT_TRAIL:              1460, // guard_assignment_audit — hangs off guards
+  /**
+   * The three tables that hang off `shifts`, raised from 1460 to match
+   * RETENTION.SHIFT_DAYS.
+   *
+   * shift_schedule_audit, shift_reassignments and shift_swap_requests are all
+   * ON DELETE CASCADE children of shifts, which is a 1500-day entity. At 1460
+   * each one died forty days BEFORE the shift it documents — leaving a live
+   * shift with no record of who rescheduled or reassigned it, which is the
+   * one thing an audit trail exists to prevent.
+   *
+   * Raising only shift_schedule_audit would have left the identical inversion
+   * on its two siblings, so all three moved. guard_assignment_audit stays at
+   * AUDIT_TRAIL: it has no FK to shifts and no parent to invert against.
+   */
+  SHIFT_CHILD_AUDIT:        1500,
 } as const;
 
 interface StepResult {
   step:      string;
   candidate: number;   // rows the WHERE clause matched
   deleted:   number;   // rows actually deleted (0 during dry-run / halted)
+  /** Was this step permitted to delete on this run?
+   *
+   *  REQUIRED, NOT OPTIONAL, ON PURPOSE. `live?: boolean` reads as undefined
+   *  on any path that forgets it, and undefined is falsy — so a forgotten
+   *  path would report "dry" for a step that actually deleted, which is the
+   *  one lie this field must never tell. Required makes tsc name every
+   *  construction site instead of leaving it to a reviewer. */
+  live:      boolean;
   /** S3 objects removed. Absent on steps that touch no media. */
   s3_deleted?: number;
   /** Well-formed keys we should have removed and could not. RETRYABLE — the
@@ -296,7 +320,7 @@ async function runSimpleStep(s: SimpleStep): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(s.step, candidate);
-    if (DRY_RUN)                  return dryRunStep(s.step, candidate);
+    if (!isStepLive(s.step))      return dryRunStep(s.step, candidate);
 
     const del = await pool.query(
       `DELETE FROM ${s.table} WHERE id = ANY($1::uuid[])`,
@@ -340,7 +364,7 @@ async function stepClockInPhoto30d(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const del = await pool.query(
       'UPDATE clock_in_verifications SET selfie_url = NULL WHERE id = ANY($1::uuid[])',
@@ -377,7 +401,7 @@ async function stepClockOutPhoto90d(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const del = await pool.query(
       'UPDATE shift_sessions SET clock_out_photo_url = NULL WHERE id = ANY($1::uuid[])',
@@ -421,7 +445,7 @@ async function stepClockInVerifications365d(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const del = await pool.query(
       'DELETE FROM clock_in_verifications WHERE id = ANY($1::uuid[])',
@@ -450,7 +474,7 @@ async function stepMonthlyHoursReports(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const del = await pool.query(
       'DELETE FROM monthly_hours_reports WHERE id = ANY($1::uuid[])',
@@ -547,7 +571,7 @@ const STEP_ORDER: readonly OrderedStep[] = [
   {
     step:  'shift_swap_requests',
     table: 'shift_swap_requests',
-    where: `requested_at < NOW() - INTERVAL '${PURGE_DAYS.AUDIT_TRAIL} days'`,
+    where: `requested_at < NOW() - INTERVAL '${PURGE_DAYS.SHIFT_CHILD_AUDIT} days'`,
     why:   'FORCED before step 6 — TWO NO ACTION FKs (from_session_id and '
          + 'to_session_id). Anchors on requested_at: this table has no '
          + 'created_at, and the other five timestamps are all nullable state.',
@@ -681,7 +705,7 @@ const STEP_ORDER: readonly OrderedStep[] = [
   {
     step:  'shift_reassignments',
     table: 'shift_reassignments',
-    where: `created_at < NOW() - INTERVAL '${PURGE_DAYS.AUDIT_TRAIL} days'`,
+    where: `created_at < NOW() - INTERVAL '${PURGE_DAYS.SHIFT_CHILD_AUDIT} days'`,
     why:   'ARBITRARY. Audit trail. Also a CASCADE child of shifts, so step 7 '
          + 'would take it anyway — this step only matters for rows whose shift '
          + 'outlives them, which at equal tiers is most of them.',
@@ -689,7 +713,7 @@ const STEP_ORDER: readonly OrderedStep[] = [
   {
     step:  'shift_schedule_audit',
     table: 'shift_schedule_audit',
-    where: `changed_at < NOW() - INTERVAL '${PURGE_DAYS.AUDIT_TRAIL} days'`,
+    where: `changed_at < NOW() - INTERVAL '${PURGE_DAYS.SHIFT_CHILD_AUDIT} days'`,
     why:   'ARBITRARY. Audit trail; CASCADE child of shifts, same note as '
          + 'shift_reassignments.',
   },
@@ -697,11 +721,11 @@ const STEP_ORDER: readonly OrderedStep[] = [
 
 export async function runNightlyPurge(): Promise<StepResult[]> {
   const start = Date.now();
-  console.log(`[retention] starting nightly purge (dry_run=${DRY_RUN})`);
+  console.log(`[retention] starting nightly purge (dry_run=${globalDryRun()}, live=[${liveStepNames().join(',')}])`);
   Sentry.addBreadcrumb({
     category: 'retention',
     message:  `nightly purge starting`,
-    data:     { dry_run: DRY_RUN, cap: STEP_ROW_CAP },
+    data:     { dry_run: globalDryRun(), live_steps: liveStepNames(), cap: STEP_ROW_CAP },
     level:    'info',
   });
 
@@ -752,7 +776,7 @@ async function step1_pingPhotos(): Promise<StepResult> {
     const candidate = candidateQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     // DB FIRST, then the sweep — the same inversion as every other step. The
     // pointer is what makes the photo reachable from the app, so nulling it is
@@ -781,7 +805,7 @@ async function step2_expiredReports(): Promise<StepResult> {
     const candidate = idsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     // Collect the URLs while the rows still exist, DELETE, then sweep.
     // report_photos goes with the parent on ON DELETE CASCADE, so after the
@@ -825,7 +849,7 @@ async function step3_expiredPings(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     // A ping reaching 90 days should already have lost its photo to step 1 at
     // 7, but `photo_delete_at` is nullable and step 1 skips held rows, so the
@@ -853,7 +877,7 @@ async function step4_expiredTaskCompletions(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const del = await pool.query(
       `DELETE FROM task_completions
@@ -878,7 +902,7 @@ async function step5_expiredGeofenceViolations(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     // This column is the one place where a key is shared ACROSS tables: one
     // key is held by both a geofence_violations row and a location_pings row
@@ -921,7 +945,7 @@ async function step5b_expiredOffPostEvents(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     // id-based like the rest, even with no media to collect: it is what makes
     // `candidate` and `deleted` describe the same set of rows instead of two
@@ -960,7 +984,7 @@ async function step5c_expiredVehicleInspections(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const del = await pool.query(
       `DELETE FROM vehicle_inspections
@@ -1064,7 +1088,7 @@ async function step6_expiredShiftSessions(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const ids  = rowsQ.rows.map((r) => r.id);
     const urls = await sessionMediaUrls(ids);
@@ -1107,7 +1131,7 @@ async function step7_expiredShifts(): Promise<StepResult> {
     const candidate = rowsQ.rows.length;
 
     if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
-    if (DRY_RUN)                  return dryRunStep(step, candidate);
+    if (!isStepLive(step))        return dryRunStep(step, candidate);
 
     const ids = rowsQ.rows.map((r) => r.id);
 
@@ -1156,20 +1180,28 @@ function haltStep(step: string, candidate: number): StepResult {
   Sentry.captureMessage(msg, {
     level: 'warning',
     tags:  { flow: 'retention', step },
-    extra: { candidate, cap: STEP_ROW_CAP, dry_run: DRY_RUN },
+    extra: { candidate, cap: STEP_ROW_CAP, dry_run: globalDryRun(), live: isStepLive(step) },
   } as unknown as Parameters<typeof Sentry.captureMessage>[1]);
-  return { step, candidate, deleted: 0, halted: true };
+  // isStepLive, not false: the cap check runs BEFORE the live check in every
+  // step, so without this a halt on a dry step and a halt on a step that
+  // WOULD have deleted are indistinguishable in the audit record — and only
+  // the second one is an incident.
+  return { step, candidate, deleted: 0, live: isStepLive(step), halted: true };
 }
 
 function dryRunStep(step: string, candidate: number): StepResult {
-  console.log(`[retention.${step}] DRY_RUN would delete ${candidate}`);
+  // Say WHICH gate held it. "would delete N" alone cannot distinguish a
+  // deliberate dry night from a typo in RETENTION_LIVE_STEPS that silently
+  // matched nothing — the two have identical output otherwise.
+  const gate = globalDryRun() ? 'RETENTION_DRY_RUN' : 'not in RETENTION_LIVE_STEPS';
+  console.log(`[retention.${step}] dry-run (${gate}) would delete ${candidate}`);
   Sentry.addBreadcrumb({
     category: 'retention',
-    message:  `${step}: DRY_RUN would delete ${candidate}`,
-    data:     { candidate },
+    message:  `${step}: dry-run would delete ${candidate}`,
+    data:     { candidate, gate },
     level:    'info',
   });
-  return { step, candidate, deleted: 0 };
+  return { step, candidate, deleted: 0, live: false };
 }
 
 function finishStep(step: string, candidate: number, deleted: number, s3: S3Sweep = NO_SWEEP): StepResult {
@@ -1181,7 +1213,7 @@ function finishStep(step: string, candidate: number, deleted: number, s3: S3Swee
     level:    'info',
   });
   return {
-    step, candidate, deleted,
+    step, candidate, deleted, live: true,
     s3_deleted: s3.deleted, s3_failed: s3.failed, s3_skipped: s3.skipped,
   };
 }
@@ -1192,7 +1224,7 @@ function errorStep(step: string, err: unknown): StepResult {
   Sentry.captureException(err, {
     tags: { flow: 'retention', step },
   } as unknown as Parameters<typeof Sentry.captureException>[1]);
-  return { step, candidate: 0, deleted: 0, error: msg };
+  return { step, candidate: 0, deleted: 0, live: false, error: msg };
 }
 
 /**
@@ -1225,6 +1257,10 @@ function emitRunSummary(results: StepResult[], durationMs: number): void {
     perStep[r.step] = {
       candidate: r.candidate,
       deleted:   r.deleted,
+      // Per-step, because one boolean for the whole run stopped being able to
+      // answer the question the audit trail exists for: which steps were
+      // allowed to delete on this night.
+      live:      r.live,
       halted:    r.halted === true,
       // Only on steps that swept. An absent trio means "touches no media",
       // which is a different fact from "swept nothing", and the summary is
@@ -1235,6 +1271,17 @@ function emitRunSummary(results: StepResult[], durationMs: number): void {
       ...(r.error ? { error: r.error } : {}),
     };
   }
+
+  // AN ALLOWLIST ENTRY THAT NAMES NO STEP IS THE ONE FAILURE THIS EVENT MUST
+  // REPORT. A typo — 'step2_report', 'step 2', 'STEP2-REPORTS', a stray '*' —
+  // produces output identical to a deliberate dry-run night: zero deletions,
+  // no error, no log line. An operator who flipped the variable would have no
+  // way to learn it did nothing. Derived from THIS RUN's results rather than a
+  // hand-kept list of names, so it cannot go stale as steps are added.
+  const knownSteps  = new Set(results.map((r) => r.step));
+  const requested   = liveStepNames();
+  const unknownLive = requested.filter((n) => !knownSteps.has(n));
+  const liveSteps   = results.filter((r) => r.live).map((r) => r.step);
 
   const totalCandidate = results.reduce((s, r) => s + r.candidate, 0);
   const totalDeleted   = results.reduce((s, r) => s + r.deleted,   0);
@@ -1249,15 +1296,23 @@ function emitRunSummary(results: StepResult[], durationMs: number): void {
     // (`flow:retention dry_run:true any_halted:true`) without exploding tags.
     tags: {
       flow:       'retention',
-      dry_run:    String(DRY_RUN),
+      dry_run:    String(globalDryRun()),
       any_halted: String(haltedSteps.length > 0),
       any_error:  String(erroredSteps.length > 0),
       // Boolean, not a count — a tag with a row count in it mints a new issue
       // per value, which is the grouping mistake RUN_SUMMARY_MSG avoids above.
       any_s3_failed: String(s3Failed > 0),
+      // BOOLEANS, AND THE STEP NAMES NEVER COME NEAR A TAG. `live_steps`
+      // joined into a tag would have 2^29 possible values — one Sentry issue
+      // per combination, the largest instance of exactly the mistake the
+      // RUN_SUMMARY_MSG comment above warns against. The names go in `extra`,
+      // where cardinality costs nothing. These two take the tag space from
+      // 16 to 64.
+      any_live:         String(liveSteps.length > 0),
+      any_unknown_live: String(unknownLive.length > 0),
     },
     extra: {
-      dry_run:         DRY_RUN,
+      dry_run:         globalDryRun(),
       cap:             STEP_ROW_CAP,
       duration_s:      Number((durationMs / 1000).toFixed(1)),
       steps_total:     results.length,
@@ -1266,6 +1321,10 @@ function emitRunSummary(results: StepResult[], durationMs: number): void {
       steps_errored:   erroredSteps.length,
       halted_steps:    haltedSteps,
       errored_steps:   erroredSteps,
+      // Names live here, never in a tag.
+      requested_live:     requested,
+      live_steps:         liveSteps,
+      unknown_live_steps: unknownLive,
       total_candidate: totalCandidate,
       total_deleted:   totalDeleted,
       s3_deleted:      s3Deleted,

@@ -62,6 +62,14 @@ export const POINTER_COLUMNS: ReadonlyArray<readonly [table: string, column: str
   ['geofence_violations',    'photo_url'],
   ['location_pings',         'photo_url'],
   ['monthly_hours_reports',  's3_url'],
+  // OPEN, FOR A LATER PR: quarantined_uploads is the only table in this list
+  // with NO deletion path of any kind — no nightlyPurge step, no PURGE_DAYS
+  // entry, no cascade in either direction (all three of its FKs are ON DELETE
+  // SET NULL, and nothing points into it). It is empty today, so nothing is
+  // leaking yet; it accumulates one row per rejected upload and nothing will
+  // ever remove one. Deliberately left out of the retention part-2 PR rather
+  // than dropped: a step for it needs a tier decision, and quarantine
+  // evidence is exactly the kind of thing to decide deliberately.
   ['quarantined_uploads',    's3_key'],          // bare key, not a URL
   ['report_photos',          'storage_url'],
   ['shift_sessions',         'clock_out_photo_url'],
