@@ -76,8 +76,20 @@ jobs:
         with:
           node-version: '20'
 
+      # PINNED 2026-09-20. `latest` was 2.1.278 that day; 2.1.270 is the build
+      # the pack-on-stdin behaviour was actually verified against -- a
+      # 226,023 B / 4,205-line pack piped in, sentinel on the last line and
+      # again in the middle, both returned verbatim.
+      #
+      # The pack now arrives as stdin rather than as a path the model opens,
+      # so a CLI change to stdin handling or to --input-format's default would
+      # not fail loudly: it would silently produce a brief written from no
+      # evidence. The floor check in scripts/ops/triage.sh catches that after
+      # the fact; pinning stops it happening on an unattended schedule.
+      #
+      # BUMP DELIBERATELY, AND RE-RUN THE SENTINEL TEST WHEN YOU DO. See N102.
       - name: Install Claude Code
-        run: npm i -g @anthropic-ai/claude-code
+        run: npm i -g @anthropic-ai/claude-code@2.1.270
 
       - name: Install Railway CLI
         run: npm i -g @railway/cli

@@ -1026,7 +1026,21 @@ fi
 # anyone types. The scoping that does exist is the same as for the git rules
 # above and rests on the same two facts: the runner is ephemeral, and every
 # credential in this job is read-only.
-ALLOWED_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(grep:*),Bash(wc:*),Bash(cat ${CONTEXT})"
+# Bash(cat ${CONTEXT}) was removed 2026-09-20 when the pack moved to stdin.
+# It existed because `Read` truncates: measured on run 35528838218's pack,
+# Read returned line 993 of 4,204 -- the model could write a brief from 24% of
+# the evidence and nothing said so. `cat` was the lossless escape hatch (tested
+# both ends and the middle of a 226,023 B pack; all three survived), so the two
+# paths differed by 4.6x and the model chose between them nondeterministically.
+#
+# Stdin removes the choice rather than arbitrating it. The pack is in context
+# before the first turn, so neither tool is needed to obtain it, and leaving
+# `cat` on the list would only invite a second 109k-token copy of something
+# already there.
+#
+# Read/Grep/Glob and grep/wc stay for TARGETED lookups -- one N item out of
+# OPEN-ITEMS.md, a git range -- which is what they were added for.
+ALLOWED_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(grep:*),Bash(wc:*)"
 
 PROMPT_BODY="$(cat .github/ops/triage-prompt.md)"
 if [ -n "${TRIAGE_FOCUS:-}" ]; then
@@ -1044,8 +1058,9 @@ PROMPT_BODY="$PROMPT_BODY
 
 ## Context pack
 
-Every live signal has already been collected for you at ${CONTEXT}.
-Read that file first. Do not attempt to collect anything yourself."
+The context pack has ALREADY BEEN DELIVERED TO YOU ON STDIN, in full and
+untruncated. It is in your context now; there is no file to open and no tool
+call to make. Do not attempt to gather anything yourself."
 
 # Model is pinned so a runner default change cannot silently alter cost or
 # quality. Run 33964954767 passed no --model at all and its log names no model,
@@ -1065,12 +1080,23 @@ printf 'starting claude -p (model=%s, max-turns %s)\n' "$MODEL" "$MAX_TURNS"
 RAW="${TRIAGE_RAW:-/tmp/triage-raw.json}"
 
 set +e
+# THE PACK GOES IN ON STDIN, NOT AS A PATH.
+#
+# `--input-format` defaults to "text" and `-p` reads stdin (the CLI even warns
+# "no stdin data received in 3s" when nothing is piped), so the pack arrives as
+# part of the first user message: complete, untruncated, and before the model
+# takes its first turn. Verified 2026-09-20 by piping a 226,023 B / 4,205-line
+# pack with a unique sentinel on its LAST line and asking for that line back --
+# returned verbatim.
+#
+# This replaces a choice the model was making badly. See the allowlist note.
 claude -p "$PROMPT_BODY" \
   --output-format json \
   --max-turns "$MAX_TURNS" \
   --model "$MODEL" \
   --permission-mode dontAsk \
   --allowedTools "$ALLOWED_TOOLS" \
+  < "$CONTEXT" \
   > "$RAW"
 CLAUDE_EXIT=$?
 set -e
@@ -1090,6 +1116,7 @@ set -e
 # exit status independently: a result that says it failed is a failure even
 # when a body is present.
 RESULT_SUBTYPE=''
+PACK_DELIVERY='ok'
 if jq -e '.type == "result"' "$RAW" >/dev/null 2>&1; then
   RESULT_SUBTYPE="$(jq -r '.subtype // "unknown"' "$RAW" 2>/dev/null || printf 'unknown')"
 
@@ -1100,6 +1127,46 @@ if jq -e '.type == "result"' "$RAW" >/dev/null 2>&1; then
        model: (.modelUsage // null)}' "$RAW" > "$COST_FILE" 2>/dev/null || true
   printf 'cost: %s (subtype=%s)\n' \
     "$(jq -r '.total_cost_usd // "unknown"' "$RAW" 2>/dev/null)" "$RESULT_SUBTYPE"
+
+  # ── DID THE PACK ACTUALLY ARRIVE? ────────────────────────────────────
+  #
+  # Free. Read from the usage this run already reports; no second model call
+  # and no sentinel round trip.
+  #
+  # The floor is PACK_BYTES/4, the conventional English bytes-per-token ratio,
+  # and it is deliberately loose. This pack measures 2.07 B/token (226,023 B
+  # -> 109,176 cache_creation tokens, 2026-09-20) because it is dense with
+  # tables, UUIDs and SQL, so a DELIVERED pack clears bytes/4 by about 2x. A
+  # pack that never arrived leaves only the prompt and the system preamble --
+  # on the order of 15-20k tokens -- which is far under the floor. The check
+  # discriminates because of the gap between those two, not because the floor
+  # is precise.
+  #
+  # input_tokens + cache_creation ONLY. cache_read is excluded on purpose: it
+  # accumulates across turns, so a 22-turn run reports ~2M whatever happened
+  # and would clear any floor. Creation is the prefix being built, which is
+  # where a cold-cache pack lands -- and at daily cadence the cache is always
+  # cold. If the cadence ever changes, this check weakens and should be
+  # revisited rather than trusted.
+  #
+  # WHAT IT PROVES AND DOES NOT. It proves something pack-sized reached the
+  # model. It does not prove it was THIS pack, and it cannot: that would need
+  # a sentinel and a second call, which the brief for this change ruled out.
+  PACK_BYTES="$(wc -c < "$CONTEXT" | tr -d ' ')"
+  MIN_INPUT_TOKENS=$(( PACK_BYTES / 4 ))
+  GOT_INPUT="$(jq -r '((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0))' \
+                 "$RAW" 2>/dev/null || printf '0')"
+  case "$GOT_INPUT" in *[!0-9]*) GOT_INPUT=0 ;; esac
+  if [ "$GOT_INPUT" -lt "$MIN_INPUT_TOKENS" ]; then
+    PACK_DELIVERY='suspect'
+    printf 'PACK DELIVERY SUSPECT: %s input tokens reported, floor %s for a %s-byte pack.\n' \
+      "$GOT_INPUT" "$MIN_INPUT_TOKENS" "$PACK_BYTES" >&2
+    printf 'The report below was written WITHOUT the evidence. Treat it as a runner failure.\n' >&2
+    CLAUDE_EXIT=$(( CLAUDE_EXIT == 0 ? 1 : CLAUDE_EXIT ))
+  else
+    printf 'pack delivery: OK (%s input tokens >= %s floor, %s-byte pack)\n' \
+      "$GOT_INPUT" "$MIN_INPUT_TOKENS" "$PACK_BYTES"
+  fi
 
   if jq -e 'has("result")' "$RAW" >/dev/null 2>&1; then
     jq -r '.result' "$RAW" > "$OUT"
@@ -1172,6 +1239,13 @@ if [ -z "$BODY" ]; then
   # a result envelope at all, or it was a SUCCESS that somehow lacked the
   # brief section. Any error subtype is named as itself.
   _lim=''
+  # Checked before the subtype: a run whose pack never arrived reports
+  # subtype=success, so without this branch the label would blame the output
+  # format for missing evidence -- the same wrong-component mistake PR #72
+  # removed for max-turns.
+  if [ "$PACK_DELIVERY" = 'suspect' ]; then
+    BRIEF_LABEL='BRIEF MISSING — context pack did not reach the model'
+  else
   case "$RESULT_SUBTYPE" in
     error_max_turns)
       # The ceiling THAT run hit, read from the payload's own sentence
@@ -1190,6 +1264,7 @@ if [ -z "$BODY" ]; then
     *)
       BRIEF_LABEL="BRIEF MISSING — ${RESULT_SUBTYPE}" ;;
   esac
+  fi
 
   BODY="$BRIEF_LABEL
 

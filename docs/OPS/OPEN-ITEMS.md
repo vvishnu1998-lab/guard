@@ -3655,3 +3655,33 @@ worth having — and discards the free text. The two turns lost to denials on 09
 diagnosable from it.
 
 **Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema, no secret in the payload.
+
+---
+
+**N102. [VISHNU] `@anthropic-ai/claude-code` is pinned to 2.1.270 in ops-triage, and the pin needs a deliberate bump with a sentinel re-test.**
+verified: YES — pinned 2026-09-20 in the same change that moved the context pack to stdin.
+Recorded here because a pin nobody revisits becomes a stale pin, and this one guards something
+that fails QUIETLY.
+
+`.github/workflows/ops-triage.yml:92` installs `@anthropic-ai/claude-code@2.1.270`. `latest` was
+**2.1.278** on the day it was pinned, so the pin is already one patch behind by construction.
+
+**Why it is pinned at all.** The pack is no longer a path the model opens; it arrives on stdin as
+part of the first user message. That depends on two CLI behaviours — `-p` reading stdin, and
+`--input-format` defaulting to `text`. Both are documented and both were verified on 2.1.270 by
+piping a 226,023 B / 4,205-line pack with a unique sentinel on its last line, then again with one
+in the middle, and getting each back verbatim. If a future build changes either, the run does not
+error: it produces a confident brief written from no evidence.
+
+`scripts/ops/triage.sh` carries a floor check that catches that after the fact — it asserts the
+model reported at least `PACK_BYTES/4` input tokens — but a floor is a smoke alarm, not a lock.
+The pin is the lock.
+
+**When bumping:**
+1. Install the candidate version locally.
+2. Re-run the sentinel test — last line AND middle, a real pack, piped on stdin.
+3. Only then change the version in the workflow, in its own commit, quoting the result.
+
+Do not bump it incidentally inside an unrelated change.
+
+**Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema.
