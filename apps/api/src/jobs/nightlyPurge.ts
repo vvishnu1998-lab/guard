@@ -1,10 +1,15 @@
 /**
  * Nightly retention purge — runs at 00:00 UTC.
  *
- * Seven independent steps, each in its own try/catch so one step
- * failing doesn't abort the rest. Every step logs a Sentry breadcrumb
- * with a count so a subsequent captureException (or the per-step
- * timing summary) has attached context.
+ * TWENTY-NINE independent steps — the original nine plus twenty added
+ * 2026-09-19 — each in its own try/catch so one failing doesn't abort the
+ * rest. Every step logs a Sentry breadcrumb with a count so a subsequent
+ * captureException (or the per-step timing summary) has attached context.
+ *
+ * THE ORDER LIVES IN ONE PLACE: the STEP_ORDER array. Each entry says
+ * whether its position is FORCED by a foreign key, PREFERRED, or ARBITRARY,
+ * because those are three different things and only the first cannot be
+ * changed. Read that array before adding a step; do not add one here.
  *
  * Guardrail: if a step would delete > STEP_ROW_CAP rows on a single
  * night, the step is halted and a Sentry warning is sent instead.
@@ -12,6 +17,18 @@
  * many rows at once, we get an alert instead of the deletion.
  * D3: Sentry-only alert, no SendGrid — the retention email path is
  * being deleted this ship.
+ *
+ * ── THE CAP IS A DEADLOCK FOR ONE STEP, AND IT HAS A DATE ───────────────
+ *
+ * `notifications` is the only high-volume table here: 16,010 rows growing at
+ * ~232/day, of which 1,452 were past 30 days on 2026-09-19. While the step
+ * is in dry-run the due set grows by a day's writes every day, so it crosses
+ * STEP_ROW_CAP around 2026-10-26 — after which haltStep fires, nothing is
+ * deleted, the backlog keeps growing, and it halts every night forever. The
+ * guardrail becomes the thing it was meant to guard against.
+ *
+ * Enable this step before that date, or raise the cap for it. No other step
+ * is within three orders of magnitude of the cap.
  *
  * Dry-run: `RETENTION_DRY_RUN` env var, code-default = TRUE. Only the
  * literal string 'false' flips it off. During the initial 30-day
@@ -60,6 +77,51 @@ import { Sentry } from '../services/sentry';
 
 const DRY_RUN = process.env.RETENTION_DRY_RUN !== 'false';
 const STEP_ROW_CAP = 10_000;
+
+/**
+ * Day counts for the tables that have NO `expires_at` column.
+ *
+ * ── WHY THESE ARE NOT IN services/retention.ts ──────────────────────────
+ *
+ * That file's header states the rule and this is the case it describes:
+ * "The locked schedule also covers 18 tables with NO `expires_at` column …
+ * Those tiers are computed INLINE at purge time, and their constants land
+ * with the purge steps that read them. They are not added here in advance:
+ * an authoritative-looking constant with no reader is exactly what
+ * PING_PHOTO_DAYS was, and it misled two audits before it was removed."
+ *
+ * So the constant lives beside its only reader, which is the step list
+ * below. RETENTION stays the schedule for tables whose rows carry a stamped
+ * `expires_at`; this is the schedule for tables where the purge predicate IS
+ * the schedule. chatRetention.ts does the same thing for chat_messages.
+ *
+ * ── INTERPOLATED, NEVER RETYPED ─────────────────────────────────────────
+ *
+ * Every predicate below reads its number from here. A literal typed into a
+ * WHERE clause is a second copy, and a second copy is what schema_v79 spent
+ * a migration undoing — the clock-out writer had said 365 while the backfill
+ * said 90, for four months, because the number existed twice.
+ *
+ * FIVE TABLES ARE DELIBERATELY ABSENT. checkpoint_scans, missed_pings,
+ * missed_reports, revoked_tokens and admin_client_previews all carry a real
+ * `expires_at`, so their steps read the COLUMN. Adding a day count for them
+ * here would be a third copy of a number the writer and schema_v79 already
+ * agree on — and for missed_pings/missed_reports it would orphan the writer
+ * anchors PR #70 had just fixed.
+ */
+const PURGE_DAYS = {
+  CLOCK_IN_PHOTO:           30,   // the selfie; the ROW lives to CLOCK_IN_ROW
+  CLOCK_IN_ROW:             365,  // GPS + accuracy + geofence verdict
+  NOTIFICATIONS:            30,
+  AUTH_EVENTS:              365,
+  BREAK_SESSIONS:           365,
+  GUARD_DEVICE_REVOKED:     90,   // from revoked_at; an ACTIVE device never expires
+  CHAT_ROOMS:               365,
+  LOCATION_INTEGRITY_FLAGS: 365,
+  OFFLINE_DEAD_LETTERS:     90,
+  MONTHLY_HOURS_REPORTS:    1460,
+  AUDIT_TRAIL:              1460, // the three audit tables + shift_swap_requests
+} as const;
 
 interface StepResult {
   step:      string;
@@ -167,6 +229,165 @@ async function sweepS3(step: string, rawUrls: Array<string | null | undefined>):
   return out;
 }
 
+/**
+ * One plain row-delete step: no media, no cascade bookkeeping, one predicate.
+ *
+ * Seventeen of the twenty new steps are this shape, differing only in table
+ * and predicate. Writing them as seventeen near-identical functions would
+ * bury the one thing that actually matters about them — THE ORDER — in nine
+ * hundred lines of boilerplate. As data they sit in STEP_ORDER where a
+ * reviewer can see the sequence and the FK reasoning in one screen.
+ *
+ * `step` IS AN AUDIT-TRAIL KEY, NOT A LABEL. It is the property name under
+ * emitRunSummary's `per_step`, so renaming one silently breaks continuity
+ * with every Sentry event already emitted. The existing nine keep their
+ * original strings verbatim for exactly that reason.
+ *
+ * `where` is interpolated, never parameterised, and that is safe here and
+ * only here: every value comes from PURGE_DAYS or is a literal in this file.
+ * No request data reaches it. Do not extend this to accept a caller value.
+ */
+interface SimpleStep {
+  step:  string;
+  table: string;
+  where: string;
+  /** Why this step sits where it does. FORCED means an FK; anything else is
+   *  a preference and should say so. */
+  why:   string;
+}
+
+/**
+ * SELECT the ids, then DELETE by id — never COUNT-then-DELETE-by-predicate.
+ *
+ * Same reasoning as the existing nine after PR #70: NOW() is re-evaluated at
+ * DELETE time, so the two statements do not necessarily see the same set, and
+ * `candidate` and `deleted` would describe different rows.
+ */
+async function runSimpleStep(s: SimpleStep): Promise<StepResult> {
+  try {
+    const rowsQ = await pool.query<{ id: string }>(
+      `SELECT id FROM ${s.table} WHERE ${s.where}`,
+    );
+    const candidate = rowsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(s.step, candidate);
+    if (DRY_RUN)                  return dryRunStep(s.step, candidate);
+
+    const del = await pool.query(
+      `DELETE FROM ${s.table} WHERE id = ANY($1::uuid[])`,
+      [rowsQ.rows.map((r) => r.id)],
+    );
+    return finishStep(s.step, candidate, del.rowCount ?? 0);
+  } catch (err) {
+    return errorStep(s.step, err);
+  }
+}
+
+// ── NEW ── Clock-in selfie at 30 days, keeping the row to 365 ────────────────
+//
+// The pointer is nulled and the row survives: the GPS fix, accuracy, geofence
+// verdict and mock-location verdict are the evidence, and they outlive the
+// photo by eleven months. Same shape as step 1 does for location_pings.
+//
+// THE legal_hold PREDICATE IS THE POINT OF schema_v80. This table had no such
+// column until then, and the one held session's verification is 68 days old
+// with a real selfie — so a hold-blind version of this step would have
+// deleted the clock-in selfie of the only legal hold on the platform, on its
+// first live night. No step that destroys an S3 object ships without one.
+//
+// selfie_url is nullable only because v80 dropped the NOT NULL. Against a
+// database without that migration this raises 23502 on the first candidate.
+async function stepClockInPhoto30d(): Promise<StepResult> {
+  const step = 'clock_in_photo_30d';
+  try {
+    const rowsQ = await pool.query<{ id: string; selfie_url: string }>(
+      `SELECT id, selfie_url FROM clock_in_verifications
+        WHERE selfie_url IS NOT NULL
+          AND verified_at < NOW() - INTERVAL '${PURGE_DAYS.CLOCK_IN_PHOTO} days'
+          AND legal_hold = false`,
+    );
+    const candidate = rowsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      'UPDATE clock_in_verifications SET selfie_url = NULL WHERE id = ANY($1::uuid[])',
+      [rowsQ.rows.map((r) => r.id)],
+    );
+    const s3 = await sweepS3(step, rowsQ.rows.map((r) => r.selfie_url));
+    return finishStep(step, candidate, del.rowCount ?? 0, s3);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── NEW ── Clock-out photo at 90 days, keeping the session to 1500 ──────────
+//
+// Keys on clock_out_photo_delete_at rather than recomputing 90 days from
+// clocked_out_at, for the reason the column exists: the writer
+// (routes/shifts.ts) and schema_v79.sql:237 both stamp
+// `clocked_out_at + INTERVAL '90 days'`, so reading the column is reading
+// their agreement instead of minting a third copy of the number. That is also
+// why PURGE_DAYS has no entry for it.
+//
+// NULLS THE POINTER, NEVER DELETES THE ROW. shift_sessions is a 1500-day
+// entity and step 6 is the only thing allowed to remove it; a DELETE here
+// would destroy a shift's entire evidence chain to reclaim one photo.
+async function stepClockOutPhoto90d(): Promise<StepResult> {
+  const step = 'clock_out_photo_90d';
+  try {
+    const rowsQ = await pool.query<{ id: string; clock_out_photo_url: string }>(
+      `SELECT id, clock_out_photo_url FROM shift_sessions
+        WHERE clock_out_photo_url IS NOT NULL
+          AND clock_out_photo_delete_at < NOW()
+          AND legal_hold = false`,
+    );
+    const candidate = rowsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      'UPDATE shift_sessions SET clock_out_photo_url = NULL WHERE id = ANY($1::uuid[])',
+      [rowsQ.rows.map((r) => r.id)],
+    );
+    const s3 = await sweepS3(step, rowsQ.rows.map((r) => r.clock_out_photo_url));
+    return finishStep(step, candidate, del.rowCount ?? 0, s3);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
+// ── NEW ── Monthly hours reports at 1460 days (DELETE then S3 sweep) ────────
+//
+// The fourth media step, and the one the brief did not name as one:
+// monthly_hours_reports.s3_url is TEXT NOT NULL and is already entry 5 of
+// POINTER_COLUMNS in services/mediaOwnership.ts. A plain DELETE here would
+// orphan every generated PDF it has ever produced.
+async function stepMonthlyHoursReports(): Promise<StepResult> {
+  const step = 'monthly_hours_reports';
+  try {
+    const rowsQ = await pool.query<{ id: string; s3_url: string }>(
+      `SELECT id, s3_url FROM monthly_hours_reports
+        WHERE generated_at < NOW() - INTERVAL '${PURGE_DAYS.MONTHLY_HOURS_REPORTS} days'`,
+    );
+    const candidate = rowsQ.rows.length;
+
+    if (candidate > STEP_ROW_CAP) return haltStep(step, candidate);
+    if (DRY_RUN)                  return dryRunStep(step, candidate);
+
+    const del = await pool.query(
+      'DELETE FROM monthly_hours_reports WHERE id = ANY($1::uuid[])',
+      [rowsQ.rows.map((r) => r.id)],
+    );
+    const s3 = await sweepS3(step, rowsQ.rows.map((r) => r.s3_url));
+    return finishStep(step, candidate, del.rowCount ?? 0, s3);
+  } catch (err) {
+    return errorStep(step, err);
+  }
+}
+
 runJob('nightlyPurge', '0 0 * * *', runNightlyPurge, { sentryMonitor: false });
 
 /**
@@ -188,6 +409,208 @@ runJob('nightlyPurge', '0 0 * * *', runNightlyPurge, { sentryMonitor: false });
  * tagged job=nightlyPurge, and records last_result='error' in
  * cron_heartbeats. Purge logic is unchanged.
  */
+/**
+ * EVERY STEP, IN THE ORDER THEY MUST RUN. This list is the schedule.
+ *
+ * A thunk is a step with its own function (media, or a cascade blast radius);
+ * a SimpleStep object is a plain row delete run by runSimpleStep().
+ *
+ * ── WHAT "MUST" MEANS HERE ──────────────────────────────────────────────
+ *
+ * Only some of this order is forced. Each entry's `why` says which, and the
+ * distinction is not pedantry: a FORCED position cannot be reordered without
+ * a 23503, a PREFERRED one can be reordered safely and a future maintainer
+ * needs to know which they are looking at. Positions that are neither say so.
+ *
+ * The forced ones all come from NO ACTION foreign keys into shift_sessions,
+ * which are checked at end-of-statement and abort the WHOLE delete:
+ *   checkpoint_scans_shift_session_id_fkey
+ *   vehicle_inspections_shift_session_id_fkey
+ *   task_completions_shift_session_id_fkey
+ *   shift_swap_requests_from_session_id_fkey / _to_session_id_fkey
+ *
+ * ── THIS IS ALL LATENT UNTIL 2030 ───────────────────────────────────────
+ *
+ * Measured 2026-09-19: the earliest shift_sessions.expires_at and
+ * shifts.expires_at are both 2030-08-21, so steps 6 and 7 match zero rows and
+ * cannot raise a 23503 for another four years. The ordering is correct and
+ * worth getting right now — it is not an outage waiting on a deploy.
+ *
+ * ── THE NAMING SCHEME STOPPED SCALING, AND WAS NOT EXTENDED ─────────────
+ *
+ * step1..step7 with 5b/5c interpolated cannot absorb twenty more without
+ * renumbering, and renumbering would rewrite `per_step` keys that Sentry
+ * events already carry. So the existing nine keep their strings VERBATIM and
+ * new steps are named for their table. Position is expressed by this array
+ * and nowhere else.
+ */
+type OrderedStep = (() => Promise<StepResult>) | SimpleStep;
+
+const STEP_ORDER: readonly OrderedStep[] = [
+  // ── A. Pointer nulling. No row is deleted, so nothing here can block or
+  //       be blocked. First only because a photo freed early is a photo not
+  //       carried through the rest of the run.
+  step1_pingPhotos,
+  stepClockInPhoto30d,
+  stepClockOutPhoto90d,
+
+  // ── B. Children of shift_sessions. Everything here must precede step 6.
+  step2_expiredReports,
+  step3_expiredPings,
+  step4_expiredTaskCompletions,
+  step5_expiredGeofenceViolations,
+  step5b_expiredOffPostEvents,
+  step5c_expiredVehicleInspections,
+  {
+    step:  'checkpoint_scans',
+    table: 'checkpoint_scans',
+    where: 'expires_at < NOW() AND legal_hold = false',
+    why:   'FORCED before step 6 — NO ACTION FK. Reads expires_at (NOT NULL, '
+         + 'DEFAULT now() + 365 days, recomputed by schema_v79) rather than '
+         + 'computing 365 inline, which would be a third copy of the number.',
+  },
+  {
+    step:  'shift_swap_requests',
+    table: 'shift_swap_requests',
+    where: `requested_at < NOW() - INTERVAL '${PURGE_DAYS.AUDIT_TRAIL} days'`,
+    why:   'FORCED before step 6 — TWO NO ACTION FKs (from_session_id and '
+         + 'to_session_id). Anchors on requested_at: this table has no '
+         + 'created_at, and the other five timestamps are all nullable state.',
+  },
+  {
+    step:  'missed_pings',
+    table: 'missed_pings',
+    where: 'expires_at < NOW()',
+    why:   'PREFERRED — CASCADE child, so no FK forces it. Reads expires_at '
+         + 'because PR #70 fixed this table\'s writer to anchor it on '
+         + 'window_end; computing 90 days inline would orphan that fix. No '
+         + 'legal_hold column exists on this table.',
+  },
+  {
+    step:  'missed_reports',
+    table: 'missed_reports',
+    where: 'expires_at < NOW()',
+    why:   'PREFERRED — same as missed_pings, tier 730d, writer anchored on '
+         + 'window_end by PR #70. Note resolved_by_report_id -> reports is '
+         + 'SET NULL, so the reports step cannot block or be blocked by this.',
+  },
+  {
+    step:  'break_sessions',
+    table: 'break_sessions',
+    where: `break_start < NOW() - INTERVAL '${PURGE_DAYS.BREAK_SESSIONS} days'`,
+    why:   'PREFERRED — CASCADE child. Anchors on break_start, not break_end: '
+         + 'break_end is NULL on an open break, and a NULL anchor makes a row '
+         + 'immortal under a < predicate. A never-closed break should still '
+         + 'age out 365 days after it began.',
+  },
+  {
+    step:  'notifications',
+    table: 'notifications',
+    where: `created_at < NOW() - INTERVAL '${PURGE_DAYS.NOTIFICATIONS} days'`,
+    why:   'PREFERRED — CASCADE child, not FK-forced in either direction. '
+         + 'THE ONLY HIGH-VOLUME STEP: 16,010 rows at ~232/day, 1,452 due. '
+         + 'See the STEP_ROW_CAP note in the header.',
+  },
+  {
+    step:  'clock_in_verifications',
+    table: 'clock_in_verifications',
+    where: `verified_at < NOW() - INTERVAL '${PURGE_DAYS.CLOCK_IN_ROW} days' `
+         + 'AND legal_hold = false',
+    why:   'PREFERRED — CASCADE child. The ROW half of the pair; the selfie '
+         + 'went at 30 days in stepClockInPhoto30d above. legal_hold exists '
+         + 'here only as of schema_v80.',
+  },
+
+  // ── C/D. The parents. Both match zero rows until 2030-08-21.
+  step6_expiredShiftSessions,
+  step7_expiredShifts,
+
+  // ── E. Independent of the shift chain. Order among these is ARBITRARY —
+  //       no FK connects any of them to another, verified against
+  //       pg_constraint. Listed alphabetically so a reader can find one.
+  {
+    step:  'admin_client_previews',
+    table: 'admin_client_previews',
+    where: 'expires_at < NOW()',
+    why:   'ARBITRARY. NOT A RETENTION TIER — schema_v79:128-131 names this a '
+         + 'capability window (a 30-minute admin preview grant). Pruned on its '
+         + 'own expires_at; deliberately absent from PURGE_DAYS so nobody '
+         + 'attaches a retention number to it.',
+  },
+  {
+    step:  'auth_events',
+    table: 'auth_events',
+    where: `created_at < NOW() - INTERVAL '${PURGE_DAYS.AUTH_EVENTS} days'`,
+    why:   'ARBITRARY. Append-only log; created_at is its only timestamp.',
+  },
+  {
+    step:  'chat_rooms',
+    table: 'chat_rooms',
+    where: `created_at < NOW() - INTERVAL '${PURGE_DAYS.CHAT_ROOMS} days'`,
+    why:   'ARBITRARY. CASCADES to chat_messages and chat_room_reads, which is '
+         + 'why neither gets a step of its own. created_at is NULLABLE here '
+         + '(0 NULLs today) — a NULL row would be immortal under this '
+         + 'predicate, which is the carried NOT NULL item, deferred.',
+  },
+  {
+    step:  'guard_devices',
+    table: 'guard_devices',
+    where: 'revoked_at IS NOT NULL '
+         + `AND revoked_at < NOW() - INTERVAL '${PURGE_DAYS.GUARD_DEVICE_REVOKED} days'`,
+    why:   'ARBITRARY. STATE-DRIVEN, not age-driven: an ACTIVE device never '
+         + 'expires however old it is, so the IS NOT NULL is the whole rule '
+         + 'and not a null-guard. 114 of 138 rows are revoked; 0 are due.',
+  },
+  {
+    step:  'guard_assignment_audit',
+    table: 'guard_assignment_audit',
+    where: `changed_at < NOW() - INTERVAL '${PURGE_DAYS.AUDIT_TRAIL} days'`,
+    why:   'ARBITRARY. Audit trail, 4-year tier.',
+  },
+  {
+    step:  'location_integrity_flags',
+    table: 'location_integrity_flags',
+    where: `detected_at < NOW() - INTERVAL '${PURGE_DAYS.LOCATION_INTEGRITY_FLAGS} days'`,
+    why:   'ARBITRARY. Anchors on detected_at (the event) rather than '
+         + 'created_at (the insert); first_event_at, last_event_at and '
+         + 'reviewed_at are all nullable state.',
+  },
+  stepMonthlyHoursReports,
+  {
+    step:  'offline_dead_letters',
+    table: 'offline_dead_letters',
+    where: `reported_at < NOW() - INTERVAL '${PURGE_DAYS.OFFLINE_DEAD_LETTERS} days'`,
+    why:   'ARBITRARY. Anchors on reported_at, the only NOT NULL timestamp. '
+         + 'queued_at and dead_at are CLIENT-SUPPLIED and unbounded '
+         + '(services/offlineDeadLetter.ts passes them straight from the '
+         + 'request body), so a client could set either far enough in the past '
+         + 'to delete its own evidence or far enough ahead to keep it forever.',
+  },
+  {
+    step:  'revoked_tokens',
+    table: 'revoked_tokens',
+    where: 'expires_at < NOW()',
+    why:   'ARBITRARY. NOT A RETENTION TIER — a JWT blocklist window. Once the '
+         + 'token it blocks has expired the row cannot deny anything. Same '
+         + 'schema_v79:128-131 note as admin_client_previews.',
+  },
+  {
+    step:  'shift_reassignments',
+    table: 'shift_reassignments',
+    where: `created_at < NOW() - INTERVAL '${PURGE_DAYS.AUDIT_TRAIL} days'`,
+    why:   'ARBITRARY. Audit trail. Also a CASCADE child of shifts, so step 7 '
+         + 'would take it anyway — this step only matters for rows whose shift '
+         + 'outlives them, which at equal tiers is most of them.',
+  },
+  {
+    step:  'shift_schedule_audit',
+    table: 'shift_schedule_audit',
+    where: `changed_at < NOW() - INTERVAL '${PURGE_DAYS.AUDIT_TRAIL} days'`,
+    why:   'ARBITRARY. Audit trail; CASCADE child of shifts, same note as '
+         + 'shift_reassignments.',
+  },
+];
+
 export async function runNightlyPurge(): Promise<StepResult[]> {
   const start = Date.now();
   console.log(`[retention] starting nightly purge (dry_run=${DRY_RUN})`);
@@ -198,16 +621,12 @@ export async function runNightlyPurge(): Promise<StepResult[]> {
     level:    'info',
   });
 
+  // Sequential on purpose. The order in STEP_ORDER is the whole point, and
+  // Promise.all would run a child and its parent in the same instant.
   const results: StepResult[] = [];
-  results.push(await step1_pingPhotos());
-  results.push(await step2_expiredReports());
-  results.push(await step3_expiredPings());
-  results.push(await step4_expiredTaskCompletions());
-  results.push(await step5_expiredGeofenceViolations());
-  results.push(await step5b_expiredOffPostEvents());
-  results.push(await step5c_expiredVehicleInspections());
-  results.push(await step6_expiredShiftSessions());
-  results.push(await step7_expiredShifts());
+  for (const entry of STEP_ORDER) {
+    results.push(typeof entry === 'function' ? await entry() : await runSimpleStep(entry));
+  }
 
   const durationMs = Date.now() - start;
   const dur = (durationMs / 1000).toFixed(1);
