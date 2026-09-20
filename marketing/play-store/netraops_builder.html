@@ -112,7 +112,10 @@ const C_BASE_INNER_W = 196;
 // shift. No AM/PM: a real status bar on a 12-hour phone shows neither.
 const DEFAULTS = {
     statusBar: true,
-    bleed: true,
+    // Bleed OFF by default: every phone whole and centred at local X 180, one
+    // device per frame. ON restores the panoramic strip, where phones sit at
+    // their approved world positions and spill across frame edges.
+    bleed: false,
     screens: [
         { title: 'NETRAOPS.',    sub: 'Security guard management, simplified.', hideTop: 8, clock: '8:55' },
         { title: 'EVERY SHIFT.', sub: 'Verified.',                              hideTop: 8, clock: '8:56' },

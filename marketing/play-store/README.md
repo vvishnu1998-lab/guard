@@ -44,6 +44,22 @@ and anyone on the network can read the directory.
 3. **Download All 10** for a zip, **Download Version C/B (5)** for one design,
    or **Export Frame** for a single image.
 
+### Toggles
+
+| toggle | default | what it does |
+|---|---|---|
+| **Status Bar** | on | Version C only. Adds the 22px row described below. |
+| **Bleed** | **off** | Version C only. Off centres every phone at local X 180, one whole device per frame. On restores the panoramic strip: phones sit at their approved world positions (`265,392` frames 1-4, `205,392` frame 5) and spill across frame edges. |
+| **Show Guides** | off | Draws the red *unrotated rect* — the device box before tilt, not its on-screen bounds. |
+| **Use PNG** | off | See the format note under Play Store requirements. |
+
+Each frame also has a **Status Bar Clock** field. The defaults run 8:55 / 8:56 /
+8:57 / 8:58 / 9:00 across the strip so the set reads as one continuous shift.
+Two of them have to match what is already inside the screenshot: Home renders
+its own `8:56 AM` in the app header, and Chat shows an `8:59 AM` message
+timestamp that the bar must sit *after*. No AM/PM in the bar — a real status
+bar on a 12-hour phone shows neither.
+
 Exports land in your browser's download directory. Move them to `out/` — it is
 gitignored, so nothing exported is ever committed.
 
@@ -73,10 +89,17 @@ These are approved and deliberate. Do not change them without a new approval:
 - frame order, headline text, and sublines
 - colours, the background gradient, and the three skewed bands
 - tilt angles (`+5 / -5 / +5 / -5 / +5`) and device centres —
-  Version C `(265, 392)` for frames 1-4 and `(205, 392)` for frame 5,
-  Version B centre X `180`
+  Version C `(265, 392)` for frames 1-4 and `(205, 392)` for frame 5 when
+  **Bleed** is on, `180` when it is off; Version B centre X `180`
 - fonts: Barlow Condensed 700 for headlines, Inter for everything else
 - export filenames
+
+Version C keeps every tilted device inside **y 152-632** — clear of the
+headline block, which ends at y=120. `geomC()` enforces that by solving for the
+largest `innerW` whose *rotated* bounding box still fits, counting the 2px cyan
+ring the box-shadow draws outside the border. At the five shipped ratios the
+limit is 196.42, so `innerW` stays at the approved 196 and nothing shrinks; a
+taller future capture would shrink instead of escaping the band.
 
 No callouts. No "best", "#1", "free", "new", no prices, no calls to action —
 Play's metadata policy prohibits promotional overlays on screenshots.
