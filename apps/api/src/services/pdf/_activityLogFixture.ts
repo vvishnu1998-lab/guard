@@ -278,5 +278,24 @@ export const FIXTURE_META = {
   toIso:      '2026-09-09T06:59:59.999Z',
 };
 
+/**
+ * The range PDF-1 was actually exported with: picker 2026-08-24 → 2026-09-22,
+ * at the STARNET Bethel site. The end bound is what localDayEnd() puts on the
+ * wire for a PT browser — 06:59:59.999Z the NEXT UTC day — which is why a
+ * zone-less toLocaleDateString on a UTC server prints 23/09 while the filename
+ * the same click produced says 09-22.
+ *
+ * The start bound needs no fix and must not acquire one: 07:00Z on 24/08 is
+ * still 24/08 in UTC, so only the END date was ever visibly wrong. An
+ * assertion that checked only the end could be satisfied by a change that
+ * broke the start, so both are pinned.
+ */
+export const FIXTURE_META_PROD_RANGE = {
+  siteLabel:  SITE,
+  guardLabel: 'All guards',
+  fromIso:    '2026-08-24T07:00:00.000Z',  // localDayStart('2026-08-24') from PT
+  toIso:      '2026-09-23T06:59:59.999Z',  // localDayEnd('2026-09-22')   from PT
+};
+
 /** session_id is set, and nothing in the current header says so — D1. */
 export const FIXTURE_SESSION_ID = '77cc32e7-3827-4c8f-a08c-06751c34e919';

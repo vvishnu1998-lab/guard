@@ -30,6 +30,7 @@ import { renderActivityLogPdf, type ActivityPdfMeta } from './activityLog';
 import {
   FIXTURE_ROWS,
   FIXTURE_META,
+  FIXTURE_META_PROD_RANGE,
   ALL_STATUS_KINDS,
 } from './_activityLogFixture';
 
@@ -103,6 +104,44 @@ async function main() {
 
   check('cover reports the uncapped row total', () => {
     assert.match(doc.page(1), new RegExp(`\\b${FIXTURE_ROWS.length}\\b[\\s\\S]{0,400}TOTAL EVENTS`));
+  });
+
+  // ── C1 / D2 — the period renders in SITE time, not server time ────────────
+  console.log('');
+  console.log('C1 — period header (D2)');
+
+  const prod = await render('prod-range', FIXTURE_ROWS, FIXTURE_META_PROD_RANGE);
+
+  check('period end is the picker date, not the next UTC day', () => {
+    // Picker 2026-08-24 -> 2026-09-22. Wire end is 2026-09-23T06:59:59.999Z,
+    // which a zone-less formatter on a UTC server renders as 23/09.
+    const period = prod.page(1).split('\n').find((l) => l.includes('Period'));
+    assert.ok(period, 'no Period line on the cover');
+    assert.match(period, /22\/09\/2026/, `period end wrong: ${period.trim()}`);
+    assert.doesNotMatch(period, /23\/09\/2026/, `period end is the next UTC day: ${period.trim()}`);
+  });
+
+  check('period start is unchanged (07:00Z is already the right day)', () => {
+    const period = prod.page(1).split('\n').find((l) => l.includes('Period'))!;
+    assert.match(period, /24\/08\/2026/, `period start wrong: ${period.trim()}`);
+  });
+
+  check('the footer carries the same corrected period on every page', () => {
+    // drawFooter stamps periodStr on all pages; a fix applied only to the
+    // cover would leave every other page contradicting it.
+    for (let p = 1; p <= prod.pages; p++) {
+      assert.doesNotMatch(prod.page(p), /23\/09\/2026/, `page ${p} footer still says 23/09`);
+    }
+  });
+
+  check('the end date matches the filename the same click produces', () => {
+    // routes/admin.ts builds `activity-logs-${fromIso.slice(0,10)}_...`, and
+    // the web builds the same name from the raw picker string. Header and
+    // filename disagreeing is the symptom a reader actually reported.
+    const period = prod.page(1).split('\n').find((l) => l.includes('Period'))!;
+    const webFilenameEnd = '2026-09-22';                 // ActivityLogTable.tsx:613
+    const [y, m, d] = webFilenameEnd.split('-');
+    assert.match(period, new RegExp(`${d}/${m}/${y}`), 'header disagrees with the filename');
   });
 
   console.log('');

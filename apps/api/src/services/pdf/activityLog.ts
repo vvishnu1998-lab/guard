@@ -23,6 +23,16 @@ import {
 } from './theme';
 import { ACTIVITY_PDF_ROW_CAP, type ActivityRow } from '../../routes/activityLog';
 
+/**
+ * The zone every date in this document is rendered in.
+ *
+ * Hardcoded, matching the three Intl formatters below that already were —
+ * all 23 production sites read `America/Los_Angeles`. It is named rather
+ * than repeated so that the day a site exists in another zone, `grep SITE_TZ`
+ * finds every place that has to change. Tracked in OPEN-ITEMS.
+ */
+const SITE_TZ = 'America/Los_Angeles';
+
 export interface ActivityPdfMeta {
   /** Site name, or 'All sites' when the export is not site-filtered. */
   siteLabel:  string;
@@ -51,7 +61,25 @@ export function renderActivityLogPdf(
   const eventRows = rows.slice(0, ACTIVITY_PDF_ROW_CAP);
   // En dash, not an arrow: WinAnsi has no → and PDFKit's built-in Helvetica
   // rendered it as "!'" on every page of this PDF.
-  const periodStr = `${new Date(fromIso).toLocaleDateString('en-GB')} – ${new Date(toIso).toLocaleDateString('en-GB')}`;
+  //
+  // THE ZONE IS NOT OPTIONAL. Without it these two calls format in the
+  // PROCESS's zone, and Railway sets no TZ, so the API runs in UTC. The web
+  // sends an INCLUSIVE end-of-local-day bound — localDayEnd() parses
+  // "<date>T23:59:59.999" with no suffix, so a PT browser puts
+  // 2026-09-23T06:59:59.999Z on the wire for a picker end of 2026-09-22 —
+  // and 06:59Z is the next day in UTC. The header therefore printed 23/09
+  // against a filename, built from the same click, reading 09-22.
+  //
+  // Only the END was ever visibly wrong, which is why this went unnoticed:
+  // a start-of-day PT bound is 07:00Z on the SAME date, so the start agreed
+  // by luck. It is not an exclusive-end bug — the bound really is inclusive.
+  //
+  // Every sibling formatter in this file already passes the zone (DAY_KEY,
+  // DAY_HEADER, TIME_FMT, and the Generated line below). This call was the
+  // only one that did not, so it was an omission, not a choice.
+  const periodStr =
+    `${new Date(fromIso).toLocaleDateString('en-GB', { timeZone: SITE_TZ })}` +
+    ` – ${new Date(toIso).toLocaleDateString('en-GB', { timeZone: SITE_TZ })}`;
 
   // Group by Pacific-time day for the on-page sections.
   const DAY_KEY = new Intl.DateTimeFormat('en-CA', {
