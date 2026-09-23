@@ -26,6 +26,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import PDFDocument from 'pdfkit';
+import { badge } from './theme';
 import {
   renderActivityLogPdf, STATUS_COLOR, STATUS_LABEL,
   type ActivityPdfMeta,
@@ -36,6 +38,8 @@ import {
   FIXTURE_META,
   FIXTURE_META_PROD_RANGE,
   FIXTURE_META_WITH_SHIFT,
+  DESC_400,
+  DESC_337,
   ALL_STATUS_KINDS,
 } from './_activityLogFixture';
 
@@ -74,6 +78,28 @@ async function render(name: string, rows = FIXTURE_ROWS, meta: ActivityPdfMeta =
     page: (n: number) =>
       execFileSync('pdftotext', ['-layout', '-f', String(n), '-l', String(n), file, '-'],
                    { encoding: 'utf8' }),
+    /**
+     * Every word with its bounding box, in PDF points.
+     *
+     * Layout assertions go through this rather than through -layout text.
+     * Column alignment and padding are GEOMETRY: -layout renders them as
+     * runs of spaces whose count depends on poppler's own column fitting,
+     * so a badge overlapping the guard name and a badge merely close to it
+     * extract identically. xMax does not have that problem.
+     */
+    words: (n: number) => {
+      const xml = execFileSync(
+        'pdftotext', ['-bbox', '-f', String(n), '-l', String(n), file, '-'],
+        { encoding: 'utf8' },
+      );
+      const out: { t: string; x0: number; x1: number; y0: number; y1: number; y: number }[] = [];
+      const re = /<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">([^<]*)<\/word>/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(xml))) {
+        out.push({ t: m[5], x0: +m[1], x1: +m[3], y0: +m[2], y1: +m[4], y: Math.round(+m[2]) });
+      }
+      return out;
+    },
   };
 }
 
@@ -346,6 +372,140 @@ async function main() {
 
   check('a late clock-in carries its delta, as the web shows it', () => {
     assert.match(doc.text, /\+18m late/, 'no "+Nm late" on the late clock-in row');
+  });
+
+  // ── C6 — layout (L1-L5) ───────────────────────────────────────────────────
+  console.log('');
+  console.log('C6 — layout (L1-L5)');
+
+  const ML_ = 50, MR_ = 545, COL_STATUS_X = ML_ + 60, COL_GUARD_X = ML_ + 170;
+  const squash = (t: string) => t.replace(/\s+/g, ' ').trim();
+
+  check('L1 a 400-char description is printed in full', () => {
+    assert.ok(squash(doc.text).includes(squash(DESC_400)),
+      'the 400-char description is still being clamped');
+  });
+
+  check('L1 the 337-char production description is printed in full', () => {
+    // Real length, from incident 223cf7e2 on 2026-09-08.
+    assert.ok(squash(doc.text).includes(squash(DESC_337)),
+      'the 337-char incident description is still being clamped');
+  });
+
+  check('L1 nothing is truncated without saying so', () => {
+    // The old code appended "…" only past 180 chars, then dropped the line
+    // carrying it via height:10 — so the ellipsis was never once visible.
+    const shown = squash(doc.text);
+    for (const d of [DESC_400, DESC_337]) {
+      assert.ok(!shown.includes(squash(d).slice(0, 100) + '…'), 'silent mid-text cut remains');
+    }
+  });
+
+  check('L2 no badge box reaches the guard column', () => {
+    // ASSERTED ON THE RETURNED WIDTH, not on pdftotext. The defect is the
+    // filled RECT, which carries no text — poppler sees only the label
+    // inside it, so an over-wide box and a correct one extract identically.
+    // A first pass at this check read bounding boxes and "passed" the broken
+    // renderer while flagging the cover's Generated line, which is the exact
+    // failure mode of measuring the wrong thing.
+    const probe = new PDFDocument({ margin: 0, size: 'A4' });
+    const offenders: string[] = [];
+    for (const k of ALL_STATUS_KINDS) {
+      const w = badge(probe, COL_STATUS_X, 0, STATUS_LABEL[k], STATUS_COLOR[k]);
+      if (COL_STATUS_X + w >= COL_GUARD_X) {
+        offenders.push(`${STATUS_LABEL[k]} -> ${w.toFixed(1)}pt, ends at ${(COL_STATUS_X + w).toFixed(1)}`);
+      }
+    }
+    assert.deepStrictEqual(offenders, [],
+      `badge boxes reaching the guard column at ${COL_GUARD_X}:\n       ` + offenders.join('\n       '));
+  });
+
+  check('L2 badge width tracks real ink, not character count', () => {
+    // 'MISSED / ANSWERED LATE' is 22 chars: the old formula billed it
+    // 22*6+12 = 144pt against ~94pt of actual Helvetica-Bold at 7pt.
+    const probe = new PDFDocument({ margin: 0, size: 'A4' });
+    probe.fontSize(7).font('Helvetica-Bold');
+    for (const k of ALL_STATUS_KINDS) {
+      const label = STATUS_LABEL[k];
+      const w = badge(probe, 0, 0, label, STATUS_COLOR[k]);
+      probe.fontSize(7).font('Helvetica-Bold');
+      const ink = probe.widthOfString(label);
+      assert.ok(Math.abs(w - (ink + 12)) < 0.5,
+        `"${label}" box is ${w.toFixed(1)}pt for ${ink.toFixed(1)}pt of ink `
+        + `(want ${(ink + 12).toFixed(1)})`);
+    }
+  });
+
+  check('L3 the day-header count has padding inside the bar', () => {
+    for (let p = 1; p <= doc.pages; p++) {
+      for (const w of doc.words(p)) {
+        if (w.t !== 'events' && w.t !== 'event') continue;
+        assert.ok(w.x1 <= MR_ - 8,
+          `"N events" ends at ${w.x1.toFixed(1)}; the bar ends at ${MR_}, so padding is `
+          + `${(MR_ - w.x1).toFixed(1)}pt (want >= 8)`);
+      }
+    }
+  });
+
+  check('L4 a single-site export does not repeat the site on every row', () => {
+    const sites = new Set(FIXTURE_ROWS.map((r) => r.site_id));
+    assert.strictEqual(sites.size, 1, 'fixture is no longer single-site');
+    // Cover line + per-page footer is expected; one per row is the defect.
+    const occurrences = (doc.text.match(/Bethel AME Church/g) ?? []).length;
+    assert.ok(occurrences <= doc.pages + 1,
+      `site name printed ${occurrences} times across ${doc.pages} pages `
+      + `(expected <= ${doc.pages + 1}: one cover line plus one footer per page)`);
+  });
+
+  // Rendered up front: an async check() would need awaiting, and a check
+  // whose promise is dropped reports "ok" no matter what it asserted.
+  const noRoundsOrMaint = await render('no-rounds',
+    FIXTURE_ROWS.filter((r) => r.kind !== 'checkpoint_round'
+                            && r.status_kind !== 'maintenance_report'));
+  const noRounds = await render('no-rounds-2',
+    FIXTURE_ROWS.filter((r) => r.kind !== 'checkpoint_round'));
+
+  check('L5 zero-value ROUNDS / MAINTENANCE tiles are not drawn', () => {
+    // Bethel has checkpoints_enabled = false, so ROUNDS is 0 on every real
+    // export from that site — a permanently empty tile taking a seventh of
+    // the row.
+    assert.doesNotMatch(noRoundsOrMaint.page(1), /ROUNDS/, 'ROUNDS tile drawn with a zero value');
+    assert.doesNotMatch(noRoundsOrMaint.page(1), /MAINTENANCE/, 'MAINTENANCE tile drawn with a zero value');
+  });
+
+  check('L5 the always-on tiles survive and still fit on one line', () => {
+    for (const t of ['TOTAL EVENTS', 'PINGS', 'MISSED', 'ACTIVITY', 'INCIDENT']) {
+      assert.ok(noRounds.page(1).includes(t), `${t} tile missing`);
+    }
+    // The comment at the tile row records an 8th tile wrapping TOTAL EVENTS
+    // onto a second line and overflowing its fixed 56pt box. Fewer tiles are
+    // wider, but assert it rather than assuming.
+    const label = noRounds.words(1).filter((w) => w.t === 'TOTAL' || w.t === 'EVENTS');
+    assert.strictEqual(new Set(label.map((w) => w.y)).size, 1,
+      'TOTAL EVENTS wrapped onto a second line');
+  });
+
+  check('L-overlap no two words are drawn on top of each other', () => {
+    // NOT COVERED BY ANY TEXT ASSERTION, which is why it is here. pdftotext
+    // extracts overlapping words perfectly — the SCHED marker and the
+    // qualifier line both came out intact while physically sitting on top of
+    // one another, and only rasterising showed it. Rectangles, not lines:
+    // the two collided at a 4pt vertical offset, so anything that compared
+    // rounded baselines would have called them different rows.
+    const EPS = 0.5;
+    for (let p = 1; p <= doc.pages; p++) {
+      const ws = doc.words(p).filter((w) => w.t.trim() !== '');
+      for (let i = 0; i < ws.length; i++) {
+        for (let j = i + 1; j < ws.length; j++) {
+          const a = ws[i], b = ws[j];
+          const xOver = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+          const yOver = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+          assert.ok(!(xOver > EPS && yOver > EPS),
+            `page ${p}: "${a.t}" and "${b.t}" overlap by `
+            + `${xOver.toFixed(1)}x${yOver.toFixed(1)}pt at y=${a.y0.toFixed(0)}`);
+        }
+      }
+    }
   });
 
   console.log('');

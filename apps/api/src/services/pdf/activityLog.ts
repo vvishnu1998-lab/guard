@@ -336,15 +336,26 @@ export function renderActivityLogPdf(
   // splitting it out on the cover is not worth breaking the existing labels.
   const roundCount       = eventRows.filter((r) => r.kind === 'checkpoint_round').length;
 
+  // ROUNDS and MAINTENANCE are dropped when zero; the other five always
+  // print. The five are the spine of the document — "0 MISSED" and
+  // "0 INCIDENT" are findings a client wants stated, not omissions. ROUNDS
+  // is 0 on every export from a site with checkpoints_enabled = false, which
+  // is four of the seven STARNET sites including Bethel AME, so that tile
+  // was permanently empty and taking a seventh of the row.
+  //
+  // Fewer tiles is the safe direction: statW is CW / count, so dropping two
+  // WIDENS the rest. The note this replaces records an EIGHTH tile wrapping
+  // TOTAL EVENTS onto a second line and overflowing its fixed 56pt box —
+  // asserted rather than assumed, since that is a real failure mode here.
   const stats = [
-    { label: 'TOTAL EVENTS', value: totalRows,        color: TEXT  },
-    { label: 'PINGS',        value: pingCount,        color: NAVY  },
-    { label: 'MISSED',       value: missedCount,      color: RED   },
-    { label: 'ROUNDS',       value: roundCount,       color: NAVY  },
-    { label: 'ACTIVITY',     value: activityCount,    color: BLUE  },
-    { label: 'INCIDENT',     value: incidentCount,    color: RED   },
-    { label: 'MAINTENANCE',  value: maintenanceCount, color: AMBER },
-  ];
+    { label: 'TOTAL EVENTS', value: totalRows,        color: TEXT,  always: true  },
+    { label: 'PINGS',        value: pingCount,        color: NAVY,  always: true  },
+    { label: 'MISSED',       value: missedCount,      color: RED,   always: true  },
+    { label: 'ROUNDS',       value: roundCount,       color: NAVY,  always: false },
+    { label: 'ACTIVITY',     value: activityCount,    color: BLUE,  always: true  },
+    { label: 'INCIDENT',     value: incidentCount,    color: RED,   always: true  },
+    { label: 'MAINTENANCE',  value: maintenanceCount, color: AMBER, always: false },
+  ].filter((t) => t.always || t.value > 0);
   const statW = CW / stats.length;
   for (let i = 0; i < stats.length; i++) {
     const sx = ML + i * statW;
@@ -373,9 +384,27 @@ export function renderActivityLogPdf(
   const COL_STATUS_X = ML + 60;
   const COL_GUARD_X  = ML + 170;
   const COL_SITE_X   = ML + 300;
-  const COL_DESC_X   = ML + 8;
+  // Printing the site on all 823 rows of a single-site export says nothing
+  // 822 times. Derived from the ROWS, not from meta.siteLabel: an export can
+  // be single-site without a site filter (one guard, one post), and a
+  // site-filtered export of a site with no rows should not claim otherwise.
+  const singleSite   = new Set(eventRows.map((r) => r.site_id)).size <= 1;
+  // The freed 200pt goes to the guard name, which was clipped at 120pt with
+  // lineBreak:false — silently, since a clipped name still looks like a name.
+  const COL_GUARD_W  = singleSite ? 250 : 120;
+  // Detail text starts under the BADGE, not at the page margin. It used to
+  // share x with the time column, and once the time column grew a second
+  // line (the SCHED marker) the two collided: on the merged missed/answered
+  // row "SCHED" and "Missed — answered 108 minutes late" were drawn on top
+  // of each other, 21pt of overlap at a 1.6pt vertical offset. pdftotext
+  // extracted both strings perfectly, so no text assertion could see it —
+  // it took a rasteriser, and it is now pinned by a geometric one.
+  const COL_DESC_X   = ML + 60;
+  const COL_DESC_W   = MR - COL_DESC_X - 8;
   const ROW_H        = 18;
   const ROW_DESC_H   = 26;
+  /** y-offset of the detail line inside its row. */
+  const DETAIL_TOP   = 15;
 
   function ensureRoom(needed: number) {
     // CONTENT_BOTTOM (PAGE_H - 46), not the PAGE_H - 40 this used before.
@@ -405,8 +434,14 @@ export function renderActivityLogPdf(
     doc.fontSize(9).fillColor(WHITE).font('Helvetica-Bold')
        .text(DAY_HEADER.format(dayDate).toUpperCase(), ML + 8, y + 6, { lineBreak: false });
     doc.fontSize(8).fillColor('#94A3B8').font('Helvetica')
+       // width PAGE_W - ML put the right edge at exactly 545, which is where
+       // the navy bar ENDS — zero padding, against 8pt on the left. The
+       // geometry was copied from drawHeader, where the container is the
+       // full 595pt page and 50pt of margin remains. Inside a bar that stops
+       // at MR it has to be paid for explicitly. The media count two rows
+       // down already does this with `- 10`.
        .text(`${dayRows.length} event${dayRows.length !== 1 ? 's' : ''}`,
-             0, y + 6, { align: 'right', width: PAGE_W - ML });
+             0, y + 6, { align: 'right', width: PAGE_W - ML - 8 });
     y += 26;
 
     for (const r of dayRows) {
@@ -437,7 +472,29 @@ export function renderActivityLogPdf(
       //                         computed, exactly as ActivityLogTable does it
       const qualifier = buildQualifier(r, STATUS_LABEL[r.status_kind]);
       const detail    = r.description ?? qualifier;
-      const rowHeight = detail ? ROW_DESC_H : ROW_H;
+
+      // L1. The description used to be sliced at 180 chars and then drawn
+      // with `height: 10`, which admits exactly ONE line at 8pt; pdfkit
+      // drops the rest silently, and appends its own ellipsis only when
+      // `ellipsis` is passed, which it was not. So 43.5% of production
+      // descriptions (478 of 1099) lost their tail with no mark at all, and
+      // the "…" the code did append past 180 chars landed on the dropped
+      // second line and was therefore NEVER ONCE VISIBLE.
+      //
+      // Now the row grows to fit. The cap is the usable body height rather
+      // than a character count, so a description cannot outrun a page; the
+      // longest in production is 947 chars, about nine lines, well inside
+      // it. If one ever does exceed a page, `ellipsis: true` makes the cut
+      // VISIBLE — the failure that matters is a silent one.
+      let detailH = 0;
+      if (detail) {
+        doc.fontSize(8).font('Helvetica');
+        detailH = Math.min(
+          doc.heightOfString(detail, { width: COL_DESC_W }),
+          CONTENT_BOTTOM - CONTENT_TOP - DETAIL_TOP - 6,
+        );
+      }
+      const rowHeight = detail ? Math.max(ROW_DESC_H, DETAIL_TOP + detailH + 3) : ROW_H;
       ensureRoom(rowHeight + 4);
 
       // No `?? MUTED` / `?? r.status.toUpperCase()` any more. Both maps are
@@ -454,14 +511,16 @@ export function renderActivityLogPdf(
       }
       badge(doc, COL_STATUS_X, y + 1, label, color);
       doc.fontSize(8).fillColor(TEXT).font('Helvetica')
-         .text(r.guard_name, COL_GUARD_X, y + 3, { lineBreak: false, width: 120 });
-      doc.fontSize(8).fillColor(MUTED).font('Helvetica')
-         .text(r.site_name, COL_SITE_X, y + 3, { lineBreak: false, width: 200 });
+         .text(r.guard_name, COL_GUARD_X, y + 3, { lineBreak: false, width: COL_GUARD_W });
+      if (!singleSite) {
+        doc.fontSize(8).fillColor(MUTED).font('Helvetica')
+           .text(r.site_name, COL_SITE_X, y + 3, { lineBreak: false, width: 200 });
+      }
 
       if (detail) {
-        const snippet = detail.length > 180 ? detail.slice(0, 180) + '…' : detail;
         doc.fontSize(8).fillColor('#374151').font('Helvetica')
-           .text(snippet, COL_DESC_X, y + 15, { width: CW - 16, height: 10 });
+           .text(detail, COL_DESC_X, y + DETAIL_TOP,
+                 { width: COL_DESC_W, height: detailH, ellipsis: true });
       }
 
       const mediaCount = r.log_media_urls?.length ?? 0;
