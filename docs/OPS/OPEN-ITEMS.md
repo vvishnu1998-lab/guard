@@ -3759,3 +3759,117 @@ failure is console-only at `apps/api/src/routes/locations.ts:193`
 console-only-catch class as the two upgraded to Sentry in this PR
 (`routes/reports.ts:801` and `:847`) and is invisible to Sentry for the same reason. Left out to
 keep this PR to one file family. **Size S, Tier 1.**
+
+---
+
+## New from the activity-log PDF fixes (2026-09-23)
+
+Five items, all found while fixing the activity-log PDF export (PR: `fix/activity-pdf`).
+None is in that PR: N105 and N106 are client-facing changes with no way to verify
+them yet, N107 and N109 are hygiene, N108 is a builder change that needs a product
+decision first.
+
+### N105 — the client-facing site-security PDF renders every date in UTC
+
+`clientPortal.ts` has **seven** bare `toLocale*` calls. Two were fixed in
+`fix/activity-pdf` (`periodStr` and `Generated`). **Five remain, and they are the
+ones inside the document body:**
+
+| line | call | what it formats |
+|---|---|---|
+| **502** | `toLocaleDateString('en-GB', {day,month,year})` | **the key the report timeline is GROUPED by** |
+| 660 | `toLocaleTimeString('en-GB', {hour,minute})` | timeline entry time |
+| 778 | `toLocaleString('en-GB', {...})` | incident date + time |
+| 847 | `dt.toLocaleDateString('en-GB', {...})` | incident table, date cell |
+| 848 | `dt.toLocaleTimeString('en-GB', {...})` | incident table, time cell |
+
+Railway sets no `TZ`, so all five render in **UTC**. **502 is the one that matters**:
+it is the grouping key, not a label, so a report filed at 17:00 PT or later (00:00Z
+onward) is filed under the **NEXT DATE** in a document a client reads. That is not a
+cosmetic off-by-one — it moves evidence between days. STARNET's Bethel shifts run to
+23:00 PT, so this hits the tail of every evening shift.
+
+**Not fixed in that PR, deliberately.** The generator is built inline against `res`
+(`clientPortal.ts:503` pipes straight to the response), so it cannot be called
+without an Express request and there is no way to render it into a buffer and assert
+on it. Changing what a client-facing document groups by, with no way to see the
+result, is how an unverified fix ships.
+
+**NEXT PR, in this order:** extract the renderer using the Commit-0 pattern from
+`fix/activity-pdf` (`services/pdf/activityLog.ts` — pure move, proven byte-identical
+by rendering a fixture through both paths and comparing md5), add a fixture, THEN fix
+all five. The extraction is the work; the fix is five one-line edits.
+
+Related and already recorded above: `clientPortal.ts:766` coerces
+`(r.severity ?? 'low')`, so that PDF asserts **LOW** on 13 incidents whose severity
+was never assessed. Same document, same pass. **Size M, Tier 1.**
+
+### N106 — SITE_TZ is hardcoded in both PDF renderers
+
+`America/Los_Angeles` is a literal in `services/pdf/activityLog.ts` and (as of
+`fix/activity-pdf`) in `routes/clientPortal.ts`. It is named `SITE_TZ` in both rather
+than inlined, so `grep SITE_TZ` finds every place that has to change — but it is
+still a constant standing in for data.
+
+**`sites.timezone` exists and no PDF reads it.** The activity builder already threads
+it per row (`ActivityRow.timezone`, populated for patrol rounds, and `si.timezone`
+selected in the sessions query) precisely because the admin feed spans sites and
+there is no single zone the document can assume.
+
+Harmless today: all 23 production sites read `America/Los_Angeles`, verified. It
+stops being harmless the first time a site does not, and the failure is silent — the
+document renders, with the wrong times. **Size S, Tier 1.**
+
+### N107 — a PDF service imports from a route module
+
+`services/pdf/activityLog.ts` imports `ACTIVITY_PDF_ROW_CAP` — a **value**, not a
+type — from `routes/activityLog.ts`. Importing it pulls the whole route module into
+the renderer's graph: `express`, `pg` (`db/pool`), the S3 client, `requireAuth`.
+
+Pre-existing; `routes/admin.ts` had the same import before the extraction, so the
+move inherited it rather than introducing it. It is why `_activityLog.test.ts` boots
+the aws-sdk v2 deprecation warning to render a PDF, and it means the renderer cannot
+be exercised anywhere the database module will not load.
+
+Fix is small: move `PDF_ROW_CAP` (and `ActivityRow` / `StatusKind` with it) into a
+`services/activityRow.ts` or similar that both the route and the renderer import.
+Types alone would not need this — `import type` is erased — but the cap is a value.
+**Size S, Tier 0.**
+
+### N108 — the activity feed never emits a clocked-out row
+
+`fetchActivityRows` reads `clocked_out_at` only as a range predicate
+(`routes/activityLog.ts:409`) and as `sessionEndMs` (`:647`). **No row is ever pushed
+for a clock-out**, and `StatusKind` has `clocked_in_on_time`, `clocked_in_late` and
+`missed_clock_in` but no clock-out member. Across 30 days of STARNET Bethel exports,
+zero CLOCKED OUT rows appear — every shift in the document begins and never ends.
+
+**Builder-level, so it is NOT a PDF bug**: the admin web view and the client portal
+are both missing it too. `ActivityLogTable.tsx:272` touches `clocked_out_at` only to
+label the SHIFT dropdown `active`/`ended`.
+
+**Blocked on a product decision, which is why it is deferred and not just unbuilt.**
+75% of all sessions since 2026-07-01 auto-closed (45/60; 78% for STARNET, 14/18), and
+no manual clock-out has ever landed within 20 minutes of `scheduled_end`. So most
+rows this would emit are a sweep closing a session, not a guard clocking out, and
+rendering those as "Clocked Out" in a client-facing document would assert something
+that did not happen. Needs wording that distinguishes the two — and `shift_sessions`
+must be checked for whether it even records which one occurred — before any row is
+emitted. **Size M, Tier 1.**
+
+### N109 — SEARCH GUARDS never reaches the PDF
+
+`ActivityLogTable.tsx` filters by guard name **client-side, on the current page
+only** (`:540-546`, with the comment "Full-corpus search would need a server-side
+name filter; MVP scope"). `downloadPdf()` (`:602-620`) sends `site_id` and
+`session_id` and nothing else.
+
+So an admin who types a name, sees the list narrow, and clicks DOWNLOAD PDF gets the
+**unsearched corpus** — and `hasFilters` (`:600`) counts `search`, so the UI is
+simultaneously telling them a filter is active. Same class as D1, which
+`fix/activity-pdf` fixed for `session_id`: a document whose contents do not match the
+filter state the user is looking at.
+
+Two directions: make the search server-side and thread it into the PDF body, or
+disable/qualify the button while a search is active. The first is the real fix; the
+second is honest and costs nothing. **Size S/M, Tier 1.**
