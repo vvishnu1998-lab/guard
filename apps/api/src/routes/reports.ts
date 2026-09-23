@@ -798,7 +798,18 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
 
   // Email: only incident reports trigger the client-facing incident alert.
   if (report_type === 'incident') {
-    sendIncidentAlert(report, site_id).catch(console.error);
+    // Console-only was how a render TypeError in sendIncidentAlert stayed
+    // invisible: every incident alert threw before its first send and nothing
+    // reached Sentry, so the failure was only ever visible by reading Railway
+    // logs. Fire-and-forget is deliberate and unchanged — the report must not
+    // depend on the email — but the failure is now surfaced.
+    sendIncidentAlert(report, site_id).catch((err) => {
+      console.error('[reports] sendIncidentAlert failed:', err);
+      Sentry.captureException(err, {
+        tags:  { flow: 'incident_alert' },
+        extra: { report_id: report.id, site_id },
+      } as unknown as Parameters<typeof Sentry.captureException>[1]);
+    });
   }
 
   if (isWithin === false && report_type === 'incident') {
@@ -844,7 +855,13 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
           eventType:      'off_post_report',
           context:        { kind: 'report', reportType: report_type },
           extraData:      { reportId: report.id },
-        }).catch((err) => console.error('[report.flag] alert dispatch failed:', err));
+        }).catch((err) => {
+          console.error('[report.flag] alert dispatch failed:', err);
+          Sentry.captureException(err, {
+            tags:  { flow: 'off_post_report_alert' },
+            extra: { report_id: report.id, site_id },
+          } as unknown as Parameters<typeof Sentry.captureException>[1]);
+        });
       }
     }
   }
