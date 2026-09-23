@@ -26,7 +26,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { renderActivityLogPdf, type ActivityPdfMeta } from './activityLog';
+import {
+  renderActivityLogPdf, STATUS_COLOR, STATUS_LABEL,
+  type ActivityPdfMeta,
+} from './activityLog';
 import {
   FIXTURE_ROWS,
   FIXTURE_ROWS_ONE_PAGE,
@@ -211,6 +214,49 @@ async function main() {
     // guards had worked that site that day and only one was in the document.
     assert.doesNotMatch(shifted.page(1), /All guards/,
       'cover still claims "All guards" while scoped to one session');
+  });
+
+  // ── C4 — every status kind gets a label and a colour ──────────────────────
+  console.log('');
+  console.log('C4 — status maps (audit anomaly 2)');
+
+  const MUTED = '#64748B';
+
+  check('every StatusKind has a label', () => {
+    const missing = ALL_STATUS_KINDS.filter((k) => !STATUS_LABEL[k]);
+    assert.deepStrictEqual(missing, [], `kinds falling back to r.status: ${missing.join(', ')}`);
+  });
+
+  check('every StatusKind has a colour, and none is the muted fallback', () => {
+    const missing = ALL_STATUS_KINDS.filter((k) => !STATUS_COLOR[k]);
+    assert.deepStrictEqual(missing, [], `kinds with no colour: ${missing.join(', ')}`);
+    const muted = ALL_STATUS_KINDS.filter((k) => STATUS_COLOR[k] === MUTED);
+    assert.deepStrictEqual(muted, [], `kinds rendering muted grey: ${muted.join(', ')}`);
+  });
+
+  check('an unmet obligation is red wherever it appears', () => {
+    // MISSED PING was red while MISSED CLOCK IN and MISSED REPORT fell through
+    // to grey. A missed clock-in is the most serious row in the document and
+    // was the least visually salient thing on the page.
+    for (const k of ['missed', 'missed_clock_in', 'missed_report', 'missed_answered_late'] as const) {
+      assert.strictEqual(STATUS_COLOR[k], '#DC2626', `${k} is not red`);
+    }
+  });
+
+  check('a late clock-in is distinguishable from an on-time one', () => {
+    // Both rows carry status 'Clocked In', so the label fallback rendered
+    // them identically — the PDF could not tell an admin which was which.
+    assert.notStrictEqual(STATUS_LABEL.clocked_in_late, STATUS_LABEL.clocked_in_on_time,
+      'both clock-in kinds render the same label');
+    assert.notStrictEqual(STATUS_COLOR.clocked_in_late, STATUS_COLOR.clocked_in_on_time,
+      'both clock-in kinds render the same colour');
+  });
+
+  check('every label actually reaches the page', () => {
+    for (const k of ALL_STATUS_KINDS) {
+      assert.ok(doc.text.includes(STATUS_LABEL[k]),
+        `${k} -> "${STATUS_LABEL[k]}" appears nowhere in the rendered document`);
+    }
   });
 
   console.log('');

@@ -210,7 +210,10 @@ interface RoundQueryRow {
   checkpoints:    RoundCheckpoint[];
 }
 
-type StatusKind =
+/** Exported so the PDF renderer can type its label/colour maps as
+ *  Record<StatusKind, ...> and have tsc enforce completeness. Type only —
+ *  no value crosses this boundary. */
+export type StatusKind =
   | 'on_time'
   | 'late'
   | 'missed'
