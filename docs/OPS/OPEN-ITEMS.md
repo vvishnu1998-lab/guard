@@ -3719,3 +3719,43 @@ measured no-pack baseline rather than a ratio of pack size, or assert on a cheap
 property of the pack's content instead of on token volume. Both need their own measurement pass.
 
 **Size S** — the trim itself is small; the floor rework is the work. **Tier 1**, CI-only.
+
+---
+
+**N104. `reports.severity` is never written by any client; decide whether mobile/web should set it or the column goes.**
+verified: YES — production, 2026-09-22. `reports.severity` is `character varying(20)` NULL-able and
+**0 of 1096 rows have it set**, incidents included (**0 of 13**). The server side is fully built:
+`POST /api/reports` accepts and validates it against `ALLOWED_SEVERITIES`
+(`apps/api/src/routes/reports.ts:248-252`, CHECK `severity IN ('low','medium','high','critical')`
+per the comment at `:40`) and the INSERT writes `severity || null` (`:681`). Nothing ever supplies it:
+`apps/mobile` references `severity` in exactly one file, `app/(tabs)/reports.tsx`, and only to
+RENDER it (`:97-99`); there is no severity field on any submit path. `apps/web` likewise only
+displays it. So the column, its CHECK, its validation branch and the API contract all exist to
+carry a value no client has ever produced.
+
+This is the root cause of the incident-alert outage fixed in this PR — `renderIncidentAlert` typed
+it `string` and called `.toUpperCase()` on it, so **every** incident alert threw before its first
+send. The fix makes the renderer null-safe, which is correct regardless, but it does not answer
+whether a severity is supposed to exist. Worth noting that `apps/mobile` already types it
+`string | null` and guards the render (`reports.tsx:21`, `:97`) — the client had it right and the
+server renderer did not.
+
+Two directions, both real; this item is the decision, not the work:
+* **Set it** — add a severity picker to the mobile incident flow. The whole server path is already
+  there, and the client-facing email regains a signal it was designed around (the alert's colour
+  band and subject segment both key on it).
+* **Drop it** — remove the column, the CHECK, the validation branch and the three read sites. The
+  incident alert already renders correctly without it, and a field nothing writes is a field that
+  will keep growing null-handling around itself.
+
+Do not resolve this by backfilling a default. `clientPortal.ts:766` already coerces
+`(r.severity ?? 'low')` for the PDF badge, which means the PDF has been asserting **LOW** on 13
+incidents whose severity was never assessed — a fabricated value in a client-facing document. That
+coercion should be revisited with whichever direction is chosen. **Size S/M, Tier 1.**
+
+**Second, unrelated to severity and deliberately NOT in this PR:** the breach-alert email send
+failure is console-only at `apps/api/src/routes/locations.ts:193`
+(`.catch((err) => console.error('[email] breach alert failed:', err))`). It is the same
+console-only-catch class as the two upgraded to Sentry in this PR
+(`routes/reports.ts:801` and `:847`) and is invisible to Sentry for the same reason. Left out to
+keep this PR to one file family. **Size S, Tier 1.**

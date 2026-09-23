@@ -353,7 +353,7 @@ const INCIDENT_SEVERITY_COLORS: Record<string, string> = {
 };
 
 export async function sendIncidentAlert(
-  report: { id: string; description: string; severity: string; reported_at: Date },
+  report: { id: string; description: string; severity: string | null; reported_at: Date },
   siteId: string,
 ) {
   // Fan out to EVERY active client linked to this site via the v36
@@ -429,7 +429,7 @@ export async function sendIncidentAlert(
 export function renderIncidentAlert(data: {
   report_id:   string;
   description: string;
-  severity:    string;
+  severity:    string | null;
   reported_at: Date | string;
   site_name:   string;
   /** IANA tz string, e.g. 'America/Los_Angeles'. Falls back to Pacific if unset. */
@@ -440,8 +440,17 @@ export function renderIncidentAlert(data: {
   const tz         = data.site_tz ?? PACIFIC;
   const dateLabel  = fmtDateSite(data.reported_at, tz);
   const greetName  = firstName(data.client_name);
-  const sevColor   = INCIDENT_SEVERITY_COLORS[data.severity] ?? '#6B7280';
-  const sevLabel   = data.severity.toUpperCase();
+  // `reports.severity` is NULL-able and nothing writes it — every production
+  // row is NULL, so this is the ONLY path incident alerts have ever taken.
+  // Absent severity drops the badge outright rather than rendering a
+  // placeholder; the timestamp span beside it is kept either way.
+  //
+  // The trailing newline+indent lives INSIDE this fragment so that the
+  // non-null render stays byte-identical to the pre-fix output — asserted
+  // against a snapshot captured from main in _incidentAlert.test.ts.
+  const sevBadge = data.severity
+    ? `<span style="background:${INCIDENT_SEVERITY_COLORS[data.severity] ?? '#6B7280'};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;letter-spacing:1px">${data.severity.toUpperCase()}</span>\n        `
+    : '';
 
   // Per-report deep link — client lands on their portal home with
   // ?report=<id>, and the ActivityLogTable there scrolls the row into view
@@ -463,8 +472,7 @@ export function renderIncidentAlert(data: {
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
-        <span style="background:${sevColor};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;letter-spacing:1px">${sevLabel}</span>
-        <span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
+        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
@@ -481,7 +489,9 @@ export function renderIncidentAlert(data: {
     </div>
   </div>`;
 
-  const subject = `Incident Reported — ${data.site_name} — ${sevLabel} — ${dateLabel}`;
+  const subject = data.severity
+    ? `Incident Reported — ${data.site_name} — ${data.severity.toUpperCase()} — ${dateLabel}`
+    : `Incident Reported — ${data.site_name} — ${dateLabel}`;
   return { subject, html };
 }
 
