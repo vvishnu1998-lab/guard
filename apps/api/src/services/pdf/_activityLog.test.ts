@@ -259,6 +259,95 @@ async function main() {
     }
   });
 
+  // ── C5 — the time column tells the truth about its own sort key ───────────
+  console.log('');
+  console.log('C5 — time column (D4 + D5 + D6)');
+
+  /** Leading HH:MM of every timeline row, in page order. */
+  function rowTimes(d: { text: string }): string[] {
+    return d.text.split('\n')
+      .map((l) => l.match(/^\s{0,8}(\d{2}:\d{2}|—)\s{2,}\S/))
+      .filter((m): m is RegExpMatchArray => m !== null)
+      .map((m) => m[1]);
+  }
+
+  check('no row prints an em-dash for its time', () => {
+    const dashes = rowTimes(doc).filter((t) => t === '—');
+    assert.strictEqual(dashes.length, 0,
+      `${dashes.length} rows still print "—" instead of their scheduled time`);
+  });
+
+  check('synthesized rows print their scheduled time, marked as scheduled', () => {
+    // missed / missed_report / missed_clock_in have log_time null and carry
+    // the window (or hour, or scheduled_start) in event_time all along. The
+    // renderer simply never looked at it.
+    for (const label of ['MISSED PING', 'MISSED REPORT', 'MISSED CLOCK IN']) {
+      const line = doc.text.split('\n').find((l) => l.includes(label));
+      assert.ok(line, `no ${label} row`);
+      assert.match(line, /^\s*\d{2}:\d{2}/, `${label} has no time: ${line.trim()}`);
+    }
+    assert.match(doc.text, /SCHED/, 'nothing marks a time as scheduled rather than observed');
+  });
+
+  check('the merged row sorts AND prints at its window, not its answer', () => {
+    // The whole of D4. event_time is the 13:00 window; log_time is the
+    // 15:17:34 ping that answered it. Printing log_time while sorting on
+    // event_time put "15:17" between 12:31 and 13:03.
+    const line = doc.text.split('\n').find((l) => l.includes('MISSED / ANSWERED LATE'));
+    assert.ok(line, 'no merged row');
+    assert.match(line, /^\s*13:00/, `merged row prints ${line.trim().slice(0, 12)}, not its window`);
+  });
+
+  check('15:17 in the time column belongs only to the 15:17 report', () => {
+    // Before: "15:17" appeared TWICE in one day, four rows apart — once from
+    // the merged row and once from an unrelated activity report.
+    const at1517 = rowTimes(doc).filter((t) => t === '15:17');
+    assert.strictEqual(at1517.length, 1, `${at1517.length} rows print 15:17 in the time column`);
+  });
+
+  check('the answer time and lateness survive, in the status text', () => {
+    assert.match(doc.text, /answered 108 minutes late/,
+      'the merged row lost "Missed — answered 108 minutes late" to its short badge');
+  });
+
+  check('two pings in the same minute are told apart', () => {
+    // Two real DB rows 12.7s apart answering DIFFERENT windows. Both print
+    // 16:32, so the badge alone made them look like one event duplicated.
+    // They are separated by the LATE badge plus its qualifier; the on-time
+    // one is deliberately bare (see 'on_time rows are one line' below).
+    const lines = doc.text.split('\n').filter((l) => /^\s*16:32/.test(l));
+    assert.strictEqual(lines.length, 2, `expected 2 rows at 16:32, got ${lines.length}`);
+    const late   = lines.filter((l) => l.includes('LATE PING'));
+    const onTime = lines.filter((l) => /PING/.test(l) && !l.includes('LATE PING'));
+    assert.strictEqual(late.length, 1,   'no LATE PING row at 16:32');
+    assert.strictEqual(onTime.length, 1, 'no plain PING row at 16:32');
+    assert.match(doc.text, /Late Ping \(32 minutes\)/,
+      'the 16:00-window backfill carries no qualifier, so the pair is ambiguous');
+  });
+
+  check('on_time ping rows are one line — no qualifier', () => {
+    // Every ping row carrying a qualifier took a full export from 90 to 122
+    // pages. A routine on-time ping is the bulk of the document and its
+    // badge already says everything.
+    for (const m of ['Ping (0 minutes)', 'Ping (1 minute)', 'Ping (2 minutes)', 'Ping (3 minutes)']) {
+      assert.ok(!doc.text.includes(m), `on_time row still prints its qualifier: "${m}"`);
+    }
+  });
+
+  check('a qualifier that only restates its badge is dropped', () => {
+    // 'Missed Ping' / 'Missed Report' / 'Missed Clock In' ARE the badge
+    // labels, so printing them would add a line that says nothing.
+    for (const m of ['Missed Ping', 'Missed Report', 'Missed Clock In']) {
+      const asQualifier = doc.text.split('\n').filter((l) => l.trim() === m);
+      assert.strictEqual(asQualifier.length, 0,
+        `"${m}" printed as a qualifier line, restating its own badge`);
+    }
+  });
+
+  check('a late clock-in carries its delta, as the web shows it', () => {
+    assert.match(doc.text, /\+18m late/, 'no "+Nm late" on the late clock-in row');
+  });
+
   console.log('');
   if (failures > 0) {
     console.error(`FAIL — ${failures} assertion(s) failed.`);

@@ -201,15 +201,27 @@ const SAME_MINUTE: ActivityRow[] = [
 // ── Block 3 — one row per remaining StatusKind, plus the description sizes ──
 // Dated 2026-09-05 so they form their own day section, away from blocks 1-2.
 const D = (hhmmss: string) => `2026-09-05T${hhmmss}.000Z`;
+// This block's rows belong to a 2026-09-05 shift, so they carry that day's
+// schedule and not SEQ_0908's. Without this the late clock-in's delta is
+// measured against a scheduled_start three days later, clamps to +0m at
+// Math.max(0, ...), and the row silently stops exercising the thing it is
+// there to exercise. Caught by the C5 assertion, which is the point of
+// asserting on a NUMBER rather than on the presence of the word "late".
+const D_SCHED_START = D('17:00:00');
+const D_SCHED_END   = D('23:00:00');
 
 const KINDS: ActivityRow[] = [
   row({ id: 'k-clockin-ontime', status: 'Clocked In', status_kind: 'clocked_in_on_time',
         event_time: D('17:00:11'),
+        scheduled_start: D_SCHED_START, scheduled_end: D_SCHED_END,
         log_media_urls: ['selfie', 'site'], log_media_url: 'selfie' }),
   // Same `status` string as the row above — the ONLY thing separating an
   // on-time clock-in from a late one is status_kind.
+  // 17:18:42 against a 17:00:00 scheduled start -> +18m, the figure the web
+  // prints as "Clocked In at 10:18 (+18m late)".
   row({ id: 'k-clockin-late', status: 'Clocked In', status_kind: 'clocked_in_late',
-        event_time: D('17:18:42') }),
+        event_time: D('17:18:42'),
+        scheduled_start: D_SCHED_START, scheduled_end: D_SCHED_END }),
   row({ id: 'k-missed-clockin', status: 'Missed Clock In', status_kind: 'missed_clock_in',
         event_time: D('17:30:00'), log_time: null }),
   row({ id: 'k-missed', status: 'Missed Ping', status_kind: 'missed',

@@ -97,6 +97,75 @@ export const STATUS_LABEL: Record<StatusKind, string> = {
   missed_report:             'MISSED REPORT',
 };
 
+
+/**
+ * Kinds whose row is sorted — and therefore printed — at a SCHEDULED instant
+ * rather than an observed one.
+ *
+ * All four carry that instant in event_time already: the window start for a
+ * missed or merged ping, the hour start for a missed report, scheduled_start
+ * for a missed clock-in. The data was never absent; the renderer read
+ * log_time, which is null on three of them and MISLEADING on the fourth.
+ */
+const SCHEDULED_TIME_KINDS: ReadonlySet<StatusKind> = new Set<StatusKind>([
+  'missed', 'missed_report', 'missed_clock_in', 'missed_answered_late',
+]);
+
+/**
+ * The fact the badge's short form drops, or null when it drops nothing.
+ *
+ * WHICH KINDS, AND WHY NOT on_time. Every ping row used to get a qualifier,
+ * which cost a line each and took a full export from 90 pages to 122 (+36%).
+ * A routine on-time ping is the overwhelming majority of rows and the least
+ * interesting thing in the document: its badge, its time and its position in
+ * the day already say everything, and "(3 minutes)" is offset-into-window
+ * detail nobody reads a 90-page PDF for. It is one line again.
+ *
+ * The kinds that keep a qualifier are the ones whose badge is lossy — an
+ * exception the reader is meant to act on:
+ *   late                  LATE PING drops HOW late
+ *   missed_answered_late  drops both WHEN it was answered and by how much
+ *   clocked_in_late       builder gives BOTH clock-in kinds the identical
+ *                         status 'Clocked In', so the delta is computed
+ *   missed / missed_report / missed_clock_in  — see the guard below
+ *
+ * THE GUARD. For those last three the builder's status is 'Missed Ping',
+ * 'Missed Report' and 'Missed Clock In' — the badge label verbatim. Printing
+ * it would add a line that restates the badge and costs 8pt a row, so a
+ * qualifier that only echoes its own badge is dropped. The rule is
+ * mechanical rather than a hand-maintained list: the day one of those
+ * statuses grows a detail (a window name, a reason), it starts printing on
+ * its own with nothing here to change.
+ *
+ * `r.status` is rendered VERBATIM and never parsed — the same rule the
+ * mobile client follows for error copy.
+ */
+function buildQualifier(r: ActivityRow, label: string): string | null {
+  let q: string | null = null;
+
+  if (r.status_kind === 'clocked_in_late' && r.log_time && r.scheduled_start) {
+    const late = Math.max(0, Math.floor(
+      (Date.parse(r.log_time) - Date.parse(r.scheduled_start)) / 60_000));
+    q = `Clocked In at ${TIME_LABEL.format(new Date(r.log_time))} (+${late}m late)`;
+  } else if (QUALIFIED_KINDS.has(r.status_kind)) {
+    q = r.status;
+  }
+
+  // Drop a qualifier that only restates its badge.
+  if (q && q.trim().toUpperCase() === label.trim().toUpperCase()) return null;
+  return q;
+}
+
+/** Kinds whose badge is a lossy short form of the server's own status text. */
+const QUALIFIED_KINDS: ReadonlySet<StatusKind> = new Set<StatusKind>([
+  'late', 'missed', 'missed_answered_late', 'missed_report', 'missed_clock_in',
+]);
+
+/** Module-scope twin of the in-function TIME_FMT, for buildQualifier. */
+const TIME_LABEL = new Intl.DateTimeFormat('en-GB', {
+  hour: '2-digit', minute: '2-digit', timeZone: SITE_TZ,
+});
+
 export interface ActivityPdfMeta {
   /** Site name, or 'All sites' when the export is not site-filtered. */
   siteLabel:   string;
@@ -341,26 +410,56 @@ export function renderActivityLogPdf(
     y += 26;
 
     for (const r of dayRows) {
-      const descLen = r.description ? Math.min(r.description.length, 180) : 0;
-      const rowHeight = descLen > 0 ? ROW_DESC_H : ROW_H;
+      // TIME COLUMN. Rows are SORTED on event_time; this column used to print
+      // log_time, so for a merged missed/answered row the two disagreed and
+      // the row landed nowhere near the time it displayed. On 2026-09-08 that
+      // put "15:17" between 12:31 and 13:03 — and printed 15:17 a SECOND time
+      // four rows later, for an unrelated report that really was at 15:17.
+      //
+      // So: scheduled-time rows print the instant they are sorted at, marked
+      // SCHED so it is not read as an observation. Everything else prints
+      // when it happened. `?? event_time` is a floor, not a fallback — no row
+      // may print "—" again, and every kind has one or the other.
+      const scheduledTime = SCHEDULED_TIME_KINDS.has(r.status_kind);
+      const stamp = scheduledTime ? r.event_time : (r.log_time ?? r.event_time);
+      const timeStr = TIME_FMT.format(new Date(stamp));
+
+      // QUALIFIER. The badge is a short form and for four kinds it drops the
+      // only fact that distinguishes the row:
+      //   missed_answered_late  badge says MISSED / ANSWERED LATE and loses
+      //                         both WHEN it was answered and by how much
+      //   on_time / late        badge says PING / LATE PING and loses how far
+      //                         into the window it landed — which is the only
+      //                         thing separating two pings in the same minute
+      //                         that answered DIFFERENT windows
+      //   clocked_in_late       builder sets status 'Clocked In' for BOTH
+      //                         clock-in kinds, so the delta has to be
+      //                         computed, exactly as ActivityLogTable does it
+      const qualifier = buildQualifier(r, STATUS_LABEL[r.status_kind]);
+      const detail    = r.description ?? qualifier;
+      const rowHeight = detail ? ROW_DESC_H : ROW_H;
       ensureRoom(rowHeight + 4);
 
-      const color   = STATUS_COLOR[r.status_kind] ?? MUTED;
-      const label   = STATUS_LABEL[r.status_kind] ?? r.status.toUpperCase();
-      const timeStr = r.log_time ? TIME_FMT.format(new Date(r.log_time)) : '—';
+      // No `?? MUTED` / `?? r.status.toUpperCase()` any more. Both maps are
+      // Record<StatusKind, ...>, so a fallback here could only ever hide the
+      // next missing key the way it hid the last four.
+      const color = STATUS_COLOR[r.status_kind];
+      const label = STATUS_LABEL[r.status_kind];
 
       doc.fontSize(8).fillColor(MUTED).font('Helvetica')
          .text(timeStr, COL_TIME_X, y + 3, { lineBreak: false, width: 50 });
+      if (scheduledTime) {
+        doc.fontSize(6).fillColor(MUTED).font('Helvetica')
+           .text('SCHED', COL_TIME_X, y + 11, { lineBreak: false, width: 50 });
+      }
       badge(doc, COL_STATUS_X, y + 1, label, color);
       doc.fontSize(8).fillColor(TEXT).font('Helvetica')
          .text(r.guard_name, COL_GUARD_X, y + 3, { lineBreak: false, width: 120 });
       doc.fontSize(8).fillColor(MUTED).font('Helvetica')
          .text(r.site_name, COL_SITE_X, y + 3, { lineBreak: false, width: 200 });
 
-      if (descLen > 0) {
-        const snippet = (r.description ?? '').length > 180
-          ? (r.description ?? '').slice(0, 180) + '…'
-          : (r.description ?? '');
+      if (detail) {
+        const snippet = detail.length > 180 ? detail.slice(0, 180) + '…' : detail;
         doc.fontSize(8).fillColor('#374151').font('Helvetica')
            .text(snippet, COL_DESC_X, y + 15, { width: CW - 16, height: 10 });
       }
