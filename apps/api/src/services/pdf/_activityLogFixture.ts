@@ -282,10 +282,25 @@ export const FIXTURE_ROWS_ONE_PAGE: ActivityRow[] = [...SEQ_0908];
  * 2026-09-09T06:59:59.999Z. That is the whole of D2.
  */
 export const FIXTURE_META = {
-  siteLabel:  SITE,
-  guardLabel: 'All guards',
-  fromIso:    '2026-09-01T07:00:00.000Z',
-  toIso:      '2026-09-09T06:59:59.999Z',
+  siteLabel: SITE,
+  fromIso:   '2026-09-01T07:00:00.000Z',
+  toIso:     '2026-09-09T06:59:59.999Z',
+};
+
+/**
+ * The same export with the SHIFT filter applied — the shape that produced
+ * the 19-event PDF whose header claimed "Guard: All guards".
+ *
+ * Values are session 77cc32e7's real ones: clocked in 2026-09-08T19:00:14Z,
+ * which is 12:00 PT.
+ */
+export const FIXTURE_META_WITH_SHIFT = {
+  ...FIXTURE_META,
+  shift: {
+    guardName:   GUARD,
+    siteName:    SITE,
+    clockedInAt: '2026-09-08T19:00:14.185Z',
+  },
 };
 
 /**
@@ -301,10 +316,9 @@ export const FIXTURE_META = {
  * broke the start, so both are pinned.
  */
 export const FIXTURE_META_PROD_RANGE = {
-  siteLabel:  SITE,
-  guardLabel: 'All guards',
-  fromIso:    '2026-08-24T07:00:00.000Z',  // localDayStart('2026-08-24') from PT
-  toIso:      '2026-09-23T06:59:59.999Z',  // localDayEnd('2026-09-22')   from PT
+  siteLabel: SITE,
+  fromIso:   '2026-08-24T07:00:00.000Z',  // localDayStart('2026-08-24') from PT
+  toIso:     '2026-09-23T06:59:59.999Z',  // localDayEnd('2026-09-22')   from PT
 };
 
 /** session_id is set, and nothing in the current header says so — D1. */

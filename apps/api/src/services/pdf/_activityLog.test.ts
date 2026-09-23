@@ -32,6 +32,7 @@ import {
   FIXTURE_ROWS_ONE_PAGE,
   FIXTURE_META,
   FIXTURE_META_PROD_RANGE,
+  FIXTURE_META_WITH_SHIFT,
   ALL_STATUS_KINDS,
 } from './_activityLogFixture';
 
@@ -181,6 +182,35 @@ async function main() {
     for (let p = 1; p <= doc.pages; p++) {
       assert.match(doc.page(p), /\d+\s*\/\s*\d+/, `page ${p} has no chrome`);
     }
+  });
+
+  // ── C3 / D1 — the header names the shift filter ───────────────────────────
+  console.log('');
+  console.log('C3 — shift filter in the header (D1)');
+
+  const shifted = await render('with-shift', FIXTURE_ROWS, FIXTURE_META_WITH_SHIFT);
+
+  check('a shift-filtered export prints a Shift line', () => {
+    const line = shifted.page(1).split('\n').find((l) => /^\s*Shift\b/.test(l));
+    assert.ok(line, 'no Shift line on the cover of a session-filtered export');
+    assert.match(line, /Fixture Guard A/, `Shift line names no guard: ${line.trim()}`);
+    assert.match(line, /Bethel AME Church/, `Shift line names no site: ${line.trim()}`);
+    // 19:00:14Z is 12:00 PT. A server-zone render would say 19:00.
+    assert.match(line, /12:00/, `Shift clock-in not in site time: ${line.trim()}`);
+    assert.doesNotMatch(line, /19:00/, `Shift clock-in rendered in UTC: ${line.trim()}`);
+  });
+
+  check('an unfiltered export prints no Shift line', () => {
+    const line = doc.page(1).split('\n').find((l) => /^\s*Shift\b/.test(l));
+    assert.strictEqual(line, undefined, `Shift line present with no session filter: ${line}`);
+  });
+
+  check('a filtered export never claims to be unfiltered', () => {
+    // The whole of D1: the 19-event export was scoped to ONE session and its
+    // header read "Guard: All guards", so a reader had no way to know two
+    // guards had worked that site that day and only one was in the document.
+    assert.doesNotMatch(shifted.page(1), /All guards/,
+      'cover still claims "All guards" while scoped to one session');
   });
 
   console.log('');

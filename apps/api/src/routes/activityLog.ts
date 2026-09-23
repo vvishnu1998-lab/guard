@@ -13,9 +13,14 @@
  *   ?page=1
  *   ?page_size=10          (max 100)
  *
- * POST /api/activity-log/pdf
- *   body: { from, to, guard_id?, site_id?, session_id? }
- *   Streams application/pdf. company_admin only.
+ * POST /api/admin/activity-log/pdf   (routes/admin.ts — NOT this router)
+ *   body: { from, to, site_id?, session_id? }
+ *   Returns application/pdf. company_admin only.
+ *
+ *   NO guard_id. It was accepted and forwarded here, but the web has never
+ *   sent one and the PDF cover had no way to say the filter was applied, so
+ *   the route dropped it. GET / below still accepts guard_id — that consumer
+ *   renders its own filter state.
  *
  * Scope:
  *   - company_admin → all shift_sessions within the company

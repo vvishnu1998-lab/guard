@@ -35,12 +35,27 @@ const SITE_TZ = 'America/Los_Angeles';
 
 export interface ActivityPdfMeta {
   /** Site name, or 'All sites' when the export is not site-filtered. */
-  siteLabel:  string;
-  /** Guard name, or 'All guards'. */
-  guardLabel: string;
+  siteLabel:   string;
   /** Range as the caller received it on the wire. */
-  fromIso:    string;
-  toIso:      string;
+  fromIso:     string;
+  toIso:       string;
+  /**
+   * Set when the export is scoped to ONE shift_session. Absent otherwise.
+   * Resolved by the route, because the renderer does not touch the database.
+   *
+   * THIS IS THE WHOLE OF D1. A 19-event export scoped to a single session
+   * carried a cover reading "Guard: All guards" and "MISSED 0". Both were
+   * true of the session and neither was true of the day: two guards worked
+   * that site on 2026-09-21, and the other one missed eleven windows. The
+   * filter was never broken — the header simply never mentioned it, so a
+   * reader had no way to know the document was a slice.
+   */
+  shift?: {
+    guardName:   string;
+    siteName:    string;
+    /** ISO instant; rendered in SITE_TZ, never the server's zone. */
+    clockedInAt: string;
+  };
 }
 
 /**
@@ -54,7 +69,7 @@ export function renderActivityLogPdf(
   rows: ActivityRow[],
   meta: ActivityPdfMeta,
 ): Promise<Buffer> {
-  const { siteLabel, guardLabel, fromIso, toIso } = meta;
+  const { siteLabel, fromIso, toIso, shift } = meta;
   // Newest first (matches on-screen order)
   rows.sort((a, b) => Date.parse(b.event_time) - Date.parse(a.event_time));
   const truncated = rows.length > ACTIVITY_PDF_ROW_CAP;
@@ -90,6 +105,13 @@ export function renderActivityLogPdf(
   });
   const TIME_FMT = new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
+  });
+  // Clock-in on the Shift line: dated as well as timed, because a shift
+  // filter is the one case where the document may cover a single day that
+  // is not obvious from the period.
+  const SHIFT_CLOCK_FMT = new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZone: SITE_TZ,
   });
 
   const byDay = new Map<string, ActivityRow[]>();
@@ -166,8 +188,22 @@ export function renderActivityLogPdf(
   y += 15;
   doc.text(`Site        ${siteLabel}`, ML, y);
   y += 15;
-  doc.text(`Guard       ${guardLabel}`, ML, y);
-  y += 15;
+  // No Guard line. This route no longer accepts guard_id — the web never
+  // sent it (ActivityLogTable.tsx:611-612 sends site_id and session_id and
+  // nothing else), so the line could only ever read "All guards", and a
+  // constant that looks like a filter summary is worse than no line: on the
+  // session-scoped export it actively asserted the opposite of the truth.
+  //
+  // The guard a reader actually wants is named on the Shift line below,
+  // where it means something.
+  if (shift) {
+    doc.text(
+      `Shift       ${shift.guardName} \u00B7 ${shift.siteName} \u00B7 ` +
+      `${SHIFT_CLOCK_FMT.format(new Date(shift.clockedInAt))} PT`,
+      ML, y,
+    );
+    y += 15;
+  }
   doc.text(`Generated   ${new Date().toLocaleString('en-GB', { timeZone: 'America/Los_Angeles' })} PT`, ML, y);
   y += 22;
 

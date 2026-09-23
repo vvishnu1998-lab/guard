@@ -1913,7 +1913,7 @@ router.get('/sessions', requireAuth('company_admin'), async (req, res) => {
 // request. res.send() therefore sets a real Content-Length where the old
 // pipe sent chunked — strictly better for a client fetching to a blob.
 router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) => {
-  const { from, to, guard_id, site_id, session_id } = (req.body ?? {}) as Record<string, string | undefined>;
+  const { from, to, site_id, session_id } = (req.body ?? {}) as Record<string, string | undefined>;
 
   const fromIso = from || new Date(Date.now() - 7 * 86_400_000).toISOString();
   const toIso   = to   || new Date().toISOString();
@@ -1923,34 +1923,54 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
     company_id: req.user!.company_id,
   };
 
+  // No guardId. The web has never sent one — ActivityLogTable.tsx:611-612
+  // sends site_id and session_id and nothing else — so the guard filter and
+  // the "Guard" header line it fed were both unreachable. Accepting a filter
+  // the cover cannot describe is exactly the defect this PR is fixing, so the
+  // parameter is dropped rather than left half-wired.
   const rows = await fetchActivityRows(scope, {
     fromIso, toIso,
-    guardId:   guard_id,
     siteId:    site_id,
     sessionId: session_id,
   });
 
-  // Optional filter-summary lookups. When a site_id / guard_id is present
-  // we look up its display name so the PDF header reads "Sunset Tower"
-  // instead of a UUID.
-  let siteLabel  = 'All sites';
-  let guardLabel = 'All guards';
+  // Filter-summary lookups. Every filter the export actually applied has to
+  // be nameable on the cover, or the document is a slice that does not say so.
+  let siteLabel = 'All sites';
   if (site_id) {
     const r = await pool.query('SELECT name FROM sites WHERE id = $1 AND company_id = $2',
                                [site_id, req.user!.company_id]);
     if (r.rows[0]) siteLabel = r.rows[0].name;
   }
-  if (guard_id) {
-    const r = await pool.query('SELECT name FROM guards WHERE id = $1 AND company_id = $2',
-                               [guard_id, req.user!.company_id]);
-    if (r.rows[0]) guardLabel = r.rows[0].name;
+
+  // Shift filter. TENANT-SCOPED on si.company_id, like the site lookup above:
+  // fetchActivityRows already scopes the ROWS, so a foreign session_id yields
+  // an empty document — but an unscoped label lookup would still have printed
+  // another tenant's guard and site name onto the cover of it.
+  let shift: { guardName: string; siteName: string; clockedInAt: string } | undefined;
+  if (session_id) {
+    const r = await pool.query(
+      `SELECT g.name AS guard_name, si.name AS site_name, ss.clocked_in_at
+         FROM shift_sessions ss
+         JOIN guards g  ON g.id  = ss.guard_id
+         JOIN sites  si ON si.id = ss.site_id
+        WHERE ss.id = $1 AND si.company_id = $2`,
+      [session_id, req.user!.company_id],
+    );
+    if (r.rows[0]) {
+      shift = {
+        guardName:   r.rows[0].guard_name,
+        siteName:    r.rows[0].site_name,
+        clockedInAt: new Date(r.rows[0].clocked_in_at).toISOString(),
+      };
+    }
   }
 
   const fromDate  = fromIso.slice(0, 10);
   const toDate    = toIso.slice(0, 10);
   const filename  = `activity-logs-${fromDate}_${toDate}.pdf`;
 
-  const pdf = await renderActivityLogPdf(rows, { siteLabel, guardLabel, fromIso, toIso });
+  const pdf = await renderActivityLogPdf(rows, { siteLabel, fromIso, toIso, shift });
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
