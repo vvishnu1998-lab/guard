@@ -1,16 +1,15 @@
 /**
  * Activity-log PDF renderer.
  *
- * Extracted verbatim from the body of POST /api/admin/activity-log/pdf
+ * Extracted from the body of POST /api/admin/activity-log/pdf
  * (routes/admin.ts) so the document can be rendered — and therefore
  * asserted on — without an Express request. The route keeps auth, params,
  * the fetch and the response headers; everything below is layout.
  *
- * This is a pure move. The body between `const STATUS_COLOR` and
- * `doc.end()` is byte-identical to what shipped at 00e2298; the only
- * changes are the wrapper: the document is collected into a Buffer instead
- * of being piped at `res`, because a caller that cannot hold the bytes
- * cannot compare them.
+ * The extraction itself was a pure move, proven byte-identical against
+ * 00e2298 at 65c12d7. Everything since is a deliberate fix with a failing
+ * assertion recorded in its commit — see _activityLog.test.ts, which reads
+ * the rendered PDF through poppler rather than reading this file.
  *
  * Media policy is unchanged: counts only, no embedded images and no
  * filenames, so a 5-photo incident weighs the same as a bare ping.
@@ -18,8 +17,9 @@
 import PDFDocument from 'pdfkit';
 import {
   NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
-  PAGE_W, PAGE_H, ML, MR, CW,
-  drawHeader, drawFooter, badge,
+  PAGE_W, ML, MR, CW,
+  drawFooter, badge, stampPages,
+  CONTENT_TOP, CONTENT_BOTTOM,
 } from './theme';
 import { ACTIVITY_PDF_ROW_CAP, type ActivityRow } from '../../routes/activityLog';
 
@@ -101,7 +101,10 @@ export function renderActivityLogPdf(
   const dayKeys = Array.from(byDay.keys()).sort().reverse();
   for (const key of dayKeys) byDay.get(key)!.sort((a, b) => Date.parse(a.event_time) - Date.parse(b.event_time));
 
-  const doc = new PDFDocument({ margin: 0, size: 'A4', autoFirstPage: true });
+  // bufferPages holds the PAGE OBJECTS open so the real count is known
+  // before the chrome is stamped. It is not the same thing as buffering
+  // the output, which the Buffer return already does.
+  const doc = new PDFDocument({ margin: 0, size: 'A4', autoFirstPage: true, bufferPages: true });
   const chunks: Buffer[] = [];
   const done = new Promise<Buffer>((resolve, reject) => {
     doc.on('data',  (c: Buffer) => chunks.push(c));
@@ -141,15 +144,19 @@ export function renderActivityLogPdf(
     task_completed:            'TASK COMPLETED',
   };
 
-  // We don't know the true page total until the stream drains, so
-  // estimate: cover + ~20 rows/page. Header shows "n / estimate".
-  const estRowsPerPage = 20;
-  const estPages       = 1 + Math.max(1, Math.ceil(eventRows.length / estRowsPerPage));
-  let pageNum = 1;
-
   // ── Page 1 — Cover / filter summary ─────────────────────────────────────
-  drawHeader(doc, 'ACTIVITY LOGS', pageNum, estPages);
-  let y = 90;
+  // No page number is drawn here. `bufferPages` holds the page objects open
+  // so stampPages() can write the chrome at the end, once the real count is
+  // known — the guardHours.ts pattern.
+  //
+  // What this replaces: `1 + max(1, ceil(rows / 20))`. Two errors compounding
+  // in the same direction. The `1 +` assumed a standalone cover, but the
+  // timeline starts on the SAME page as the cover; and 20 rows/page badly
+  // under-counted real density (823 production rows occupied 28 pages, ~29
+  // each). On the PDF that prompted this work it declared "1 / 43" across
+  // 28 pages. Its floor was also 2, so a one-page export could not ever be
+  // labelled correctly no matter how the constant was tuned.
+  let y = CONTENT_TOP;
 
   doc.fontSize(22).fillColor(TEXT).font('Helvetica-Bold').text('Activity Logs', ML, y);
   y += 30;
@@ -224,8 +231,6 @@ export function renderActivityLogPdf(
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(0.5).stroke();
   y += 14;
 
-  drawFooter(doc, siteLabel, periodStr);
-
   // ── Timeline: per-day sections ──────────────────────────────────────────
   const COL_TIME_X   = ML + 8;
   const COL_STATUS_X = ML + 60;
@@ -236,12 +241,15 @@ export function renderActivityLogPdf(
   const ROW_DESC_H   = 26;
 
   function ensureRoom(needed: number) {
-    if (y + needed > PAGE_H - 40) {
-      drawFooter(doc, siteLabel, periodStr);
+    // CONTENT_BOTTOM (PAGE_H - 46), not the PAGE_H - 40 this used before.
+    // theme.ts stamps the chrome after layout and states the contract that
+    // makes that safe: body content stays inside CONTENT_TOP..CONTENT_BOTTOM.
+    // The old bound let a 26pt row end 10pt above the footer's fill — no
+    // overlap, but outside the contract being relied on. Costs at most one
+    // row per page.
+    if (y + needed > CONTENT_BOTTOM) {
       doc.addPage();
-      pageNum += 1;
-      drawHeader(doc, 'ACTIVITY LOGS', pageNum, estPages);
-      y = 90;
+      y = CONTENT_TOP;
     }
   }
 
@@ -303,7 +311,8 @@ export function renderActivityLogPdf(
     y += 8;
   }
 
-  drawFooter(doc, siteLabel, periodStr);
+  // ── Chrome last, now that the page count is known ─────────────────────
+  stampPages(doc, 'ACTIVITY LOGS', (d) => drawFooter(d, siteLabel, periodStr));
   doc.end();
 
   return done;

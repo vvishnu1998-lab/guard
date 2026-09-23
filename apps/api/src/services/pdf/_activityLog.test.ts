@@ -29,6 +29,7 @@ import { execFileSync } from 'node:child_process';
 import { renderActivityLogPdf, type ActivityPdfMeta } from './activityLog';
 import {
   FIXTURE_ROWS,
+  FIXTURE_ROWS_ONE_PAGE,
   FIXTURE_META,
   FIXTURE_META_PROD_RANGE,
   ALL_STATUS_KINDS,
@@ -142,6 +143,44 @@ async function main() {
     const webFilenameEnd = '2026-09-22';                 // ActivityLogTable.tsx:613
     const [y, m, d] = webFilenameEnd.split('-');
     assert.match(period, new RegExp(`${d}/${m}/${y}`), 'header disagrees with the filename');
+  });
+
+  // ── C2 / D3 — the declared page total is the real one ─────────────────────
+  console.log('');
+  console.log('C2 — page total (D3)');
+
+  const one = await render('one-page', FIXTURE_ROWS_ONE_PAGE);
+
+  /** Every "n / N" the chrome prints, one per page. */
+  function declaredTotals(d: { pages: number; page: (n: number) => string }): number[] {
+    const out: number[] = [];
+    for (let p = 1; p <= d.pages; p++) {
+      const m = d.page(p).match(/(\d+)\s*\/\s*(\d+)/);
+      assert.ok(m, `page ${p} prints no "n / N"`);
+      assert.strictEqual(Number(m[1]), p, `page ${p} numbers itself ${m[1]}`);
+      out.push(Number(m[2]));
+    }
+    return out;
+  }
+
+  check('multi-page: declared total equals pdfinfo Pages', () => {
+    const totals = declaredTotals(doc);
+    assert.deepStrictEqual(
+      [...new Set(totals)], [doc.pages],
+      `pdfinfo says ${doc.pages}, pages declare ${JSON.stringify(totals)}`,
+    );
+  });
+
+  check('one-page: declared total equals pdfinfo Pages', () => {
+    // The old estimate's floor was 2, so this case was unreachable.
+    assert.strictEqual(one.pages, 1, `fixture is no longer one page (${one.pages})`);
+    assert.deepStrictEqual(declaredTotals(one), [1], 'a one-page document must say 1 / 1');
+  });
+
+  check('no page is left un-numbered', () => {
+    for (let p = 1; p <= doc.pages; p++) {
+      assert.match(doc.page(p), /\d+\s*\/\s*\d+/, `page ${p} has no chrome`);
+    }
   });
 
   console.log('');

@@ -266,6 +266,16 @@ export const FIXTURE_ROWS: ActivityRow[] = [
 ];
 
 /**
+ * Just the 2026-09-08 block — short enough to fit on one page.
+ *
+ * The page-total estimate it replaces was `1 + max(1, ceil(n/20))`, whose
+ * floor is TWO. A single-page document is therefore the case that estimate
+ * could never get right no matter how the constant was tuned, which is why
+ * it is a fixture and not an afterthought.
+ */
+export const FIXTURE_ROWS_ONE_PAGE: ActivityRow[] = [...SEQ_0908];
+
+/**
  * Meta as the route builds it. `to` is what the web actually sends for a
  * picker end of 2026-09-08: localDayEnd() parses "T23:59:59.999" in the
  * BROWSER's zone (PT), so the wire value is the next UTC day —
