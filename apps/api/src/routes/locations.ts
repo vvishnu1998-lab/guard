@@ -15,6 +15,7 @@ import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { recordOffPostEvent } from '../services/offPostEvents';
+import { writeClockInVerification } from '../services/clockInVerification';
 
 /**
  * Fire guard notification row + admin email for a geofence violation.
@@ -975,19 +976,45 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
   // INHERIT_HOLD_FROM_SESSION_SQL in services/legalHold.ts), and a call site
   // that hand-rolls the pair is the one that drifts when a third hold column
   // is added.
-  const result = await pool.query(
-    `INSERT INTO clock_in_verifications
-       (shift_session_id, guard_id, site_id, selfie_url, site_photo_url, verified_lat, verified_lng, is_within_geofence,
-        accuracy_meters, location_mocked, fix_age_ms, ${INHERIT_HOLD_COLUMNS})
-     SELECT $1, ss.guard_id, ss.site_id, $2, $3, $4, $5, $6, $7, $8, $9,
-            ${INHERIT_HOLD_FROM_SESSION_SQL('$1')}
-     FROM shift_sessions ss WHERE ss.id = $1
-     RETURNING *`,
-    [shift_session_id, selfie_url ?? null, site_photo_url ?? null, verified_lat, verified_lng, true,
-     verifyShadow.accuracyMeters, verifyShadow.locationMocked, verifyShadow.fixAgeMs],
-  );
+  //
+  // The statement itself lives in services/clockInVerification.ts.
+  //
+  // ── IDEMPOTENT ON RETRY (NETRAOPS-API-X) ────────────────────────────────
+  //
+  // A second POST for the same session is a client retry after a lost
+  // response, not an error: the first row is returned as 200 and is never
+  // overwritten. The ownership check above has already 404'd any session
+  // that is not this guard's, so 'conflict' is a backstop, not a path a
+  // client is expected to reach.
+  const write = await writeClockInVerification(pool, req.user!.sub, {
+    shiftSessionId: shift_session_id,
+    selfieUrl:      selfie_url ?? null,
+    sitePhotoUrl:   site_photo_url ?? null,
+    verifiedLat:    verified_lat,
+    verifiedLng:    verified_lng,
+    accuracyMeters: verifyShadow.accuracyMeters,
+    locationMocked: verifyShadow.locationMocked,
+    fixAgeMs:       verifyShadow.fixAgeMs,
+  });
 
-  res.status(201).json(result.rows[0]);
+  if (write.kind === 'created') return res.status(201).json(write.row);
+
+  if (write.kind === 'existing') {
+    console.info('[clock_in_verification.duplicate]', {
+      shift_session_id,
+      guard_id: req.user!.sub,
+    });
+    return res.status(200).json(write.row);
+  }
+
+  console.warn('[clock_in_verification.conflict]', {
+    shift_session_id,
+    guard_id: req.user!.sub,
+  });
+  return res.status(409).json({
+    error:   'VERIFICATION_CONFLICT',
+    message: 'Clock-in verification could not be saved for this shift. Tell your supervisor.',
+  });
 });
 
 export default router;
