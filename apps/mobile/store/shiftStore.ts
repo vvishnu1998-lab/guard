@@ -116,7 +116,21 @@ interface ShiftState {
    *  see the body comment for the drift scenarios and the silent-fail
    *  semantics. */
   refreshFromServer: () => Promise<void>;
+  /** Hydrate activeShift + activeSession from the server when the store has
+   *  none. For deep-links that land before home has mounted. Resolves to the
+   *  session, or null when the server says there is no open one. */
+  restoreSessionIfMissing: () => Promise<ShiftSession | null>;
 }
+
+/** In-flight guard for restoreSessionIfMissing.
+ *
+ *  Module scope, not store state: two screens mounting in the same frame —
+ *  a deep-linked /ping and the home tab underneath it — would otherwise each
+ *  fire their own GET /shifts/active-session, and the second setActiveSession
+ *  would re-trip the geofence effect for a session already armed. Callers
+ *  share the first promise instead. Cleared in a finally so a failed restore
+ *  does not wedge every later attempt. */
+let restoreInFlight: Promise<ShiftSession | null> | null = null;
 
 export const useShiftStore = create<ShiftState>((set, get) => ({
   pendingShift: null,
@@ -255,5 +269,89 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     // updates. unreadStore.refresh() has its own try/catch and Sentry
     // capture — no need to double-wrap here.
     useUnreadStore.getState().refresh();
+  },
+
+  /**
+   * Hydrate the session when the store has none — for a screen reached by
+   * DEEP LINK before home has mounted.
+   *
+   * WHY THIS EXISTS. This store is not persisted, so a cold start has
+   * activeSession === null until something fetches it. The only thing that
+   * did was home.tsx's restoreOrFetchShift, which is a local function bound
+   * to home's own React state (setLoadingShift / setRestoreFailed /
+   * fetchUpcomingShift) and cannot be called from another screen. So a push
+   * tapped from a KILLED app routed to /ping, found no session, and bounced
+   * to home — the guard tapped "Submit your 13:30 ping" and landed on the
+   * home tab (session bb3934c9, 2026-09-12 20:30).
+   *
+   * refreshFromServer is NOT an alternative: it deliberately never calls
+   * setActiveSession (see its body — /active-session historically lacked the
+   * geofence), so from null it is a no-op.
+   *
+   * ⚠️ HYDRATION RE-ARMS THE GEOFENCE. setActiveSession rewrites activeShift,
+   * which is a dependency of _layout.tsx's geofence effect, so this triggers
+   * startBackgroundLocation → stopGeofencingAsync + startGeofencingAsync.
+   * Both platforms synthesise an ENTER on registration when the device is
+   * already inside the region (Android INITIAL_TRIGGER_ENTER; iOS seeds
+   * regionStates to Unknown), which before batch/mobile-16 would have fired a
+   * spurious "Back on post" on every deep-link restore. It does not now ONLY
+   * because lib/geofenceState.ts suppresses an ENTER that does not follow a
+   * recorded EXIT. That suppression is load-bearing for this action — if it
+   * is ever removed or weakened, this path starts lying to guards again.
+   *
+   * DELIBERATELY THIN. home.tsx keeps its own retry/backoff, its
+   * restore-failed banner and its upcoming-shift fallthrough; that code has
+   * the 2026-08-18 "unknown state rendered as not-on-shift" incident behind
+   * it and is not moved here. This is one GET and one setActiveSession: it
+   * either hydrates or it does not, and the caller decides what to show.
+   *
+   * Returns the session on success, null when the server confirms there is
+   * no open one OR the fetch failed. The caller cannot distinguish those two
+   * and must not: both mean "we cannot put you on the capture screen".
+   */
+  restoreSessionIfMissing: async () => {
+    const existing = get().activeSession;
+    if (existing) return existing;
+    if (restoreInFlight) return restoreInFlight;
+
+    restoreInFlight = (async () => {
+      try {
+        const active = await apiClient.get<{
+          shift:   Shift;
+          session: ShiftSession;
+        } | null>('/shifts/active-session');
+        if (!active?.session?.clocked_in_at) {
+          Sentry.addBreadcrumb({
+            category: 'shift_restore',
+            message: 'restoreSessionIfMissing: server reports no open session',
+            level: 'info',
+          });
+          return null;
+        }
+        get().setActiveSession(active.shift, active.session);
+        Sentry.addBreadcrumb({
+          category: 'shift_restore',
+          message: 'restoreSessionIfMissing: hydrated from deep link',
+          level: 'info',
+          data: { session_id: active.session.id },
+        });
+        return active.session;
+      } catch (err: any) {
+        // Non-throwing, like refreshFromServer. A deep link that cannot
+        // restore must degrade to "go to home", never to a crash on a
+        // screen the guard reached from a notification.
+        Sentry.addBreadcrumb({
+          category: 'shift_restore',
+          message: 'restoreSessionIfMissing: fetch failed',
+          level: 'warning',
+          data: { error: err?.message ?? String(err) },
+        });
+        return null;
+      } finally {
+        restoreInFlight = null;
+      }
+    })();
+
+    return restoreInFlight;
   },
 }));
