@@ -208,6 +208,96 @@ from `guard_devices.client` in production the same day.
 
 ---
 
+## 2026-09-26 — auto clock-out, hours, admin shift edits
+
+Taken during the Bethel 18-hour shift incident
+(`INCIDENTS/2026-09-26-bethel-18h-shift.md`) and the U4a review that followed.
+
+### D18. An auto clock-out records `GREATEST(clocked_in_at, scheduled_end)`, not the sweep time.
+
+**Status: decided 2026-09-26.** Built in **U4a** (`92e5fbc`, branch
+`fix/autoclose-anchor-scheduled-end`) — not yet merged or deployed.
+
+- The sweep still **fires** at `scheduled_end` + grace; it no longer **records**
+  that moment. One anchor, `GREATEST(clocked_in_at, scheduled_end)`, is used for
+  `clocked_out_at`, `total_hours`, open breaks (`GREATEST(break_start, anchor)`)
+  and violation resolution. `clock_out_reason` stays `'auto'`. Manual and handoff
+  clock-outs are unchanged.
+- **Grace 30 → 15 minutes is decided and ships separately as U4b**, together with
+  `apps/api/scripts/backfill-stale-shifts.ts`'s grace-less predicate (`:34`,
+  `:43`), which moves with it.
+- **Every historical auto clock-out is corrected by rule, not by count:** the q9c
+  backfill selects `clock_out_reason = 'auto' AND clocked_out_at >
+  GREATEST(clocked_in_at, scheduled_end)` and re-anchors each row with the job's
+  own formulas, skipping and counting rows on legal hold. It runs **only after U4a
+  is deployed and verified in production** — while the old sweep is live, new
+  rows keep matching the rule. It stays a draft until then.
+
+Evidence (2026-09-26, prod, read-only): 206 auto clock-outs match the rule, every
+one +30.00 … +35.01 min past `scheduled_end` — STARNET SECURITY 25 (12.504 h),
+Star Guard 181 (90.634 h); clock-ins 2026-08-24 09:58 → 2026-09-25 23:00 PT; 0 on
+legal hold. The last five before U4a all landed at +30.01 min.
+
+### D19. Hours: Actual stays raw; a new **Payable** figure drives totals and billing.
+
+**Status: decided 2026-09-26. NOT YET BUILT (U6).** **Replaces the "4 fields
+(Scheduled/Actual/Break/Violation), no aggregate total" lock** recorded in the
+`netraops-invariants` skill (repo `SKILL.md:68`, plugin copy `:58`) and in the
+`services/shiftHours.ts` header. Those describe shipped behaviour and change when
+U6 ships, not before.
+
+- **Actual** stays raw: clock-out − clock-in.
+- **Payable** = clocked-in time inside the scheduled window, one definition beside
+  `actual_hours` in `shiftHours.ts`:
+  `GREATEST(0, LEAST(COALESCE(clocked_out_at, NOW()), scheduled_end) −
+  GREATEST(clocked_in_at, scheduled_start))`.
+- **Totals and billing use Payable.** The billing and monthly hours XLSX (detail,
+  aggregates, SUMMARY), admin analytics (month KPI, leaderboard, monthly bars) and
+  ACTIVE SITES — the last via the shared fragment, replacing its hand-inlined copy
+  (`routes/admin.ts:1399`). The analytics export gains a **Payable Hours** column.
+- **Stay on Actual:** the daily client email, the client site-security PDF, the
+  guard my-hours PDF and mobile.
+- **Coverage %, Variance and SHORT compute from Payable. OVER and OFFPOST_ANOMALY
+  stay on Actual.** Variance (Payable − Scheduled) is ≤ 0 by construction, so it
+  becomes a shortfall figure; OVER is the only overtime signal.
+- **Handoff shifts:** the per-session scheduled share is split in proportion to
+  Payable (equally when the shift's Payable is 0). Sessions of one shift cannot
+  overlap — a handoff closes A and opens B at one `NOW()` in one transaction — so
+  summed Payable cannot exceed the window.
+- **NO_SCHEDULE rows:** Payable 0, the flag kept, coverage null.
+- **STARNET's August monthly report is regenerated after U6 ships.** Files already
+  in S3 are frozen snapshots until then.
+
+Evidence (2026-09-26, prod, read-only): no hours figure today is capped at
+`scheduled_end` on any surface; 0 NO_SCHEDULE shifts; 1 multi-session shift, 0
+overlapping session pairs, 0 of 388 shifts with summed Payable above the window.
+Bethel AME Church, clock-ins 2026-08-24 … 09-25 (55 sessions): Actual 310.45 h
+today → 303.95 h after the D18 backfill; Payable 301.45 h (301.43 raw) before and
+after.
+
+### D20. Admin shift edits: on an ACTIVE shift, the end time only; a confirm step above 12 hours.
+
+**Status: decided 2026-09-26. NOT YET BUILT (U2, U5).**
+
+- **U2:** the shift detail EDIT control works on an **active** shift for the
+  **end time only** (scheduled shifts keep start + end). An end already in the past
+  closes the open session at that time. Today `PATCH /api/shifts/:id` refuses
+  `active` (`routes/shifts.ts:1644`) and any shift with a session (`:1669-1681`),
+  and no admin route closes a session — which is why the Bethel shift needed a
+  hand correction. The mobile app keeps a cached end until a cold start; a refetch
+  follows later as an OTA, and handsets below the published runtime cannot take it
+  (N115).
+- **U5:** create and edit show a **confirm step when the duration exceeds 12
+  hours.** The create modal rolls an end earlier than the start into the next day
+  silently (`apps/web/components/admin/ScheduleShiftModal.tsx:226`), and
+  `POST /api/shifts` checks neither end > start nor a maximum (`:376`).
+
+Evidence (2026-09-26, prod, read-only): STARNET had 4 shifts over 12 h in the last
+60 days — 2 were this AM/PM mistake (`b3a29807`, `c3574592`, both 18 h at Bethel),
+2 were real overnights (13 h, 12.5 h).
+
+---
+
 ## How to add to this file
 
 One dated section per decision batch. State the decision, then — if it references

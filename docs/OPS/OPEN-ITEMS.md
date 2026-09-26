@@ -3873,3 +3873,166 @@ filter state the user is looking at.
 Two directions: make the search server-side and thread it into the PDF body, or
 disable/qualify the button while a search is active. The first is the real fix; the
 second is honest and costs nothing. **Size S/M, Tier 1.**
+
+---
+
+## New from the Bethel 18-hour shift incident (2026-09-26)
+
+Twelve items, from the read-only audit of shift `c3574592` and the U4a review that
+followed (`INCIDENTS/2026-09-26-bethel-18h-shift.md`). **None is fixed by U4a**
+(`92e5fbc`, `fix/autoclose-anchor-scheduled-end`). Every `verified:` line was read
+on 2026-09-26 — prod through postgres-readonly, code at `origin/main` `8de7a94`
+unless it names U4a. Guard data is uuid + badge + tenant only.
+
+### N110 — `geofence_violations.notification_sent` is never written, yet exported
+
+verified: `git grep -n notification_sent -- apps/api/src` finds only the analytics
+export — the SELECT at `routes/exports.ts:146` and the CSV header at `:214`. No
+INSERT or UPDATE sets it, so it is `false` on every row: **0 of 47** in prod. The
+export presents it as if it recorded whether the breach alert went out; it records
+nothing. Breach-alert delivery is not stored anywhere (`sendToAdmins` logs failures
+only), which is why the 2026-09-26 incident could not confirm whether the 18:05
+admin email was sent.
+
+Either write it where `fireBreachAlerts` actually sends (`routes/locations.ts`), or
+drop it from the export. **Size S, Tier 1.**
+
+### N111 — reports, checkpoint scans and inspections answer a closed session with 403, not `SESSION_CLOSED`
+
+verified: after a session closes, `POST /api/reports` returns 403 `Active session
+not found` (`routes/reports.ts:337`), checkpoints do the same (`routes/checkpoints.ts:381`,
+`:416`, `:506`), and inspections return 403 (`routes/inspections.ts:167`) or a 409
+with prose in `error` (`:147`). Only the ping, violation and clock-in-verification
+routes (`routes/locations.ts`) and task completion (`routes/tasks.ts`) send the
+`SESSION_CLOSED` code. Mobile reconciles and shows "Shift Ended" only on that code
+(`apps/mobile/lib/sessionClosed.ts:49`), so a guard who files a report or scans
+after an auto-close gets a generic failure and a stale store.
+
+Use the `SESSION_CLOSED` shape (status + code) on all three, and check the mobile
+callers in the same dispatch. **Size M (API + mobile batch), Tier 1.**
+
+### N112 — `STATE.md` says the schema tip is v77 (v78 free); v80 is on disk and appears applied
+
+verified: `apps/api/src/db/migrate.ts` lists 81 files ending `schema_v80.sql`;
+`ls schema_v*.sql | sort -V | tail -1` → `schema_v80.sql`. `STATE.md`'s Schema
+section (verified 2026-09-14) still records v77 applied and v78 FREE. Prod catalog
+shows v78's `legal_hold_at` columns (`shifts`, `shift_sessions`, `reports`,
+`clock_in_verifications`) and v80's change (`clock_in_verifications.selfie_url`
+nullable). v79 is data-only and cannot be confirmed from DDL.
+
+Update the table from schema objects, the only method there is (no ledger).
+`scripts/ops/triage.sh` embeds `STATE.md`, so a stale row feeds the daily brief.
+**Size S, Tier 1.**
+
+### N113 — invariants skill: "no manual clock-out has EVER landed within 20 minutes of `scheduled_end`" is false
+
+verified: `.claude/skills/netraops-invariants/SKILL.md:97`. Prod, clock-ins since
+2026-08-25, reasons `manual` / `manual_no_photo`: **91 of 113** landed within ±20
+min of `scheduled_end`; the closest was 0.1 min. (The U4a Phase 0 report quoted
+"76 of 113" — that was the −15 … +5 min band, mislabelled. 91 is the ±20 figure.)
+The claim was true when written (2026-08-24), before the +30 grace deployed; once
+guards had a window after the end, they used it.
+
+Correct the section in both skill copies (repo and plugin). Not in the U4a PR,
+which leaves the skill untouched. **Size S.**
+
+### N114 — [VISHNU] 2026-09-25 16:07 PT deploy `d2f7f870` landed with 3 STARNET sessions open; gate route unrecorded
+
+verified: `railway deployment list` → `d2f7f870-fcd9-47db-bfee-0c1f3297077b`
+SUCCESS 2026-09-25 16:07:02 −07:00; `gh api …/commits/8de7a94…/status` links it to
+`8de7a94` (PR #78). At 16:07:02 PT **3** STARNET sessions were open
+(`cc1cf358`, `0cae3d1f`, `8dcd7bcc`), and the last STARNET ping before it was
+15:30:23 PT, 36.6 min earlier. So the CONDITION route was false and the PROXY
+route impossible; it went out on OVERRIDE or ungated, and nothing records which.
+`POLICY.md` requires naming the route every time.
+
+Vishnu records the route used and what landed in the window. **Tier: docs.**
+
+### N115 — [VISHNU] GRD0005 (`4a71d17d`, STARNET `27c4d404`) is on runtime 1.0.16 and has sent zero pings since 2026-09-04
+
+verified: its active `guard_devices` row reports `platform/android; version/1.0.16;
+build/17; runtime/1.0.16` (last seen 2026-09-14 12:02 PT). Since 2026-09-04:
+**13 sessions, 0 location pings, 132 `missed_pings` rows**, 56 reports. Last ping
+2026-09-03 16:32 PT. Every OTA channel publishes at runtime 1.0.17, so this handset
+cannot take any update (same class as N7); a JS-only fix — including the mobile
+refetch in D20 — cannot reach it.
+
+Needs a store install of the current build. Vishnu arranges it with STARNET.
+**Tier: ops.**
+
+### N116 — handoff clock-in and the auto-complete sweep lock in opposite orders (deadlock risk)
+
+verified: handoff clock-in locks the shift row first (`FOR UPDATE OF ssr, sh`,
+`routes/shifts.ts:2846`), then updates the outgoing session (`:2967`). The sweep
+locks sessions first (step 2, `jobs/autoCompleteShifts.ts:210` in U4a) and shift
+rows second (step 3, `:316`). A handoff during the grace — the shift is still
+`active`, which is all `:2855` checks — can deadlock with the sweep, and Postgres
+aborts one of them. Pre-dates U4a. Not observed; Sentry was not searched for it.
+
+Take locks in one order in both paths (shift, then session). **Size M, Tier 1.**
+
+### N117 — the sweep can orphan a session between its session step and its status flip
+
+verified: `autoCompleteShifts` closes open sessions in step 2 and flips shift status
+in step 3, in one transaction under READ COMMITTED. A clock-in (`routes/shifts.ts:4248`,
+which needs status `scheduled`) or a handoff clock-in that commits after step 2's
+snapshot but before step 3 leaves an open session under a shift step 3 marks
+`completed`. `jobs/orphanedSessionCheck.ts:94` detects that state hourly and alerts
+through Sentry. Pre-dates U4a.
+
+Either lock the shift rows first, or have step 3 skip shifts that still have an open
+session. **Size S/M, Tier 1.**
+
+### N118 — the daily client email reads only the latest session of a handoff shift
+
+verified: `services/email.ts:587` — `ORDER BY ss.clocked_in_at DESC LIMIT 1`. The
+hours, clock-in/out and ping ratio a client receives for a handoff shift describe
+the incoming guard only; the outgoing guard's time is absent. Prod has one
+multi-session shift to date (`d9ac9565`).
+
+Decide the intended content before U6 touches this path (D19 keeps the email on
+Actual). **Size S.**
+
+### N119 — violations resolved during the grace by other writers keep grace time in `duration_minutes`; list surfaces don't clamp
+
+verified: while a session is still open during the grace, three writers resolve
+violations at `NOW()`: the on-site ping auto-resolve (`routes/locations.ts:610`), the
+guard's PATCH (`:831`) and the admin resolve route's `NOW()` arm (`routes/admin.ts:734`).
+With U4a the recorded `clocked_out_at` is the scheduled end, so these rows carry
+minutes past it. Hours reads clamp them (`services/shiftHours.ts:300`); the stored
+`duration_minutes` is shown raw on the client security-events page
+(`routes/clientPortal.ts:286`), the admin violations list (`routes/admin.ts:1316`),
+admin live-status (`apps/web/app/admin/live-status/page.tsx:743`), the guard's
+mobile `/violations` (`routes/locations.ts:215`) and the analytics export
+(`routes/exports.ts:144`, `:214`).
+
+Clamp at read on those surfaces, or at write. **Size S/M, Tier 1.**
+
+### N120 — `clock_out_reason = 'admin_corrected'` exists in prod with no code path
+
+verified: prod has **1** such row — session `cc1cf358`, written by the 2026-09-26 Q11
+correction. `git grep admin_corrected` finds no code. The column has no CHECK by
+design (`db/schema_v55.sql:92`). Effect today: the hours export flags `AUTO_CLOSED`
+only on `'auto'` (`services/hoursExport.ts:321`), so this row carries no flag.
+
+Add it to the documented vocabulary (`schema_v55.sql` comment, the clock-out
+comment in `routes/shifts.ts`), or give it a real writer when U2 builds the admin
+close. **Size S.**
+
+### N121 — the activity log can hide grace-time pings and task completions for shifts ending near local midnight
+
+verified: sessions enter the activity log by overlap —
+`clocked_in_at < to AND COALESCE(clocked_out_at, NOW()) > from`
+(`routes/activityLog.ts:416-417`; the same at `routes/admin.ts:1873`). Pings
+(`:443`), missed pings (`:458`), clock-in verifications (`:476`) and task
+completions (`:492`) are fetched only for included sessions. With U4a an
+auto-closed session's `clocked_out_at` is the anchor, so a range whose `from` falls
+between the anchor and the real close — the web sends `from` as browser-local
+midnight (`apps/web/components/ActivityLogTable.tsx:248`) — drops the session,
+and its grace-time pings and task completions vanish from the next-day view and
+PDF. Reports (`:523`) and patrol scans are fetched independently and still render.
+Exposure so far: 0 grace-time pings or task completions since 2026-08-25; 1
+auto-closed session (test tenant) ended within 35 min before local midnight.
+
+No read-path change in U4a, by decision. Fix: include a session when any of its
+events falls in range, or compare against the real close. **Size S, Tier 1.**
