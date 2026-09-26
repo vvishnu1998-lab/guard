@@ -4036,3 +4036,158 @@ auto-closed session (test tenant) ended within 35 min before local midnight.
 
 No read-path change in U4a, by decision. Fix: include a session when any of its
 events falls in range, or compare against the real close. **Size S, Tier 1.**
+
+---
+
+## New from the U6 Payable build (2026-09-26)
+
+Ten items, from U6's read-only Phase 0 audit and its build (D19,
+`feat/payable-hours`, `43d77c0`…`a0d6846`). **None is changed by U6** unless the
+item says so. Every `verified:` line was read on 2026-09-26 against that branch
+(line numbers at its head) or prod through postgres-readonly. Guard data is uuid +
+badge + tenant only.
+
+### N122 — the hours-export snapshot fixture commits 94 guard names
+
+verified: `apps/api/scripts/__snapshots__/hours-export.2026-07-01_2026-08-23.json`
+carries a filled `guard_name` on **94** objects — 60 rows, 14 `by_guard` and 20
+`by_guard_site` aggregates across the two tenants — because it snapshots
+`buildHoursExport` whole (`hoursExport.ts` selects `g.name AS guard_name`).
+`POLICY.md` says guard data leaves the DB as `guard_id`, `company_id`, badge and
+counts only. The fixture predates U6; U6 regenerated it (route F1) without
+touching the names, by decision. A `--check` DRIFT also prints fixture lines, names
+included, to the terminal.
+
+Replace `guard_name` with the badge in the snapshot (the script can map before
+writing and comparing), then rewrite the fixture once. **Size S, Tier 1.**
+
+### N123 — the regenerate route writes a different S3 object from the monthly job
+
+verified: `POST /api/billing/hours-export/schedule` (`routes/billing.ts:69`) writes
+`monthly-reports/${companyId}/${YYYY-MM}.xlsx` (`:89`); the cron writes
+`monthly-reports/${companyId}/netraops-hours-${slug}-${YYYY-MM}.xlsx`
+(`jobs/monthlyHoursReport.ts:73`). Both upsert the one `monthly_hours_reports` row
+(`billing.ts:95` `ON CONFLICT … DO UPDATE SET s3_url = …, generated_at = NOW()`).
+So a regeneration through the route — the only way to redo one tenant-month; the
+cron builds only the previous month and the web has no regenerate button — writes a
+**second** object, repoints the row at it, and leaves the cron's object referenced by
+nothing (the bucket is versioned; nothing deletes it). It also brings back the
+un-slugged `2026-08.xlsx` filename the slug fixed, and resets `generated_at`, which
+restarts the row's 1460-day purge clock (`jobs/nightlyPurge.ts:148`, `:472`). Prod:
+STARNET's August row points at the cron's
+`…/netraops-hours-starnet-security-2026-08.xlsx`. Also: any `company_admin` of the
+tenant may call the route (`:69`), and `fileName` at `:86` is unused.
+
+Extract one `generateMonthlyReport(companyId, year, month)` with one key template,
+used by the cron and the route. **Must land before any August regeneration (D19).**
+**Size S, Tier 1.**
+
+### N124 — each row of a handoff shift is judged against the whole window; a guard filter gives one side the whole schedule
+
+verified: a DETAIL row's `scheduled_hours` is the shift's FULL window
+(`services/hoursExport.ts` header, "The per-ROW scheduled_hours field…"), and
+coverage / SHORT are computed per row against it — so every session of a handoff
+shift reads SHORT (both did before D19 on Actual; both still do on Payable).
+Separately, the payable-weighted share is computed over the rows that survived the
+filter (`hoursExport.ts:380-388`): the PER GUARD export (`apps/web/app/admin/billing/
+page.tsx:90`, `params.set('guard_id', …)`) — or a handoff straddling a month edge —
+leaves one session with no sibling, so it takes the full scheduled value
+(`:388` `if (siblings === 1) return total;`). Prod has one multi-session shift
+(`d9ac9565`).
+
+Decide whether a row's coverage uses its share, and compute shares before
+filtering. **Size S/M, Tier 1.**
+
+### N125 — the SUMMARY "Flagged" KPI counts sessions; the aggregate "Flagged" counts shifts
+
+verified: `services/hoursWorkbook.ts:219` `const flagged = data.rows.filter(…)` feeds
+the KPI (`:239` `flagged.length`) — flagged DETAIL rows, i.e. sessions. Aggregate
+rows use `flagged_count`, distinct shifts (`hoursExport.ts`). A handoff shift with
+both sessions flagged counts 2 in the KPI and 1 on every aggregate row, including
+the TOTAL. U6 made the NOTES "Flagged" row say so; the numbers still disagree.
+
+Use `data.overall.flagged_count` for the KPI, or relabel it "Flagged rows".
+**Size S.**
+
+### N126 — analytics month totals and the billing export for the same month differ, by design
+
+Documenting, not a defect. For "this month":
+
+| | admin analytics month KPI (`routes/admin.ts:1698`) | billing / monthly hours export (`services/hoursExport.ts`) |
+|---|---|---|
+| month boundary | Pacific literal (`PACIFIC_TZ_SQL`) | each site's own `sites.timezone` (`:288-289`) |
+| open sessions | included, Payable running to NOW() | excluded (`:333`) |
+| test tenants | not filtered (company-scoped only) | excluded (`:332` `c.is_test = false`) |
+
+The leaderboard is a rolling 30 days (`admin.ts:1737`), not a calendar month. Today
+every site is Pacific, so for a customer tenant the live difference is the open
+sessions (a tenant flagged `is_test` gets analytics but an empty export). An admin
+comparing the KPI with the XLSX mid-month will see different totals.
+
+Say so on the analytics page (the KPI sub-line or a tooltip), or leave as recorded
+here. **Size XS.**
+
+### N127 — the handoff FYI email says "worked 0.00h" when its session join misses
+
+verified: `services/email.ts:1672-1673` —
+`COALESCE(ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(fs.clocked_out_at,
+NOW()) - fs.clocked_in_at))/3600.0) AS NUMERIC), 2), fs.total_hours)`. If the
+LEFT JOIN finds no outgoing session, every `fs.*` is NULL; `GREATEST(0, NULL)` is
+0 (GREATEST skips NULLs), so the first argument is 0.00, never NULL, and the email
+renders "worked 0.00h" (`:1719`) instead of '—'. The comment at `:1664` ("Falls back
+to stored total_hours only when the join misses") is therefore false, and the
+fallback can never fire. Stays on Actual (D19); not touched by U6.
+
+Move the GREATEST inside a CASE on `fs.id IS NULL`, and drop the dead fallback.
+**Size XS.**
+
+### N128 — `_clockInVerification.test.ts` claims it never reads `.env`; it does
+
+verified: its header, `apps/api/src/services/_clockInVerification.test.ts:7`, says
+"It never reads .env". Its import of `../routes/locations` (`:32`) loads
+`middleware/auth.ts` (`routes/locations.ts:2`), which imports `services/sentry`
+(`auth.ts:4`), whose first line is `import 'dotenv/config'` (`sentry.ts:22`) — the
+cwd `.env` is read, and a `SENTRY_DSN` in it would start Sentry. `locations.ts:8`
+also imports `services/email`, which throws at load without `SENDGRID_FROM_EMAIL`
+(`email.ts:179-182`) — so the test depends on the `.env` it says it never reads.
+`scripts/test-payable-hours.ts` avoids both by stubbing sentry, auth, email and S3
+in `require.cache` first (the `routes/_aiEnhance.test.ts` pattern).
+
+Stub sentry and email the same way, and correct the header. **Size XS.**
+
+### N129 — three hard-coded `shiftHours.ts` line pointers are stale
+
+verified: `.github/workflows/window-anchor.yml:12` cites `shiftHours.ts:223` (the
+"WINDOW ANCHOR IS DEFINED TWICE" note, now `:280`); `routes/shifts.ts:3999` cites
+`services/shiftHours.ts:278-281` (the `getShiftHours` join); `services/pdf/
+guardHours.ts:31` cites `services/shiftHours.ts:209` for the scheduled
+double-count hazard (`:209` was "CALLERS MUST STILL SUM OVER VIOLATIONS", now
+`:271`; the hazard note sits in the `sumShiftHours` docblock). U6 grew the file's
+header, moving every line again.
+
+Cite symbols or section headings, not line numbers. **Size XS.**
+
+### N130 — the analytics export's own copy and docs are wrong in two places
+
+verified: `apps/web/components/admin/ExportPanel.tsx:101` tells admins "Max 5,000
+rows per sheet. Scoped to your company." — the violations sheet is capped at
+**2,000** (`routes/exports.ts:156`), and the vishnu role gets **every** company
+(`:47` `cidPredicate = 'true'`). And `exports.ts:16` documents
+`type = … 'incidents' …`, but the CSV route has no incidents branch: a
+`type=incidents` CSV is just the BOM.
+
+Fix the copy; drop `incidents` from the docblock or add the section.
+**Size XS.**
+
+### N131 — the Payable route tests depend on where "now" falls in the site-local week and month
+
+verified: `apps/api/scripts/test-payable-hours.ts:523-524` reads the site-local week
+and month starts from the DB clock, and the ACTIVE SITES / analytics expectations
+count only the seeded sessions clocked in since then (`:543`, `:559`). The seed sits
+up to 12 h before NOW(), so a run within ~12 h after a Monday or a 1st (Pacific)
+covers fewer sessions — down to none just after midnight — and those checks
+weaken to comparing zeros. The test prints how many sessions it used ("14 of 14"
+on 2026-09-26) but does not fail on a thin window.
+
+Fail — or skip loudly — below a minimum count, or seed the route cases at fixed
+offsets from the week/month start. **Size XS.**

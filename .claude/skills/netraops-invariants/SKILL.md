@@ -65,7 +65,14 @@ Verified ground truth for the NetraOps platform. When live state may have change
 
 ## Locked decisions (do not relitigate)
 
-- Hours display: 4 fields (Scheduled/Actual/Break/Violation), no aggregate total. `actual_hours` = raw clock-out − clock-in. `violation=0` → "None"; `scheduled=0` → "—"; `actual/break=0` → "0h 00m". UI HH:MM, API decimal, XLSX decimal.
+- **Hours — D19 (`docs/OPS/DECISIONS.md`; built in U6, `43d77c0`…`a0d6846`).** Replaces the 2026-07 lock "4 fields (Scheduled/Actual/Break/Violation), no aggregate total". Three different figures — never read one as another:
+  - **Actual** (`actual_hours`) = raw clock-out − clock-in, unchanged. OVER and OFFPOST_ANOMALY judge against it.
+  - **Payable** (`payable_hours`) = clocked-in time inside the scheduled window: `max(0, min(COALESCE(clocked_out_at, NOW()), scheduled_end) − max(clocked_in_at, scheduled_start))`. ONE definition, `PAYABLE_HOURS_ROW_SQL` in `apps/api/src/services/shiftHours.ts`; the two fragments emit it only with `{ payable: true }`, typed `PayableShiftHours` (`ShiftHours` stays the four Actual-surface fields, so no Payable reaches a client or guard payload). Breaks are not subtracted.
+  - The STORED `shift_sessions.total_hours` is neither: start-clamped only, and net of breaks on rows written before 2026-08-29. Never a fallback for either figure.
+  - **Totals and billing use Payable:** the billing and monthly hours XLSX (detail, aggregates, SUMMARY), admin analytics (month KPI, leaderboard ranked by Payable, monthly bars) and ACTIVE SITES; the analytics CSV/XLSX carries an added Payable Hours column. **Stay on Actual:** daily client email, client site-security PDF, guard my-hours PDF, client portal, mobile, live widgets, handoff FYI email.
+  - Coverage %, Variance and SHORT from Payable (so Coverage ≤ 100 % and Variance ≤ 0 on a valid schedule); the handoff scheduled share splits by Payable (equally when the shift's Payable is 0); NO_SCHEDULE → Payable 0, coverage blank.
+  - Web renders '—' when `payable_hours` is absent (Vercel and Railway deploy separately) — never 0, never Actual, never the stored scalar. ACTIVE SITES status (ACTIVE/SCHEDULED/INACTIVE) stays on Actual.
+  - Formatting unchanged: `violation=0` → "None"; `scheduled=0` → "—"; `actual/break=0` → "0h 00m". UI HH:MM, API decimal, XLSX decimal.
 - Marketing: no public pricing page; one-month free trial is the offer; homepage stays gold `#C9A84C`; no fabricated metrics; staged fictional demo data OK.
 - Positioning: enforcement vs tracking; client portal + no-show escalation + photo-verified pings vs Connecteam-class tools.
 
