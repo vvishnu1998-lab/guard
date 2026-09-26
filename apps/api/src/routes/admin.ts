@@ -19,10 +19,9 @@ import {
 import {
   SHIFT_HOURS_SQL_FIELDS,
   SHIFT_HOURS_AGG_SQL_FIELDS,
-  BREAK_HOURS_ROW_SQL,
-  VIOLATION_HOURS_ROW_SQL,
   BREAK_OVERRUN_SQL_FIELDS,
   type ShiftHours,
+  type PayableShiftHours,
 } from '../services/shiftHours';
 
 const router = Router();
@@ -1371,18 +1370,18 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
          WHERE r.reported_at >= (DATE_TRUNC('day', NOW() AT TIME ZONE s.timezone)
                                  AT TIME ZONE s.timezone)
        ) AS reports_today,
-       -- Legacy scalar: sum of stored total_hours this week. Kept for
-       -- back-compat until the web dashboard consumes hours_this_week
-       -- from the new 4-field object below.
+       -- Legacy scalar: sum of the STORED total_hours this week (start-clamped,
+       -- not Actual, not Payable). No reader left — the web reads the hours
+       -- object below — and it must never become a fallback for either figure.
        COALESCE((
          SELECT SUM(ss2.total_hours) FROM shift_sessions ss2
           WHERE ss2.site_id = s.id
             AND ss2.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
                                        AT TIME ZONE s.timezone)
        ), 0) AS hours_this_week,
-       -- Phase 1 — 4-field canonical hours, summed this week per site.
-       -- scheduled_hours here sums each shift's window (deduped by shift_id
-       -- so multi-session handoffs don't double-count the schedule).
+       -- Canonical hours, summed this week per site. scheduled_hours sums
+       -- each shift's window (deduped by shift_id so multi-session handoffs
+       -- don't double-count the schedule).
        COALESCE((
          SELECT ROUND(CAST(SUM(sched.scheduled_hours) AS NUMERIC), 2)
            FROM (
@@ -1395,34 +1394,32 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
                                            AT TIME ZONE s.timezone)
            ) sched
        ), 0) AS h_scheduled,
-       COALESCE((
-         SELECT ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss4.clocked_out_at, NOW()) - ss4.clocked_in_at))/3600.0)) AS NUMERIC), 2)
-           FROM shift_sessions ss4
-          WHERE ss4.site_id = s.id
-            AND ss4.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
-                                       AT TIME ZONE s.timezone)
-       ), 0) AS h_actual,
-       COALESCE((
-         SELECT ROUND(CAST(SUM(${BREAK_HOURS_ROW_SQL('bs', 'ss5')}) AS NUMERIC), 2)
-           FROM break_sessions bs
-           JOIN shift_sessions ss5 ON ss5.id = bs.shift_session_id
-          WHERE ss5.site_id = s.id
-            AND ss5.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
-                                       AT TIME ZONE s.timezone)
-       ), 0) AS h_break,
-       COALESCE((
-         SELECT ROUND(CAST(SUM(${VIOLATION_HOURS_ROW_SQL('gv', 'ss6', 'sh6')}) AS NUMERIC), 2)
-           FROM geofence_violations gv
-           JOIN shift_sessions ss6 ON ss6.id = gv.shift_session_id
-           JOIN shifts sh6 ON sh6.id = ss6.shift_id
-          WHERE ss6.site_id = s.id
-            AND ss6.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
-                                       AT TIME ZONE s.timezone)
-       ), 0) AS h_violation
+       -- Actual, Payable (D19), Break and Violation from the shared aggregate
+       -- fragment, one grouped pass over this week's sessions per site. This
+       -- replaced a hand-typed copy of the Actual arithmetic and two
+       -- event-table subqueries: same session set, same per-row clamps, so
+       -- the same values. A derived table rather than LATERAL because the
+       -- outer query joins every report a site has ever had; a lateral could
+       -- be re-run once per report row.
+       COALESCE(wk.h_actual,    0) AS h_actual,
+       COALESCE(wk.h_payable,   0) AS h_payable,
+       COALESCE(wk.h_break,     0) AS h_break,
+       COALESCE(wk.h_violation, 0) AS h_violation
      FROM sites s
+     LEFT JOIN (
+       SELECT ssw.site_id,
+              ${SHIFT_HOURS_AGG_SQL_FIELDS('ssw', 'h_prefix', 'shw', { payable: true })}
+         FROM shift_sessions ssw
+         JOIN shifts shw ON shw.id = ssw.shift_id
+         JOIN sites  sw  ON sw.id  = ssw.site_id
+        WHERE sw.company_id = $1
+          AND ssw.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE sw.timezone)
+                                     AT TIME ZONE sw.timezone)
+        GROUP BY ssw.site_id
+     ) wk ON wk.site_id = s.id
      LEFT JOIN reports r ON r.site_id = s.id
      WHERE s.company_id = $1 AND s.is_active = true
-     GROUP BY s.id, s.name
+     GROUP BY s.id, s.name, wk.h_actual, wk.h_payable, wk.h_break, wk.h_violation
      ORDER BY s.name`,
     [cid]
   );
@@ -1430,11 +1427,13 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
     row.hours = {
       scheduled_hours: Number(row.h_scheduled) || 0,
       actual_hours:    Number(row.h_actual)    || 0,
+      payable_hours:   Number(row.h_payable)   || 0,
       break_hours:     Number(row.h_break)     || 0,
       violation_hours: Number(row.h_violation) || 0,
-    } satisfies ShiftHours;
+    } satisfies PayableShiftHours;
     delete row.h_scheduled;
     delete row.h_actual;
+    delete row.h_payable;
     delete row.h_break;
     delete row.h_violation;
   }
@@ -1667,10 +1666,14 @@ router.post('/company-admins/:id/resend-welcome', requireAuth('company_admin'), 
 router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
 
+  // Totals here are PAYABLE (D19): the month KPI, the leaderboard and the
+  // monthly bars all carry payable_hours from the shared fragment, next to
+  // the raw actual_hours. The legacy `total_hours` scalars are the STORED
+  // column (start-clamped) — kept for old web builds only, never a fallback.
   const [hoursResult, reportsByType, incidentBySeverity, guardPerf, monthlyHours] = await Promise.all([
-    // Total hours this month — legacy `total_hours` scalar + Phase 1
-    // 4-field breakdown. scheduled_hours is deduped across sessions per
-    // shift so mid-shift handoffs don't double-count the schedule window.
+    // Total hours this month — legacy `total_hours` scalar + the canonical
+    // breakdown. scheduled_hours is deduped across sessions per shift so
+    // mid-shift handoffs don't double-count the schedule window.
     pool.query(`
       SELECT
         COALESCE(ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1), 0) AS total_hours,
@@ -1687,7 +1690,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
                                              AT TIME ZONE ${PACIFIC_TZ_SQL})
             ) sched
         ), 0) AS h_scheduled,
-        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
+        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix', 'sh', { payable: true })}
       FROM shift_sessions ss
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
@@ -1717,13 +1720,15 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       GROUP BY r.severity
     `, [cid]),
 
-    // Top guards by hours (last 30 days) — legacy total_hours + Phase 1
-    // 4-field breakdown per guard.
+    // Top guards by PAYABLE hours (last 30 days) — legacy total_hours + the
+    // canonical breakdown per guard. Ranked by the figure the page shows;
+    // Actual then guard id break ties, which Payable makes common (a guard
+    // whose every session fell outside its window has Payable 0).
     pool.query(`
       SELECT g.name, g.badge_number,
              ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS total_hours,
              COUNT(DISTINCT ss.id) AS shift_count,
-             ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
+             ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix', 'sh', { payable: true })}
       FROM shift_sessions ss
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN guards g ON g.id = ss.guard_id
@@ -1731,18 +1736,18 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       WHERE s.company_id = $1
         AND ss.clocked_in_at >= NOW() - INTERVAL '30 days'
       GROUP BY g.id, g.name, g.badge_number
-      ORDER BY h_actual DESC
+      ORDER BY h_payable DESC, h_actual DESC, g.id
       LIMIT 10
     `, [cid]),
 
     // Monthly hours per site (last 6 months) — legacy total_hours scalar
-    // + Phase 1 4-field breakdown per (month, site).
+    // + the canonical breakdown per (month, site).
     pool.query(`
       SELECT
         TO_CHAR(DATE_TRUNC('month', ss.clocked_in_at AT TIME ZONE ${PACIFIC_TZ_SQL}), 'Mon YYYY') AS month,
         s.name AS site_name,
         ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS hours,
-        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
+        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix', 'sh', { payable: true })}
       FROM shift_sessions ss
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
@@ -1754,12 +1759,15 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
     `, [cid]),
   ]);
 
-  // Phase 1 — expose the 4-field breakdown for total-this-month, top-guards,
-  // and monthly-by-site. Legacy scalars kept untouched.
+  // The canonical breakdown — now with payable_hours (D19) — for
+  // total-this-month, top-guards and monthly-by-site. The web renders
+  // payable_hours and shows '—' when an older API omits it. Legacy scalars
+  // kept untouched.
   const totalsRow = hoursResult.rows[0];
-  const totals_this_month: ShiftHours = {
+  const totals_this_month: PayableShiftHours = {
     scheduled_hours: Number(totalsRow?.h_scheduled) || 0,
     actual_hours:    Number(totalsRow?.h_actual)    || 0,
+    payable_hours:   Number(totalsRow?.h_payable)   || 0,
     break_hours:     Number(totalsRow?.h_break)     || 0,
     violation_hours: Number(totalsRow?.h_violation) || 0,
   };
@@ -1771,9 +1779,10 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
     hours: {
       scheduled_hours: 0, // per-guard scheduled aggregate is ambiguous (multi-site) — surfaced at (guard, shift) level only.
       actual_hours:    Number(r.h_actual)    || 0,
+      payable_hours:   Number(r.h_payable)   || 0,
       break_hours:     Number(r.h_break)     || 0,
       violation_hours: Number(r.h_violation) || 0,
-    } satisfies ShiftHours,
+    } satisfies PayableShiftHours,
   }));
   const monthlyBySite = monthlyHours.rows.map((r) => ({
     month:     r.month,
@@ -1782,9 +1791,10 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
     hours: {
       scheduled_hours: 0, // aggregate scheduled_hours per (month, site) omitted — dedup would require another CTE; add when web needs it.
       actual_hours:    Number(r.h_actual)    || 0,
+      payable_hours:   Number(r.h_payable)   || 0,
       break_hours:     Number(r.h_break)     || 0,
       violation_hours: Number(r.h_violation) || 0,
-    } satisfies ShiftHours,
+    } satisfies PayableShiftHours,
   }));
 
   res.json({

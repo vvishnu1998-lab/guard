@@ -516,6 +516,69 @@ async function main(): Promise<void> {
       check(out.status === 200 && header[10] === 'Payable', `route workbook HOURS DETAIL col 11 = ${fmt(header[10])}`);
     }
 
+    // ══ U3: admin analytics and ACTIVE SITES ═════════════════════════════════
+    const admin: any = (await import('../src/routes/admin')).default;
+    actor = { sub: 'admin-test', role: 'company_admin', company_id: fx.companyId };
+    const bounds = (await pool.query(`
+      SELECT EXTRACT(EPOCH FROM (DATE_TRUNC('week',  NOW() AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'America/Los_Angeles')) * 1000 AS week_ms,
+             EXTRACT(EPOCH FROM (DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'America/Los_Angeles')) * 1000 AS month_ms`)).rows[0];
+    const inWindow = (s: SessionSpec, sinceMs: number): boolean => fx.t0 + s.inMin * MIN >= Number(sinceMs);
+    /** Expected sums over the seeded sessions clocked in since `sinceMs`, open ones evaluated at `nowM`. */
+    const sums = (sinceMs: number, nowM: number) => {
+      const xs = allSessions.filter(({ s }) => inWindow(s, sinceMs));
+      return {
+        n: xs.length,
+        payable: xs.reduce((a, { c, s }) => a + payableMin(c, s, nowM) / 60, 0),
+        actual:  xs.reduce((a, { s }) => a + actualMin(s, nowM) / 60, 0),
+        brk:     xs.some(({ s }) => s.key === 'A') ? 0.5 : 0,
+        viol:    xs.some(({ s }) => s.key === 'A') ? 0.75 : 0,
+      };
+    };
+
+    section('U3 — GET /api/admin/dashboard-sites (ACTIVE SITES) on the shared fragment');
+    {
+      const out = await callRoute(admin, '/dashboard-sites', {});
+      const nowM = await nowMin();
+      const site = (out.body as any[]).find((x) => x.id === fx.siteId);
+      const e = sums(bounds.week_ms, nowM);
+      console.log(`  (${e.n} of ${allSessions.length} seeded sessions fall in this site-local week)`);
+      check(near(num(site?.hours?.payable_hours), e.payable, 0.03),
+        `payable_hours ${fmt(site?.hours?.payable_hours)} = ${e.payable.toFixed(2)} (this week, open sessions to NOW)`);
+      check(near(num(site?.hours?.actual_hours), e.actual, 0.03),
+        `actual_hours ${fmt(site?.hours?.actual_hours)} = ${e.actual.toFixed(2)} (raw — the hand-typed copy it replaced computed the same)`);
+      check(num(site?.hours?.break_hours) === e.brk, `break_hours ${fmt(site?.hours?.break_hours)} = ${e.brk}`);
+      check(num(site?.hours?.violation_hours) === e.viol, `violation_hours ${fmt(site?.hours?.violation_hours)} = ${e.viol}`);
+      check(site && !('h_payable' in site) && !('h_actual' in site), 'no raw h_* column leaks into the row');
+    }
+
+    section('U3 — GET /api/admin/analytics: month KPI, leaderboard order, monthly bars');
+    {
+      const out = await callRoute(admin, '/analytics', {});
+      const body: any = out.body;
+      const nowM = await nowMin();
+      const m = sums(bounds.month_ms, nowM);
+      check(near(num(body?.totals_this_month?.payable_hours), m.payable, 0.03),
+        `month KPI payable_hours ${fmt(body?.totals_this_month?.payable_hours)} = ${m.payable.toFixed(2)}`);
+      check(near(num(body?.totals_this_month?.actual_hours), m.actual, 0.03),
+        `month KPI actual_hours ${fmt(body?.totals_this_month?.actual_hours)} = ${m.actual.toFixed(2)} (unchanged)`);
+      check('total_hours_this_month' in (body ?? {}), 'legacy total_hours_this_month still present for old web builds');
+      // Leaderboard: every seeded guard has one session in the last 30 days.
+      const want = allSessions
+        .map(({ c, s }) => ({ key: s.key, id: fx.guardBySession.get(s.key)!,
+          p: round2(payableMin(c, s, nowM) / 60), a: round2(actualMin(s, nowM) / 60) }))
+        .sort((x, y) => (y.p - x.p) || (y.a - x.a) || (x.id < y.id ? -1 : 1))
+        .slice(0, 10).map((x) => `U6-${x.key}`);
+      const got = (body?.top_guards ?? []).map((g: any) => g.badge_number);
+      check(JSON.stringify(got) === JSON.stringify(want), `leaderboard ranked by payable, then actual: ${got.join(' ')} = ${want.join(' ')}`);
+      const top = body?.top_guards?.[0];
+      check(top?.hours && 'payable_hours' in top.hours, `top_guards[].hours carries payable_hours (${fmt(top?.hours?.payable_hours)})`);
+      const monthly = (body?.monthly_hours_by_site ?? []).filter((r: any) => r.site_name === `${marker}-site`);
+      const all = sums(0, nowM);
+      const monthlyPay = monthly.reduce((a: number, r: any) => a + num(r.hours?.payable_hours), 0);
+      check(near(monthlyPay, all.payable, 0.03),
+        `monthly bars: Σ payable_hours over this site's months ${monthlyPay.toFixed(2)} = ${all.payable.toFixed(2)}`);
+    }
+
     // ══ later units append their sections here ══════════════════════════════
   } finally {
     if (!KEEP && fx.companyId) {
