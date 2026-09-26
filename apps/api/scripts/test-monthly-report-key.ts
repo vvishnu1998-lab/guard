@@ -421,7 +421,6 @@ async function main(): Promise<void> {
     const k = (y: number, m: string) => `monthly-reports/${c.id}/netraops-hours-star-guard-${y}-${m}.xlsx`;
     for (const [label, body, key] of [
       ['digit strings "8" / "2026"', { company_id: c.id, month: '8', year: '2026' }, k(2026, '08')],
-      ['omitted: the previous month', { company_id: c.id }, k(2026, '08')],
       ['2025-12', { company_id: c.id, year: 2025, month: 12 }, k(2025, '12')],
     ] as Array<[string, unknown, string]>) {
       reset();
@@ -440,6 +439,11 @@ async function main(): Promise<void> {
       ['company_id "not-a-uuid"', { company_id: 'not-a-uuid', year: 2026, month: 8 },          400, 'INVALID_COMPANY_ID'],
       ['a braced company_id',     { company_id: `{${real.id}}`, year: 2026, month: 8 },        400, 'INVALID_COMPANY_ID'],
       ['a numeric company_id',    { company_id: 123, year: 2026, month: 8 },                   400, 'INVALID_COMPANY_ID'],
+      // No default period on the route (the cron computes its own).
+      ['year only',               { company_id: real.id, year: 2026 },                         400, 'PERIOD_REQUIRED'],
+      ['month only',              { company_id: real.id, month: 8 },                           400, 'PERIOD_REQUIRED'],
+      ['neither year nor month',  { company_id: real.id },                                     400, 'PERIOD_REQUIRED'],
+      ['month null',              { company_id: real.id, year: 2026, month: null },            400, 'PERIOD_REQUIRED'],
       ['month 13',                { company_id: real.id, year: 2026, month: 13 },              400, 'INVALID_MONTH'],
       ['month 0',                 { company_id: real.id, year: 2026, month: 0 },               400, 'INVALID_MONTH'],
       ['month 8.5',               { company_id: real.id, year: 2026, month: 8.5 },             400, 'INVALID_MONTH'],
@@ -475,14 +479,15 @@ async function main(): Promise<void> {
     check(at.status === 200 && uploads.length === 1, 'August at 12:00:00.000 UTC on Sep 1 -> 200, written',
       `got ${fmt(at.status)}, uploads ${uploads.length}`);
 
-    // 03:00 UTC on Sep 1 is Aug 31 in the process zone: the default month is
-    // still August (UTC), which has not ended — not July, which has.
+    // The cron's period is its own, and UTC: at 03:00 UTC on Sep 1 — still
+    // Aug 31 in the process zone — it reports August, not July. (It fires at
+    // 12:00 UTC; this instant only separates a UTC month from a local one.)
     nowMs = RealDate.UTC(2026, 8, 1, 3, 0, 0, 0);
     reset();
-    const dflt = await post({ company_id: real.id });
-    check(dflt.status === 409 && dflt.body?.code === 'MONTH_NOT_ENDED' && uploads.length === 0,
-      'month omitted at 03:00 UTC on Sep 1 -> defaults to August (UTC) -> 409, nothing written',
-      `got ${fmt(dflt.status)} ${fmt(dflt.body)}, uploads ${fmt(uploads.map((u) => u.key))}`);
+    await runCron([real.id]);
+    check(uploads.length === 1 && uploads[0].key === `monthly-reports/${real.id}/netraops-hours-refusal-co-2026-08.xlsx`,
+      'the cron at 03:00 UTC on Sep 1 reports August (the UTC month), not July',
+      `uploads ${fmt(uploads.map((u) => u.key))}`);
     nowMs = NOW_DEFAULT;
 
     // The cron refuses a test company too, if one ever reaches it.

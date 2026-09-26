@@ -18,7 +18,6 @@ import {
   generateMonthlyReport,
   monthHasEnded,
   monthRange,
-  previousMonth,
   MonthlyReportInputError,
   MonthlyReportNotEligibleError,
 } from '../services/monthlyReport';
@@ -26,15 +25,15 @@ import { logEvent } from './auth';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const absent = (v: unknown): boolean => v === undefined || v === null;
+
 /**
- * A month/year from a JSON body: absent -> the default; an integer, or a
- * string of digits, -> that number; anything else (an array, an object, "aug",
- * " 8x") -> NaN, which monthRange() then refuses. Strict on purpose: `[8]`
- * used to slip through String()/Date.UTC as August and then fail the INSERT
- * after the upload.
+ * A month/year from a JSON body: an integer, or a string of digits, -> that
+ * number; anything else (an array, an object, "aug", " 8x") -> NaN, which
+ * monthRange() then refuses. Strict on purpose: `[8]` used to slip through
+ * String()/Date.UTC as August and then fail the INSERT after the upload.
  */
-function intField(v: unknown, fallback: number): number {
-  if (v === undefined || v === null) return fallback;
+function intField(v: unknown): number {
   if (typeof v === 'number') return v;
   if (typeof v === 'string' && /^\s*\d+\s*$/.test(v)) return Number(v);
   return NaN;
@@ -99,11 +98,13 @@ router.get('/hours-export/monthly', requireAuth('company_admin', 'vishnu'), asyn
 // vishnu only. With one key per month a regeneration REPLACES the archived
 // file, so it is not a company_admin action.
 //
-// Body: { company_id, year?, month? } — year/month default to the previous
-// month. Refused before anything is written: a malformed company_id, a month
-// or year that is not an integer in range, a month that has not yet closed at
-// every site (the cron's own 12:00 UTC-on-the-1st bound) or lies in the
-// future, an unknown company, a test company.
+// Body: { company_id, year, month } — all three required. There is no default
+// period: a regeneration overwrites the archived file, so the caller names the
+// month it means (the cron computes its own). Refused before anything is
+// written: a malformed company_id, a missing year or month, a month or year
+// that is not an integer in range, a month that has not yet closed at every
+// site (the cron's own 12:00 UTC-on-the-1st bound) or lies in the future, an
+// unknown company, a test company.
 //
 // Error bodies put the enum in `code` and the sentence in `error` — the vishnu
 // web client (lib/vishnuApi.ts) renders `error` as the message.
@@ -114,9 +115,11 @@ router.post('/hours-export/schedule', requireAuth('vishnu'), async (req, res) =>
     return res.status(400).json({ code: 'INVALID_COMPANY_ID', error: 'company_id must be a uuid.' });
   }
 
-  const fallback = previousMonth(new Date());
-  const year  = intField(req.body?.year, fallback.year);
-  const month = intField(req.body?.month, fallback.month);
+  if (absent(req.body?.year) || absent(req.body?.month)) {
+    return res.status(400).json({ code: 'PERIOD_REQUIRED', error: 'Both year and month are required.' });
+  }
+  const year  = intField(req.body.year);
+  const month = intField(req.body.month);
   try {
     monthRange(year, month); // validates both
   } catch (err) {
