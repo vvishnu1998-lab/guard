@@ -83,10 +83,12 @@ COMMENT ON COLUMN shift_sessions.clock_out_photo_delete_at IS
   'RETENTION_DRY_RUN unset on Railway and the code default is '
   '`!== ''false''`, i.e. TRUE in production, so every purge step reports '
   'candidates and deletes NOTHING. (3) S3 bucket guard-media-prod has '
-  'versioning ENABLED with no NoncurrentVersionExpiration rule, so even a '
-  'live purge only writes a delete marker — the object bytes remain and stay '
-  'billed, and are still retrievable via GetObjectVersion. Wiring a purge '
-  'here therefore needs all three fixed, not just a cron step. Add an index '
+  'versioning ENABLED, so a live purge only writes a delete marker and the '
+  'bytes become a noncurrent version, billed and retrievable via '
+  'GetObjectVersion until lifecycle rule noncurrent-30d expires them '
+  '(NoncurrentVersionExpiration, NoncurrentDays 60, read 2026-09-26; the '
+  'bucket had no such rule when schema_v55 was written). Wiring a purge '
+  'here therefore needs more than a cron step. Add an index '
   'on this column at the same time as the purge that scans it.';
 
 -- ── clock_out_reason: DELIBERATELY NO CHECK CONSTRAINT ───────────────────

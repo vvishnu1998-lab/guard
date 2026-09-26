@@ -47,8 +47,11 @@ runJob('monthlyHoursReport', '0 12 1 * *', async () => {
   // is_test (schema_v60) excludes the stale duplicate tenant and the scratch
   // tenant. is_active alone was the filter, and it means "not decommissioned",
   // not "is a customer" — so this job uploaded an empty XLSX to
-  // guard-media-prod for both of them every month. The bucket has versioning
-  // on with no NoncurrentVersionExpiration, so those never went away.
+  // guard-media-prod for both of them every month. Those objects are still
+  // there: they are current versions their rows still point at, and the
+  // bucket's lifecycle rule "noncurrent-30d" (NoncurrentVersionExpiration,
+  // NoncurrentDays 60 — the id says 30; read 2026-09-26) expires only
+  // noncurrent versions.
   // generateMonthlyReport refuses is_test itself as well, for the route.
   const companies = await pool.query(
     'SELECT id FROM companies WHERE is_active = true AND is_test = false',
