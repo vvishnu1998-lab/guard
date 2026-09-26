@@ -254,6 +254,14 @@ legal hold. The last five before U4a all landed at +30.01 min.
 
 ### D19. Hours: Actual stays raw; a new **Payable** figure drives totals and billing.
 
+**Status 2026-09-26 — SHIPPED.** U6 merged as `4a577e6` (PR #80); Railway
+deployment `4683c913` SUCCESS on that commit. Verified 2026-09-26: Vishnu checked
+the render on prod desktop and a real iPhone (real Payable values, no wrap or
+collision), and Bethel AME Church through the builder reads **Payable 301.45 h /
+Actual 303.95 h**. The August regeneration is still pending (below; N123).
+
+Earlier status, kept as history:
+
 **Status: decided 2026-09-26. NOT YET BUILT (U6).** **Replaces the "4 fields
 (Scheduled/Actual/Break/Violation), no aggregate total" lock** recorded in the
 `netraops-invariants` skill (repo `SKILL.md:68`, plugin copy `:58`) and in the
@@ -283,7 +291,12 @@ Choices made while building it (approved 2026-09-26, Phase 0 A1–A12):
   deploy orders.
 - **The August regeneration waits** for the regenerate-route S3 key fix (a small
   PR after U6 — `OPEN-ITEMS.md` N123): today that route writes a different object
-  from the monthly job's.
+  from the monthly job's. **Update 2026-09-26:** fixed on `fix/monthly-report-key`
+  (`ad1948e`, `3ee957f`), not yet merged or deployed. The route and the monthly
+  job now write one key through `services/monthlyReport.ts`; the route is
+  vishnu-only and needs an explicit year and month. The regeneration itself runs
+  only on Vishnu's explicit approval, after that fix is deployed, from a signed-in
+  vishnu portal session against the deployed route.
 
 - **Actual** stays raw: clock-out − clock-in.
 - **Payable** = clocked-in time inside the scheduled window, one definition beside
@@ -305,7 +318,14 @@ Choices made while building it (approved 2026-09-26, Phase 0 A1–A12):
   summed Payable cannot exceed the window.
 - **NO_SCHEDULE rows:** Payable 0, the flag kept, coverage null.
 - **STARNET's August monthly report is regenerated after U6 ships.** Files already
-  in S3 are frozen snapshots until then.
+  in S3 are frozen snapshots until then. The file it replaces (read 2026-09-26):
+  `monthly-reports/27c4d404-8769-49ca-bfd6-93cb9b890067/netraops-hours-starnet-security-2026-08.xlsx`,
+  version **`Fk9p_3JF1RK8e46Z93vafVVLZlrCg4Qf`**, 16,251 bytes, written
+  2026-09-01T12:00:02Z by the monthly job. The regeneration overwrites that same
+  key, so this version becomes noncurrent, and lifecycle rule `noncurrent-30d`
+  (`NoncurrentDays 60`) deletes it about 60 days later — **accepted 2026-09-26
+  (N123, B11).** A copy of the file as delivered is retrievable by that version
+  id only until then.
 
 Evidence (2026-09-26, prod, read-only): no hours figure today is capped at
 `scheduled_end` on any surface; 0 NO_SCHEDULE shifts; 1 multi-session shift, 0

@@ -4012,7 +4012,7 @@ Clamp at read on those surfaces, or at write. **Size S/M, Tier 1.**
 
 verified: prod has **1** such row — session `cc1cf358`, written by the 2026-09-26 Q11
 correction. `git grep admin_corrected` finds no code. The column has no CHECK by
-design (`db/schema_v55.sql:92`). Effect today: the hours export flags `AUTO_CLOSED`
+design (`db/schema_v55.sql:94`). Effect today: the hours export flags `AUTO_CLOSED`
 only on `'auto'` (`services/hoursExport.ts:321`), so this row carries no flag.
 
 Add it to the documented vocabulary (`schema_v55.sql` comment, the clock-out
@@ -4061,7 +4061,37 @@ included, to the terminal.
 Replace `guard_name` with the badge in the snapshot (the script can map before
 writing and comparing), then rewrite the fixture once. **Size S, Tier 1.**
 
-### N123 — the regenerate route writes a different S3 object from the monthly job
+### N123 — CLOSED 2026-09-26 — the regenerate route writes a different S3 object from the monthly job
+
+**Closed by** `ad1948e` and `3ee957f` on `fix/monthly-report-key` (base `4a577e6`;
+the PR is opened in N123 Phase 3 — this entry closes on `main` when that merges).
+`services/monthlyReport.ts` is the one builder, key, upload and upsert; the cron
+(`jobs/monthlyHoursReport.ts`) and the route both call `generateMonthlyReport`.
+The cron's slugged key is canonical (`monthlyReportKey`); an empty slug becomes
+`company`; the key uses the company id the database returns. Before any upload
+it refuses a non-integer or out-of-range month/year, an unknown company and an
+`is_test` company; any other failure goes to Sentry tagged `company_id` +
+`report_month` (no names). The route is now `requireAuth('vishnu')`, requires
+`company_id`, `year` and `month` (400 `INVALID_COMPANY_ID` / `PERIOD_REQUIRED` /
+`INVALID_MONTH`), refuses a month not yet closed at 12:00 UTC on the 1st or in
+the future (409 `MONTH_NOT_ENDED`), an unknown company (404) and a test company
+(409 `TEST_COMPANY`), writes `logEvent('monthly_report_regenerated')` plus a
+`[monthly-hours.regenerated]` log line, and returns a presigned URL. The unused
+`fileName` and the stale "Also called by the cron job." are gone.
+
+Proof: `apps/api/scripts/test-monthly-report-key.ts` (S3, pool, Sentry stubbed;
+nothing leaves the machine) — route key === cron key === a hand-written key for
+12 company names; **108/0** on `3ee957f`, **19/63** on `4a577e6` (negative
+control), **104/4** on `ad1948e` (the four missing-period cases). The generator
+also ran end to end on a throwaway local Postgres (real builder, ExcelJS and
+upsert; S3 stubbed).
+
+**Not closed by this:** a regeneration still orphans the old object when the
+stored key differs from the one it computes — every July 2026 row (pre-`201fecc`
+key), or after a company rename (N133). The August regeneration itself is D19's
+and needs Vishnu's explicit approval.
+
+Original finding, retained (line numbers at `4a577e6`):
 
 verified: `POST /api/billing/hours-export/schedule` (`routes/billing.ts:69`) writes
 `monthly-reports/${companyId}/${YYYY-MM}.xlsx` (`:89`); the cron writes
@@ -4191,3 +4221,137 @@ on 2026-09-26) but does not fail on a thin window.
 
 Fail — or skip loudly — below a minimum count, or seed the route cases at fixed
 offsets from the week/month start. **Size XS.**
+
+## New from N123 — one monthly report key (2026-09-26)
+
+Six items: N132–N135 from N123's read-only Phase 0 audit, N136–N137 from its
+Phase 2 review. **None is changed by N123** unless
+the item says so. Every `verified:` line was read on 2026-09-26: code at
+`fix/monthly-report-key` (line numbers at `3ee957f` plus the Phase 2 docs commit),
+prod through postgres-readonly, the bucket through `aws s3api` (read-only).
+
+### N132 — [VISHNU] lifecycle rule `noncurrent-30d` expires noncurrent versions after 60 days, not 30
+
+verified: `aws s3api get-bucket-lifecycle-configuration --bucket guard-media-prod`
+returns two Enabled rules: `ping-7d` (prefix `ping/`, `Expiration: Days 7`) and
+`noncurrent-30d` (`Filter: {}` — every object — `NoncurrentVersionExpiration:
+NoncurrentDays 60`, `Expiration: ExpiredObjectDeleteMarker true`,
+`AbortIncompleteMultipartUpload: DaysAfterInitiation 7`). The id says 30 and the
+value is 60, so anything that quotes the rule by name states the wrong window.
+Nothing in the repo defines either rule. N123 Phase 2 rewrote the five places that
+said there was no such rule to quote the value (`jobs/monthlyHoursReport.ts:52`,
+`schema_v55.sql:88`, `schema_v80.sql:129`, `:146`, `EXPIRIES.md` E14); the value
+is also quoted in `services/monthlyReport.ts:28` and `DECISIONS.md` D19.
+
+Vishnu decides which number is meant — an AWS change, not code — then the places
+above follow. The two choices are not alike. Renaming the id changes a label.
+Lowering `NoncurrentDays` below 60 is irreversible: the rule covers every object
+in the bucket (`Filter: {}`), so the next lifecycle run permanently deletes every
+noncurrent version older than the new value, STARNET's included, and it shortens
+the window D19 records as accepted (B11) for the August version
+`Fk9p_3JF1RK8e46Z93vafVVLZlrCg4Qf`. Updating D19 afterwards is itself a
+`DECISIONS.md` change. **Renaming the id: Tier 1. Changing the value: Tier 2.**
+
+### N133 — `monthly-reports/` objects no row points at: 8 today, plus one per regeneration whose stored key differs
+
+verified: `aws s3api list-object-versions --prefix monthly-reports/` → **14
+versions, all current, 0 noncurrent, 0 delete markers.** 6 are the objects of the
+6 `monthly_hours_reports` rows. The other **8** belong to 6 company ids with no
+`companies` row and no report row — `16acb562-2c1b-42bb-935b-67dcc684beee`
+(2026-05, 2026-06), `be771973-ba6a-48b3-b00c-e9171e2968b0` (2026-05, 2026-06),
+`46bc9ae8-2c66-48f7-a8f7-53efd4eea555`, `5e61ddd1-5159-4d4e-b23a-4950d41ee983`,
+`bccd0a67-5947-4818-bac9-3bb376baec46`, `c47181f0-41a2-404c-9652-13611887df5a`
+(2026-06 each) — 16,122–18,846 bytes each, written 2026-06-01 and 2026-07-01
+02:00 UTC by the monthly job. Their rows went with the companies (the FK is
+`ON DELETE CASCADE`); nothing deletes the objects. `nightlyPurge` sweeps only the
+`s3_url` of rows it deletes (`jobs/nightlyPurge.ts:470-483`), and the only bucket
+lister, `scripts/audit-s3-bucket.ts`, lists current versions and flags
+`monthly-reports/` as an unknown prefix (`:27`, `:126`) without comparing it to
+rows. They are current versions, so `noncurrent-30d` (N132) never expires them.
+Same row-keyed-cleanup shape as N30.
+
+**Regeneration adds to it (folded in from N123).** A regeneration overwrites the
+stored object only when the row already holds the key it computes
+(`services/monthlyReport.ts` header). Otherwise it re-points the row and leaves
+the old object unreferenced:
+- **every July 2026 row holds a pre-`201fecc` key** — `monthly-reports/{id}/2026-07.xlsx`,
+  written 2026-08-01 02:00 UTC by the monthly job before its key gained the slug.
+  Of the four, Star Guard (`b7c7d32d`) and STARNET SECURITY (`27c4d404`) can be
+  regenerated; `starnet` (`1bba063e`) and `test company` (`7637ef73`) are
+  `is_test` and are refused;
+- a company renamed since its row was written (`PATCH /api/admin/companies/:id`,
+  `routes/admin.ts:136`) — the slug follows the current name;
+- a row holding the old empty-slug key `netraops-hours--{YYYY-MM}.xlsx` (none in
+  prod today; the empty slug is now `company`).
+
+Reconcile `monthly-reports/` keys against `monthly_hours_reports.s3_url` and
+delete the unreferenced ones by version id through the `mediaOwnership.ts`
+ownership check; for regeneration, capture the old `s3_url` before the upsert and
+delete it after. Until then, regenerating a July row leaves its July object
+behind. **Counting is Tier 0; deleting anything from the bucket is Tier 2.**
+**Size S.**
+
+### N134 — the monthly job's heartbeat reads `ok` when every company fails
+
+verified: `jobs/monthlyHoursReport.ts:60-74` catches each company's error, logs
+it and moves on, so no per-company failure reaches `runJob` (only a failure of
+the companies query at `:56-58`, outside the loop, does); `runJob` then records
+`last_result = 'ok'` (`jobs/_run.ts:330`, `:338`, `:358`) and `/health/crons`
+shows a fresh, healthy heartbeat. The job runs with `sentryMonitor: false`
+(`monthlyHoursReport.ts:77`), so there is no Sentry cron check-in either. Since
+N123 each per-company failure is a Sentry event (`services/monthlyReport.ts:198`,
+tagged `company_id` + `report_month`) — visible, but nothing marks the run as
+failed. The next run is 2026-10-01 12:00 UTC, the day after E14's date.
+
+After the loop, throw (or record `error`) when every company failed — or when any
+did; decide which — so the heartbeat reads `error`. **Size XS, Tier 1.**
+
+### N135 — two design docs still call `monthly_hours_reports` a table with no migration
+
+verified: `docs/05-BACKEND-SCHEMA.md:476` "Has no corresponding migration file."
+(under the heading "`monthly_hours_reports` *(orphan — see disclaimer)*", `:474`)
+and `docs/02-TRD.md:360` lists it among "3 live-orphan tables (urgent —
+disaster-recovery blocker)". Both are contradicted by
+`apps/api/src/db/schema_v45.sql:25` `CREATE TABLE IF NOT EXISTS
+monthly_hours_reports (`, which is in the `migrate.ts` chain. Both also name only
+the monthly job as a user of the table; since N123 the regenerate route writes it
+through the same generator. The other two tables in the TRD sentence
+(`chat_rooms`, `chat_messages`) were not checked.
+
+Correct both. **Size XS. Tier: docs.**
+
+### N136 — `triage.sh` only recognises bold `**Nnnn.**` item headings; every `###` item is invisible to its collectors
+
+verified: every item since N105 has a `### Nnnn — …` heading (33 of them, N105–N137);
+the collectors match only the bold form.
+- **WAITING.** `scripts/ops/triage.sh:856` collects `[VISHNU]` items with
+  `grep -oE '^\*\*(N[0-9]+)\. \[VISHNU\][^*]*'`. Run on this file it returns N1,
+  N23, N24 and N102 only — **N114, N115 and N132 never reach the waiting line.**
+- **CLOSED trim.** `:953` starts a block only at `/^\*\*[NC][0-9]+\./` and skips it
+  when that line says CLOSED. A `### … CLOSED` heading is not a block start, so
+  N123's CLOSED block stays in the pack (both awk stages simulated on this file).
+- **Silent loss.** `skip` carries across `###` blocks, so every `###` item is in the
+  pack only because the last bold item, N104 (`OPEN-ITEMS.md:3725`), is open.
+  Closing N104 in the bold form would drop all 33 from the pack, with nothing
+  printed to say so.
+
+Treat `^### [NC][0-9]+ ` as an item start in both collectors (and `^## ` as a block
+boundary), keep the bold form working, and prove it with before/after pack runs —
+including a copy with N104 marked CLOSED. **Size S, Tier 1** (merging restarts
+Railway).
+
+### N137 — three more stale S3 lifecycle claims, outside the five N123 corrected
+
+verified against the lifecycle read 2026-09-26 (N132: `ping-7d`, prefix `ping/`,
+`Expiration: Days 7`; `noncurrent-30d`, every object, `NoncurrentDays 60` +
+`ExpiredObjectDeleteMarker`; no 180-day rule; versioning Enabled):
+- `apps/api/src/services/retention.ts:76-79` says `ping-7d` "is the one that
+  removes the bytes". On a versioned bucket its Expiration writes a delete marker;
+  the bytes become a noncurrent version that `noncurrent-30d` deletes 60 days later.
+- `apps/api/src/services/imageMagic.ts:17-18` says a quarantined orphan "survives
+  until the bucket lifecycle deletes it (180 days)". No 180-day rule exists; outside
+  `ping/` such an object is a current version that neither rule expires.
+- `docs/02-TRD.md:242` says the lifecycle "is intended to delete it at 180 days but
+  is unverified" — the same missing rule.
+
+Correct the three to what the rules do, dated. **Size XS, Tier 1.**
