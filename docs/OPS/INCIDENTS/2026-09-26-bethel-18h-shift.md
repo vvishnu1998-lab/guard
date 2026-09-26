@@ -39,7 +39,10 @@ All from production reads (postgres-readonly, PT via `to_char`) unless marked.
 | 12:57 | 05:57 | Read-only audit starts. |
 | 13:30:00.818 | **06:30:00.818** | `autoCompleteShifts` closes the session at the sweep time: `clock_out_reason` `auto`, `total_hours` **18.413**; violation `201fea51` resolved at 06:30 with **744 min** off-post. |
 | 13:58:44 – 14:19:24 | 06:58:44 – 07:19:24 | **Q11, then 8-a, applied by Vishnu** (below). Bounded by audit reads — at 06:58:44 PT the session was still `auto`; at 07:19:24 PT both corrections were in place — and by the SQL files: 8-a's COMMIT file was written at 07:12:36 PT, so 8-a ran between 07:12:36 and 07:19:24 PT. No update timestamp exists on these rows, so the exact minutes are not recorded. |
-| 16:00 | 09:00 | `dailyShiftEmail` run — reads the corrected rows. **UNVERIFIED at the time of writing** (08:24 PT: `daily_report_email_sent` still false). |
+| 16:00 | 09:00 | `dailyShiftEmail` run — reads the corrected rows. **UNVERIFIED at the time of writing** (08:24 PT: `daily_report_email_sent` still false). *Later that day:* sent at 09:00:01 PT for both Bethel shifts; the run's log reads ping compliance **0/11** for `c3574592` and ends "sent: 9, failed: 0". Hours and clock-out are not logged, so 5h55m / 6:00 PM remain what the renderer reads from the corrected rows, not an observed email. |
+| 16:06:10 | 09:06:10 | U4a merged as `1d6b60b` (PR #79), gate route CONDITION (0 open STARNET sessions); deployment `0dbee65e` live 09:08:11 PT. |
+| 16:45:00 | 09:45:00 | First auto-close under U4a (Star Guard test session `806ecf64`): `clocked_out_at` recorded as 09:15:00.000 PT, its scheduled end. |
+| after 16:58:39 | after 09:58:39 | **q9c backfill applied by Vishnu** (below). The census rule matched 206 rows in the U4a Phase 4b read (just after 09:51 PT) and 0 when next read later that morning; the COMMIT file was written at 09:58:39 PT. |
 
 ## 2. Root cause
 
@@ -119,7 +122,47 @@ the SQL itself.
 sweep time` (U4a, branch `fix/autoclose-anchor-scheduled-end`). **Not merged, not
 deployed** at the time of writing. It removes the 30-35 min an auto-close adds;
 it does not stop an 18-hour shift being created (U5) or make it correctable
-while active (U2).
+while active (U2). *Update, same day:* merged as `1d6b60b` (PR #79) at 09:06:10
+PT and deployed (`0dbee65e`); the first auto-close under it recorded exactly its
+scheduled end (timeline).
+
+**Data: the D18 backfill (q9c), applied by Vishnu 2026-09-26, Tier 2** — after
+U4a was deployed and its first anchor-close verified, as D18 requires. Every
+historical auto clock-out carrying the sweep's 30-35 min was re-anchored by rule
+(`clock_out_reason = 'auto' AND clocked_out_at > GREATEST(clocked_in_at,
+scheduled_end)`), with no id lists:
+
+| outcome (as reported by the COMMIT run) | value |
+|---|---|
+| sessions re-anchored | **206** — Star Guard 181, STARNET SECURITY 25 |
+| hours removed | **103.1385 h** (STARNET 12.5041 h) |
+| violations re-resolved / breaks re-ended / rows on legal hold | **9** / **0** / **0** |
+| re-run census (the rule above) | **0** |
+
+Verified read-only afterwards: the census rule matches 0 rows, and all 207
+`'auto'` rows sit exactly at their anchor (the 206 plus U4a's own `806ecf64`).
+The totals above are the COMMIT run's own report; the rows no longer carry their
+pre-backfill values, so they cannot be re-derived after the fact.
+
+**The SQL** — copied byte-for-byte into `2026-09-26-bethel-18h-shift/` from
+`~/guard-incident-2026-09-26/`, where both files are byte-identical (`cmp`) to the
+drafts written in the session scratchpad. The invocation and path Vishnu ran
+them from were not recorded here — **UNVERIFIED**.
+
+| file | role | sha256 | mtime (PT) |
+|---|---|---|---|
+| `q9c_backfill_auto_clockout_anchor.sql` | q9c preview (ends `ROLLBACK`) | `7aac420ded65db6f3a5ef858189eced76576cbcfda2094d0dc639e36ba81d989` | 2026-09-26 07:41:47 (scratchpad draft); 10:00:06 (copy in `~/guard-incident-2026-09-26/`) |
+| `q9c_backfill_auto_clockout_anchor_COMMIT.sql` | q9c applied | `e4177cdab429cefdd86dab48151e7538461acba76babdde6b6d5f63a7c45382c` | 2026-09-26 09:58:39 (scratchpad); 10:00:06 (copy) |
+
+The COMMIT file differs from the preview at line 245 only (`ROLLBACK;   --
+PREVIEW. Change to COMMIT only after approval.` → `COMMIT;`). Its header still
+reads "DRAFT. NOT EXECUTED." — the one-line swap left it stale, as it did Q11's
+trailing comment. Before it ran, the preview was tested on a throwaway local PG
+18.6 (U4a Phase 0).
+
+**Code: U6 (D19, Payable hours)** — built on `feat/payable-hours`
+(`43d77c0`…`a0d6846`), not yet merged. It changes no stored row; it changes how
+totals are computed from them.
 
 ## 4. Verification
 
@@ -137,7 +180,9 @@ Production reads after the corrections (2026-09-26, 07:19 PT and again 08:24 PT)
 The corrected figures on the client's daily report (5h55m, clock-out 6:00 PM, pings
 0/11) are what `sendDailyShiftReport` renders from those rows by construction
 (`services/email.ts:773`, `:783`, `:664`). **Not yet observed** — the 09:00 PT run
-had not happened when this was written.
+had not happened when this was written. *Update, same day:* the run sent at
+09:00:01 PT; its log shows 0/11 for this shift and no errors. The rendered email
+itself was not seen, and delivery is not logged on success.
 
 ## What the corrections did NOT undo
 
@@ -182,10 +227,11 @@ edits, 12-hour confirm).
 
 - `../DECISIONS.md` **D18, D19, D20** (new).
 - `../OPEN-ITEMS.md` **N110 – N121** (new), filed from this incident and the U4a
-  review.
+  review; **N122 – N131** from the U6 (Payable) build.
 - Code: `92e5fbc` (U4a) on `fix/autoclose-anchor-scheduled-end`; U4b (grace 30 →
   15), U2 (edit an active shift's end), U5 (12-hour confirm) and U6 (Payable)
-  are decided and not yet built.
+  are decided and not yet built. *Update, same day:* U4a shipped (`1d6b60b`); U6
+  is built on `feat/payable-hours` and not yet merged; U4b, U2 and U5 remain.
 - The 206 historical auto clock-outs that carry the same 30-35 min are corrected by
   rule, not in this incident: the q9c backfill runs only after U4a is deployed and
-  verified (D18).
+  verified (D18). *Update:* it ran the same day — see §3.

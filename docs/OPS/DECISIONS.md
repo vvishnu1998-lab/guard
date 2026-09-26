@@ -218,6 +218,20 @@ Taken during the Bethel 18-hour shift incident
 **Status: decided 2026-09-26.** Built in **U4a** (`92e5fbc`, branch
 `fix/autoclose-anchor-scheduled-end`) — not yet merged or deployed.
 
+**Status update 2026-09-26 — SHIPPED, and the backfill has run.**
+- U4a merged as `1d6b60b` (PR #79) at 09:06:10 PT by gate route CONDITION;
+  Railway deployment `0dbee65e` SUCCESS. The first auto-close under it —
+  session `806ecf64` (Star Guard test tenant), 09:45 PT tick — recorded
+  `clocked_out_at` 09:15:00.000 PT, exactly its scheduled end, with
+  `total_hours` 0.25.
+- **The q9c backfill was COMMITTED on 2026-09-26** (by Vishnu, after that
+  verification): **206** auto clock-outs re-anchored — Star Guard 181,
+  STARNET SECURITY 25 — removing **103.1385 h** (STARNET 12.5041 h); **9**
+  violations re-resolved, **0** breaks, **0** rows on legal hold. The re-run
+  census (the rule above) returns **0**. The SQL that ran is kept, with
+  sha256, in `INCIDENTS/2026-09-26-bethel-18h-shift/`.
+- Still open: grace 30 → 15 (**U4b**).
+
 - The sweep still **fires** at `scheduled_end` + grace; it no longer **records**
   that moment. One anchor, `GREATEST(clocked_in_at, scheduled_end)`, is used for
   `clocked_out_at`, `total_hours`, open breaks (`GREATEST(break_start, anchor)`)
@@ -245,6 +259,31 @@ legal hold. The last five before U4a all landed at +30.01 min.
 `netraops-invariants` skill (repo `SKILL.md:68`, plugin copy `:58`) and in the
 `services/shiftHours.ts` header. Those describe shipped behaviour and change when
 U6 ships, not before.
+
+**Status update 2026-09-26 — BUILT in U6** on `feat/payable-hours`, not yet
+merged or deployed: `43d77c0` (the fragment and types), `116e355` (hours export,
+workbook, snapshot fixture), `2497d68` (admin analytics, ACTIVE SITES),
+`7399665` (analytics export column), `a0d6846` (web labels, '—' when absent).
+The skill lock and the `shiftHours.ts` header are rewritten in the same branch.
+Choices made while building it (approved 2026-09-26, Phase 0 A1–A12):
+- **Payable is opt-in.** One definition, `PAYABLE_HOURS_ROW_SQL`; the fragments
+  emit it only with `{ payable: true }`, typed `PayableShiftHours`. `ShiftHours`
+  keeps its four fields, and every surface that stays on Actual gets
+  byte-identical SQL — so no Payable figure reaches a client or guard payload.
+- The leaderboard **ranks** by Payable: `h_payable DESC, h_actual DESC, g.id`.
+- **ACTIVE SITES status stays on Actual** (an activity signal); its hours cell
+  shows Payable. ACTIVE SITES now reads the shared aggregate fragment; the
+  hand-typed Actual copy is gone (old and new SQL match on every prod site).
+- The web shows **'—' when `payable_hours` is absent** and never falls back to
+  Actual or to the stored `total_hours` scalars (start-clamped legacy). The month
+  KPI's sub-line leads with Actual.
+- The analytics XLSX header is the raw key `payable_hours`, like its siblings;
+  the CSV labels it `Payable Hours`.
+- One PR for API and web: the API change is additive and the web tolerates both
+  deploy orders.
+- **The August regeneration waits** for the regenerate-route S3 key fix (a small
+  PR after U6 — `OPEN-ITEMS.md` N123): today that route writes a different object
+  from the monthly job's.
 
 - **Actual** stays raw: clock-out − clock-in.
 - **Payable** = clocked-in time inside the scheduled window, one definition beside
