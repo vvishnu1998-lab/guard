@@ -579,6 +579,71 @@ async function main(): Promise<void> {
         `monthly bars: Σ payable_hours over this site's months ${monthlyPay.toFixed(2)} = ${all.payable.toFixed(2)}`);
     }
 
+    // ══ U4: the analytics export gains a Payable Hours column ════════════════
+    const exportsRouter: any = (await import('../src/routes/exports')).default;
+    actor = { sub: 'admin-test', role: 'company_admin', company_id: fx.companyId };
+    const KEYS = ['site_name', 'guard_name', 'badge_number', 'shift_date', 'total_hours', 'scheduled_hours',
+      'actual_hours', 'payable_hours', 'break_hours', 'violation_hours', 'clocked_in_at', 'clocked_out_at'];
+    /** Minimal RFC-4180 line parser: every field is quoted by rowsToCsv. */
+    const csvFields = (line: string): string[] => {
+      const out: string[] = []; let cur = ''; let q = false;
+      for (let i = 0; i < line.length; i += 1) {
+        const ch = line[i];
+        if (q) {
+          if (ch === '"' && line[i + 1] === '"') { cur += '"'; i += 1; }
+          else if (ch === '"') q = false;
+          else cur += ch;
+        } else if (ch === '"') q = true;
+        else if (ch === ',') { out.push(cur); cur = ''; }
+        else cur += ch;
+      }
+      out.push(cur);
+      return out;
+    };
+    const expectPay = (key: string, nowM: number): number => {
+      const hit = allSessions.find(({ s }) => s.key === key)!;
+      return payableMin(hit.c, hit.s, nowM) / 60;
+    };
+
+    section('U4 — GET /api/exports/analytics/csv: one column added, nothing else moved');
+    {
+      const out = await callRoute(exportsRouter, '/analytics/csv', { query: { site_id: fx.siteId, type: 'hours' } });
+      const nowM = await nowMin();
+      const lines = String(out.body).replace(/^﻿/, '').split('\n');
+      const header = csvFields(lines[1] ?? '');
+      const LABELS = ['Site', 'Guard', 'Badge', 'Shift Date', 'Total Hours (legacy)', 'Scheduled Hours',
+        'Actual Hours', 'Payable Hours', 'Break Hours', 'Geofence Violation Hours', 'Clocked In', 'Clocked Out'];
+      check(lines[0] === 'GUARD HOURS', `section title ${fmt(lines[0])}`);
+      check(JSON.stringify(header) === JSON.stringify(LABELS),
+        `CSV header = 12 labels, 'Payable Hours' at 8 (${header.length} labels: ${header.join(' | ')})`);
+      const rows = lines.slice(2).filter((l) => l.length > 0).map(csvFields);
+      check(rows.length === allSessions.length, `${rows.length} CSV rows = ${allSessions.length} sessions (open ones included)`);
+      for (const r of rows) {
+        const key = String(r[1]).replace(`${marker}-`, '');
+        const want = expectPay(key, nowM);
+        const open = allSessions.find(({ s }) => s.key === key)?.s.outMin === null;
+        check(near(num(r[7]), want, open ? 0.03 : 0.005), `${key}: Payable Hours ${fmt(r[7])} = ${want.toFixed(2)}`);
+      }
+    }
+
+    section('U4 — GET /api/exports/analytics/xlsx: payable_hours after actual_hours, other sheets untouched');
+    {
+      const out = await callRoute(exportsRouter, '/analytics/xlsx', { query: { site_id: fx.siteId } });
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const XLSX = require('xlsx');
+      const wb = XLSX.read(out.body, { type: 'buffer' });
+      const hoursHeader = (XLSX.utils.sheet_to_json(wb.Sheets['Guard Hours'], { header: 1 })[0] ?? []) as string[];
+      check(JSON.stringify(hoursHeader) === JSON.stringify(KEYS),
+        `Guard Hours header = ${KEYS.length} raw keys, payable_hours after actual_hours (${hoursHeader.join(' | ')})`);
+      const vioHeader = (XLSX.utils.sheet_to_json(wb.Sheets['Geofence Violations'], { header: 1 })[0] ?? []) as string[];
+      check(JSON.stringify(vioHeader) === JSON.stringify(['site_name', 'guard_name', 'occurred_at', 'resolved_at',
+        'duration_minutes', 'supervisor_override', 'notification_sent']), 'Geofence Violations sheet header unchanged');
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets['Guard Hours']) as any[];
+      const f = rows.find((r) => r.guard_name === `${marker}-F`);
+      check(num(f?.payable_hours) === 3 && num(f?.actual_hours) === 7,
+        `F: payable_hours ${fmt(f?.payable_hours)} = 3, actual_hours ${fmt(f?.actual_hours)} = 7`);
+    }
+
     // ══ later units append their sections here ══════════════════════════════
   } finally {
     if (!KEEP && fx.companyId) {
