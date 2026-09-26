@@ -7,10 +7,17 @@
  *
  * Runs every 5 minutes. Walks every currently-open shift_session
  * (and sessions that clocked out within the last 15 min, to catch
- * the final window of a shift that autoCompleteShifts just closed),
- * computes the completed hourly windows anchored to the shift's
- * scheduled_start, and INSERTs a missed_reports row for any window
- * that has no report.
+ * the final window of a shift closed by a MANUAL or handoff
+ * clock-out), computes the completed hourly windows anchored to the
+ * shift's scheduled_start, and INSERTs a missed_reports row for any
+ * window that has no report.
+ *
+ * The 15-min tail does not serve AUTO-closed sessions, for the same
+ * reason as in missedPingCron.ts: the recorded clocked_out_at is the
+ * anchor, and a scheduled_end anchor is 30+ min in the past by the time
+ * the sweep commits (a grace-time clock-in may still match, but has no
+ * trackable window). Every tracked window ends by scheduled_end and is
+ * judged by the open arm during the grace.
  *
  * Window rules (matches missedPingCron):
  *   * Windows are 60 min slots starting at scheduled_start.

@@ -9,8 +9,40 @@
  * job is the fallback for when they do not. Sweeping at scheduled_end would
  * close the session out from under a guard who is walking to the gate.
  *
+ * ── WHAT THE SWEEP RECORDS: THE ANCHOR, NOT THE SWEEP TIME ───────────────
+ *
+ * The grace decides WHEN the sweep runs. It does not decide what the sweep
+ * writes. An auto-closed session is recorded as ending at
+ *
+ *     anchor = GREATEST(clocked_in_at, scheduled_end)
+ *
+ * (AUTO_CLOSE_ANCHOR_SQL below), never at NOW(). Until 2026-09-26 this job
+ * stamped NOW(), so every auto-close carried 30-35 minutes nobody worked
+ * (census that day: 206 sessions, all +30.00..+35.01 past scheduled_end,
+ * 103.14 h across tenants). The guard never clocked out, so nothing after
+ * the scheduled end is evidenced.
+ * GREATEST covers a clock-in after scheduled_end (the clock-in route has
+ * no end-side gate): that session is zero-length, 0 hours.
+ *
+ * One anchor, used by every step that closes something:
+ *   - clocked_out_at and total_hours (step 2). total_hours needs the anchor
+ *     spelled out too: SET reads the pre-update row, so it cannot refer to
+ *     the new clocked_out_at, and a NOW() there would make the row disagree
+ *     with itself.
+ *   - open breaks (step 1) end at GREATEST(break_start, anchor). A break
+ *     started during the grace is closed zero-length at its own start —
+ *     break_end never precedes break_start, and nothing after the anchor
+ *     counts.
+ *   - open violations resolve against the new clocked_out_at (the step
+ *     after step 2), so one born during the grace resolves at its own
+ *     occurred_at with 0 minutes.
+ *
+ * Events the guard files during the grace (reports, pings, task
+ * completions, scans) keep their real timestamps, which now fall after the
+ * recorded clocked_out_at. Nothing here rewrites them.
+ *
  * ALL THREE predicates below move together and MUST stay in lockstep. If the
- * shifts-status flip (step 4) fired at scheduled_end while the session close
+ * shifts-status flip (step 3) fired at scheduled_end while the session close
  * (step 2) waited for +30min, the shift would already be 'completed' when
  * step 2 ran, its `status IN ('active','scheduled')` guard would not match,
  * and the session would be orphaned FOREVER — the exact state
@@ -22,10 +54,16 @@
  *     actually stop it).
  *   - missedShiftAlert is bounded by missed_alert_sent_at, fires once.
  *   - dailyShiftEmail requires scheduled_end < NOW() - 1 hour, well past +30.
- *   - pingReminder / missedPingCron / missedReportCron / taskDueCron all
- *     bound their windows by scheduled_end itself (services/pingWindows.ts:83
- *     — a window is tracked only if its END fits inside scheduled_end), so a
- *     longer-open session produces no extra reminders or flags.
+ *   - missedPingCron / missedReportCron bound their windows by scheduled_end
+ *     itself (services/pingWindows.ts:215, and missedReportCron's own grid —
+ *     a window is tracked only if its END fits inside scheduled_end), so a
+ *     longer-open session produces no extra missed-window flags. Every
+ *     window has closed by scheduled_end and is judged on the ticks inside
+ *     the grace, while the session is still open.
+ *   - pingReminder's ping leg is bounded the same way (pingWindows.ts:275).
+ *     Its activity-report leg (fires at UTC minute 0) and its task leg do
+ *     NOT look at scheduled_end, so they keep reminding an open session
+ *     through the grace. So does taskDueCron. The grace is not silent.
  *
  * ── WHY 'cancelled' IS DELIBERATELY NOT IN THE SWEEP SET ─────────────────
  *
@@ -35,7 +73,7 @@
  * two reasons that the code makes concrete:
  *
  *   1. IT WOULD INVENT BILLABLE HOURS. The total_hours expression below is
- *      NOW() - GREATEST(clocked_in_at, scheduled_start). Run against
+ *      anchor - GREATEST(clocked_in_at, scheduled_start). Run against
  *      a cancelled shift it produces paid hours for a shift the admin
  *      explicitly cancelled, and stamps clock_out_reason = 'auto', which is
  *      indistinguishable from an ordinary overrun. The payroll artifact would
@@ -68,10 +106,12 @@
  * If a shift's scheduled_end + 30 minutes has passed and status is still
  * 'active' or 'scheduled':
  *   1. Close any open break_sessions inside the affected shift_sessions
- *      (set break_end = NOW(), compute duration_minutes).
- *   2. Close any open shift_sessions (set clocked_out_at = NOW(),
- *      compute total_hours = gross hours from the pay start).
- *   3. Mark the shift as 'completed'.
+ *      (set break_end = GREATEST(break_start, anchor), compute
+ *      duration_minutes).
+ *   2. Close any open shift_sessions (set clocked_out_at = anchor,
+ *      compute total_hours = gross hours from the pay start to the anchor).
+ *      Then resolve open geofence violations against the new clocked_out_at.
+ *   3. Mark the shift 'completed' (or 'missed' when it has no session).
  *
  * Step 1 still runs and still computes duration_minutes even though step 2
  * no longer subtracts it: breaks became PAID on 2026-08-29, and break_hours
@@ -89,7 +129,10 @@
  * `clocked_out_at` but never `total_hours`, so the daily-report email and
  * the CSV export both showed "—" for any shift the guard didn't clock
  * out of manually. The fix mirrors the math the manual clock-out
- * endpoint (apps/api/src/routes/shifts.ts:233) already uses.
+ * endpoint uses (routes/shifts.ts POST /:id/clock-out, the payStartMs /
+ * netHours lines): clock-out minus GREATEST(clock-in, scheduled_start).
+ * The shape is still identical; only the clock-out differs — the manual
+ * path has an observed clock-out, this path has the anchor.
  *
  * Exporting the worker function makes it testable from
  * apps/api/scripts/test-auto-complete-shifts.ts.
@@ -100,6 +143,12 @@ import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 import { Sentry } from '../services/sentry';
 
+/**
+ * The recorded end of an auto-closed session — see the header. Aliases are
+ * fixed: `ss` = shift_sessions, `s` = shifts, in both statements that use it.
+ */
+const AUTO_CLOSE_ANCHOR_SQL = 'GREATEST(ss.clocked_in_at, s.scheduled_end)';
+
 export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
   shiftsClosed: number;
   sessionsClosed: number;
@@ -109,34 +158,44 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
   await client.query('BEGIN');
   try {
     // Step 1: Close any open break_sessions belonging to shift_sessions
-    //         that are about to be auto-closed.
+    //         that are about to be auto-closed, at the session's anchor.
+    //         GREATEST(break_start, anchor): a break started before the
+    //         anchor ends there; one started during the grace (the break
+    //         allowance does not block post-end starts) ends zero-length at
+    //         its own start, so break_end never precedes break_start.
+    //         In practice breakExpiryCron closes a break at break_start +
+    //         plan (every plan is 30 min, it runs every minute), so what
+    //         reaches this step is almost always a grace-time break.
     const breaks = await client.query(
-      `UPDATE break_sessions
-       SET break_end = NOW(),
+      `UPDATE break_sessions b
+       SET break_end = GREATEST(b.break_start, due.anchor),
            duration_minutes = LEAST(
              GREATEST(
                0,
-               ROUND(EXTRACT(EPOCH FROM (NOW() - break_start)) / 60.0)::INT
+               ROUND(EXTRACT(EPOCH FROM (GREATEST(b.break_start, due.anchor) - b.break_start)) / 60.0)::INT
              ),
-             planned_duration_minutes
+             b.planned_duration_minutes
            ),
            ended_by = 'auto_complete'
-       WHERE break_end IS NULL
-         AND shift_session_id IN (
-           SELECT ss.id
-             FROM shift_sessions ss
-             JOIN shifts s ON s.id = ss.shift_id
-            WHERE ss.clocked_out_at IS NULL
-              AND s.scheduled_end + INTERVAL '30 minutes' <= NOW()
-              AND s.status IN ('active', 'scheduled')
-         )
-       RETURNING id`
+       FROM (
+         SELECT ss.id, ${AUTO_CLOSE_ANCHOR_SQL} AS anchor
+           FROM shift_sessions ss
+           JOIN shifts s ON s.id = ss.shift_id
+          WHERE ss.clocked_out_at IS NULL
+            AND s.scheduled_end + INTERVAL '30 minutes' <= NOW()
+            AND s.status IN ('active', 'scheduled')
+       ) due
+       WHERE b.shift_session_id = due.id
+         AND b.break_end IS NULL
+       RETURNING b.id`
     );
 
-    // Step 2: Close any open shift_sessions, computing total_hours as
-    //         clock_out − MAX(clock_in, scheduled_start)
-    //         (option C: early arrivals not paid, late stays paid).
-    //         Matches manual clock-out math in routes/shifts.ts.
+    // Step 2: Close any open shift_sessions at the anchor, computing
+    //         total_hours as anchor − MAX(clock_in, scheduled_start)
+    //         (option C: early arrivals not paid). A late stay is paid only
+    //         when a guard clocks out manually — an auto-close has no
+    //         evidence of work past scheduled_end, so it records none.
+    //         Same shape as the manual clock-out math in routes/shifts.ts.
     //
     //         Breaks are PAID from 2026-08-29 — the break-minutes
     //         subtraction that used to follow the gross term is gone. Step 1
@@ -149,11 +208,11 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     //         clocked_in_at. That divergence is intentional and locked.
     const sessions = await client.query(
       `UPDATE shift_sessions ss
-       SET clocked_out_at = NOW(),
+       SET clocked_out_at = ${AUTO_CLOSE_ANCHOR_SQL},
            clock_out_reason = 'auto',
            total_hours = GREATEST(
              0,
-             EXTRACT(EPOCH FROM (NOW() - GREATEST(ss.clocked_in_at, s.scheduled_start))) / 3600.0
+             EXTRACT(EPOCH FROM (${AUTO_CLOSE_ANCHOR_SQL} - GREATEST(ss.clocked_in_at, s.scheduled_start))) / 3600.0
            )
        FROM shifts s
        WHERE ss.shift_id = s.id
@@ -162,10 +221,12 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
          AND s.status IN ('active', 'scheduled')
        RETURNING ss.id`
     );
+    const closedThisTick: string[] = sessions.rows.map((r: { id: string }) => r.id);
 
     // Walk-test 2026-07-09 BUG I: resolve lingering open geofence violations
     // on any session that has closed. Uses clocked_out_at as the resolution
-    // timestamp for parity with the manual clock-out path.
+    // timestamp for parity with the manual clock-out path. For a session
+    // step 2 just closed, clocked_out_at is the anchor.
     //
     // ── WHY THERE IS NO RECENCY BOUND ────────────────────────────────────
     //
@@ -206,11 +267,22 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     // occurred_at is negative in exactly the first branch: GREATEST(0, ...)
     // yields the 0 that branch requires and is a no-op in the second. A
     // negative can no longer be written from here.
+    //
+    // With the anchor, the first branch has two causes, and the log must
+    // not confuse them:
+    //   - a violation born during the grace on a session THIS tick closed.
+    //     The session was open when it was written, so the ingress gate did
+    //     its job; it simply post-dates the recorded end. Expected, routine.
+    //   - a violation born after the session was closed by an EARLIER tick
+    //     (or manually). Only that one means locations.ts let a post-close
+    //     boundary report through.
+    // closed_this_tick tells them apart: $1 is step 2's RETURNING set.
     const violations = await client.query<{
       id:                   string;
       shift_session_id:     string;
       resolved_at:          Date;
       post_clock_out_birth: boolean;
+      closed_this_tick:     boolean;
     }>(
       `UPDATE geofence_violations gv
           SET resolved_at = CASE WHEN gv.occurred_at >= ss.clocked_out_at
@@ -227,7 +299,9 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
         RETURNING gv.id,
                   gv.shift_session_id,
                   gv.resolved_at,
-                  (gv.occurred_at >= ss.clocked_out_at) AS post_clock_out_birth`
+                  (gv.occurred_at >= ss.clocked_out_at) AS post_clock_out_birth,
+                  (ss.id = ANY($1::uuid[]))             AS closed_this_tick`,
+      [closedThisTick],
     );
 
     // Step 3: Mark the overdue shifts. Shifts with at least one
@@ -253,15 +327,21 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     await client.query('COMMIT');
 
     // One line per resolved row, after COMMIT so a rolled-back tick never
-    // reports a resolution that did not happen. `branch` names which arm of
-    // the CASE fired: 'occurred_at' is the post-clock-out birth that used to
-    // be uncatchable, and seeing it in the logs means the ingress gate in
-    // routes/locations.ts let one through.
+    // reports a resolution that did not happen. `branch` names what fired:
+    //   'clocked_out_at' — born before the recorded end; resolved there.
+    //   'grace'          — born after the anchor on a session this tick
+    //                      closed; resolved at occurred_at, 0 minutes.
+    //                      Expected on every auto-close with a grace exit.
+    //   'occurred_at'    — born after a session closed by an earlier tick.
+    //                      Seeing this means the ingress gate in
+    //                      routes/locations.ts let one through.
     for (const v of violations.rows) {
       console.info('[auto_complete_shifts.violation_resolved]', {
         violation_id:     v.id,
         shift_session_id: v.shift_session_id,
-        branch:           v.post_clock_out_birth ? 'occurred_at' : 'clocked_out_at',
+        branch:           !v.post_clock_out_birth ? 'clocked_out_at'
+                        : v.closed_this_tick      ? 'grace'
+                        :                           'occurred_at',
         resolved_at:      v.resolved_at instanceof Date ? v.resolved_at.toISOString() : v.resolved_at,
       });
     }

@@ -3,9 +3,18 @@
  *
  * Runs every 5 minutes. Walks every currently-open shift_session (and
  * sessions that clocked out within the last 15 min, to catch the final
- * window of a shift that autoCompleteShifts just closed), computes the
+ * window of a shift closed by a MANUAL or handoff clock-out), computes the
  * completed 30-min windows anchored to the shift's scheduled_start,
  * and INSERTs a missed_pings row for any window that has no ping.
+ *
+ * The 15-min tail does not serve AUTO-closed sessions: autoCompleteShifts
+ * records clocked_out_at at the anchor (scheduled_end, or clocked_in_at if
+ * later) but only runs 30+ min after scheduled_end, so a scheduled_end
+ * anchor is already older than 15 min when the row becomes visible. (A
+ * clock-in during the grace can still match the tail, but it has no
+ * trackable window at all — every window starts before it, R4.) Nothing is
+ * lost: every tracked window ends by scheduled_end (R3), and the session is
+ * still open — so the open arm judges it — on every tick of the grace.
  *
  * Window rules (SD-D + R3 + R4):
  *   * Windows are 30 min slots starting at scheduled_start.
