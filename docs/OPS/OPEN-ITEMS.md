@@ -4224,7 +4224,8 @@ offsets from the week/month start. **Size XS.**
 
 ## New from N123 — one monthly report key (2026-09-26)
 
-Four items from N123's read-only Phase 0 audit. **None is changed by N123** unless
+Six items: N132–N135 from N123's read-only Phase 0 audit, N136–N137 from its
+Phase 2 review. **None is changed by N123** unless
 the item says so. Every `verified:` line was read on 2026-09-26: code at
 `fix/monthly-report-key` (line numbers at `3ee957f` plus the Phase 2 docs commit),
 prod through postgres-readonly, the bucket through `aws s3api` (read-only).
@@ -4318,3 +4319,39 @@ through the same generator. The other two tables in the TRD sentence
 (`chat_rooms`, `chat_messages`) were not checked.
 
 Correct both. **Size XS. Tier: docs.**
+
+### N136 — `triage.sh` only recognises bold `**Nnnn.**` item headings; every `###` item is invisible to its collectors
+
+verified: every item since N105 has a `### Nnnn — …` heading (33 of them, N105–N137);
+the collectors match only the bold form.
+- **WAITING.** `scripts/ops/triage.sh:856` collects `[VISHNU]` items with
+  `grep -oE '^\*\*(N[0-9]+)\. \[VISHNU\][^*]*'`. Run on this file it returns N1,
+  N23, N24 and N102 only — **N114, N115 and N132 never reach the waiting line.**
+- **CLOSED trim.** `:953` starts a block only at `/^\*\*[NC][0-9]+\./` and skips it
+  when that line says CLOSED. A `### … CLOSED` heading is not a block start, so
+  N123's CLOSED block stays in the pack (both awk stages simulated on this file).
+- **Silent loss.** `skip` carries across `###` blocks, so every `###` item is in the
+  pack only because the last bold item, N104 (`OPEN-ITEMS.md:3725`), is open.
+  Closing N104 in the bold form would drop all 33 from the pack, with nothing
+  printed to say so.
+
+Treat `^### [NC][0-9]+ ` as an item start in both collectors (and `^## ` as a block
+boundary), keep the bold form working, and prove it with before/after pack runs —
+including a copy with N104 marked CLOSED. **Size S, Tier 1** (merging restarts
+Railway).
+
+### N137 — three more stale S3 lifecycle claims, outside the five N123 corrected
+
+verified against the lifecycle read 2026-09-26 (N132: `ping-7d`, prefix `ping/`,
+`Expiration: Days 7`; `noncurrent-30d`, every object, `NoncurrentDays 60` +
+`ExpiredObjectDeleteMarker`; no 180-day rule; versioning Enabled):
+- `apps/api/src/services/retention.ts:76-79` says `ping-7d` "is the one that
+  removes the bytes". On a versioned bucket its Expiration writes a delete marker;
+  the bytes become a noncurrent version that `noncurrent-30d` deletes 60 days later.
+- `apps/api/src/services/imageMagic.ts:17-18` says a quarantined orphan "survives
+  until the bucket lifecycle deletes it (180 days)". No 180-day rule exists; outside
+  `ping/` such an object is a current version that neither rule expires.
+- `docs/02-TRD.md:242` says the lifecycle "is intended to delete it at 180 days but
+  is unverified" — the same missing rule.
+
+Correct the three to what the rules do, dated. **Size XS, Tier 1.**
