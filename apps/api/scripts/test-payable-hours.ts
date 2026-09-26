@@ -159,6 +159,45 @@ const CASES: CaseSpec[] = [
   { key: 'L', startMin: -420, endMin: -60, status: 'active', sessions: [{ key: 'L', inMin: -420, outMin: null }] },
 ];
 
+// ── the D19 rules, written out independently of services/hoursExport.ts ─────
+
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+const covOf = (hours: number, scheduled: number): number | null =>
+  (scheduled <= 0 ? null : round1((hours / scheduled) * 100));
+function d19Flags(x: { actual: number; payable: number; scheduled: number; offpost: number; auto: boolean }): string[] {
+  const out: string[] = [];
+  const cp = covOf(x.payable, x.scheduled);
+  const ca = covOf(x.actual, x.scheduled);
+  if (x.scheduled <= 0)          out.push('NO_SCHEDULE');
+  if (cp !== null && cp < 80)    out.push('SHORT');   // from PAYABLE
+  if (ca !== null && ca > 110)   out.push('OVER');    // from ACTUAL
+  if (x.auto)                    out.push('AUTO_CLOSED');
+  if (x.offpost > x.actual)      out.push('OFFPOST_ANOMALY');
+  return out;
+}
+
+/** A route handler stack driven directly — no express app, no listen (routes/_aiEnhance.test.ts). */
+interface Captured { status: number; body: unknown; headers: Record<string, string> }
+async function callRoute(router: any, path: string, req: Record<string, unknown>): Promise<Captured> {
+  const layer = router.stack.find((l: any) => l.route && l.route.path === path && l.route.methods.get);
+  if (!layer) throw new Error(`GET ${path} not found on the router`);
+  const out: Captured = { status: 200, body: undefined, headers: {} };
+  const res: any = {
+    status(code: number) { out.status = code; return res; },
+    json(payload: unknown) { out.body = payload; return res; },
+    send(payload: unknown) { out.body = payload; return res; },
+    setHeader(k: string, v: string) { out.headers[k] = v; },
+  };
+  const fullReq: any = { query: {}, params: {}, body: {}, headers: {}, ...req };
+  for (const h of layer.route.stack.map((s: any) => s.handle)) {
+    let advanced = false;
+    await h(fullReq, res, () => { advanced = true; });
+    if (!advanced) break;
+  }
+  return out;
+}
+
 /** Independent Payable, in minutes, at wall-clock offset `nowMin` for open sessions. */
 function payableMin(c: CaseSpec, s: SessionSpec, nowMin: number): number {
   const out = s.outMin ?? nowMin;
@@ -336,6 +375,145 @@ async function main(): Promise<void> {
         `sumShiftHours sums payable ${fmt(sum.payable_hours)} = 9 alongside actual ${fmt(sum.actual_hours)} = 9.5`);
       const nm = await nowMin();
       check(nm >= 0, `clock sanity: NOW() is ${nm.toFixed(2)} min after t0`);
+    }
+
+    // ══ U2: the hours export and its workbook ═══════════════════════════════
+    const hx: any = await import('../src/services/hoursExport');
+    const hw: any = await import('../src/services/hoursWorkbook');
+    const ExcelJS: any = (await import('exceljs')).default;
+    const closed = allSessions.filter(({ s }) => s.outMin !== null);
+    const offpostBy: Record<string, number> = { A: 0.75 };
+    const expectRow = (c: CaseSpec, s: SessionSpec) => {
+      const scheduled = round2((c.endMin - c.startMin) / 60);
+      const actual = h2(actualMin(s, 0));
+      const payable = h2(payableMin(c, s, 0));
+      const offpost = offpostBy[s.key] ?? 0;
+      return {
+        scheduled, actual, payable, offpost,
+        variance: round2(payable - scheduled),
+        coverage: covOf(payable, scheduled),
+        flags: d19Flags({ actual, payable, scheduled, offpost, auto: s.reason === 'auto' }),
+      };
+    };
+
+    section('U2 — buildHoursExport rows: payable, variance, coverage and flags per D19');
+    const data = await hx.buildHoursExport({ company_id: fx.companyId, site_id: fx.siteId });
+    {
+      check(data.rows.length === closed.length, `${data.rows.length} rows = ${closed.length} closed sessions (open K, L excluded)`);
+      const bySession = new Map(data.rows.map((r: any) => [r.session_id, r]));
+      for (const { c, s } of closed) {
+        const r: any = bySession.get(fx.sessionId.get(s.key));
+        const e = expectRow(c, s);
+        check(r?.payable_hours === e.payable, `${s.key}: payable ${fmt(r?.payable_hours)} = ${e.payable}`);
+        check(r?.actual_hours === e.actual, `${s.key}: actual ${fmt(r?.actual_hours)} = ${e.actual}`);
+        check(r?.variance_hours === e.variance, `${s.key}: variance ${fmt(r?.variance_hours)} = payable − scheduled = ${e.variance}`);
+        check(r?.coverage_pct === e.coverage, `${s.key}: coverage ${fmt(r?.coverage_pct)} = ${fmt(e.coverage)}`);
+        check(JSON.stringify(r?.flags) === JSON.stringify(e.flags), `${s.key}: flags ${fmt(r?.flags)} = ${fmt(e.flags)}`);
+      }
+      // The two discriminating rows, stated literally as well as by rule.
+      const E = bySession.get(fx.sessionId.get('E')) as any;
+      const F = bySession.get(fx.sessionId.get('F')) as any;
+      check(JSON.stringify(E?.flags) === '["SHORT"]', `E is SHORT on Payable (75 %) though Actual is 100 %: ${fmt(E?.flags)}`);
+      check(JSON.stringify(F?.flags) === '["SHORT","OVER"]', `F is SHORT on Payable and OVER on Actual at once: ${fmt(F?.flags)}`);
+      const B = bySession.get(fx.sessionId.get('B')) as any;
+      check(B?.coverage_pct === 100 && JSON.stringify(B?.flags) === '["OVER"]',
+        `B is OVER with coverage 100 %: coverage ${fmt(B?.coverage_pct)}, flags ${fmt(B?.flags)}`);
+      const keys = Object.keys(data.rows[0] ?? {});
+      check(keys.indexOf('payable_hours') === keys.indexOf('actual_hours') + 1, 'row key order: payable_hours right after actual_hours');
+    }
+
+    section('U2 — aggregates: payable totals, the handoff share by payable, the invariant');
+    {
+      const guardAgg = (key: string) => data.by_guard.find((a: any) => a.guard_id === fx.guardBySession.get(key));
+      // G: 8 h window, payable 3 + 5 -> shares 3 / 5 (by actual it would be 2.98 / 5.02).
+      check(guardAgg('G-a')?.scheduled_hours === 3 && guardAgg('G-b')?.scheduled_hours === 5,
+        `G handoff share by payable: ${fmt(guardAgg('G-a')?.scheduled_hours)} / ${fmt(guardAgg('G-b')?.scheduled_hours)} = 3 / 5`);
+      // H: payable 0 on both sides -> equal split (by actual it would be 0.57 / 0.43).
+      check(guardAgg('H-a')?.scheduled_hours === 0.5 && guardAgg('H-b')?.scheduled_hours === 0.5,
+        `H handoff with shift payable 0 splits equally: ${fmt(guardAgg('H-a')?.scheduled_hours)} / ${fmt(guardAgg('H-b')?.scheduled_hours)} = 0.5 / 0.5`);
+      const wantPay = round2(closed.reduce((a, { c, s }) => a + expectRow(c, s).payable, 0));
+      const wantAct = round2(closed.reduce((a, { c, s }) => a + expectRow(c, s).actual, 0));
+      const wantSched = round2(CASES.filter((c) => c.status === 'completed')
+        .reduce((a, c) => a + (c.endMin - c.startMin) / 60, 0));
+      const o = data.overall;
+      check(o.payable_hours === wantPay, `overall payable ${fmt(o.payable_hours)} = ${wantPay}`);
+      check(o.actual_hours === wantAct, `overall actual ${fmt(o.actual_hours)} = ${wantAct} (unchanged, raw)`);
+      check(o.scheduled_hours === wantSched, `overall scheduled ${fmt(o.scheduled_hours)} = ${wantSched} (shares sum to each window)`);
+      check(o.variance_hours === round2(wantPay - wantSched), `overall variance ${fmt(o.variance_hours)} = ${round2(wantPay - wantSched)}`);
+      check(o.coverage_pct === covOf(wantPay, wantSched), `overall coverage ${fmt(o.coverage_pct)} = ${fmt(covOf(wantPay, wantSched))}`);
+      const wantFlagged = new Set(closed.filter(({ c, s }) => expectRow(c, s).flags.length > 0).map(({ c }) => c.key)).size;
+      check(o.flagged_count === wantFlagged, `overall flagged shifts ${fmt(o.flagged_count)} = ${wantFlagged}`);
+      for (const f of ['scheduled_hours', 'actual_hours', 'payable_hours', 'break_hours', 'offpost_hours']) {
+        const sum = (xs: any[]) => round2(xs.reduce((a, x) => a + (x[f] ?? NaN), 0));
+        const g = sum(data.by_guard), si = sum(data.by_site), gs = sum(data.by_guard_site), ov = round2(o[f]);
+        check(g === ov && si === ov && gs === ov, `Σ by_guard ${g} = Σ by_site ${si} = Σ by_guard_site ${gs} = overall ${ov} (${f})`);
+      }
+    }
+
+    section('U2 — the workbook: columns, derived positions, fills, NOTES');
+    {
+      const buf = await hw.workbookToBuffer(hw.buildHoursWorkbook(data));
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(buf);
+      const DETAIL = ['Guard', 'Site', 'Date', 'Day', 'Sched Start', 'Sched End', 'Clock In', 'Clock Out',
+        'Scheduled', 'Actual', 'Payable', 'Break', 'Geofence violation', 'Variance', 'Coverage %', 'Flag'];
+      const rowVals = (ws: any, n: number): unknown[] => (ws.getRow(n).values as unknown[]).slice(1);
+      const d = wb.getWorksheet('HOURS DETAIL');
+      check(JSON.stringify(rowVals(d, 1)) === JSON.stringify(DETAIL), `HOURS DETAIL header = ${DETAIL.length} columns, Payable at 11`);
+      let fRow: any = null;
+      d.eachRow((row: any) => { if (row.getCell(1).value === `${marker}-F`) fRow = row; });
+      const eF = expectRow(CASES.find((c) => c.key === 'F')!, CASES.find((c) => c.key === 'F')!.sessions[0]);
+      check(fRow?.getCell(10).value === eF.actual && fRow?.getCell(11).value === eF.payable,
+        `F detail row: Actual ${fmt(fRow?.getCell(10).value)} = ${eF.actual}, Payable ${fmt(fRow?.getCell(11).value)} = ${eF.payable}`);
+      check(fRow?.getCell(14).value === eF.variance, `F detail row: Variance (col 14) ${fmt(fRow?.getCell(14).value)} = ${eF.variance}`);
+      check(fRow?.getCell(15).value === 0.5 && fRow?.getCell(15).numFmt === '0.0%',
+        `F detail row: Coverage (col 15) ${fmt(fRow?.getCell(15).value)} as 0.0% = 0.5`);
+      check(fRow?.getCell(15).fill?.fgColor?.argb === 'FFF8D2D2', 'F detail row: coverage cell RED (< 80 %)');
+      check(fRow?.getCell(16).value === 'SHORT OVER' && fRow?.getCell(16).fill?.fgColor?.argb === 'FFF8D2D2',
+        `F detail row: Flag (col 16) ${fmt(fRow?.getCell(16).value)} with a red fill`);
+      check(fRow?.getCell(12).fill === undefined || fRow?.getCell(12).fill?.fgColor?.argb === undefined,
+        'F detail row: no fill on Break (col 12) — the RAG fill did not land one column short');
+      let total: any = null;
+      d.eachRow((row: any) => { if (row.getCell(1).value === 'TOTAL') total = row; });
+      check(total?.getCell(9).value === data.overall.scheduled_hours && total?.getCell(11).value === data.overall.payable_hours,
+        `DETAIL TOTAL: Scheduled (col 9) ${fmt(total?.getCell(9).value)}, Payable (col 11) ${fmt(total?.getCell(11).value)}`);
+      check(total?.getCell(15).value === data.overall.coverage_pct / 100, 'DETAIL TOTAL: coverage in col 15');
+      const e = wb.getWorksheet('EXCEPTIONS');
+      check(JSON.stringify(rowVals(e, 3)) === JSON.stringify(DETAIL), 'EXCEPTIONS header matches HOURS DETAIL');
+      check(String(e.getRow(1).getCell(1).value).includes('SHORT: payable coverage < 80%'),
+        'EXCEPTIONS rule banner: SHORT is payable coverage');
+      const s = wb.getWorksheet('SUMMARY');
+      check(JSON.stringify(rowVals(s, 4).slice(0, 8)) === JSON.stringify(
+        ['Shifts', 'Scheduled h', 'Actual h', 'Payable h', 'Coverage %', 'Break h', 'Geofence violation h', 'Flagged']),
+        'SUMMARY KPI header has Payable h after Actual h');
+      check(s.getRow(5).getCell(4).value === data.overall.payable_hours && s.getRow(5).getCell(5).numFmt === '0.0%',
+        `SUMMARY KPI: Payable ${fmt(s.getRow(5).getCell(4).value)} in col 4, coverage in col 5`);
+      check(JSON.stringify(rowVals(s, 8)) === JSON.stringify(
+        ['Guard', 'Site', 'Shifts', 'Scheduled', 'Actual', 'Payable', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged']),
+        'SUMMARY BY GUARD & SITE header has Payable after Actual');
+      check(s.getRow(9).getCell(8).numFmt === '0.0%', 'SUMMARY BY GUARD & SITE: coverage in col 8');
+      const n = wb.getWorksheet('NOTES');
+      const notes = new Map<string, string>();
+      n.eachRow((row: any) => { notes.set(String(row.getCell(1).value ?? ''), String(row.getCell(2).value ?? '')); });
+      check((notes.get('Payable') ?? '').startsWith('Clocked-in time inside the scheduled window'), 'NOTES has a Payable row');
+      check((notes.get('Variance') ?? '').startsWith('Payable minus scheduled'), 'NOTES: Variance is Payable minus scheduled');
+      check((notes.get('Coverage %') ?? '').startsWith('Payable as a percentage of scheduled'), 'NOTES: Coverage % is Payable-based');
+      check(notes.get('SHORT') === 'Payable coverage below 80%.', 'NOTES: SHORT is payable coverage');
+      check((notes.get('OVER') ?? '').startsWith('Actual above 110% of scheduled'), 'NOTES: OVER stays on Actual');
+      check((notes.get('Scheduled') ?? '').includes('in proportion to payable hours'), 'NOTES: the share splits by payable');
+      check((notes.get('Break') ?? '').includes('not subtracted from Payable'), 'NOTES: breaks are not subtracted');
+    }
+
+    section('U2 — GET /api/billing/hours-export (the on-demand route; the monthly job uses the same builder)');
+    {
+      const billing: any = (await import('../src/routes/billing')).default;
+      actor = { sub: 'admin-test', role: 'company_admin', company_id: fx.companyId };
+      const out = await callRoute(billing, '/hours-export', { query: { site_id: fx.siteId } });
+      const wb = new ExcelJS.Workbook();
+      let header: unknown[] = [];
+      try { await wb.xlsx.load(out.body as Buffer); header = (wb.getWorksheet('HOURS DETAIL').getRow(1).values as unknown[]).slice(1); }
+      catch (err) { console.log(`  (could not read the route's workbook: ${(err as Error).message})`); }
+      check(out.status === 200 && header[10] === 'Payable', `route workbook HOURS DETAIL col 11 = ${fmt(header[10])}`);
     }
 
     // ══ later units append their sections here ══════════════════════════════

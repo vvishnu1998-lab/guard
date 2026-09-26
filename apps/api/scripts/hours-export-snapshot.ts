@@ -36,7 +36,7 @@ const FIXTURE = `${__dirname}/__snapshots__/hours-export.${START}_${END}.json`;
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 function assertAggregateInvariant(slug: string, d: HoursExportDataset): string[] {
-  const fields = ['scheduled_hours', 'actual_hours', 'break_hours', 'offpost_hours'] as const;
+  const fields = ['scheduled_hours', 'actual_hours', 'payable_hours', 'break_hours', 'offpost_hours'] as const;
   const problems: string[] = [];
   for (const f of fields) {
     const g = round2(d.by_guard.reduce((s, a) => s + a[f], 0));
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
     console.log(`wrote ${FIXTURE}`);
   }
   for (const [slug, d] of Object.entries(first)) {
-    console.log(`  ${slug}: ${d.rows.length} rows | scheduled ${d.overall.scheduled_hours} | actual ${d.overall.actual_hours} | break ${d.overall.break_hours} | offpost ${d.overall.offpost_hours}`);
+    console.log(`  ${slug}: ${d.rows.length} rows | scheduled ${d.overall.scheduled_hours} | actual ${d.overall.actual_hours} | payable ${d.overall.payable_hours} | break ${d.overall.break_hours} | offpost ${d.overall.offpost_hours}`);
   }
   console.log(mode === 'check' ? 'OK — deterministic, invariants hold, no drift' : 'OK');
   await pool.end();

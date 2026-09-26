@@ -17,6 +17,7 @@
  * filters `clocked_out_at IS NOT NULL`:
  *
  *   actual   COALESCE(clocked_out_at, NOW())            -> clocked_out_at
+ *   payable  LEAST(sched_end, COALESCE(cout, NOW()))    -> LEAST(sched_end, cout)
  *   break    LEAST(COALESCE(break_end, NOW()),  cout)   -> cout when break_end
  *                                                          is null, since a
  *                                                          closed session has
@@ -35,27 +36,56 @@
  * (d9ac9565, 7.50 h scheduled, reddy -> kartikeya, summed as 15.00 h).
  *
  * Every aggregate therefore uses a per-session SHARE of the shift's
- * scheduled hours, split in proportion to actual hours worked:
+ * scheduled hours, split in proportion to PAYABLE hours (D19):
  *
- *     share(session) = shift.scheduled * (session.actual / shift.actual)
+ *     share(session) = shift.scheduled * (session.payable / shift.payable)
+ *
+ * Payable, not actual: the share is the part of the scheduled window each
+ * session covered, and time outside the window covers none of it. (It was
+ * actual until U6, which let a guard who clocked in early take share from
+ * the colleague who worked the window.)
  *
  * Properties that make this the rule rather than a fudge:
  *   * For a single-session shift the share IS the full scheduled value —
  *     exact for 75 of prod's 76 shifts, no approximation introduced.
  *   * Shares sum to the shift's scheduled exactly, so
  *     Σ by_guard == Σ by_site == overall, always. The snapshot asserts it.
- *   * It survives filtering. Counting DISTINCT shift_id instead would
- *     over-count when a guard_id filter puts only one side of a handoff in
- *     scope — the site total would claim scheduled hours for work outside
- *     the result set.
- *   * A shift whose sessions total zero actual hours splits equally, since
+ *   * Counting DISTINCT shift_id instead would over-count when a filter puts
+ *     only one side of a handoff in scope. KNOWN GAP: the split is computed
+ *     over the rows that survived the filter, so that one in-scope session
+ *     sees no sibling and takes the FULL scheduled value (the same happens
+ *     to a handoff that straddles a month boundary). Filed in OPEN-ITEMS; not
+ *     changed by U6.
+ *   * A shift whose sessions total zero payable hours splits equally, since
  *     proportion is undefined there.
  *
  * The per-ROW scheduled_hours field is the shift's FULL scheduled value, not
  * the share — a reader looking at one line wants that shift's scheduled
  * window. Only aggregation uses the share. That asymmetry is why the row
  * count and the aggregate cannot be reconciled by naive addition, and why
- * the workbook must not add anything up itself.
+ * the workbook must not add anything up itself. (It also means each row of a
+ * handoff shift is judged against the whole window, so every such row reads
+ * SHORT — filed in OPEN-ITEMS, unchanged by U6.)
+ *
+ * ── PAYABLE, ACTUAL AND THE FLAGS (D19) ──────────────────────────────────
+ *
+ * payable_hours is services/shiftHours.ts's PAYABLE_HOURS_ROW_SQL — the
+ * clocked-in time inside the scheduled window — and it drives the totals:
+ *
+ *   variance  = payable − scheduled      (≤ 0 whenever end ≥ start)
+ *   coverage  = payable / scheduled      (≤ 100 %), null without a schedule
+ *   SHORT     = coverage < 80 %
+ *
+ * actual_hours stays raw and keeps the two judgements that are ABOUT time
+ * outside the window or a comparison with it:
+ *
+ *   OVER            = actual / scheduled > 110 %
+ *   OFFPOST_ANOMALY = off-post > actual
+ *
+ * So an OVER row shows coverage ≤ 100 %: it covered its window and the guard
+ * stayed well beyond it. NO_SCHEDULE rows (scheduled ≤ 0) carry payable 0
+ * and a blank coverage by construction. Breaks are not subtracted from
+ * payable — break_hours stays its own column.
  *
  * ── OTHER RULES ──────────────────────────────────────────────────────────
  *
@@ -73,15 +103,17 @@
  *   * Dropped from the old sheet: Total Hours (legacy), Break (mins),
  *     Status. The first contradicts actual_hours by design, the second
  *     duplicates break_hours in different units, the third describes the
- *     shift rather than the hours.
+ *     shift rather than the hours. Payable is NOT that legacy column
+ *     revived: the stored total_hours clamps the start only and is stored;
+ *     Payable clamps both ends and is computed at read time.
  */
 
 import { pool } from '../db/pool';
 import { SHIFT_HOURS_SQL_FIELDS } from './shiftHours';
 
 export type HoursFlag =
-  | 'SHORT'            // coverage < 80%
-  | 'OVER'             // coverage > 110%
+  | 'SHORT'            // payable coverage < 80%
+  | 'OVER'             // actual / scheduled > 110%
   | 'NO_SCHEDULE'      // shift carries no scheduled window
   | 'AUTO_CLOSED'      // clock_out_reason = 'auto' — guard never clocked out
   | 'OFFPOST_ANOMALY'; // off-post exceeds actual: impossible, means bad data
@@ -107,11 +139,12 @@ export interface HoursExportRow {
   clock_out_iso:    string;
   clock_out_label:  string;
   scheduled_hours:  number;   // the SHIFT's full window — see header
-  actual_hours:     number;
+  actual_hours:     number;   // raw clock-out − clock-in
+  payable_hours:    number;   // clocked-in time inside the scheduled window (D19)
   break_hours:      number;
   offpost_hours:    number;
-  variance_hours:   number;        // actual − scheduled
-  coverage_pct:     number | null; // null when there is no schedule to cover
+  variance_hours:   number;        // payable − scheduled
+  coverage_pct:     number | null; // payable / scheduled; null when there is no schedule
   flags:            HoursFlag[];
 }
 
@@ -124,12 +157,13 @@ export interface HoursAggregate {
   label:           string;   // display only — never a key
   sessions:        number;
   shifts:          number;
-  scheduled_hours: number;   // sum of per-session SHARES — see header
+  scheduled_hours: number;   // sum of per-session SHARES (split by payable) — see header
   actual_hours:    number;
+  payable_hours:   number;
   break_hours:     number;
   offpost_hours:   number;
-  variance_hours:  number;
-  coverage_pct:    number | null;
+  variance_hours:  number;        // payable − scheduled
+  coverage_pct:    number | null; // payable / scheduled
   auto_closed_sessions: number;
   /**
    * How many distinct SHIFTS in this group carry at least one flag.
@@ -203,21 +237,28 @@ export function slugify(name: string): string {
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 const round1 = (n: number): number => Math.round(n * 10) / 10;
 
-function coverage(actual: number, scheduled: number): number | null {
+/** `hours` as a percentage of `scheduled`; null when there is no schedule. */
+function coverage(hours: number, scheduled: number): number | null {
   if (scheduled <= 0) return null;
-  return round1((actual / scheduled) * 100);
+  return round1((hours / scheduled) * 100);
 }
 
-function flagsFor(
-  actual: number, scheduled: number, offpost: number, autoClosed: boolean,
-): HoursFlag[] {
+/**
+ * One row's flags. A named object, not positional numbers: actual and
+ * payable are both `number`, and a swapped call would type-check while
+ * inverting the rule D19 hinges on — SHORT from Payable, OVER from Actual.
+ */
+function flagsFor(h: {
+  actual: number; payable: number; scheduled: number; offpost: number; autoClosed: boolean;
+}): HoursFlag[] {
   const out: HoursFlag[] = [];
-  const cov = coverage(actual, scheduled);
-  if (scheduled <= 0)                out.push('NO_SCHEDULE');
-  if (cov !== null && cov < 80)      out.push('SHORT');
-  if (cov !== null && cov > 110)     out.push('OVER');
-  if (autoClosed)                    out.push('AUTO_CLOSED');
-  if (offpost > actual)              out.push('OFFPOST_ANOMALY');
+  const payableCov = coverage(h.payable, h.scheduled);
+  const actualCov  = coverage(h.actual,  h.scheduled);
+  if (h.scheduled <= 0)                        out.push('NO_SCHEDULE');
+  if (payableCov !== null && payableCov < 80)  out.push('SHORT');
+  if (actualCov  !== null && actualCov  > 110) out.push('OVER');
+  if (h.autoClosed)                            out.push('AUTO_CLOSED');
+  if (h.offpost > h.actual)                    out.push('OFFPOST_ANOMALY');
   return out;
 }
 
@@ -231,7 +272,7 @@ interface RawRow {
   clock_in_iso: Date; clock_in_label: string;
   clock_out_iso: Date; clock_out_label: string;
   clock_out_reason: string | null;
-  scheduled_hours: string; actual_hours: string;
+  scheduled_hours: string; actual_hours: string; payable_hours: string;
   break_hours: string; violation_hours: string;
 }
 
@@ -281,7 +322,7 @@ export async function buildHoursExport(
       ss.clocked_out_at                                AS clock_out_iso,
       TO_CHAR(ss.clocked_out_at AT TIME ZONE s.timezone, 'DD/MM/YYYY, HH24:MI:SS') AS clock_out_label,
       ss.clock_out_reason,
-      ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')}
+      ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh', { payable: true })}
     FROM shift_sessions ss
     JOIN shifts    sh ON sh.id = ss.shift_id
     JOIN sites     s  ON s.id  = ss.site_id
@@ -296,8 +337,16 @@ export async function buildHoursExport(
   `, args);
 
   const rows: HoursExportRow[] = result.rows.map((r) => {
+    // No `|| 0` for payable. RawRow is a type-only annotation that tsc never
+    // checks against the SELECT, so a column that failed to arrive would read
+    // as 0 — every row 0 % coverage and SHORT, the shares split equally — and
+    // the file would still write. Refuse instead.
+    if (r.payable_hours === undefined || r.payable_hours === null) {
+      throw new Error('hours export: payable_hours missing from the row — the fragment was not asked for it');
+    }
     const scheduled = Number(r.scheduled_hours) || 0;
     const actual    = Number(r.actual_hours)    || 0;
+    const payable   = Number(r.payable_hours);
     const brk       = Number(r.break_hours)     || 0;
     const offpost   = Number(r.violation_hours) || 0;
     return {
@@ -315,28 +364,30 @@ export async function buildHoursExport(
       clock_out_iso: new Date(r.clock_out_iso).toISOString(),
       clock_out_label: r.clock_out_label,
       scheduled_hours: scheduled,
-      actual_hours: actual, break_hours: brk, offpost_hours: offpost,
-      variance_hours: round2(actual - scheduled),
-      coverage_pct: coverage(actual, scheduled),
-      flags: flagsFor(actual, scheduled, offpost, r.clock_out_reason === 'auto'),
+      actual_hours: actual, payable_hours: payable, break_hours: brk, offpost_hours: offpost,
+      variance_hours: round2(payable - scheduled),
+      coverage_pct: coverage(payable, scheduled),
+      flags: flagsFor({
+        actual, payable, scheduled, offpost, autoClosed: r.clock_out_reason === 'auto',
+      }),
     };
   });
 
   // ── the handoff split (see header) ──────────────────────────────────────
   const shiftScheduled = new Map<string, number>();
-  const shiftActual    = new Map<string, number>();
+  const shiftPayable   = new Map<string, number>();
   const shiftSessions  = new Map<string, number>();
   for (const r of rows) {
     shiftScheduled.set(r.shift_id, r.scheduled_hours);
-    shiftActual.set(r.shift_id, (shiftActual.get(r.shift_id) ?? 0) + r.actual_hours);
+    shiftPayable.set(r.shift_id, (shiftPayable.get(r.shift_id) ?? 0) + r.payable_hours);
     shiftSessions.set(r.shift_id, (shiftSessions.get(r.shift_id) ?? 0) + 1);
   }
   const scheduledShare = (r: HoursExportRow): number => {
     const total    = shiftScheduled.get(r.shift_id) ?? 0;
     const siblings = shiftSessions.get(r.shift_id) ?? 1;
     if (siblings === 1) return total;
-    const actualAll = shiftActual.get(r.shift_id) ?? 0;
-    return actualAll > 0 ? total * (r.actual_hours / actualAll) : total / siblings;
+    const payableAll = shiftPayable.get(r.shift_id) ?? 0;
+    return payableAll > 0 ? total * (r.payable_hours / payableAll) : total / siblings;
   };
 
   const agg = (
@@ -350,14 +401,15 @@ export async function buildHoursExport(
       let a = acc.get(k);
       if (!a) {
         a = { ...shape(r), sessions: 0, shifts: 0, scheduled_hours: 0, actual_hours: 0,
-              break_hours: 0, offpost_hours: 0, variance_hours: 0, coverage_pct: null,
-              auto_closed_sessions: 0, flagged_count: 0,
+              payable_hours: 0, break_hours: 0, offpost_hours: 0, variance_hours: 0,
+              coverage_pct: null, auto_closed_sessions: 0, flagged_count: 0,
               _shifts: new Set<string>(), _flagged: new Set<string>() };
         acc.set(k, a);
       }
       a.sessions        += 1;
       a.scheduled_hours += scheduledShare(r);
       a.actual_hours    += r.actual_hours;
+      a.payable_hours   += r.payable_hours;
       a.break_hours     += r.break_hours;
       a.offpost_hours   += r.offpost_hours;
       if (r.flags.includes('AUTO_CLOSED')) a.auto_closed_sessions += 1;
@@ -369,10 +421,11 @@ export async function buildHoursExport(
       a.flagged_count   = _flagged.size;
       a.scheduled_hours = round2(a.scheduled_hours);
       a.actual_hours    = round2(a.actual_hours);
+      a.payable_hours   = round2(a.payable_hours);
       a.break_hours     = round2(a.break_hours);
       a.offpost_hours   = round2(a.offpost_hours);
-      a.variance_hours  = round2(a.actual_hours - a.scheduled_hours);
-      a.coverage_pct    = coverage(a.actual_hours, a.scheduled_hours);
+      a.variance_hours  = round2(a.payable_hours - a.scheduled_hours);
+      a.coverage_pct    = coverage(a.payable_hours, a.scheduled_hours);
       return a;
     }).sort((x, y) => x.label.localeCompare(y.label));
   };
@@ -400,8 +453,8 @@ export async function buildHoursExport(
   )[0] ?? {
     guard_id: null, guard_name: null, badge_number: null, site_id: null, site_name: null,
     label: 'ALL', sessions: 0, shifts: 0, scheduled_hours: 0, actual_hours: 0,
-    break_hours: 0, offpost_hours: 0, variance_hours: 0, coverage_pct: null,
-    auto_closed_sessions: 0, flagged_count: 0,
+    payable_hours: 0, break_hours: 0, offpost_hours: 0, variance_hours: 0,
+    coverage_pct: null, auto_closed_sessions: 0, flagged_count: 0,
   };
 
   return {
