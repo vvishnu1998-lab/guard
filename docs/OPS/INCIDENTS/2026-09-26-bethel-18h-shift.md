@@ -146,8 +146,22 @@ pre-backfill values, so they cannot be re-derived after the fact.
 
 **The SQL** — copied byte-for-byte into `2026-09-26-bethel-18h-shift/` from
 `~/guard-incident-2026-09-26/`, where both files are byte-identical (`cmp`) to the
-drafts written in the session scratchpad. The invocation and path Vishnu ran
-them from were not recorded here — **UNVERIFIED**.
+drafts written in the session scratchpad.
+
+**How it ran** (Vishnu, 2026-09-26, from `~/guard` in his own terminal, all after
+09:58:39 PT — the COMMIT file's mtime; the exact commit minute is not recorded):
+
+1. **Preview** —
+   `railway run --service Postgres sh -c 'psql "$DATABASE_PUBLIC_URL" -v ON_ERROR_STOP=1 -f <scratchpad>/q9c_backfill_auto_clockout_anchor.sql'`,
+   where `<scratchpad>` is this session's
+   `/private/tmp/claude-501/-Users-vishnuvardhanreddy-guard/0684c545-86d8-4d7a-a59f-7d168ae2ce8d/scratchpad`.
+   Printed sha256 `7aac420d…`; 206 rows, 0 held, 103.1385 h; ended `ROLLBACK`.
+2. **The COMMIT copy** — made with a one-line `sed`; `diff` against the preview
+   showed line 245 only.
+3. **Commit** — the same command on `q9c_backfill_auto_clockout_anchor_COMMIT.sql`:
+   identical output; ended `COMMIT`.
+4. **Re-run of the preview** — the census returned 0 in every tenant; ended
+   `ROLLBACK`.
 
 | file | role | sha256 | mtime (PT) |
 |---|---|---|---|
