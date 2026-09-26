@@ -130,7 +130,7 @@ export default function BillingPage() {
       <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
         <h2 className="text-white font-bold tracking-widest text-base mb-1">DOWNLOAD HOURS REPORT</h2>
         <p className="text-gray-500 text-xs mb-5">
-          Export an Excel spreadsheet of all completed shifts with clock-in/out times, break duration, and total hours.
+          Export an Excel spreadsheet of all completed shifts with clock-in/out times, break duration, actual hours, and payable hours (clocked-in time inside the scheduled window).
         </p>
 
         {exportError && (
