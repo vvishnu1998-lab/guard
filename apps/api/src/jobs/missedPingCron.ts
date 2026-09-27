@@ -9,8 +9,8 @@
  *
  * The 15-min tail does not serve AUTO-closed sessions: autoCompleteShifts
  * records clocked_out_at at the anchor (scheduled_end, or clocked_in_at if
- * later) but only runs 30+ min after scheduled_end, so a scheduled_end
- * anchor is already older than 15 min when the row becomes visible. (A
+ * later) and only once scheduled_end + the 15-min grace has passed (equal to
+ * this tail), so a scheduled_end anchor is past the tail when visible. (A
  * clock-in during the grace can still match the tail, but it has no
  * trackable window at all — every window starts before it, R4.) Nothing is
  * lost: every tracked window ends by scheduled_end (R3), and the session is

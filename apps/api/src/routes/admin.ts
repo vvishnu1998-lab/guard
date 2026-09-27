@@ -1483,9 +1483,9 @@ router.get('/recent-alerts', requireAuth('company_admin', 'vishnu'), async (req,
 
        -- Missed shifts — scheduled but no clock-in 15 min after start.
        -- Status filter accepts both 'scheduled' (alert fired, shift still
-       -- before scheduled_end) and 'missed' (auto-complete cron has since
-       -- flipped the status because scheduled_end passed with zero
-       -- sessions). The 24-hour cap on missed_alert_sent_at keeps the
+       -- before scheduled_end + the auto-close grace) and 'missed'
+       -- (auto-complete cron has since flipped the status because that passed
+       -- with zero sessions). The 24-hour cap on missed_alert_sent_at keeps the
        -- alert visible on the dashboard the morning after, then drops it.
        SELECT
          sh.id::text,

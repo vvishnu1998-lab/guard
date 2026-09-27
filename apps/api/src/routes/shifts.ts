@@ -1253,9 +1253,9 @@ router.patch('/:id/reassign', requireAuth('company_admin', 'vishnu'), async (req
 // shift. The 409 at 'active' below is an existing, shipped product decision
 // that an in-progress shift is not cancellable; this makes the gate
 // actually enforce it. Left in ('active','scheduled'), the shift is swept
-// by autoCompleteShifts at scheduled_end and the session closes through the
-// path that already owns closing sessions, with the same total_hours math
-// as a manual clock-out. Nothing here writes clock_out_reason.
+// by autoCompleteShifts once scheduled_end + the grace has passed; the session
+// closes through the path that already owns closing sessions, with the same
+// total_hours math as a manual clock-out. Nothing here writes clock_out_reason.
 //
 // Writes (single txn):
 //   shifts.status              = 'cancelled'

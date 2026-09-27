@@ -20,14 +20,14 @@
  * / missed_alert_sent_at all live on shifts) and gives us cleaner
  * observability when triaging "which rung fired" incidents.
  *
- * Once the guard clocks in, the shift status flips to 'active' and
- * every WHERE below stops matching automatically — no explicit "stop"
- * needed. If the guard never clocks in, autoCompleteShifts eventually
- * flips the shift to 'missed' at scheduled_end and this cron stops
- * too. missedShiftAlert.ts stays in place for the pre-existing
- * admin-only T+10 email flow; the T+30 admin email here is a separate
- * ladder rung with different framing (it fires 30 min into the
- * escalation as the "no-response" fallback).
+ * Once the guard clocks in, the shift status flips to 'active' and every
+ * WHERE below stops matching — no explicit "stop" needed. A no-show is
+ * flipped to 'missed' once scheduled_end + the auto-close grace (15 min)
+ * has passed and this cron stops too; a shift of about 10 min or less
+ * flips before its T+30 rung, which is never sent (10-20 min: a same-tick
+ * race) — accepted in U4b. missedShiftAlert.ts stays in place for the
+ * pre-existing admin-only T+10 email flow; the T+30 admin email here is a
+ * separate rung with different framing (the "no-response" fallback).
  *
  * Also mirrors each guard push into the notifications table with
  * type='late_clock_in' so the mobile Alerts tab renders it.
