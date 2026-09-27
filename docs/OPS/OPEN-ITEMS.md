@@ -32,6 +32,7 @@ Deliberately not tested for validity — testing transmits it.
 verified: PARTIAL — `nightlyPurge.ts:53` is `cron.schedule('0 0 * * *', runNightlyPurge)` with no options arg; `grep -L timezone apps/api/src/jobs/*.ts` includes it. `nightlyPurge.ts:42`: `const DRY_RUN = process.env.RETENTION_DRY_RUN !== 'false'` → defaults **true**. **UNVERIFIED — the Railway env value of `RETENTION_DRY_RUN`** (would require reading service vars; not done in a read-only pass). If unset in prod, the purge has never deleted anything.
 
 **N3. UPDATED 2026-09-19 — Four crons have no top-level catch; nine catch to console only; `missedPingCron` has no Sentry import.**
+update 2026-09-26 (U4b): `missedPingCron`'s outer `try` (`jobs/missedPingCron.ts:99`, catch `:222`, console.error only) wraps the whole session loop — the only inner `try` (`:200`) covers just the FCM push — so a throw on one session drops every later session for that tick, `runJob` records `last_result='ok'`, and nothing alarms. With the 15-minute grace a shift's last ping window gets at least 3 open-session ticks (was at least 6) before the sweep closes it, so as few as three consecutive failing ticks can lose that window's flag without trace.
 update: `chatRetention`'s console-only catch was DELETED, so it leaves the console-only set (nine → eight) and joins the no-top-level-catch set (four → five) — but deliberately, and with the opposite consequence: its throw now reaches the `runJob` wrapper and produces console + Sentry + `cron_heartbeats.last_result='error'`. The `verified:` line below is the 2026-09-05 snapshot and is left as recorded. Two errors in it, found 2026-09-19 and NOT fixed here: `pingReminder`'s top-level catch is at `:505` not `:407`, and it imports Sentry nowhere rather than importing-without-calling; and `unstaffedPostWarning` (added 2026-09-11) is a tenth console-only catch missing from the list.
 verified: YES — no top-level catch: `dailyShiftEmail` (unwrapped `pool.query` `:24`), `missedShiftAlert` (`:25`), `monthlyHoursReport` (`:52`), `nightlyPurge` (deliberate, documented `:58-63`). Console-only top-level catch: `chatRetention`, `expireSwapRequests`, `handoffNudge`, `lateClockInReminder`, `locationIntegrityCron`, `missedPingCron`, `pingReminder` (`:407`, imports Sentry but does not call it), `preShiftReminder`, `shiftStartReminder`. `grep -c Sentry apps/api/src/jobs/missedPingCron.ts` → 0. Full table in `CRONS.md`.
 
@@ -3924,7 +3925,14 @@ Update the table from schema objects, the only method there is (no ledger).
 `scripts/ops/triage.sh` embeds `STATE.md`, so a stale row feeds the daily brief.
 **Size S, Tier 1.**
 
-### N113 — invariants skill: "no manual clock-out has EVER landed within 20 minutes of `scheduled_end`" is false
+### N113 — CLOSED 2026-09-26 — invariants skill: "no manual clock-out has EVER landed within 20 minutes of `scheduled_end`" is false
+
+**Closed by** U4b's docs commit: the skill's "Clock-out reality" section now states
+91 of 113 within ±20 min and gives the grace as the constant (15 from U4b, 30
+before) — in the repo copy (`.claude/skills/netraops-invariants/SKILL.md`) and the
+plugin copy, kept byte-identical. The claude.ai copy is Vishnu's to update.
+
+Original finding, retained:
 
 verified: `.claude/skills/netraops-invariants/SKILL.md:97`. Prod, clock-ins since
 2026-08-25, reasons `manual` / `manual_no_photo`: **91 of 113** landed within ±20
@@ -4355,3 +4363,78 @@ verified against the lifecycle read 2026-09-26 (N132: `ping-7d`, prefix `ping/`,
   is unverified" — the same missing rule.
 
 Correct the three to what the rules do, dated. **Size XS, Tier 1.**
+
+## New from U4b — auto clock-out grace 15 (2026-09-26)
+
+Four items from U4b's Phase 0 audit and build (`761d7f5`). **None is changed by
+U4b** unless the item says so. API lines are read at `761d7f5`; mobile lines at
+`6638018`, and `batch/mobile-17` (3 commits ahead of main) does not touch them.
+
+### N138 — mobile `SHIFT_EXPIRY_GRACE_MS` is still 30 minutes; the server's grace is 15 (next OTA)
+
+verified: `apps/mobile/lib/shiftExpiry.ts:35` `export const SHIFT_EXPIRY_GRACE_MS =
+30 * 60 * 1000;` — the local expiry gate the background location task applies
+(`tasks/locationBackground.ts:160`, `:179`). The server closes sessions at
+`scheduled_end + 15` since U4b (`AUTO_CLOSE_GRACE_MINUTES`). Accepted until the OTA
+ships (U4b, 2026-09-26):
+- between end+15 and end+30 an exit from the fence raises the local "Outside post
+  boundary" alert; the server answers 409 `SESSION_CLOSED` and cannot retract it;
+- a clock-out in the same band gets 404 `Active session not found`
+  (`apps/api/src/routes/shifts.ts:4500`), and the app shows "Clock-Out Failed" with
+  that raw server text and one OK button (`app/clock-out/index.tsx:171`;
+  `guardMessage` returns `ApiError.message`, `lib/errorCopy.ts:53`; only 400
+  `PHOTO_REJECTED` is special-cased, `:151`). It should say the shift has already
+  ended and refresh.
+
+GRD0005 (`4a71d17d`, STARNET) is on runtime 1.0.16 and cannot take any OTA (N115),
+so it keeps the 30-minute gate until a store install.
+
+Set the constant to 15 in the next mobile batch, and treat the clock-out 404 as
+"shift already ended" (a `SESSION_CLOSED` code on that route, N111's shape, would
+make it unambiguous). **Size S (mobile batch, small API change), Tier 1.**
+
+### N139 — a handoff requested near the end can stay `pending` after the sweep has closed the shift
+
+verified: a handoff's deadline is `requested_at + HANDOFF_EXPIRY_MINUTES` (30;
+`jobs/expireSwapRequests.ts:73`, `:93`) whatever the shift's status, and accept
+refuses a shift that is no longer active with 409 `SHIFT_NOT_ACTIVE`
+(`routes/shifts.ts:2682`). With the 15-minute grace a handoff requested from about
+end−15 until the sweep outlives its shift: B still sees it, accept returns 409,
+and A later gets an "expired" push for a shift that was auto-closed. Under 30, a
+request made before the end expired while the shift was still active. Related and
+pre-existing: `handoffNudge` keeps nudging accepted handoffs with no arrival
+(`jobs/handoffNudge.ts:54-65` has no shift-status condition), so its pushes and
+admin email can land after the shift has closed.
+
+Expire (or cancel) open handoffs when the sweep closes their shift, or give the
+expiry and the nudge a shift-status predicate; check the mobile Alerts copy in
+the same dispatch. Filed, not fixed, per the U4b decision. **Size S, Tier 1.**
+
+### N140 — offline-queued reports and scans that flush after a close are dead-lettered; no report or scan row is ever written (links N111)
+
+verified: `apps/mobile/lib/offlineQueue.ts` moves an item the server refuses with a
+4xx straight to the dead-letter bucket, no retry (`:345`, reason `permanent_4xx`,
+`:70`); the guard is shown a banner (header `:18-22`). After a session closes, a
+queued report gets 403 `Active session not found` (`apps/api/src/routes/reports.ts:337`)
+and a checkpoint scan the same (`routes/checkpoints.ts:506`), so both are
+dead-lettered and no `reports` / `checkpoint_scans` row is ever written. The
+payload is not lost outright: the app escalates it to
+`POST /offline/dead-letter` (`offlineQueue.ts:401-411`), which stores it in
+`offline_dead_letters` (capped at 32 KB, `apps/api/src/routes/offlineDeadLetter.ts:119`)
+for admins to list, and keeps it on the handset until reported. Nothing turns
+that row back into a report. Pre-existing; U4b moves the start of the band from
+end+30 to end+15.
+
+Accept a late report or scan for a session closed within a bounded window, or
+replay the dead-letter row as the report or scan it was, and return
+`SESSION_CLOSED` (N111). **Size M (API + mobile batch), Tier 1.**
+
+### N141 — `backfill-stale-shifts.ts` stops EVERY node-cron task, not just the sweep's
+
+verified: `apps/api/scripts/backfill-stale-shifts.ts:74` `for (const task of
+cron.getTasks().values()) task.stop();` (U4b). Today the job module is the only
+import that registers a cron, so this is exactly right and is what lets the script
+exit. If a future import registers another job, or the script runs inside a
+longer-lived process, that job is stopped too, silently. Revisit then: stop only
+the autoCompleteShifts task, or move the worker into a module that does not call
+`runJob`. **Size XS.**

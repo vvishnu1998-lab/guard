@@ -1,7 +1,7 @@
 /**
  * test-auto-complete-shifts.ts — regression test for jobs/autoCompleteShifts.ts
  * (U4a: an auto clock-out records GREATEST(clocked_in_at, scheduled_end), not
- * the sweep time).
+ * the sweep time; U4b: the sweep runs 15 minutes after scheduled_end, not 30).
  *
  * LOCAL DATABASES ONLY. The pool is built from PGHOST / PGPORT / PGDATABASE /
  * PGUSER, and the script REFUSES to run unless PGHOST is 127.0.0.1 or
@@ -18,9 +18,12 @@
  *   PGHOST=127.0.0.1 PGPORT=5433 PGDATABASE=guard_u4a PGUSER=tester \
  *     npx ts-node apps/api/scripts/test-auto-complete-shifts.ts
  *
- * Every due fixture shift ends at t0 - 45 min, so its sweep predicate
- * (scheduled_end + 30 min <= NOW()) holds; the recorded end must still be the
- * anchor, 45 minutes before the sweep ran. Cases:
+ * Most due fixture shifts end at t0 - 45 min, past the grace under 15 or 30;
+ * the recorded end must still be the anchor, 45 minutes before the
+ * sweep ran. L and M end at t0 - 20 and t0 - 16: due under the 15-minute
+ * grace (scheduled_end + 15 min <= NOW()), NOT due under the old 30. They are
+ * the cases that tell the two apart, and they fail against the 30-minute job.
+ * Cases:
  *   A on-time clock-in           -> out = scheduled_end
  *   B late clock-in              -> out = scheduled_end, hours from clock-in
  *   C early clock-in             -> out = scheduled_end, hours from scheduled_start
@@ -31,11 +34,17 @@
  *   H open violation born in the grace   -> resolved at occurred_at, 0 min, branch 'grace'
  *   I open violation on a session an EARLIER close ended -> branch 'occurred_at'
  *   J due shift with no session  -> 'missed' (unchanged)
- *   K shift inside the grace     -> untouched (unchanged)
+ *   K shift inside the grace (ended t0 - 10) -> untouched (unchanged)
+ *   L shift ended t0 - 20        -> swept at 15 (the old 30 left it open); its
+ *     open break from t0 - 25 is cut at the anchor, 5 min (step 1 at 15)
+ *   M shift ended t0 - 16        -> swept at 15: the boundary, one minute past
+ *   K's open break from t0 - 12 stays open (step 1 does not reach inside it)
  *   then a re-run must change nothing.
  *
- * Assertions do not stop at the first failure: the negative control (this
- * file against the pre-U4a job) must show WHICH assertions fail.
+ * Assertions do not stop at the first failure: the negative controls (this
+ * file against the pre-U4a job; for U4b, against the 30-minute job at
+ * 6638018, where exactly the L/M cases and the counts fail) must show WHICH
+ * assertions fail.
  */
 import { Pool, PoolClient } from 'pg';
 import cron from 'node-cron';
@@ -123,7 +132,7 @@ async function main(): Promise<void> {
       return g.rows[0].id;
     }
 
-    // Due window for every swept case: 6 h shift ending t0 - 45 min.
+    // Default window: 6 h shift ending t0 - 45 min (L and M override it).
     const START = -405;
     const END = -45;
 
@@ -165,6 +174,9 @@ async function main(): Promise<void> {
                                      { status: 'completed', closedAtMin: END });
     const J = await shiftWithSession('J-missed', null, { status: 'scheduled' });
     const K = await shiftWithSession('K-inside-grace', -370, { startMin: -370, endMin: -10 });
+    // U4b: inside the old 30-minute grace, past the new 15-minute one.
+    const L = await shiftWithSession('L-past-new-grace', -378, { startMin: -380, endMin: -20 });
+    const M = await shiftWithSession('M-boundary-16', -376, { startMin: -376, endMin: -16 });
 
     const brkE = await pool.query<{ id: string }>(
       `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes)
@@ -174,6 +186,16 @@ async function main(): Promise<void> {
       `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes)
        VALUES ($1, $2, $3, $4, 'break', 30) RETURNING id`,
       [F.sessionId, F.guardId, fx.siteId, at(END + 5)]);
+    // U4b step 1: a break started 5 min before L's end is still open at the
+    // sweep and is cut at the anchor; K's (inside its grace) is left alone.
+    const brkL = await pool.query<{ id: string }>(
+      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes)
+       VALUES ($1, $2, $3, $4, 'break', 30) RETURNING id`,
+      [L.sessionId, L.guardId, fx.siteId, at(-25)]);
+    const brkK = await pool.query<{ id: string }>(
+      `INSERT INTO break_sessions (shift_session_id, guard_id, site_id, break_start, break_type, planned_duration_minutes)
+       VALUES ($1, $2, $3, $4, 'break', 30) RETURNING id`,
+      [K.sessionId, K.guardId, fx.siteId, at(-12)]);
 
     async function violation(s: { sessionId: string | null; guardId: string }, occurredMin: number): Promise<string> {
       const v = await pool.query<{ id: string }>(
@@ -207,9 +229,9 @@ async function main(): Promise<void> {
 
     const r1 = await runOnce();
     console.log(`\nfirst run: ${JSON.stringify(r1)}\n`);
-    check(r1.shiftsClosed === 9,       `shiftsClosed = 9 (A-H + J) (got ${r1.shiftsClosed})`);
-    check(r1.sessionsClosed === 8,     `sessionsClosed = 8 (A-H) (got ${r1.sessionsClosed})`);
-    check(r1.breaksClosed === 2,       `breaksClosed = 2 (E, F) (got ${r1.breaksClosed})`);
+    check(r1.shiftsClosed === 11,      `shiftsClosed = 11 (A-H + J + L + M) (got ${r1.shiftsClosed})`);
+    check(r1.sessionsClosed === 10,    `sessionsClosed = 10 (A-H + L + M) (got ${r1.sessionsClosed})`);
+    check(r1.breaksClosed === 3,       `breaksClosed = 3 (E, F, L) (got ${r1.breaksClosed})`);
     check(r1.violationsResolved === 3, `violationsResolved = 3 (G, H, I) (got ${r1.violationsResolved})`);
 
     type SessRow = { clocked_in_at: Date; clocked_out_at: Date | null; total_hours: number | null;
@@ -235,6 +257,9 @@ async function main(): Promise<void> {
     await expectAnchor('D grace clock-in', D, END + 10, 0);
     await expectAnchor('E',                E, END,      hours((END - (START + 1)) * MIN));
     await expectAnchor('F',                F, END,      hours((END - (START + 1)) * MIN));
+    // U4b: due under the 15-minute grace; the 30-minute job leaves both open.
+    await expectAnchor('L ended t0-20 (inside the old grace)', L, -20, hours((-20 - (-378)) * MIN));
+    await expectAnchor('M ended t0-16 (the 15-minute boundary)', M, -16, hours((-16 - (-376)) * MIN));
 
     // The recorded end is not the sweep time: the sweep ran ~45 min after it.
     const aRow = await sess(A);
@@ -253,6 +278,12 @@ async function main(): Promise<void> {
     check(ms(bF.break_end) === ms(bF.break_start), `F (c): grace break is zero-length, break_end = break_start (got ${bF.break_end?.toISOString()})`);
     check(bF.duration_minutes === 0, `F (c): duration_minutes = 0 (got ${bF.duration_minutes})`);
     check(bF.ended_by === 'auto_complete', `F (c): ended_by = 'auto_complete' (got ${bF.ended_by})`);
+    const bL = await brk(brkL.rows[0].id);
+    check(ms(bL.break_end) === t0 - 20 * MIN, `L: break begun 5 min before the end is cut AT the anchor (got ${bL.break_end?.toISOString()})`);
+    check(bL.duration_minutes === 5, `L: duration_minutes = 5 (got ${bL.duration_minutes})`);
+    check(bL.ended_by === 'auto_complete', `L: ended_by = 'auto_complete' (got ${bL.ended_by})`);
+    const bK = await brk(brkK.rows[0].id);
+    check(bK.break_end === null && bK.ended_by === null, `K: its open break is untouched (still open)`);
 
     // Violations d, and the log branch
     type ViolRow = { occurred_at: Date; resolved_at: Date | null; duration_minutes: number | null };

@@ -329,9 +329,9 @@ async function cleanup(f: Fixtures) {
        VALUES ($1, $2, $3::date - INTERVAL '30 days', $3::date - INTERVAL '1 day')`,
       [guardExp, f.companyA.siteA, today]);
 
-    // Seed shifts on a future date so the auto-complete cron hasn't
-    // already settled them (it runs every 5 min on scheduled_end <= NOW;
-    // a same-day afternoon slot would have flipped to 'missed' by the
+    // Seed shifts on a future date so the auto-complete cron hasn't already
+    // settled them (it runs every 5 min on scheduled_end + the auto-close grace
+    // <= NOW; a same-day afternoon slot would have flipped to 'missed' by the
     // time this test reaches it). shiftAssigned belongs to f.companyA.guard
     // (assignment covers today..today+7 from case 4 — today+5 is in range).
     // guardOk's assignment is open-ended; guardExp's expired before today.

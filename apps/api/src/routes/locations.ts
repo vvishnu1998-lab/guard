@@ -688,7 +688,7 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
   const guardId      = req.user!.sub;
 
   // Liveness gate (2026-08-07). Ownership alone is not enough: the
-  // autoCompleteShifts cron closes a session server-side at scheduled_end,
+  // autoCompleteShifts cron closes a session server-side once its grace is up,
   // and the mobile app has no channel to learn that — its registered
   // geofence region stays armed until the store next transitions. On
   // 2026-08-06 that produced two boundary reports 3 and 28 minutes after

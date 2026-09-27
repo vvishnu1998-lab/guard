@@ -14,10 +14,10 @@
  *
  * The 15-min tail does not serve AUTO-closed sessions, for the same
  * reason as in missedPingCron.ts: the recorded clocked_out_at is the
- * anchor, and a scheduled_end anchor is 30+ min in the past by the time
- * the sweep commits (a grace-time clock-in may still match, but has no
- * trackable window). Every tracked window ends by scheduled_end and is
- * judged by the open arm during the grace.
+ * anchor, and a scheduled_end anchor is at least the auto-close grace (15
+ * min) in the past by the time the sweep commits (a grace-time clock-in
+ * may still match, but has no trackable window). Every tracked window
+ * ends by scheduled_end and is judged by the open arm during the grace.
  *
  * Window rules (matches missedPingCron):
  *   * Windows are 60 min slots starting at scheduled_start.

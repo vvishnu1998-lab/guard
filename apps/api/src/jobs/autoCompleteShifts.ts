@@ -3,8 +3,8 @@
  *
  * ── THE GRACE WINDOW ─────────────────────────────────────────────────────
  *
- * The sweep fires at scheduled_end + 30 MINUTES, not at scheduled_end. The
- * clock-out redesign gives the guard a push 5 minutes before the end and a
+ * The sweep fires 15 minutes (constants/autoCloseGrace.ts) after scheduled_end.
+ * The clock-out redesign gives the guard a push 5 minutes before the end and a
  * window to close the shift themselves with a photo and coordinates; this
  * job is the fallback for when they do not. Sweeping at scheduled_end would
  * close the session out from under a guard who is walking to the gate.
@@ -41,19 +41,19 @@
  * completions, scans) keep their real timestamps, which now fall after the
  * recorded clocked_out_at. Nothing here rewrites them.
  *
- * ALL THREE predicates below move together and MUST stay in lockstep. If the
- * shifts-status flip (step 3) fired at scheduled_end while the session close
- * (step 2) waited for +30min, the shift would already be 'completed' when
- * step 2 ran, its `status IN ('active','scheduled')` guard would not match,
- * and the session would be orphaned FOREVER — the exact state
- * jobs/orphanedSessionCheck.ts exists to detect.
+ * ALL THREE predicates below are one expression, autoCloseDueSql(), and must
+ * stay one. If the shifts-status flip (step 3) fired at scheduled_end while
+ * the session close (step 2) waited for the grace, the shift would already be
+ * 'completed' when step 2 ran, its `status IN ('active','scheduled')` guard
+ * would not match, and the session would be orphaned FOREVER — the exact
+ * state jobs/orphanedSessionCheck.ts exists to detect.
  *
- * Checked against every consumer of the status flip before moving it:
- *   - lateClockInReminder is self-bounding on its three *_sent_at sentinels,
- *     not on the flip (its comment claims otherwise; the sentinels are what
- *     actually stop it).
+ * Checked against every consumer of the status flip:
+ *   - lateClockInReminder selects only 'scheduled' shifts, so the flip ends
+ *     its ladder. A no-show of about 10 min or less flips before its T+30
+ *     rung, which is never sent (10-20 min: never or a race); accepted, U4b.
  *   - missedShiftAlert is bounded by missed_alert_sent_at, fires once.
- *   - dailyShiftEmail requires scheduled_end < NOW() - 1 hour, well past +30.
+ *   - dailyShiftEmail requires scheduled_end < NOW() - 1 hour, past the grace.
  *   - missedPingCron / missedReportCron bound their windows by scheduled_end
  *     itself (services/pingWindows.ts:215, and missedReportCron's own grid —
  *     a window is tracked only if its END fits inside scheduled_end), so a
@@ -103,7 +103,7 @@
  * ever appear, that alert is the signal to build a deliberate close path,
  * not to widen this predicate.
  *
- * If a shift's scheduled_end + 30 minutes has passed and status is still
+ * If a shift's scheduled_end + the grace has passed and status is still
  * 'active' or 'scheduled':
  *   1. Close any open break_sessions inside the affected shift_sessions
  *      (set break_end = GREATEST(break_start, anchor), compute
@@ -134,14 +134,14 @@
  * The shape is still identical; only the clock-out differs — the manual
  * path has an observed clock-out, this path has the anchor.
  *
- * Exporting the worker function makes it testable from
- * apps/api/scripts/test-auto-complete-shifts.ts.
+ * Exported for apps/api/scripts/test-auto-complete-shifts.ts.
  */
 
 import { runJob } from './_run';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 import { Sentry } from '../services/sentry';
+import { autoCloseDueSql } from '../constants/autoCloseGrace';
 
 /**
  * The recorded end of an auto-closed session — see the header. Aliases are
@@ -163,9 +163,9 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
     //         anchor ends there; one started during the grace (the break
     //         allowance does not block post-end starts) ends zero-length at
     //         its own start, so break_end never precedes break_start.
-    //         In practice breakExpiryCron closes a break at break_start +
-    //         plan (every plan is 30 min, it runs every minute), so what
-    //         reaches this step is almost always a grace-time break.
+    //         breakExpiryCron ends a break at start + its 30-min plan, so one
+    //         begun in the last ~15 min before scheduled_end is cut here, at
+    //         the anchor, with no push or overrun verdict (U4b; D18).
     const breaks = await client.query(
       `UPDATE break_sessions b
        SET break_end = GREATEST(b.break_start, due.anchor),
@@ -182,7 +182,7 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
            FROM shift_sessions ss
            JOIN shifts s ON s.id = ss.shift_id
           WHERE ss.clocked_out_at IS NULL
-            AND s.scheduled_end + INTERVAL '30 minutes' <= NOW()
+            AND ${autoCloseDueSql('s.scheduled_end')}
             AND s.status IN ('active', 'scheduled')
        ) due
        WHERE b.shift_session_id = due.id
@@ -217,7 +217,7 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
        FROM shifts s
        WHERE ss.shift_id = s.id
          AND ss.clocked_out_at IS NULL
-         AND s.scheduled_end + INTERVAL '30 minutes' <= NOW()
+         AND ${autoCloseDueSql('s.scheduled_end')}
          AND s.status IN ('active', 'scheduled')
        RETURNING ss.id`
     );
@@ -319,7 +319,7 @@ export async function autoCompleteOverdueShifts(client: PoolClient): Promise<{
            THEN 'completed'
          ELSE 'missed'
        END
-       WHERE s.scheduled_end + INTERVAL '30 minutes' <= NOW()
+       WHERE ${autoCloseDueSql('s.scheduled_end')}
          AND s.status IN ('active', 'scheduled')
        RETURNING id, status`
     );

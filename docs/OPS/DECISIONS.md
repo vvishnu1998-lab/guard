@@ -232,6 +232,38 @@ Taken during the Bethel 18-hour shift incident
   sha256, in `INCIDENTS/2026-09-26-bethel-18h-shift/`.
 - Still open: grace 30 → 15 (**U4b**).
 
+**Status update 2026-09-26 — U4b BUILT: grace 30 → 15 minutes.** `761d7f5` on
+`fix/autoclose-grace-15` — not yet merged or deployed.
+- The grace is one constant, **`AUTO_CLOSE_GRACE_MINUTES` = 15**
+  (`apps/api/src/constants/autoCloseGrace.ts`), read by the sweep's three
+  predicates, the clock-out reminder's window and
+  `scripts/backfill-stale-shifts.ts`, whose grace-less count is fixed with it (it
+  also stops the cron that importing the job registers, so it now exits). The
+  anchor above and Payable (D19) are unchanged.
+- Cost, measured before building (prod, manual clock-outs 2026-08-25 00:00 →
+  2026-09-26 00:00 PT): **7 of 113** landed +15 … +30 min past `scheduled_end`, all
+  STARNET; they would now be
+  auto-closed at the anchor. Their post-end minutes leave Actual; Payable is
+  unchanged.
+- **Accepted with it:**
+  - A break begun in roughly the last 15 minutes before `scheduled_end` is still
+    open when the sweep runs (every plan is 30 min) and is cut at the anchor:
+    `ended_by = 'auto_complete'`, no "Break ended" push, no return check, no
+    overrun verdict. Pay is unaffected — breaks are paid.
+  - The late-clock-in T+30 admin email (both jobs run every 5 min): a no-show
+    shift of 10 minutes or less is flipped to `'missed'` before its T+30 rung and
+    never gets it; at 11–19 minutes it is never sent or races the sweep on the
+    same tick, depending on the start minute; at 20+ it is always sent.
+  - Mobile keeps its own 30-minute local expiry until the next OTA (N138):
+    between +15 and +30 a guard can see a local breach alert that the server's
+    409 cannot retract, and a clock-out attempt gets 404 and an alert reading
+    "Clock-Out Failed" / "Active session not found" (the raw server text, one OK
+    button, no refresh).
+- Proof lives outside CI (the harness needs a local Postgres):
+  `apps/api/scripts/test-auto-complete-shifts.ts` is **63/0 on `761d7f5`**; the same
+  harness run against `6638018`'s job is **49/14** — the 14 are exactly the new
+  cases (shifts ended t0−20 and t0−16, a break from t0−25) and the counts.
+
 - The sweep still **fires** at `scheduled_end` + grace; it no longer **records**
   that moment. One anchor, `GREATEST(clocked_in_at, scheduled_end)`, is used for
   `clocked_out_at`, `total_hours`, open breaks (`GREATEST(break_start, anchor)`)
@@ -258,7 +290,7 @@ legal hold. The last five before U4a all landed at +30.01 min.
 deployment `4683c913` SUCCESS on that commit. Verified 2026-09-26: Vishnu checked
 the render on prod desktop and a real iPhone (real Payable values, no wrap or
 collision), and Bethel AME Church through the builder reads **Payable 301.45 h /
-Actual 303.95 h**. The August regeneration is still pending (below; N123).
+Actual 303.95 h**. The August regeneration is DONE (2026-09-27, below).
 
 Earlier status, kept as history:
 
@@ -326,6 +358,14 @@ Choices made while building it (approved 2026-09-26, Phase 0 A1–A12):
   (`NoncurrentDays 60`) deletes it about 60 days later — **accepted 2026-09-26
   (N123, B11).** A copy of the file as delivered is retrievable by that version
   id only until then.
+  **Done 2026-09-27 02:20:55Z** by vishnu through the deployed route (N123 merged
+  as `6638018`, PR #81, Railway `e086f901`). Row `1521d5c7` kept its id and its
+  `s3_url` byte for byte; the new current version is
+  **`gtwNqclVg6tAQDOumS.uF94HO9Fdi30N`** (17,880 bytes, NOTES commit `66380180`), and
+  `Fk9p_3JF1RK8e46Z93vafVVLZlrCg4Qf` is noncurrent until about 2026-11-26. Checked
+  row by row against the digest-verified August extract: 42 shifts, Actual
+  343.42 h, Payable 340.43 h; Bethel AME Church 22 shifts, 113.33 / 112.29 h; 11
+  flagged (7 AUTO_CLOSED, 4 SHORT), every flag equal to the D19 rules.
 
 Evidence (2026-09-26, prod, read-only): no hours figure today is capped at
 `scheduled_end` on any surface; 0 NO_SCHEDULE shifts; 1 multi-session shift, 0
