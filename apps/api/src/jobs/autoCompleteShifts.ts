@@ -51,7 +51,7 @@
  * Checked against every consumer of the status flip:
  *   - lateClockInReminder selects only 'scheduled' shifts, so the flip ends
  *     its ladder. A no-show of about 10 min or less flips before its T+30
- *     rung, which is never sent (10-20 min: a same-tick race); accepted, U4b.
+ *     rung, which is never sent (10-20 min: never or a race); accepted, U4b.
  *   - missedShiftAlert is bounded by missed_alert_sent_at, fires once.
  *   - dailyShiftEmail requires scheduled_end < NOW() - 1 hour, past the grace.
  *   - missedPingCron / missedReportCron bound their windows by scheduled_end

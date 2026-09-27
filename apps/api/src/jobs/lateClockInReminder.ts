@@ -24,8 +24,8 @@
  * WHERE below stops matching — no explicit "stop" needed. A no-show is
  * flipped to 'missed' once scheduled_end + the auto-close grace (15 min)
  * has passed and this cron stops too; a shift of about 10 min or less
- * flips before its T+30 rung, which is never sent (10-20 min: a same-tick
- * race) — accepted in U4b. missedShiftAlert.ts stays in place for the
+ * flips before its T+30 rung, which is never sent (10-20 min: never or a
+ * same-tick race) — accepted in U4b. missedShiftAlert.ts stays in place for the
  * pre-existing admin-only T+10 email flow; the T+30 admin email here is a
  * separate rung with different framing (the "no-response" fallback).
  *
