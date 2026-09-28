@@ -52,6 +52,7 @@ import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { breakOverlapsWindow } from '../services/pingWindows';
 import { expiresAtFor } from '../services/retention';
+import { missedWindowInsertSql } from '../services/missedWindowInsert';
 import { Sentry } from '../services/sentry';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
 
@@ -194,18 +195,16 @@ runJob('missedReportCron', '*/5 * * * *', async () => {
 
         const label = siteLocalLabel(w.windowStart, s.site_tz);
 
+        // Nothing back when the row exists already, or when the shift's
+        // CURRENT end no longer covers the window (services/missedWindowInsert.ts).
         const inserted = await pool.query<{ id: string }>(
-          `INSERT INTO missed_reports
-             (shift_session_id, site_id, guard_id,
-              window_start, window_end, window_label, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (shift_session_id, window_start) DO NOTHING
-           RETURNING id`,
+          missedWindowInsertSql('missed_reports'),
           [
             s.session_id, s.site_id, s.guard_id,
             w.windowStart, w.windowEnd, label,
             // Anchored on window_end, matching schema_v79. See missedPingCron.
             expiresAtFor('missed_report', w.windowEnd),
+            s.shift_id,
           ],
         );
         const mrId = inserted.rows[0]?.id;
