@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import type { PoolClient } from 'pg';
 import * as Sentry from '@sentry/node';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
@@ -59,6 +60,7 @@ import { insertNotification } from '../services/notifications';
 import {
   isLongShift, longShiftConfirmBody, readLongShiftConfirm, LONG_SHIFT_CONFIRM_FLAG,
 } from '../constants/longShift';
+import { AUTO_CLOSE_GRACE_MINUTES } from '../constants/autoCloseGrace';
 
 const router = Router();
 
@@ -1598,6 +1600,473 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
   }
 });
 
+// ── PATCH /api/shifts/:id helpers ────────────────────────────────────────────
+
+/**
+ * The edit's overlap pre-check against the NEW window, for both the scheduled
+ * edit and the active-shift end edit: the 409 body, or null. The same query
+ * and body PATCH has emitted since v58.
+ */
+async function editOverlapBody(
+  client: PoolClient, guardId: string, shiftId: string, s: Date, e: Date,
+): Promise<Record<string, unknown> | null> {
+  const overlap = await client.query(
+    `SELECT s.id, s.scheduled_start, s.scheduled_end,
+            si.name AS site_name, si.timezone AS site_tz,
+            g.name AS guard_name
+       FROM shifts s
+       JOIN sites si ON si.id = s.site_id
+       LEFT JOIN guards g ON g.id = s.guard_id
+      WHERE s.guard_id = $1
+        AND s.id      != $2
+        AND s.status IN ('scheduled','active')
+        AND s.scheduled_start < $4
+        AND s.scheduled_end   > $3
+      ORDER BY s.scheduled_start
+      LIMIT 1`,
+    [guardId, shiftId, s.toISOString(), e.toISOString()],
+  );
+  if (!overlap.rows[0]) return null;
+  const c  = overlap.rows[0];
+  const tz = (c.site_tz as string | null) ?? 'America/Los_Angeles';
+  const day = new Intl.DateTimeFormat('en-US', {
+    month: 'short', day: 'numeric', timeZone: tz,
+  }).format(new Date(c.scheduled_start));
+  const from = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZone: tz,
+  }).format(new Date(c.scheduled_start));
+  const to = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZone: tz,
+  }).format(new Date(c.scheduled_end));
+  // The message NAMES the collision — guard, site, date, time — because
+  // "overlaps an existing shift" tells an admin nothing they can act on.
+  // `conflict` carries the same facts in structured form so the UI can
+  // deep-link straight to the offending shift.
+  return {
+    error:
+      `These hours overlap ${c.guard_name ?? 'this guard'}'s shift at ` +
+      `${c.site_name} on ${day}, ${from} – ${to}. Move or cancel that shift first.`,
+    conflict: {
+      shift_id:        c.id,
+      guard_name:      c.guard_name,
+      site_name:       c.site_name,
+      scheduled_start: c.scheduled_start,
+      scheduled_end:   c.scheduled_end,
+    },
+  };
+}
+
+/** How long PATCH waits for the shift row before answering SHIFT_BUSY. */
+const SHIFT_LOCK_TIMEOUT = '3s';
+
+/**
+ * How long the active branch waits for any row AFTER it holds the shift row:
+ * its open session, breaks, violations, missed rows. Below Postgres's
+ * deadlock_timeout (1s in production, read 2026-09-28), so when this edit and
+ * a writer that locks the session first (the guard's clock-out, the auto
+ * clock-out sweep) collide, THIS side times out and rolls back before the
+ * deadlock detector would pick a victim. The guard's writes always win; the
+ * admin gets SHIFT_BUSY and reloads.
+ */
+const ACTIVE_CHILD_LOCK_TIMEOUT = '500ms';
+
+/** lock_timeout (55P03) or a broken deadlock (40P01). */
+function isLockConflict(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === '55P03' || code === '40P01';
+}
+
+/**
+ * The race an edit that keeps the session open must stay clear of (decision
+ * 7a, 2026-09-28). The sweep (jobs/autoCompleteShifts.ts) closes sessions with
+ * `UPDATE shift_sessions … FROM shifts` and takes no lock on the shift row. If
+ * an extension committed while a tick that had already judged the OLD end due
+ * was between its snapshot and that UPDATE, Postgres would re-check the
+ * session row but keep the tick's stale shift row, and close the session at
+ * the OLD end ('auto') — then step 3 would skip the shift, leaving it active
+ * with no open session. No lock taken here can prevent that.
+ *
+ * So an edit that keeps the session open is refused once the auto clock-out
+ * is less than a minute away, judged by clock_timestamp() on entry AND again
+ * immediately before COMMIT. A tick that could see the old end as due starts
+ * at or after old end + grace, and this transaction has committed at least 60
+ * seconds before that — so every snapshot that tick takes sees the new end.
+ * Closing in the past is not affected: it closes the session itself, and a
+ * concurrent tick then finds nothing open to close.
+ */
+const AUTO_CLOSE_EDIT_MARGIN_MS = 60_000;
+
+type ActiveEndInput = {
+  id: string;
+  actor: { sub: string; role: string };
+  shift: {
+    guard_id: string | null;
+    scheduled_start: Date | string;
+    scheduled_end: Date | string;
+    legal_hold: boolean;
+    site_name: string;
+    site_tz: string | null;
+  };
+  newEnd: Date;
+  sentStart: Date | null;
+  reason: string | undefined;
+  confirmLong: boolean;
+  confirmClose: boolean;
+};
+
+type ActiveEndResult =
+  | { kind: 'refuse'; status: number; body: Record<string, unknown> }
+  | { kind: 'noop' }
+  | { kind: 'done'; body: Record<string, unknown>; afterCommit: () => void };
+
+/**
+ * U2 (D20): an admin moves an ACTIVE shift's end. Runs inside PATCH's
+ * transaction with the shift row already locked FOR UPDATE; the caller COMMITs
+ * on 'done' and ROLLBACKs otherwise.
+ *
+ *   new end later than now  → the session stays open. scheduled_end moves; the
+ *                             session's clock-out reminder latch is cleared so
+ *                             the reminder fires for the new end (decision
+ *                             11a). Extended or shortened.
+ *   new end at or before now → the open session is CLOSED at the new end, in
+ *                             this transaction, with the auto clock-out's own
+ *                             formulas (jobs/autoCompleteShifts.ts) and the
+ *                             2026-09-26 Bethel correction's shape (q11/q8a).
+ *
+ * GATE (decision 8a): status 'active' (the caller), exactly one open session,
+ * and that session belongs to shift.guard_id — a reassign can leave another
+ * guard's session under the shift, and closing it would clock out someone the
+ * push never reaches. The start is fixed; a start that is sent must equal it.
+ *
+ * LOCKS: the shift row first (the caller), then this session FOR NO KEY
+ * UPDATE, then its breaks, missed rows and violations — every wait after the
+ * shift lock bounded by ACTIVE_CHILD_LOCK_TIMEOUT, so a collision with a
+ * session-first writer ends with this edit yielding (SHIFT_BUSY), never a
+ * deadlock victim chosen by Postgres. NO KEY UPDATE, not FOR UPDATE: it does
+ * not conflict with the KEY SHARE lock every ping, report, break and violation
+ * INSERT takes on its session, so ordinary guard traffic does not bounce the
+ * admin.
+ *
+ * NOT TOUCHED: clock-out coordinates and photo (the sweep does not set them
+ * either), task_instances (pending tasks outlive every close today), breaks
+ * that were already closed (decision 13a — hours reads clamp them at
+ * clocked_out_at), off_post_events (append-only), expires_at (start-anchored).
+ * clearScheduleDerivedLatches is not called: all of its latches are keyed on
+ * the start and read only for scheduled/unassigned shifts.
+ */
+async function editActiveShiftEnd(client: PoolClient, x: ActiveEndInput): Promise<ActiveEndResult> {
+  const tz     = x.shift.site_tz ?? 'America/Los_Angeles';
+  const start  = new Date(x.shift.scheduled_start);
+  const oldEnd = new Date(x.shift.scheduled_end);
+  const newEnd = x.newEnd;
+  const refuse = (status: number, code: string, error: string, extra: Record<string, unknown> = {}): ActiveEndResult =>
+    ({ kind: 'refuse', status, body: { code, error, ...extra } });
+  const timeAt = (d: Date): string => new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZone: tz,
+  }).format(d);
+
+  if (x.sentStart && x.sentStart.getTime() !== start.getTime()) {
+    return refuse(422, 'START_LOCKED',
+      `The guard is on shift, so only the end time can change. The start stays at ${timeAt(start)}.`);
+  }
+  if (newEnd.getTime() <= start.getTime()) {
+    return refuse(422, 'END_NOT_AFTER_START', 'scheduled_end must be after scheduled_start.');
+  }
+
+  await client.query(`SET LOCAL lock_timeout = '${ACTIVE_CHILD_LOCK_TIMEOUT}'`);
+  const open = await client.query<{
+    id: string; guard_id: string; clocked_in_at: Date; legal_hold: boolean;
+  }>(
+    `SELECT id, guard_id, clocked_in_at, legal_hold
+       FROM shift_sessions
+      WHERE shift_id = $1 AND clocked_out_at IS NULL
+      ORDER BY id
+      FOR NO KEY UPDATE`,
+    [x.id],
+  );
+  if (open.rows.length === 0) {
+    return refuse(409, 'NO_OPEN_SESSION',
+      'This shift is marked in progress but nobody is clocked in on it, so its end cannot be changed here.');
+  }
+  if (open.rows.length > 1 || open.rows[0].guard_id !== x.shift.guard_id) {
+    return refuse(409, 'SESSION_STATE_CONFLICT',
+      "The clock-in on this shift does not belong to the shift's assigned guard, so its end cannot be changed here.");
+  }
+  const sess    = open.rows[0];
+  const clockIn = new Date(sess.clocked_in_at);
+  if (newEnd.getTime() <= clockIn.getTime()) {
+    return refuse(422, 'END_BEFORE_CLOCK_IN',
+      `The guard clocked in at ${timeAt(clockIn)}. The new end must be after that.`);
+  }
+  if (newEnd.getTime() === oldEnd.getTime()) return { kind: 'noop' };
+
+  if (isLongShift(start, newEnd) && !x.confirmLong) {
+    return { kind: 'refuse', status: 409, body: longShiftConfirmBody(start, newEnd, tz) };
+  }
+
+  const clockNow = async (): Promise<number> =>
+    new Date((await client.query<{ now: Date }>('SELECT clock_timestamp() AS now')).rows[0].now).getTime();
+  const nowMs        = await clockNow();
+  const autoClosesAt = oldEnd.getTime() + AUTO_CLOSE_GRACE_MINUTES * 60_000;
+  const tooLateToKeepOpen = (ms: number): boolean => ms >= autoClosesAt - AUTO_CLOSE_EDIT_MARGIN_MS;
+  const autoClosingBody = (): ActiveEndResult => refuse(409, 'SHIFT_AUTO_CLOSING',
+    `This shift ended at ${timeAt(oldEnd)} and is being clocked out automatically, so it can no longer be ` +
+    `extended or kept open. You can still set an end at or before now to close it yourself.`);
+
+  const auditRow = async (): Promise<void> => {
+    // Reused action (decision 3a). before/after keep BOTH keys: the shift
+    // detail page formats both of them for every row (page.tsx:733-739).
+    await client.query(
+      `INSERT INTO shift_schedule_audit
+         (shift_id, action, changed_by, changed_by_role, reason, before, after)
+       VALUES ($1, 'shift_schedule_edited', $2, $3, $4, $5, $6)`,
+      [
+        x.id, x.actor.sub, x.actor.role, x.reason ?? null,
+        JSON.stringify({ scheduled_start: start.toISOString(), scheduled_end: oldEnd.toISOString() }),
+        JSON.stringify({ scheduled_start: start.toISOString(), scheduled_end: newEnd.toISOString() }),
+      ],
+    );
+  };
+
+  const guardId = x.shift.guard_id as string; // === sess.guard_id, checked above
+
+  // ── Keep the session open: extend, or shorten to a later-than-now end ──────
+  if (newEnd.getTime() > nowMs) {
+    if (tooLateToKeepOpen(nowMs)) return autoClosingBody();
+
+    const overlapBody = await editOverlapBody(client, guardId, x.id, start, newEnd);
+    if (overlapBody) return { kind: 'refuse', status: 409, body: overlapBody };
+
+    const updated = await client.query(
+      `UPDATE shifts SET scheduled_end = $2 WHERE id = $1 RETURNING *`,
+      [x.id, newEnd.toISOString()],
+    );
+    // The reminder fires once per session, from end − 5 min to end + grace
+    // (jobs/clockOutReminder.ts). If it already fired for the old end, the
+    // guard would get none for the new one.
+    await client.query(
+      `UPDATE shift_sessions SET clock_out_reminder_sent_at = NULL WHERE id = $1`,
+      [sess.id],
+    );
+    await auditRow();
+
+    // Judged again at the last moment — see AUTO_CLOSE_EDIT_MARGIN_MS.
+    if (tooLateToKeepOpen(await clockNow())) return autoClosingBody();
+
+    const outcome = newEnd.getTime() > oldEnd.getTime() ? 'extended' : 'shortened';
+    return {
+      kind: 'done',
+      body: { ...updated.rows[0], active_end_edit: { outcome, session_id: sess.id } },
+      afterCommit: () => pushActiveEndEdit({
+        shiftId: x.id, guardId, siteName: x.shift.site_name, tz, outcome,
+        start, newEnd,
+      }),
+    };
+  }
+
+  // ── Close in the past: clock the guard out at the new end ─────────────────
+  if (!x.confirmClose) {
+    return refuse(409, 'CLOSE_CONFIRM_REQUIRED',
+      `This clocks the guard out at ${timeAt(newEnd)}. Confirm to close the shift.`,
+      { clocks_out_at: newEnd.toISOString(), confirm_with: { confirm_close_session: true } });
+  }
+  // Decision 9a — the q8a/q9c precedent: a held record is not rewritten here.
+  if (x.shift.legal_hold || sess.legal_hold) {
+    return refuse(409, 'LEGAL_HOLD',
+      'This shift is on legal hold, so it cannot be closed here. Its end can still be extended.');
+  }
+
+  // 1. Open breaks end at the new end — the sweep's step 1 formula with the
+  //    anchor = the new end; a break that started after it becomes zero-length
+  //    at its own start. ended_by keeps the sweep's value (decision 3a; the
+  //    CHECK has no admin value, and the audit row names who did this).
+  const breaks = await client.query(
+    `UPDATE break_sessions
+        SET break_end = GREATEST(break_start, $2::timestamptz),
+            duration_minutes = LEAST(
+              GREATEST(
+                0,
+                ROUND(EXTRACT(EPOCH FROM (GREATEST(break_start, $2::timestamptz) - break_start)) / 60.0)::INT
+              ),
+              planned_duration_minutes
+            ),
+            ended_by = 'auto_complete'
+      WHERE shift_session_id = $1 AND break_end IS NULL
+      RETURNING id`,
+    [sess.id, newEnd.toISOString()],
+  );
+
+  // 2. The session. total_hours in the SAME statement as clocked_out_at: a
+  //    closed session with a NULL total_hours is what schema_v8's backfill
+  //    would fill with a raw, unclamped figure on a manual replay. The
+  //    formula is the sweep's and q11's; GREATEST(0, …) because
+  //    chk_total_hours_nonneg rejects rather than clamps. clock_out_reason
+  //    'admin_corrected' (decision 1a, N120).
+  const closed = await client.query<{ clocked_out_at: Date; total_hours: number }>(
+    `UPDATE shift_sessions ss
+        SET clocked_out_at   = $2::timestamptz,
+            clock_out_reason = 'admin_corrected',
+            total_hours      = GREATEST(
+              0,
+              EXTRACT(EPOCH FROM ($2::timestamptz - GREATEST(ss.clocked_in_at, $3::timestamptz))) / 3600.0
+            )
+      WHERE ss.id = $1 AND ss.clocked_out_at IS NULL
+      RETURNING ss.clocked_out_at, ss.total_hours`,
+    [sess.id, newEnd.toISOString(), start.toISOString()],
+  );
+  if (closed.rowCount !== 1) {
+    // The session is locked FOR NO KEY UPDATE above, so nothing can have
+    // closed it in between. Throw into the caller's ROLLBACK + 500.
+    throw new Error(`active end edit: expected to close 1 session, closed ${closed.rowCount}`);
+  }
+
+  // 3. Stored misses for windows the shift no longer has (decision 2a): every
+  //    row, resolved or not, whose window ends after the new end — the
+  //    tracker's own bound (window_end <= scheduled_end). Before the
+  //    violations, the order the ping and report routes use.
+  const mp = await client.query(
+    `DELETE FROM missed_pings WHERE shift_session_id = $1 AND window_end > $2::timestamptz`,
+    [sess.id, newEnd.toISOString()],
+  );
+  const mr = await client.query(
+    `DELETE FROM missed_reports WHERE shift_session_id = $1 AND window_end > $2::timestamptz`,
+    [sess.id, newEnd.toISOString()],
+  );
+
+  // 4. Violations: the sweep's resolution rule against the new clock-out,
+  //    for open ones and for ones resolved after it (q11:206-217).
+  const viol = await client.query(
+    `UPDATE geofence_violations gv
+        SET resolved_at = CASE WHEN gv.occurred_at >= ss.clocked_out_at
+                               THEN gv.occurred_at
+                               ELSE ss.clocked_out_at
+                          END,
+            duration_minutes = GREATEST(0, ROUND(
+              EXTRACT(EPOCH FROM (ss.clocked_out_at - gv.occurred_at)) / 60
+            ))::INT
+       FROM shift_sessions ss
+      WHERE gv.shift_session_id = ss.id
+        AND ss.id = $1
+        AND (gv.resolved_at IS NULL OR gv.resolved_at > ss.clocked_out_at)
+      RETURNING gv.id`,
+    [sess.id],
+  );
+
+  // 5. The shift. 'completed' leaves shifts_no_guard_overlap's WHERE, and a
+  //    handoff clock-in (which needs 'active') can no longer overwrite this
+  //    close. expires_at stays: it is anchored on the start.
+  const updated = await client.query(
+    `UPDATE shifts SET scheduled_end = $2, status = 'completed' WHERE id = $1 RETURNING *`,
+    [x.id, newEnd.toISOString()],
+  );
+  await auditRow();
+
+  return {
+    kind: 'done',
+    body: {
+      ...updated.rows[0],
+      active_end_edit: {
+        outcome:                'closed',
+        session_id:             sess.id,
+        clocked_out_at:         new Date(closed.rows[0].clocked_out_at).toISOString(),
+        total_hours:            Number(closed.rows[0].total_hours),
+        breaks_closed:          breaks.rowCount ?? 0,
+        violations_resolved:    viol.rowCount ?? 0,
+        missed_pings_deleted:   mp.rowCount ?? 0,
+        missed_reports_deleted: mr.rowCount ?? 0,
+      },
+    },
+    afterCommit: () => {
+      pushActiveEndEdit({
+        shiftId: x.id, guardId, siteName: x.shift.site_name, tz, outcome: 'closed',
+        start, newEnd,
+      });
+      cancelOpenHandoffsAfterClose(x.id, x.shift.site_name)
+        .catch((err) => console.error('[shifts.edit.active] handoff cancel failed:', err));
+    },
+  };
+}
+
+/**
+ * The guard's push for an active-shift end edit (decision 6, amended
+ * 2026-09-28). Type 'shift_schedule_edited', like every schedule edit: it is
+ * in the feed's always-shown list (routes/notifications.ts) and collapses per
+ * shift. The body names the END's day and time at the site. No "Tap to view
+ * details" — the shipped app does nothing on a tap of this type. The extend
+ * body tells the guard to cold-start, because until U3 an open app keeps the
+ * old end (and disarms its local geofence 30 min after it).
+ */
+function pushActiveEndEdit(p: {
+  shiftId: string; guardId: string; siteName: string; tz: string;
+  outcome: 'extended' | 'shortened' | 'closed'; start: Date; newEnd: Date;
+}): void {
+  const day  = new Intl.DateTimeFormat('en-US', {
+    weekday: 'short', month: 'short', day: 'numeric', timeZone: p.tz,
+  }).format(p.newEnd);
+  const time = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZone: p.tz,
+  }).format(p.newEnd);
+  const [title, body] =
+      p.outcome === 'extended'
+    ? [`Shift extended at ${p.siteName}`,
+       `Your shift now ends ${day}, ${time}. Fully close and reopen NetraOps to update your screen.`]
+    : p.outcome === 'shortened'
+    ? [`Shift end changed at ${p.siteName}`,
+       `Your shift now ends ${day}, ${time}. Clock out at that time.`]
+    : [`Shift ended at ${p.siteName}`,
+       `Your admin ended this shift at ${time}. You are now clocked out.`];
+  const data = {
+    type:            'shift_schedule_edited',
+    shift_id:        p.shiftId,
+    scheduled_start: p.start.toISOString(),
+    scheduled_end:   p.newEnd.toISOString(),
+  };
+  insertNotification({
+    guardId: p.guardId, type: 'shift_schedule_edited', title, body, data, shiftSessionId: null,
+  })
+    .then(async (notifId) => {
+      const token = await getActivePushToken(p.guardId);
+      if (!token) return;
+      return sendPushNotification({
+        token, title, body, data,
+        notificationId: notifId,
+        channelId:      channelForType('shift_schedule_edited'),
+        collapseId:     collapseIdFor('shift_schedule_edited', { shift_id: p.shiftId }),
+      });
+    })
+    .catch((err) => console.error('[shifts.edit.active] push failed:', err));
+}
+
+/**
+ * Decision 10a: a shift closed in the past takes its open handoffs with it —
+ * pending ones (the recipient could still accept) and accepted ones nobody
+ * has arrived for. After COMMIT and outside the edit's transaction, in the
+ * handoff-cancel route's own shape (it locks only the request row):
+ * handoff-response locks the request and THEN the shift, so cancelling inside
+ * the edit, which holds the shift, would invert that order. Accept and
+ * handoff clock-in already refuse a shift that is no longer active, so the
+ * gap between the two commits cannot seat anyone. Both guards are told.
+ */
+async function cancelOpenHandoffsAfterClose(shiftId: string, siteName: string): Promise<void> {
+  const cancelled = await pool.query<{ id: string; from_guard_id: string; to_guard_id: string }>(
+    `UPDATE shift_swap_requests
+        SET status = 'cancelled', declined_at = NOW()
+      WHERE shift_id = $1
+        AND initiated_by = 'guard_handoff'
+        AND status IN ('pending', 'accepted')
+        AND to_session_id IS NULL
+      RETURNING id, from_guard_id, to_guard_id`,
+    [shiftId],
+  );
+  for (const h of cancelled.rows) {
+    for (const toGuardId of [h.from_guard_id, h.to_guard_id]) {
+      pushHandoffCancelled({
+        toGuardId, cancellerName: 'Your admin', siteName, shiftId, historyId: h.id,
+      }).catch((err) => console.error('[shifts.edit.active] handoff push failed:', err));
+    }
+  }
+}
+
 // PATCH /api/shifts/:id — admin edits a shift's scheduled hours.
 //
 // Writes shifts.scheduled_start/scheduled_end and an audit row in
@@ -1621,7 +2090,7 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
 //     call site (POST /:id/clock-in, below). That is an application
 //     invariant with no constraint behind it — a second call site would
 //     break this silently.
-//   * The six one-shot reminder latches live on the shifts row itself and
+//   * The seven one-shot reminder latches live on the shifts row itself and
 //     are NOT covered by either half of the gate: every latch cron selects
 //     `status = 'scheduled'` with no session requirement, i.e. the exact
 //     rows this route admits. A shift 60 minutes out has already had
@@ -1638,22 +2107,33 @@ router.patch('/:id/cancel', requireAuth('company_admin', 'vishnu'), async (req, 
 // session, no possible overlap and no push to send — it is strictly safer
 // to edit than a 'scheduled' one, and refusing it would leave the 11
 // unassigned production rows uneditable for no reason.
+//
+// 'active' IS ADMITTED FOR THE END ONLY (U2, D20, 2026-09-28). Everything
+// above is about rows derived from the schedule at write time; an active
+// shift's derived rows are live, so it gets its own path — editActiveShiftEnd
+// — with its own gate (exactly one open session, the assigned guard's), locks
+// and writes, and it never reaches the status switch or the zero-session gate
+// below. Those still govern scheduled and unassigned shifts, unchanged.
 router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) => {
   const { user } = req;
   const { id }   = req.params;
-  const { scheduled_start, scheduled_end, reason } = req.body as {
-    scheduled_start?: string; scheduled_end?: string; reason?: string;
+  const { scheduled_start, scheduled_end, reason, confirm_close_session } = req.body as {
+    scheduled_start?: string; scheduled_end?: string; reason?: string; confirm_close_session?: unknown;
   };
 
-  if (!scheduled_start || !scheduled_end) {
+  // scheduled_start is required for a scheduled or unassigned shift (checked
+  // once the row is locked and its status known). An ACTIVE shift's start is
+  // fixed (U2) — the web sends only the end; a start that is sent must equal
+  // the stored one.
+  if (!scheduled_end) {
     return res.status(400).json({ error: 'scheduled_start and scheduled_end are required' });
   }
-  const newStart = new Date(scheduled_start);
+  const newStart = scheduled_start ? new Date(scheduled_start) : null;
   const newEnd   = new Date(scheduled_end);
-  if (Number.isNaN(newStart.getTime()) || Number.isNaN(newEnd.getTime())) {
+  if ((newStart && Number.isNaN(newStart.getTime())) || Number.isNaN(newEnd.getTime())) {
     return res.status(400).json({ error: 'scheduled_start and scheduled_end must be valid timestamps' });
   }
-  if (newEnd <= newStart) {
+  if (newStart && newEnd <= newStart) {
     return res.status(422).json({ code: 'END_NOT_AFTER_START', error: 'scheduled_end must be after scheduled_start.' });
   }
   if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
@@ -1663,6 +2143,9 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
   if (confirmLong === 'invalid') {
     return res.status(400).json({ error: `${LONG_SHIFT_CONFIRM_FLAG} must be true or false` });
   }
+  if (confirm_close_session !== undefined && typeof confirm_close_session !== 'boolean') {
+    return res.status(400).json({ error: 'confirm_close_session must be true or false' });
+  }
 
   // N45: guard + NEW window, hoisted for the catch. Null when the shift
   // carries no guard — an unassigned row cannot violate the constraint.
@@ -1671,10 +2154,14 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Give up rather than queue behind a long transaction on the shift row;
+    // the catch answers SHIFT_BUSY. The active branch tightens this further
+    // before it touches any session row (see editActiveShiftEnd).
+    await client.query(`SET LOCAL lock_timeout = '${SHIFT_LOCK_TIMEOUT}'`);
 
     const shiftRes = await client.query(
       `SELECT sh.id, sh.guard_id, sh.site_id, sh.status,
-              sh.scheduled_start, sh.scheduled_end,
+              sh.scheduled_start, sh.scheduled_end, sh.legal_hold,
               si.company_id, si.name AS site_name, si.timezone AS site_tz
          FROM shifts sh
          JOIN sites si ON si.id = sh.site_id
@@ -1687,9 +2174,6 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
       return res.status(404).json({ error: 'Shift not found' });
     }
     const shift = shiftRes.rows[0];
-    if (shift.guard_id) {
-      raceEditWin = { guardId: shift.guard_id, s: newStart, e: newEnd };
-    }
 
     // company_admin is scoped to its own company; vishnu has no company
     // scope. 404 rather than 403 so we don't leak which shift ids exist.
@@ -1697,6 +2181,38 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Shift not found' });
     }
+
+    // U2 (D20): an ACTIVE shift can have its END moved — extended, shortened,
+    // or set in the past, which closes the open session at that time. Its own
+    // gate, locks and writes; see editActiveShiftEnd.
+    if (shift.status === 'active') {
+      if (shift.guard_id) {
+        raceEditWin = { guardId: shift.guard_id, s: shift.scheduled_start, e: newEnd };
+      }
+      const out = await editActiveShiftEnd(client, {
+        id,
+        actor:        { sub: user!.sub, role: user!.role },
+        shift,
+        newEnd,
+        sentStart:    newStart,
+        reason,
+        confirmLong,
+        confirmClose: confirm_close_session === true,
+      });
+      if (out.kind === 'refuse') {
+        await client.query('ROLLBACK');
+        return res.status(out.status).json(out.body);
+      }
+      if (out.kind === 'noop') {
+        await client.query('ROLLBACK');
+        return res.json(shift);
+      }
+      await client.query('COMMIT');
+      res.json(out.body);
+      out.afterCommit();
+      return;
+    }
+
 
     // NO SITE-DEACTIVATED GATE HERE, DELIBERATELY. reassign refuses on an
     // inactive site because "a deactivated site can't accept NEW WORK —
@@ -1711,16 +2227,11 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     // this gate, add it with its own argument rather than by analogy.
 
     // Status gate. Specific 409 per status so the admin knows why, matching
-    // the cancel route's switch.
+    // the cancel route's switch. 'active' was handled above (U2).
     switch (shift.status) {
       case 'scheduled':
       case 'unassigned':
         break;
-      case 'active':
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          error: 'This shift is in progress (guard clocked in). Its schedule can no longer be edited — cancel and re-create instead.',
-        });
       case 'completed':
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -1737,6 +2248,17 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
       default:
         await client.query('ROLLBACK');
         return res.status(409).json({ error: `Shift status '${shift.status}' cannot be edited.` });
+    }
+
+    // After the status gate, so a shift that has just completed answers with
+    // the status 409 above even when the caller (the web's end-only edit)
+    // sent no start.
+    if (!newStart) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'scheduled_start and scheduled_end are required' });
+    }
+    if (shift.guard_id) {
+      raceEditWin = { guardId: shift.guard_id, s: newStart, e: newEnd };
     }
 
     // Session gate — the invariant itself, not the status proxy. See the
@@ -1782,51 +2304,10 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     // path. An edit that moves the hours has a stronger claim on this check
     // than reassign does, since reassign does not change the window at all.
     if (shift.guard_id) {
-      const overlap = await client.query(
-        `SELECT s.id, s.scheduled_start, s.scheduled_end,
-                si.name AS site_name, si.timezone AS site_tz,
-                g.name AS guard_name
-           FROM shifts s
-           JOIN sites si ON si.id = s.site_id
-           LEFT JOIN guards g ON g.id = s.guard_id
-          WHERE s.guard_id = $1
-            AND s.id      != $2
-            AND s.status IN ('scheduled','active')
-            AND s.scheduled_start < $4
-            AND s.scheduled_end   > $3
-          ORDER BY s.scheduled_start
-          LIMIT 1`,
-        [shift.guard_id, id, newStart.toISOString(), newEnd.toISOString()],
-      );
-      if (overlap.rows[0]) {
-        const c  = overlap.rows[0];
-        const tz = (c.site_tz as string | null) ?? 'America/Los_Angeles';
-        const day = new Intl.DateTimeFormat('en-US', {
-          month: 'short', day: 'numeric', timeZone: tz,
-        }).format(new Date(c.scheduled_start));
-        const from = new Intl.DateTimeFormat('en-US', {
-          hour: 'numeric', minute: '2-digit', timeZone: tz,
-        }).format(new Date(c.scheduled_start));
-        const to = new Intl.DateTimeFormat('en-US', {
-          hour: 'numeric', minute: '2-digit', timeZone: tz,
-        }).format(new Date(c.scheduled_end));
+      const overlapBody = await editOverlapBody(client, shift.guard_id, id, newStart, newEnd);
+      if (overlapBody) {
         await client.query('ROLLBACK');
-        // The message NAMES the collision — guard, site, date, time — because
-        // "overlaps an existing shift" tells an admin nothing they can act on.
-        // `conflict` carries the same facts in structured form so the UI can
-        // deep-link straight to the offending shift.
-        return res.status(409).json({
-          error:
-            `These hours overlap ${c.guard_name ?? 'this guard'}'s shift at ` +
-            `${c.site_name} on ${day}, ${from} – ${to}. Move or cancel that shift first.`,
-          conflict: {
-            shift_id:        c.id,
-            guard_name:      c.guard_name,
-            site_name:       c.site_name,
-            scheduled_start: c.scheduled_start,
-            scheduled_end:   c.scheduled_end,
-          },
-        });
+        return res.status(409).json(overlapBody);
       }
     }
 
@@ -1943,6 +2424,18 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
         raceEditWin.guardId, raceEditWin.s, raceEditWin.e, id,
       );
       return res.status(409).json(guardOverlapRaceBody(conflict));
+    }
+
+    // A lock wait gave up (lock_timeout, 55P03) or Postgres broke a deadlock
+    // (40P01). Both mean another writer held this shift or its session — the
+    // guard clocking out, a break, the auto clock-out — and this edit yielded
+    // to it by design (editActiveShiftEnd). Nothing was written; a reload
+    // shows what the other writer did.
+    if (isLockConflict(err)) {
+      return res.status(409).json({
+        code:  'SHIFT_BUSY',
+        error: 'This shift is being changed by something else right now — the guard clocking out, a break, or the automatic clock-out. Reload the page and try again.',
+      });
     }
 
     console.error('[shifts.edit] error:', err);
@@ -3886,12 +4379,18 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
     // Session presence — the invariant half of the edit gate. The web UI
     // must not render an EDIT action for a shift PATCH /api/shifts/:id
     // would refuse, and status alone is a proxy the cancel docblock above
-    // already documents as unreliable.
-    pool.query(
-      'SELECT 1 FROM shift_sessions WHERE shift_id = $1 LIMIT 1',
+    // already documents as unreliable. U2 adds the OPEN-session count and
+    // the open session's clock-in: an active shift's end is editable only
+    // with exactly one open session.
+    pool.query<{ n: number; open_n: number; open_in: Date | null }>(
+      `SELECT count(*)::int                                          AS n,
+              count(*) FILTER (WHERE clocked_out_at IS NULL)::int    AS open_n,
+              min(clocked_in_at) FILTER (WHERE clocked_out_at IS NULL) AS open_in
+         FROM shift_sessions WHERE shift_id = $1`,
       [req.params.id],
     ),
   ]);
+  const sessionCounts = sessionProbe.rows[0] ?? { n: 0, open_n: 0, open_in: null };
 
   const fence = geofenceResult.rows[0] ?? null;
   const geofence = fence
@@ -3936,7 +4435,15 @@ router.get('/:id', requireAuth('company_admin', 'vishnu', 'guard'), async (req, 
     // edit gate is (status IN ('scheduled','unassigned') AND !has_session),
     // matching PATCH /api/shifts/:id exactly so no admin is shown an action
     // the API will 409.
-    has_session:          (sessionProbe.rowCount ?? 0) > 0,
+    has_session:          sessionCounts.n > 0,
+    // U2 — additive (mobile reads this route too). The web's end-only edit
+    // shows for status 'active' AND open_session_count === 1, failing closed
+    // against an API without the field. The server still checks that the
+    // session is the assigned guard's.
+    open_session_count:         sessionCounts.open_n,
+    open_session_clocked_in_at: sessionCounts.open_n === 1 && sessionCounts.open_in
+      ? new Date(sessionCounts.open_in).toISOString()
+      : null,
   });
 });
 
