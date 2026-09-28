@@ -56,6 +56,9 @@ import {
 import { siteLocalDayRange } from '../services/dateRange';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
 import { insertNotification } from '../services/notifications';
+import {
+  isLongShift, longShiftConfirmBody, readLongShiftConfirm, LONG_SHIFT_CONFIRM_FLAG,
+} from '../constants/longShift';
 
 const router = Router();
 
@@ -181,6 +184,19 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     if (!site_id) return res.status(400).json({ error: 'site_id is required' });
     if (!start_time || !HH_MM.test(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
     if (!end_time   || !HH_MM.test(end_time))   return res.status(400).json({ error: 'end_time must be HH:MM' });
+    // U5: an equal pair rolls by '0 day' below and would write a zero-length
+    // shift (schema_v81 now refuses it at the database too). An end earlier
+    // than the start is an overnight, handled by the roll.
+    if (start_time === end_time) {
+      return res.status(422).json({
+        code:  'END_NOT_AFTER_START',
+        error: 'Start and end time are the same. A shift must end after it starts.',
+      });
+    }
+    const confirmLong = readLongShiftConfirm(req.body);
+    if (confirmLong === 'invalid') {
+      return res.status(400).json({ error: `${LONG_SHIFT_CONFIRM_FLAG} must be true or false` });
+    }
     if (!Array.isArray(dates) || dates.length === 0) {
       return res.status(422).json({ error: 'dates must be a non-empty array' });
     }
@@ -261,8 +277,12 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     // fall-back hour, which resolves the same way both times.
     //
     // to_char rather than dt::text so the key does not depend on DateStyle.
+    //
+    // U5: computed for EVERY request, not only when a guard is set, because
+    // the long-shift rule below needs each date's real elapsed duration —
+    // which differs by an hour on a DST night — for unassigned batches too.
     const windowByDate = new Map<string, { s: Date; e: Date }>();
-    if (guard_id) {
+    {
       const w = await pool.query<{ d: string; s: Date; e: Date }>(
         `SELECT to_char(dt, 'YYYY-MM-DD')                    AS d,
                 (dt + $2::time) AT TIME ZONE $4              AS s,
@@ -271,6 +291,24 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
         [sortedDates, start_time, overnightInterval, siteTz, end_time],
       );
       for (const r of w.rows) windowByDate.set(r.d, { s: r.s, e: r.e });
+    }
+
+    // U5 — end after start, and the long-shift confirm, per date on the real
+    // instants. First offending date in date order, like every other check
+    // on this path; nothing is written before these pass.
+    for (const d of sortedDates) {
+      const win = windowByDate.get(d);
+      if (!win) throw new Error(`shift window not computed for date ${d}`);
+      if (win.e.getTime() <= win.s.getTime()) {
+        // Only reachable on a DST night (e.g. an end inside the skipped hour).
+        return res.status(422).json({
+          code:  'END_NOT_AFTER_START',
+          error: `On ${d} these times give a shift that does not end after it starts. Adjust the times.`,
+        });
+      }
+      if (isLongShift(win.s, win.e) && !confirmLong) {
+        return res.status(409).json(longShiftConfirmBody(win.s, win.e, siteTz));
+      }
     }
 
     // N45: the window the loop is currently trying to claim. The catch
@@ -375,6 +413,26 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
   const { guard_id, site_id, scheduled_start, scheduled_end, repeat_days } = req.body;
   if (!site_id || !scheduled_start || !scheduled_end) {
     return res.status(400).json({ error: 'site_id, scheduled_start, scheduled_end are required' });
+  }
+  // U5 — these two modes bound the client's instants as sent, with no parse
+  // check and no order check: an inverted pair reached the INSERT and, for an
+  // assigned shift, the overlap constraint's tstzrange raised 22000 → 500;
+  // repeat_days copied a negative duration to every day of the series. Both
+  // are refused here now (and by schema_v81 at the database).
+  const reqStart = new Date(scheduled_start);
+  const reqEnd   = new Date(scheduled_end);
+  if (Number.isNaN(reqStart.getTime()) || Number.isNaN(reqEnd.getTime())) {
+    return res.status(400).json({ error: 'scheduled_start and scheduled_end must be valid timestamps' });
+  }
+  if (reqEnd.getTime() <= reqStart.getTime()) {
+    return res.status(422).json({
+      code:  'END_NOT_AFTER_START',
+      error: 'scheduled_end must be after scheduled_start.',
+    });
+  }
+  const confirmLong = readLongShiftConfirm(req.body);
+  if (confirmLong === 'invalid') {
+    return res.status(400).json({ error: `${LONG_SHIFT_CONFIRM_FLAG} must be true or false` });
   }
 
   // Verify site belongs to this company. Grab timezone up-front for the
@@ -505,6 +563,14 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       }
     }
 
+    // U5 — every row of the series has the template's elapsed duration
+    // (shiftEnd = shiftStart + durationMs above), so one check covers the
+    // whole series. Last, after every refusal, so the admin is never asked to
+    // confirm a request that would then fail.
+    if (isLongShift(reqStart, reqEnd) && !confirmLong) {
+      return res.status(409).json(longShiftConfirmBody(reqStart, reqEnd, siteTz));
+    }
+
     const created: Array<Record<string, unknown>> = [];
     for (const p of pending) {
       try {
@@ -583,6 +649,11 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     if (conflict) {
       return res.status(409).json(overlapConflictBody(conflict));
     }
+  }
+
+  // U5 — last, after every refusal, as on the repeat path.
+  if (isLongShift(reqStart, reqEnd) && !confirmLong) {
+    return res.status(409).json(longShiftConfirmBody(reqStart, reqEnd, siteTz));
   }
 
   let result;
@@ -1583,10 +1654,14 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     return res.status(400).json({ error: 'scheduled_start and scheduled_end must be valid timestamps' });
   }
   if (newEnd <= newStart) {
-    return res.status(422).json({ error: 'scheduled_end must be after scheduled_start.' });
+    return res.status(422).json({ code: 'END_NOT_AFTER_START', error: 'scheduled_end must be after scheduled_start.' });
   }
   if (reason !== undefined && (typeof reason !== 'string' || reason.length > 500)) {
     return res.status(400).json({ error: 'reason must be a string up to 500 chars' });
+  }
+  const confirmLong = readLongShiftConfirm(req.body);
+  if (confirmLong === 'invalid') {
+    return res.status(400).json({ error: `${LONG_SHIFT_CONFIRM_FLAG} must be true or false` });
   }
 
   // N45: guard + NEW window, hoisted for the catch. Null when the shift
@@ -1753,6 +1828,15 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
           },
         });
       }
+    }
+
+    // U5 — last refusal before any write, so the admin is never asked to
+    // confirm an edit that would then fail on overlap.
+    if (isLongShift(newStart, newEnd) && !confirmLong) {
+      await client.query('ROLLBACK');
+      return res.status(409).json(
+        longShiftConfirmBody(newStart, newEnd, (shift.site_tz as string | null) ?? 'America/Los_Angeles'),
+      );
     }
 
     // The schedule is changing, so every reminder already sent against the
