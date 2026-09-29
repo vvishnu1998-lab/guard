@@ -1388,6 +1388,7 @@ verified: PARTIAL — both lines exist and are the Pacific-anchor code: `:349-35
 
 **C3. `seed-apple-reviewer.ts` (commit `bda0524`) has a plaintext password; never run.**
 verified: YES for the plaintext — `apps/api/scripts/seed-apple-reviewer.ts:48` contains a hardcoded password string literal passed to `bcrypt.hash(...)`. Commit `bda0524` = `scripts: add seed script for Apple App Store reviewer credentials`. File exists, 4285 bytes. "Never run" — verified: NO, carried from chat memory (would need a DB check for an `Apple Reviewer Admin` / `AR-100` row).
+*Update 2026-09-29:* that check now reads 0 — no `companies`, `company_admins` or `guards` row matches an Apple/reviewer name, email or `AR-` badge (prod, read-only). F2 is lifted (`FREEZES.md`).
 
 **C4. GRD0002 `802a842f` (STARNET) on Build 44, unreachable by OTA.**
 verified: PARTIAL — the guard id is confirmed: `802a842f-da79-44a9-aa0e-f549a9420cef` = GRD0002, **STARNET SECURITY** (`27c4d404-8769-49ca-bfd6-93cb9b890067`). A device row exists with a live push token (claimed 2026-09-01T02:03Z, `revoked_at` NULL). **The build number is UNVERIFIED from the DB — `guard_devices.client` is NULL for this device**, meaning it has never made a `clock-in` / `handoff-clock-in` / `ping` / `clock-in-verification` write since claiming. `release-ops` SKILL.md:45 records "[name redacted] GRD0002 on `1.0.14+44`" from an earlier session; that specific version string is carried from chat memory, not re-confirmed. The *conclusion* (unreachable by OTA) holds for any runtime below 1.0.17.
@@ -4408,7 +4409,7 @@ U4b** unless the item says so. API lines are read at `761d7f5`; mobile lines at
 
 ### N138 — mobile `SHIFT_EXPIRY_GRACE_MS` is still 30 minutes; the server's grace is 15 (next OTA)
 
-**Update 2026-09-29 — PUBLISHED by OTA, and the API half is CLOSED by PR #<n>; open until
+**Update 2026-09-29 — PUBLISHED by OTA, and the API half is CLOSED by PR #85; open until
 the device checks pass.** The grace is 15 on `batch/mobile-18` (`4558ae9`;
 `lib/shiftExpiry.ts:61` at `ddc6f0a`). A clock-out after a close reads "Shift Ended / You
 are already clocked out of this shift." (`c5f4a63`): `lib/clockOutOutcome.ts:41` takes 409
@@ -4418,9 +4419,9 @@ Published 2026-09-29 (group ids from the publish record; STATE.md has the channe
   11:33:06 PT — reaches iOS 48 and Android vc24;
 - preview runtime 1.0.18: group `429943ab-8561-4766-b031-635587d0a6c3` from `f5a84c4`,
   08:39:30 PT — reaches the vc27 preview APK;
-- production runtime 1.0.18 (vc26): no group — vc26 is not known to be released (Play
-  review, outcome UNVERIFIED). It must get one before it is released, or its handsets run
-  the 30-minute grace with no U3 and no T6a (release-ops §3b).
+- production runtime 1.0.18 (vc26): group `ce679c72-2a37-4034-a29d-1be16afab7e3`,
+  republished from `429943ab` (same bundles, `f5a84c4`), 16:39:24 PT — so vc26 takes the
+  new JS if Play releases it.
 PR #84 (`batch/mobile-18` → main) is open and merges after a TestFlight build from it ships;
 #50 is closed unmerged, and its three commits are in #84.
 The API half: `POST /api/shifts/:id/clock-out` answers 409 `SESSION_CLOSED` with
@@ -4430,7 +4431,7 @@ is byte-identical otherwise. Message: "You are already clocked out of this shift
 to the home screen to refresh.", plus "Your handover notes may not have been saved. Give
 them to your supervisor." when the request carried notes. A rejected photo on a closed
 session gets the same 409. Proven by `apps/api/scripts/test-clock-out-session-closed.ts`
-(PR #<n>).
+(PR #85).
 Device checks, numbered as in the batch-18 test plan:
 1. clock-in: a "geofence registered" Sentry event on the new update id (proves the update
    and the DSN);
@@ -4452,9 +4453,9 @@ Towers, 2026-09-29): 1, 2 and 3 passed; 5a passed server-side (`admin_corrected`
 1.25 h; the screen was not observed). 4 and 7 were not exercised: the app was backgrounded
 from 09:42:31, so it missed the shorten, and the 10:41:51 exit went by the normal path
 (stored end 10:30, still inside the grace). 5b and 6 were not run. The iPhone run (TestFlight
-48 + `fe530a7a`) of 4, 5b, 6 and 7 is scheduled after PR #<n> deploys, so 5b exercises the 409.
+48 + `fe530a7a`) of 4, 5b, 6 and 7 is scheduled after PR #85 deploys, so 5b exercises the 409.
 Still open: handsets that have not adopted either group, and every runtime-1.0.16 handset
-(N115), keep the 30-minute gate; from PR #<n> on they show the 409 message under "Clock-Out
+(N115), keep the 30-minute gate; from PR #85 on they show the 409 message under "Clock-Out
 Failed" instead of "Active session not found".
 Adoption at 15:45 PT (non-revoked STARNET `guard_devices` rows): 3 of 10 runtime-1.0.17
 iPhone rows on `fe530a7a` (GRD0010 `c4c9b7f7`, GRD0015 `68f76ea9`, GRD0026 `610755ca`), 7
@@ -4756,7 +4757,8 @@ is UNVERIFIED; the result is not.
   2026-09-17).
 - This is N25's hypothesis (1).
 
-Fixed for new publishes: `fe530a7a` and `429943ab` were exported with the DSN and gated —
+Fixed for new publishes: `fe530a7a` and `429943ab` (republished to production 1.0.18 as
+`ce679c72`) were exported with the DSN and gated —
 the exact DSN and exactly one Sentry public key in both Hermes bundles — and events from the
 new update ids arrived the same day. Procedure: DECISIONS D21, release-ops §3b,
 `scripts/ops/ota-export-and-gate.sh`. Both groups report `environment: production`,
@@ -4770,3 +4772,30 @@ iPhone rows on `01a0b168…`, plus GRD0005 `4a71d17d`, GRD0008 `6b1402ba` and GR
 `36478eb1` on 1.0.16 (N138 has the list). From these handsets, "no mobile Sentry events"
 means "no information". Rolling back to a group published before 2026-09-29 turns Sentry
 off again. **Size XS remaining (watch adoption), Tier 1.**
+
+## New from the App Store status check (2026-09-29)
+
+### N153 — DEADLINE ~2026-11-28: the TestFlight build every guard iPhone runs (1.0.17, build 48) expires
+
+verified (Vishnu, App Store Connect, 2026-09-29): 1.0.17 build 48 (`c932c09`, EAS
+`8d8ecd90`) is approved and **"Pending Developer Release"** — not released on the App Store.
+Guards install it through **TestFlight** (internal + Public Beta, 24 installs), and that
+TestFlight build **expires in 60 days, ~2026-11-28**. An expired TestFlight build no longer
+launches, so every guard iPhone on it loses the app on that date unless it has moved to a
+replacement first. OTAs do not help: they ride on the installed binary.
+Exposure (prod, read-only, 2026-09-29): 10 non-revoked STARNET iPhone rows report
+`version/1.0.17` (last seen up to 15:30 PT today), plus one `version/1.0.16` row (GRD0007
+`36478eb1`, last seen 09-03, an older binary). **Count them by `version/`, not `build/`:**
+the header's `build/` field is app.json's stale literal, and all 10 read `build/41` (D17).
+
+Before the deadline, with time for guards to install:
+- **either** release build 48 on the App Store and move the guards to the store install
+  (a TestFlight install does not switch to the store build by itself), **or** ship a new
+  build through TestFlight (EAS build + review, Tier 2) and have guards update;
+- tell STARNET which one, and when (Tier 2: anything sent to Nataniel/Sai/guards);
+- watch `guard_devices.client` for iPhone rows still on `version/1.0.17` after the
+  replacement ships; if the replacement is build 48 from the App Store, the version will not
+  change, so confirm the moves another way (TestFlight's install list).
+
+Suggested act-by date: **2026-11-14**, two weeks ahead, since each guard has to act on their
+own phone. Unrelated to F2, which is lifted (`FREEZES.md`). **Size S, Tier 2.**

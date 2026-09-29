@@ -128,7 +128,7 @@ Verified ground truth for the NetraOps platform. When live state may have change
 |---|---|
 | `origin/main` | `95a10a38` — PR #83, U2 + U5 (D20) |
 | production OTA group, runtime 1.0.17 | `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` from `ddc6f0a` (ios `01a0ee71-1f50-7e97-b616-caed84eef9ef`, android `01a0ee71-1f50-7e14-a9f7-3e2aa741f227`), 2026-09-29. Earlier production groups include, oldest first: `9386a6d2` (2026-09-10, ios `01a08a24-c326-7136…`, android `01a08a24-c326-7a37…`), `948d55c8` (batch-17), `9db401c9` (2026-09-17, `b3dcd55`; the rollback target) |
-| preview OTA group, runtime 1.0.18 | `429943ab-8561-4766-b031-635587d0a6c3` from `f5a84c4` (android `01a0edd2-2fa1-72ae-b71a-592441a928c2`), 2026-09-29. Production runtime 1.0.18 (vc26) has no group |
+| preview OTA group, runtime 1.0.18 | `429943ab-8561-4766-b031-635587d0a6c3` from `f5a84c4` (android `01a0edd2-2fa1-72ae-b71a-592441a928c2`), 2026-09-29. Republished to production runtime 1.0.18 (vc26) as `ce679c72-2a37-4034-a29d-1be16afab7e3`, 16:39 PT |
 | prod schema | **v81** applied. **v82 is free** — but read `migrate.ts`, never this line |
 | mobile batch branch | `batch/mobile-18` at `f5a84c4`, PR #84, open |
 

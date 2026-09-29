@@ -334,7 +334,7 @@ objects, not read from a ledger — that is the only method available.
 
 ---
 
-## Mobile — `app.json` re-read 2026-09-29 at `95a10a38`; iOS 48 / Android 24 rows verified 2026-09-05 08:32 UTC; vc26/vc27 rows from session records, UNVERIFIED
+## Mobile — `app.json` re-read 2026-09-29 at `95a10a38`; builds table from Vishnu's build list and App Store Connect, 2026-09-29
 
 `apps/mobile/app.json` literal values:
 
@@ -353,16 +353,18 @@ versioning is source of truth. The real shipped numbers, from `eas build:list`:
 
 | platform | appVersion | build | commit | profile / channel | status | created |
 |---|---|---|---|---|---|---|
-| IOS | 1.0.17 | **48** | `c932c09` | production | FINISHED | 2026-08-30T01:21:10Z |
-| ANDROID | 1.0.17 | **24** | `c932c09` | production | FINISHED | 2026-08-30T01:21:11Z |
-| ANDROID | 1.0.18 | **26** | ~`7bff232` (API 36) — UNVERIFIED | production | Play production review submitted 2026-09-18, managed publishing ON — **outcome UNVERIFIED** | 2026-09-18 |
-| ANDROID | 1.0.18 | **27** | `579ee12` — UNVERIFIED | preview (APK, build `6113295c`) | FINISHED — UNVERIFIED; fingerprint = vc26 | 2026-09-27 |
-| ANDROID | — | (27 consumed) | — | production (build `b08cbf4c`) | CANCELED, no artifact — **next production build is vc28** — UNVERIFIED | UNVERIFIED |
+| IOS | 1.0.17 | **48** (`8d8ecd90`) | `c932c09` | production | FINISHED. App Store: **approved, "Pending Developer Release"** — not released on the App Store. Guards run it through **TestFlight** (internal + Public Beta, 24 installs); **that TestFlight build expires ~2026-11-28 (N153)** | 2026-08-30T01:21:10Z |
+| ANDROID | 1.0.17 | **24** (`fe3c1ff2`) | `c932c09` | production | FINISHED | 2026-08-30T01:21:11Z |
+| ANDROID | 1.0.18 | **25** (`53f0189b`) | `b0f3c85` | not given | not given | 2026-09-18 |
+| ANDROID | 1.0.18 | **26** (`7dc508bf`) | `7bff232` (API 36) | production | Play production review submitted 2026-09-18, managed publishing ON — **outcome UNVERIFIED**. Same fingerprint as vc27 | 2026-09-18 |
+| ANDROID | 1.0.18 | **27** (`b08cbf4c`) | `7bff232` | production | **CANCELED**, no artifact — **next production build is vc28** | 2026-09-18 |
+| ANDROID | 1.0.18 | **27** (`6113295c`) | `579ee12` | preview (APK) | FINISHED | 2026-09-27 |
 | ANDROID | 1.0.16 | 23 | `ef1e230` | smoke | FINISHED | 2026-08-23T19:29:21Z |
 | ANDROID | 1.0.16 | 23 | `4cd4956` | development | FINISHED | 2026-08-23T18:17:27Z |
 
-The vc26, vc27 and `b08cbf4c` rows come from session records; Vishnu fills them from
-`eas build:list`.
+Rows vc24–vc27 and iOS 48's build id: Vishnu's `eas build:list`, 2026-09-29 (dates only;
+vc25's profile and status were not given). App Store status: Vishnu, from App Store
+Connect, 2026-09-29.
 
 `c932c09` = `feat(mobile): download hours summary as PDF from the profile screen`.
 
@@ -378,7 +380,7 @@ Channels: `production`, `preview`, `smoke`, `development` (`eas channel:list`, l
 | channel | runtime | current group | from | published (PT) | rollback target |
 |---|---|---|---|---|---|
 | production | 1.0.17 | `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` | `ddc6f0a` | 2026-09-29 11:33:06 | republish `9db401c9-6319-49b4-ab17-64cf559995a0` (`b3dcd55`, 2026-09-17 15:07) — **it has no Sentry DSN and the 30-min grace (N152, N138)**; before it `948d55c8-75da-44ea-8a2f-6847d87144a7` (batch-17) |
-| production | 1.0.18 | **none** — vc26 runs its embedded bundle (`~7bff232`: 30-min grace, no U3/T6a). Skipped because vc26 is not known to be in users' hands (Play review, managed publishing ON, outcome UNVERIFIED); only Star Guard test rows run 1.0.18 embedded. **Publish before vc26 is released** — proposed: republish `429943ab` (release-ops §3b) | — | — | — |
+| production | 1.0.18 | `ce679c72-2a37-4034-a29d-1be16afab7e3` — republished from preview `429943ab`, same bundles (android `01a0ef89-8f26-70b3-b186-8be6509ce2e2`, ios `01a0ef89-8f26-7be7-ada6-786f5d9d8a4e`), so vc26 no longer depends on its embedded `7bff232` JS | `f5a84c4` | 2026-09-29 16:39:24 | roll back to embedded (`7bff232` on vc26); no earlier 1.0.18 production group |
 | preview | 1.0.18 | `429943ab-8561-4766-b031-635587d0a6c3` | `f5a84c4` | 2026-09-29 08:39:30 | roll back to embedded (`579ee12` on vc27); no earlier 1.0.18 preview group |
 | preview | 1.0.17 | `ff99ee6f-f732-449c-9eae-38a0fe3f224c` | UNVERIFIED | 2026-09-02 | — |
 | smoke | 1.0.17 | `2e20d40d-ffb3-4689-a7a2-af5183b2995b` at 2026-09-05; **UNVERIFIED since** | — | — | — |
