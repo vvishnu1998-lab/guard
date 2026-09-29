@@ -49,7 +49,10 @@
  * re-reads the shift — on the edit's push, on foreground, on home focus
  * (store/shiftStore.ts refreshFromServer, then app/_layout.tsx's window
  * effect). A suspended or killed app that is never reopened runs none of
- * that, so until it is, this gate still judges the OLD end.
+ * that, so for it the key still holds the OLD end — and the task therefore
+ * asks the server once before suppressing anything (lib/pastExpiryRecheck.ts).
+ * Only when that check cannot reach the server, or its token has expired,
+ * does the gate still go silent at the old end + grace.
  *
  * Judged at event DELIVERY, not at the exit itself: Android can deliver an
  * Enter/Exit 30 s - 2 min late, so an exit in the last minute or two before
