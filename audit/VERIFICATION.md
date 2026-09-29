@@ -1,5 +1,7 @@
 # V-Wing Audit — Verification Pass
 
+> **STALE — April 2026 (last touched `37ce825`). Do not cite without re-deriving.** Line 34 records `PUT /api/sites/<A-site>` → 404 *"no PUT by-id route"*; that route **exists** today at `apps/api/src/routes/sites.ts:168`. See **N96** in `docs/OPS/OPEN-ITEMS.md`. Verified 2026-09-15.
+
 Active checks to close the unverified claims in `audit/REPORT.md`. Every section reports **method**, **evidence**, **verdict**, and — if FAIL — **fix**.
 
 Live targets:

@@ -142,9 +142,9 @@ fewer than 19 — that is correct, not a fault. The full set fills in over a
 month; `monthlyHoursReport` is the last to appear.
 
 Jobs and their intervals are listed in `CRONS.md`. Quick reference for the
-slow ones: `chatRetention` and `orphanedSessionCheck` hourly,
-`nightlyPurge` and `locationIntegrityCron` and `dailyShiftEmail` daily,
-`monthlyHoursReport` on the 1st.
+slow ones: `orphanedSessionCheck` hourly, `chatRetention` and `nightlyPurge`
+and `locationIntegrityCron` and `dailyShiftEmail` daily, `monthlyHoursReport`
+on the 1st. (`chatRetention` moved hourly → `37 4 * * *` on 2026-09-19.)
 
 ## i. Confirm the API is healthy
 

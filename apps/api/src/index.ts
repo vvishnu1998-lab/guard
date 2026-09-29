@@ -59,6 +59,7 @@ import './jobs/clockOutReminder';
 // above or it reports 0. See jobs/_run.ts for why the wrapper exists.
 import { logJobRegistration, registeredJobs, computeStaleJobs } from './jobs/_run';
 import type { HeartbeatRow } from './jobs/_run';
+import { makeEdgeReporter } from './utils/healthEdge';
 
 logJobRegistration();
 
@@ -114,7 +115,47 @@ app.use(cors({
     if (!origin) return cb(null, true);               // native app / curl / health
     if (allowedOrigins.includes(origin)) return cb(null, true);
     if (VERCEL_PREVIEW_PATTERN.test(origin)) return cb(null, true);
-    return cb(new Error(`CORS: origin ${origin} not allowed`));
+    // DECLINE, don't throw (N85). `cb(null, false)` is how the cors API spells
+    // "this origin is not allowed"; `cb(new Error(...))` spells "this server
+    // broke". A disallowed origin is a routine, expected, client-side
+    // condition, and it was being reported as a 500 and captured by Sentry as
+    // an unhandled exception.
+    //
+    // NO RESPONSE HEADER CHANGES EITHER WAY, and that is the thing to check
+    // before "improving" this line. Read cors/lib/index.js:218-226:
+    //
+    //     originCallback(req.headers.origin, function (err2, origin) {
+    //       if (err2 || !origin) { next(err2); }          // BOTH forms land here
+    //       else { corsOptions.origin = origin; cors(...); }
+    //     });
+    //
+    // `cb(new Error)` gives err2=Error; `cb(null,false)` gives err2=null with
+    // a falsy origin. Neither reaches the branch that calls configureOrigin,
+    // so Access-Control-Allow-Origin and Vary were absent before this change
+    // and are absent after it. The browser blocks a disallowed origin for the
+    // same reason it always did — the header is missing, not the status.
+    //
+    // WHAT DOES CHANGE is the argument to next(). next(Error) diverts to the
+    // error chain, and Layer.handle_error skips every handler whose arity is
+    // not 4 (express/lib/router/layer.js:65). So today a rejected request
+    // never reaches app.use(globalLimiter) below — sending a disallowed
+    // Origin header is a way to BYPASS the global rate limiter. next(null)
+    // continues the normal chain, so these requests are now counted like
+    // every other request. That is the second half of this fix, not a
+    // side effect of it.
+    //
+    // Reaching the routes is not a new exposure: the `!origin` branch four
+    // lines up already admits every request that simply omits the header —
+    // curl, scripts, and most bots — which is the larger class by far. This
+    // makes origin-bearing requests behave like origin-less ones.
+    //
+    // REJECTED ALTERNATIVE: keeping the throw and setting err.status = 403.
+    // That also stops the Sentry capture (its filter is status >= 500, and a
+    // bare Error reports as 500 — @sentry/node integrations/tracing/
+    // express.js:177-184), but it keeps the short-circuit and so leaves the
+    // rate-limiter bypass above open, and a decline is properly the absence
+    // of a header rather than a refusal status.
+    return cb(null, false);
   },
   credentials: true,
   // Content-Disposition is NOT a CORS-safelisted response header, so without
@@ -128,12 +169,33 @@ app.use(cors({
 app.use(globalLimiter);
 app.use(express.json());
 
+// N92. One reporter per probe. Each holds a healthy/unhealthy flag so a DB
+// outage logs on EVERY probe but reaches Sentry ONCE, on the edge — see
+// utils/healthEdge.ts for why per-probe capture is the N27 defect class.
+// Module scope, not per-request: the flag has to survive between probes.
+const dbHealth    = makeEdgeReporter('db');
+const cronsHealth = makeEdgeReporter('crons');
+
 // Health check
 app.get('/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', db: 'connected' });
-  } catch {
+    dbHealth.recover();
+    // `commit` is the build this process is running, injected by Railway. It
+    // exists so "is the deployed API on main?" has an answer that does not
+    // depend on a CLI, a token scope, or a dashboard: ops-triage compares it
+    // with origin/main. Railway already sets it -- services/hoursWorkbook.ts
+    // has read it since the hours export shipped -- so this exposes a value
+    // the runtime already had rather than adding a new dependency.
+    // null off Railway, which is the correct answer for a local process and
+    // must never be read as a match.
+    res.json({
+      status: 'ok',
+      db: 'connected',
+      commit: process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
+    });
+  } catch (err) {
+    dbHealth.fail(err);
     res.status(503).json({ status: 'error', db: 'disconnected' });
   }
 });
@@ -171,12 +233,19 @@ app.get('/health/crons', async (_req, res) => {
               last_result
          FROM cron_heartbeats`,
     );
+    // Recovery is keyed on the QUERY succeeding, not on the verdict. The
+    // stale-jobs 503 below is a successful probe reporting a finding — the
+    // database answered. Putting recover() after that branch would let a
+    // stale-cron period suppress the recovery of a DATABASE outage, which is
+    // a different fault with a different fix.
+    cronsHealth.recover();
     const stale = computeStaleJobs(jobs, rows);
     if (stale.length > 0) {
       return res.status(503).json({ status: 'stale', jobs: jobs.length, stale });
     }
     return res.json({ status: 'ok', jobs: jobs.length, stale: [] });
-  } catch {
+  } catch (err) {
+    cronsHealth.fail(err);
     return res.status(503).json({ status: 'error' });
   }
 });

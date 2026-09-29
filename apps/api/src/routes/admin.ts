@@ -1,6 +1,6 @@
 import { Router } from 'express';
+import type { PoolClient } from 'pg';
 import jwt from 'jsonwebtoken';
-import PDFDocument from 'pdfkit';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { siteLocalDayRange } from '../services/dateRange';
@@ -11,24 +11,17 @@ import { generateTempPassword } from '../utils/tempPassword';
 import { Sentry } from '../services/sentry';
 import { sendPrimaryAdminWelcomeEmail, sendSecondaryAdminWelcomeEmail } from '../services/email';
 import { urlOrPresign } from '../services/s3';
-import {
-  NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
-  PAGE_W, PAGE_H, ML, MR, CW,
-  drawHeader, drawFooter, badge,
-} from '../services/pdf/theme';
+import { renderActivityLogPdf } from '../services/pdf/activityLog';
 import {
   fetchActivityRows,
-  ACTIVITY_PDF_ROW_CAP,
-  type ActivityRow,
   type UserScope,
 } from './activityLog';
 import {
   SHIFT_HOURS_SQL_FIELDS,
   SHIFT_HOURS_AGG_SQL_FIELDS,
-  BREAK_HOURS_ROW_SQL,
-  VIOLATION_HOURS_ROW_SQL,
   BREAK_OVERRUN_SQL_FIELDS,
   type ShiftHours,
+  type PayableShiftHours,
 } from '../services/shiftHours';
 
 const router = Router();
@@ -308,17 +301,195 @@ router.get('/all-sites', requireAuth('vishnu'), async (_req, res) => {
 // data_retention_log. Per-row expires_at + legal_hold on individual
 // tables replace the site-scoped countdown.
 
+/** One table's outcome from a cascade pass. `skipped` means the row was
+ *  deliberately left held because another origin still depends on it. */
+interface CascadeRow {
+  table:   string;
+  applied: boolean;
+  rows:    number;
+}
+
+/**
+ * Cascade a legal hold onto — or off — the evidence chain hanging off one
+ * shift_session.
+ *
+ * ── WHY RELEASE IS NOT JUST "SET IT BACK TO FALSE" ──────────────────────
+ *
+ * There are TWO hold origins (reports, geofence_violations) and both
+ * cascade onto the SAME eight row sets. A session's flag is therefore shared:
+ * measured 2026-09-19, 129 of 245 sessions carrying any origin carry more
+ * than one, one session carries 17 reports, and 25 sessions carry both a
+ * report and a violation. Clearing the parents whenever any single origin
+ * is released would strip a flag another held origin still needs — on the
+ * majority of sessions, not on an edge case.
+ *
+ * So release clears a parent only when NO OTHER HELD ORIGIN still depends
+ * on it, checked across both origin tables and at both levels: the session
+ * (for its own flag and its pings / task_completions / checkpoint_scans /
+ * off_post_events / vehicle_inspections / clock_in_verifications) and the
+ * shift (whose flag can be owed by a second session — 1 such shift exists
+ * in prod).
+ *
+ * ── WHY THE PREDICATE RUNS ON `conn` ────────────────────────────────────
+ *
+ * It must see the caller's own origin UPDATE, which is why it is issued on
+ * the transaction client and not on `pool`. Running it on `pool` would
+ * read pre-transaction state and count the origin being released as still
+ * held, so release would never clear anything. It would also be a
+ * check-then-act race between two concurrent releases under READ
+ * COMMITTED — the hazard `deviceRegistry.ts` documents for another table.
+ * CALLER CONTRACT: clear/set the origin row BEFORE calling this.
+ *
+ * ── legal_hold_at ───────────────────────────────────────────────────────
+ *
+ * Added to these tables in schema_v78. On set it is COALESCEd, not
+ * overwritten: a cascade row shared by several origins keeps the EARLIEST
+ * hold time, because "held since" is the question the column exists to
+ * answer and the second origin did not start the hold. This differs from
+ * the origin rows (reports / geofence_violations), which overwrite with
+ * NOW() — correct there, since re-holding a released report genuinely
+ * starts a new hold. On clear it is NULLed, matching the origin.
+ */
+async function cascadeLegalHold(
+  conn: PoolClient,
+  hold: boolean,
+  shiftSessionId: string,
+  shiftId: string,
+): Promise<CascadeRow[]> {
+  let sessionApplies = true;
+  let shiftApplies   = true;
+
+  if (!hold) {
+    // One round trip for both levels. Runs after the origin UPDATE, so the
+    // origin being released is already false and does not count itself.
+    const deps = await conn.query<{ session_still_held: boolean; shift_still_held: boolean }>(
+      `SELECT
+         (    EXISTS (SELECT 1 FROM reports             r WHERE r.shift_session_id = $1 AND r.legal_hold)
+           OR EXISTS (SELECT 1 FROM geofence_violations g WHERE g.shift_session_id = $1 AND g.legal_hold)
+         ) AS session_still_held,
+         (    EXISTS (SELECT 1 FROM reports r
+                        JOIN shift_sessions s ON s.id = r.shift_session_id
+                       WHERE s.shift_id = $2 AND r.legal_hold)
+           OR EXISTS (SELECT 1 FROM geofence_violations g
+                        JOIN shift_sessions s ON s.id = g.shift_session_id
+                       WHERE s.shift_id = $2 AND g.legal_hold)
+         ) AS shift_still_held`,
+      [shiftSessionId, shiftId],
+    );
+    sessionApplies = !deps.rows[0].session_still_held;
+    shiftApplies   = !deps.rows[0].shift_still_held;
+  }
+
+  const results: CascadeRow[] = [];
+
+  const run = async (table: string, where: string, param: string, applies: boolean) => {
+    if (!applies) { results.push({ table, applied: false, rows: 0 }); return; }
+    const r = await conn.query(
+      `UPDATE ${table}
+          SET legal_hold    = $1,
+              legal_hold_at = CASE WHEN $1 THEN COALESCE(legal_hold_at, NOW()) ELSE NULL END
+        WHERE ${where} = $2`,
+      [hold, param],
+    );
+    results.push({ table, applied: true, rows: r.rowCount ?? 0 });
+  };
+
+  // Session level first, then the shift: a reader following the log sees
+  // the chain in the order the evidence hangs off it.
+  //
+  // checkpoint_scans is gated on sessionApplies, like the other two child
+  // tables and unlike `shifts`: a scan hangs off exactly one session, so
+  // the only question that can keep it held is whether THAT session still
+  // owes a hold to some other origin.
+  //
+  // WITHOUT THIS LINE THE HOLD WOULD BE ONE-WAY. checkpoints.ts now
+  // inherits the flag at INSERT, so a scan taken on a held session is born
+  // held — but nothing would ever clear it again, and release is supposed
+  // to be symmetric. An FK does not help: legal_hold is an UPDATE, and
+  // ON DELETE CASCADE propagates deletes, not column writes. Every table
+  // in this chain needs its own line whatever its FK says.
+  //
+  // off_post_events and vehicle_inspections were missing a line until
+  // 2026-09-19 and their hold was therefore ONE-WAY: both inherit at INSERT
+  // — off_post_events by a threaded field (services/offPostEvents.ts:209 and
+  // :230), vehicle_inspections by the SQL fragment (routes/inspections.ts:179)
+  // — and nothing here ever cleared it again. The inheritance mechanism does
+  // not matter to release; what matters is that every table the hold can
+  // reach has a line in this list.
+  //
+  // Both are gated on sessionApplies for the same reason as the other child
+  // tables: each row hangs off exactly one session, so the only question that
+  // can keep it held is whether THAT session still owes a hold.
+  //
+  // Like the checkpoint_scans line, these ship UNEXERCISED and the log will
+  // not say so: zero rows of either table are held today, so a cascade logs
+  // `off_post_events=0 vehicle_inspections=0`, which is equally the output of
+  // a correct line and of one never reached.
+  await run('shift_sessions',   'id',               shiftSessionId, sessionApplies);
+  await run('location_pings',   'shift_session_id', shiftSessionId, sessionApplies);
+  await run('task_completions', 'shift_session_id', shiftSessionId, sessionApplies);
+  // Ships UNEXERCISED, and the log will not say so. The only held session
+  // in production ran 2026-07-13 20:21-21:25; the earliest row in
+  // checkpoint_scans is 2026-08-05. That session cannot ever acquire a
+  // scan, so a hold placed today logs `checkpoint_scans=0` — which is
+  // equally the output of a correct line and of one that was never
+  // reached. Do not read that zero as a pass. This function's own history
+  // is the warning: a zero-row cascade that logged nothing is how a ping
+  // sat unheld on a held session for 68 days.
+  await run('checkpoint_scans', 'shift_session_id', shiftSessionId, sessionApplies);
+  await run('off_post_events',  'shift_session_id', shiftSessionId, sessionApplies);
+  await run('vehicle_inspections', 'shift_session_id', shiftSessionId, sessionApplies);
+  // schema_v80. Unlike the other six child tables this one was added because
+  // a PURGE STEP needed it, not because a hold was escaping: the retention
+  // part-2 PR deletes the clock-in selfie at 30 days, and a step that
+  // destroys an S3 object must have a predicate that can spare held
+  // evidence. The one held session's verification is 68 days old and carries
+  // a real selfie, so without this the step's first live night would delete
+  // it. v80's backfill is what covers the row itself — this line only keeps
+  // it correct from here on.
+  await run('clock_in_verifications', 'shift_session_id', shiftSessionId, sessionApplies);
+  await run('shifts',           'id',               shiftId,        shiftApplies);
+
+  return results;
+}
+
+/** Single structured line per cascade. Before this, `rowCount` appeared
+ *  zero times in the whole file and the handler returned success:true on a
+ *  zero-row cascade with no trace anywhere — which is how the one held
+ *  report in production came to have an unheld ping for 68 days without
+ *  anyone noticing. */
+function logCascade(origin: string, originId: string, hold: boolean, rows: CascadeRow[]): void {
+  const detail = rows
+    .map((r) => (r.applied ? `${r.table}=${r.rows}` : `${r.table}=SKIPPED(still_held)`))
+    .join(' ');
+  console.log(`[legal-hold] origin=${origin} id=${originId} hold=${hold} ${detail}`);
+}
+
 // ── PATCH /api/admin/reports/:id/legal-hold ─────────────────────────────────
 //
 // Places a report on legal hold (hold=true) or releases the hold
 // (hold=false). Cascade rules:
 //   hold=true  → also flips shift_sessions, shifts, location_pings,
-//                and task_completions belonging to the report's session.
-//                Keeps the entire chain of related evidence in the DB past
-//                its normal expires_at.
-//   hold=false → releases *only* the specific report. Cascaded parents
-//                stay held. Vishnu / admin walks back through each layer
-//                manually to reduce accidental release surface (RC4).
+//                task_completions, checkpoint_scans, off_post_events,
+//                vehicle_inspections and clock_in_verifications belonging to
+//                the report's session. Keeps the entire chain of related
+//                evidence in the DB past its normal expires_at.
+//   hold=false → releases the report AND clears each cascaded row, but
+//                ONLY where no other held origin still depends on it.
+//                See cascadeLegalHold() for why that check exists and why
+//                it runs inside the transaction.
+//
+// This REVERSES the earlier behaviour, which released the report alone and
+// left every cascaded row held forever — the four cascade UPDATEs bound the
+// literal `true`, so no code path could clear them. The old prose called
+// that a deliberate reduction of "accidental release surface (RC4)"; what it
+// actually produced was holds that could only be lifted by hand-written SQL,
+// on rows that no admin UI lists.
+//
+// NOT covered, deliberately: rows written to the session AFTER the hold is
+// stamped are still not held. That is a separate defect with its own fix
+// (insert-time inheritance); this handler only governs rows that exist when
+// it runs.
 //
 // Auth: company_admin scoped to their company; vishnu bypasses the
 // scope check and can hold any report.
@@ -364,17 +535,14 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
       [hold, id],
     );
 
-    if (hold) {
-      // Cascade UP + across children of the same session. Release does
-      // NOT reverse the cascade (see docstring).
-      await conn.query('UPDATE shift_sessions   SET legal_hold = true WHERE id = $1',                [shift_session_id]);
-      await conn.query('UPDATE shifts           SET legal_hold = true WHERE id = $1',                [shift_id]);
-      await conn.query('UPDATE location_pings   SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-      await conn.query('UPDATE task_completions SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-    }
+    // Cascade UP + across children of the same session, in BOTH directions.
+    // Runs after the origin UPDATE above so the release predicate inside
+    // cascadeLegalHold() does not count this report as still holding.
+    const cascade = await cascadeLegalHold(conn, hold, shift_session_id, shift_id);
+    logCascade('report', id, hold, cascade);
 
     await conn.query('COMMIT');
-    res.json({ success: true, hold });
+    res.json({ success: true, hold, cascade });
   } catch (err) {
     await conn.query('ROLLBACK').catch(() => {});
     throw err;
@@ -388,8 +556,19 @@ router.patch('/reports/:id/legal-hold', requireAuth('company_admin', 'vishnu'), 
 // Mirror of the reports legal-hold endpoint for geofence_violations
 // (Vishnu Portal v2). Same cascade / release semantics:
 //   hold=true  → also flips the parent shift_session, shift, and the
-//                sibling location_pings + task_completions.
-//   hold=false → releases only the specific violation; parents stay held.
+//                sibling location_pings + task_completions +
+//                checkpoint_scans + off_post_events + vehicle_inspections +
+//                clock_in_verifications.
+//   hold=false → releases the violation AND clears each cascaded row,
+//                but only where no other held origin still depends on it.
+//
+// The two endpoints share cascadeLegalHold(), which is what makes the
+// release predicate correct across BOTH of them: 25 sessions in production
+// carry a report and a violation at once, so releasing a violation has to
+// see a held report on the same session and decline to clear the parents.
+// Two hand-duplicated copies of this block could not do that reliably —
+// they were byte-identical before this change, which is how both acquired
+// the same literal-`true` defect.
 //
 // Auth: company_admin scoped to their company; vishnu bypasses scope.
 router.patch('/violations/:id/legal-hold', requireAuth('company_admin', 'vishnu'), async (req, res) => {
@@ -430,15 +609,11 @@ router.patch('/violations/:id/legal-hold', requireAuth('company_admin', 'vishnu'
       [hold, id],
     );
 
-    if (hold) {
-      await conn.query('UPDATE shift_sessions   SET legal_hold = true WHERE id = $1',                [shift_session_id]);
-      await conn.query('UPDATE shifts           SET legal_hold = true WHERE id = $1',                [shift_id]);
-      await conn.query('UPDATE location_pings   SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-      await conn.query('UPDATE task_completions SET legal_hold = true WHERE shift_session_id = $1',  [shift_session_id]);
-    }
+    const cascade = await cascadeLegalHold(conn, hold, shift_session_id, shift_id);
+    logCascade('violation', id, hold, cascade);
 
     await conn.query('COMMIT');
-    res.json({ success: true, hold });
+    res.json({ success: true, hold, cascade });
   } catch (err) {
     await conn.query('ROLLBACK').catch(() => {});
     throw err;
@@ -930,6 +1105,14 @@ router.get('/live-guards', requireAuth('company_admin'), async (req, res) => {
   const result = await pool.query(
     `SELECT
        g.id, g.name, g.badge_number,
+       -- N98. site_id is what the web matches a row to a site on. It used to
+       -- send site_name alone, so apps/web compared NAMES: presentGuards on
+       -- the site detail page and siteFenceCentre in lib/siteFence.ts. Names
+       -- are unique per company in practice and nothing enforces it — there is
+       -- no unique index on (company_id, name) and one is deliberately not
+       -- being added — so the match was one duplicate name away from merging
+       -- two sites' guards into one page.
+       ss.site_id,
        s.name    AS site_name,
        ss.id     AS session_id,
        ss.clocked_in_at,
@@ -1140,6 +1323,14 @@ router.get('/violations', requireAuth('company_admin', 'vishnu'), async (req, re
             (gv.resolved_at IS NOT NULL) AS is_resolved,
             g.name         AS guard_name,
             g.badge_number,
+            -- N98, PROPHYLACTIC. No web consumer matches a breach to a site by
+            -- name today: site_name is rendered on the breach table and nothing
+            -- else reads it. This is here so the pair of payloads is
+            -- consistent, and so siteFence.ts's docblock, which names BOTH
+            -- endpoints as the reason it matches on name, stops being true of
+            -- either. (No backticks in this comment: it lives inside a
+            -- template literal, where one would end the string.)
+            gv.site_id,
             s.name         AS site_name,
             s.timezone     AS site_timezone
      FROM geofence_violations gv
@@ -1179,18 +1370,18 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
          WHERE r.reported_at >= (DATE_TRUNC('day', NOW() AT TIME ZONE s.timezone)
                                  AT TIME ZONE s.timezone)
        ) AS reports_today,
-       -- Legacy scalar: sum of stored total_hours this week. Kept for
-       -- back-compat until the web dashboard consumes hours_this_week
-       -- from the new 4-field object below.
+       -- Legacy scalar: sum of the STORED total_hours this week (start-clamped,
+       -- not Actual, not Payable). No reader left — the web reads the hours
+       -- object below — and it must never become a fallback for either figure.
        COALESCE((
          SELECT SUM(ss2.total_hours) FROM shift_sessions ss2
           WHERE ss2.site_id = s.id
             AND ss2.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
                                        AT TIME ZONE s.timezone)
        ), 0) AS hours_this_week,
-       -- Phase 1 — 4-field canonical hours, summed this week per site.
-       -- scheduled_hours here sums each shift's window (deduped by shift_id
-       -- so multi-session handoffs don't double-count the schedule).
+       -- Canonical hours, summed this week per site. scheduled_hours sums
+       -- each shift's window (deduped by shift_id so multi-session handoffs
+       -- don't double-count the schedule).
        COALESCE((
          SELECT ROUND(CAST(SUM(sched.scheduled_hours) AS NUMERIC), 2)
            FROM (
@@ -1203,34 +1394,32 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
                                            AT TIME ZONE s.timezone)
            ) sched
        ), 0) AS h_scheduled,
-       COALESCE((
-         SELECT ROUND(CAST(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(ss4.clocked_out_at, NOW()) - ss4.clocked_in_at))/3600.0)) AS NUMERIC), 2)
-           FROM shift_sessions ss4
-          WHERE ss4.site_id = s.id
-            AND ss4.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
-                                       AT TIME ZONE s.timezone)
-       ), 0) AS h_actual,
-       COALESCE((
-         SELECT ROUND(CAST(SUM(${BREAK_HOURS_ROW_SQL('bs', 'ss5')}) AS NUMERIC), 2)
-           FROM break_sessions bs
-           JOIN shift_sessions ss5 ON ss5.id = bs.shift_session_id
-          WHERE ss5.site_id = s.id
-            AND ss5.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
-                                       AT TIME ZONE s.timezone)
-       ), 0) AS h_break,
-       COALESCE((
-         SELECT ROUND(CAST(SUM(${VIOLATION_HOURS_ROW_SQL('gv', 'ss6', 'sh6')}) AS NUMERIC), 2)
-           FROM geofence_violations gv
-           JOIN shift_sessions ss6 ON ss6.id = gv.shift_session_id
-           JOIN shifts sh6 ON sh6.id = ss6.shift_id
-          WHERE ss6.site_id = s.id
-            AND ss6.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE s.timezone)
-                                       AT TIME ZONE s.timezone)
-       ), 0) AS h_violation
+       -- Actual, Payable (D19), Break and Violation from the shared aggregate
+       -- fragment, one grouped pass over this week's sessions per site. This
+       -- replaced a hand-typed copy of the Actual arithmetic and two
+       -- event-table subqueries: same session set, same per-row clamps, so
+       -- the same values. A derived table rather than LATERAL because the
+       -- outer query joins every report a site has ever had; a lateral could
+       -- be re-run once per report row.
+       COALESCE(wk.h_actual,    0) AS h_actual,
+       COALESCE(wk.h_payable,   0) AS h_payable,
+       COALESCE(wk.h_break,     0) AS h_break,
+       COALESCE(wk.h_violation, 0) AS h_violation
      FROM sites s
+     LEFT JOIN (
+       SELECT ssw.site_id,
+              ${SHIFT_HOURS_AGG_SQL_FIELDS('ssw', 'h_prefix', 'shw', { payable: true })}
+         FROM shift_sessions ssw
+         JOIN shifts shw ON shw.id = ssw.shift_id
+         JOIN sites  sw  ON sw.id  = ssw.site_id
+        WHERE sw.company_id = $1
+          AND ssw.clocked_in_at >= (DATE_TRUNC('week', NOW() AT TIME ZONE sw.timezone)
+                                     AT TIME ZONE sw.timezone)
+        GROUP BY ssw.site_id
+     ) wk ON wk.site_id = s.id
      LEFT JOIN reports r ON r.site_id = s.id
      WHERE s.company_id = $1 AND s.is_active = true
-     GROUP BY s.id, s.name
+     GROUP BY s.id, s.name, wk.h_actual, wk.h_payable, wk.h_break, wk.h_violation
      ORDER BY s.name`,
     [cid]
   );
@@ -1238,11 +1427,13 @@ router.get('/dashboard-sites', requireAuth('company_admin'), async (req, res) =>
     row.hours = {
       scheduled_hours: Number(row.h_scheduled) || 0,
       actual_hours:    Number(row.h_actual)    || 0,
+      payable_hours:   Number(row.h_payable)   || 0,
       break_hours:     Number(row.h_break)     || 0,
       violation_hours: Number(row.h_violation) || 0,
-    } satisfies ShiftHours;
+    } satisfies PayableShiftHours;
     delete row.h_scheduled;
     delete row.h_actual;
+    delete row.h_payable;
     delete row.h_break;
     delete row.h_violation;
   }
@@ -1292,9 +1483,9 @@ router.get('/recent-alerts', requireAuth('company_admin', 'vishnu'), async (req,
 
        -- Missed shifts — scheduled but no clock-in 15 min after start.
        -- Status filter accepts both 'scheduled' (alert fired, shift still
-       -- before scheduled_end) and 'missed' (auto-complete cron has since
-       -- flipped the status because scheduled_end passed with zero
-       -- sessions). The 24-hour cap on missed_alert_sent_at keeps the
+       -- before scheduled_end + the auto-close grace) and 'missed'
+       -- (auto-complete cron has since flipped the status because that passed
+       -- with zero sessions). The 24-hour cap on missed_alert_sent_at keeps the
        -- alert visible on the dashboard the morning after, then drops it.
        SELECT
          sh.id::text,
@@ -1475,10 +1666,14 @@ router.post('/company-admins/:id/resend-welcome', requireAuth('company_admin'), 
 router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
   const cid = req.user!.company_id;
 
+  // Totals here are PAYABLE (D19): the month KPI, the leaderboard and the
+  // monthly bars all carry payable_hours from the shared fragment, next to
+  // the raw actual_hours. The legacy `total_hours` scalars are the STORED
+  // column (start-clamped) — kept for old web builds only, never a fallback.
   const [hoursResult, reportsByType, incidentBySeverity, guardPerf, monthlyHours] = await Promise.all([
-    // Total hours this month — legacy `total_hours` scalar + Phase 1
-    // 4-field breakdown. scheduled_hours is deduped across sessions per
-    // shift so mid-shift handoffs don't double-count the schedule window.
+    // Total hours this month — legacy `total_hours` scalar + the canonical
+    // breakdown. scheduled_hours is deduped across sessions per shift so
+    // mid-shift handoffs don't double-count the schedule window.
     pool.query(`
       SELECT
         COALESCE(ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1), 0) AS total_hours,
@@ -1495,7 +1690,7 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
                                              AT TIME ZONE ${PACIFIC_TZ_SQL})
             ) sched
         ), 0) AS h_scheduled,
-        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
+        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix', 'sh', { payable: true })}
       FROM shift_sessions ss
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
@@ -1525,13 +1720,15 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       GROUP BY r.severity
     `, [cid]),
 
-    // Top guards by hours (last 30 days) — legacy total_hours + Phase 1
-    // 4-field breakdown per guard.
+    // Top guards by PAYABLE hours (last 30 days) — legacy total_hours + the
+    // canonical breakdown per guard. Ranked by the figure the page shows;
+    // Actual then guard id break ties, which Payable makes common (a guard
+    // whose every session fell outside its window has Payable 0).
     pool.query(`
       SELECT g.name, g.badge_number,
              ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS total_hours,
              COUNT(DISTINCT ss.id) AS shift_count,
-             ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
+             ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix', 'sh', { payable: true })}
       FROM shift_sessions ss
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN guards g ON g.id = ss.guard_id
@@ -1539,18 +1736,18 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
       WHERE s.company_id = $1
         AND ss.clocked_in_at >= NOW() - INTERVAL '30 days'
       GROUP BY g.id, g.name, g.badge_number
-      ORDER BY h_actual DESC
+      ORDER BY h_payable DESC, h_actual DESC, g.id
       LIMIT 10
     `, [cid]),
 
     // Monthly hours per site (last 6 months) — legacy total_hours scalar
-    // + Phase 1 4-field breakdown per (month, site).
+    // + the canonical breakdown per (month, site).
     pool.query(`
       SELECT
         TO_CHAR(DATE_TRUNC('month', ss.clocked_in_at AT TIME ZONE ${PACIFIC_TZ_SQL}), 'Mon YYYY') AS month,
         s.name AS site_name,
         ROUND(CAST(SUM(ss.total_hours) AS NUMERIC), 1) AS hours,
-        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix')}
+        ${SHIFT_HOURS_AGG_SQL_FIELDS('ss', 'h_prefix', 'sh', { payable: true })}
       FROM shift_sessions ss
       JOIN shifts sh ON sh.id = ss.shift_id
       JOIN sites s ON s.id = ss.site_id
@@ -1562,12 +1759,15 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
     `, [cid]),
   ]);
 
-  // Phase 1 — expose the 4-field breakdown for total-this-month, top-guards,
-  // and monthly-by-site. Legacy scalars kept untouched.
+  // The canonical breakdown — now with payable_hours (D19) — for
+  // total-this-month, top-guards and monthly-by-site. The web renders
+  // payable_hours and shows '—' when an older API omits it. Legacy scalars
+  // kept untouched.
   const totalsRow = hoursResult.rows[0];
-  const totals_this_month: ShiftHours = {
+  const totals_this_month: PayableShiftHours = {
     scheduled_hours: Number(totalsRow?.h_scheduled) || 0,
     actual_hours:    Number(totalsRow?.h_actual)    || 0,
+    payable_hours:   Number(totalsRow?.h_payable)   || 0,
     break_hours:     Number(totalsRow?.h_break)     || 0,
     violation_hours: Number(totalsRow?.h_violation) || 0,
   };
@@ -1579,9 +1779,10 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
     hours: {
       scheduled_hours: 0, // per-guard scheduled aggregate is ambiguous (multi-site) — surfaced at (guard, shift) level only.
       actual_hours:    Number(r.h_actual)    || 0,
+      payable_hours:   Number(r.h_payable)   || 0,
       break_hours:     Number(r.h_break)     || 0,
       violation_hours: Number(r.h_violation) || 0,
-    } satisfies ShiftHours,
+    } satisfies PayableShiftHours,
   }));
   const monthlyBySite = monthlyHours.rows.map((r) => ({
     month:     r.month,
@@ -1590,9 +1791,10 @@ router.get('/analytics', requireAuth('company_admin'), async (req, res) => {
     hours: {
       scheduled_hours: 0, // aggregate scheduled_hours per (month, site) omitted — dedup would require another CTE; add when web needs it.
       actual_hours:    Number(r.h_actual)    || 0,
+      payable_hours:   Number(r.h_payable)   || 0,
       break_hours:     Number(r.h_break)     || 0,
       violation_hours: Number(r.h_violation) || 0,
-    } satisfies ShiftHours,
+    } satisfies PayableShiftHours,
   }));
 
   res.json({
@@ -1706,13 +1908,22 @@ router.get('/sessions', requireAuth('company_admin'), async (req, res) => {
 
 // ── POST /api/admin/activity-log/pdf ──────────────────────────────────────────
 //
-// Streams application/pdf of the current activity feed, filtered by the
+// Returns application/pdf of the current activity feed, filtered by the
 // same params as GET /api/activity-log but read from the request body so
 // the admin can fetch-to-blob from the DOWNLOAD PDF button. company_admin
-// only. Media policy: filenames + counts, no embedded images (keeps PDF
-// size predictable — a 5-photo incident weighs the same as a bare ping).
+// only. Media policy: counts only — no embedded images and no filenames
+// (keeps PDF size predictable — a 5-photo incident weighs the same as a
+// bare ping).
+//
+// Layout lives in services/pdf/activityLog.ts. This handler owns auth,
+// params, the fetch and the response headers, and nothing else.
+//
+// The document is buffered rather than piped at `res`: renderActivityLogPdf
+// returns a Buffer so the renderer can be exercised without an Express
+// request. res.send() therefore sets a real Content-Length where the old
+// pipe sent chunked — strictly better for a client fetching to a blob.
 router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) => {
-  const { from, to, guard_id, site_id, session_id } = (req.body ?? {}) as Record<string, string | undefined>;
+  const { from, to, site_id, session_id } = (req.body ?? {}) as Record<string, string | undefined>;
 
   const fromIso = from || new Date(Date.now() - 7 * 86_400_000).toISOString();
   const toIso   = to   || new Date().toISOString();
@@ -1722,265 +1933,58 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
     company_id: req.user!.company_id,
   };
 
+  // No guardId. The web has never sent one — ActivityLogTable.tsx:611-612
+  // sends site_id and session_id and nothing else — so the guard filter and
+  // the "Guard" header line it fed were both unreachable. Accepting a filter
+  // the cover cannot describe is exactly the defect this PR is fixing, so the
+  // parameter is dropped rather than left half-wired.
   const rows = await fetchActivityRows(scope, {
     fromIso, toIso,
-    guardId:   guard_id,
     siteId:    site_id,
     sessionId: session_id,
   });
 
-  // Newest first (matches on-screen order)
-  rows.sort((a, b) => Date.parse(b.event_time) - Date.parse(a.event_time));
-
-  const truncated = rows.length > ACTIVITY_PDF_ROW_CAP;
-  const eventRows = rows.slice(0, ACTIVITY_PDF_ROW_CAP);
-
-  // Optional filter-summary lookups. When a site_id / guard_id is present
-  // we look up its display name so the PDF header reads "Sunset Tower"
-  // instead of a UUID.
-  let siteLabel  = 'All sites';
-  let guardLabel = 'All guards';
+  // Filter-summary lookups. Every filter the export actually applied has to
+  // be nameable on the cover, or the document is a slice that does not say so.
+  let siteLabel = 'All sites';
   if (site_id) {
     const r = await pool.query('SELECT name FROM sites WHERE id = $1 AND company_id = $2',
                                [site_id, req.user!.company_id]);
     if (r.rows[0]) siteLabel = r.rows[0].name;
   }
-  if (guard_id) {
-    const r = await pool.query('SELECT name FROM guards WHERE id = $1 AND company_id = $2',
-                               [guard_id, req.user!.company_id]);
-    if (r.rows[0]) guardLabel = r.rows[0].name;
+
+  // Shift filter. TENANT-SCOPED on si.company_id, like the site lookup above:
+  // fetchActivityRows already scopes the ROWS, so a foreign session_id yields
+  // an empty document — but an unscoped label lookup would still have printed
+  // another tenant's guard and site name onto the cover of it.
+  let shift: { guardName: string; siteName: string; clockedInAt: string } | undefined;
+  if (session_id) {
+    const r = await pool.query(
+      `SELECT g.name AS guard_name, si.name AS site_name, ss.clocked_in_at
+         FROM shift_sessions ss
+         JOIN guards g  ON g.id  = ss.guard_id
+         JOIN sites  si ON si.id = ss.site_id
+        WHERE ss.id = $1 AND si.company_id = $2`,
+      [session_id, req.user!.company_id],
+    );
+    if (r.rows[0]) {
+      shift = {
+        guardName:   r.rows[0].guard_name,
+        siteName:    r.rows[0].site_name,
+        clockedInAt: new Date(r.rows[0].clocked_in_at).toISOString(),
+      };
+    }
   }
 
   const fromDate  = fromIso.slice(0, 10);
   const toDate    = toIso.slice(0, 10);
   const filename  = `activity-logs-${fromDate}_${toDate}.pdf`;
-  // En dash, not an arrow: WinAnsi has no → and PDFKit's built-in Helvetica
-  // rendered it as "!'" on every page of this PDF.
-  const periodStr = `${new Date(fromIso).toLocaleDateString('en-GB')} – ${new Date(toIso).toLocaleDateString('en-GB')}`;
 
-  // Group by Pacific-time day for the on-page sections.
-  const DAY_KEY = new Intl.DateTimeFormat('en-CA', {
-    year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'America/Los_Angeles',
-  });
-  const DAY_HEADER = new Intl.DateTimeFormat('en-GB', {
-    weekday: 'long', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Los_Angeles',
-  });
-  const TIME_FMT = new Intl.DateTimeFormat('en-GB', {
-    hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
-  });
-
-  const byDay = new Map<string, ActivityRow[]>();
-  for (const r of eventRows) {
-    const key = DAY_KEY.format(new Date(r.event_time));
-    if (!byDay.has(key)) byDay.set(key, []);
-    byDay.get(key)!.push(r);
-  }
-  const dayKeys = Array.from(byDay.keys()).sort().reverse();
-  for (const key of dayKeys) byDay.get(key)!.sort((a, b) => Date.parse(a.event_time) - Date.parse(b.event_time));
+  const pdf = await renderActivityLogPdf(rows, { siteLabel, fromIso, toIso, shift });
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-  const doc = new PDFDocument({ margin: 0, size: 'A4', autoFirstPage: true });
-  doc.pipe(res);
-
-  const STATUS_COLOR: Record<string, string> = {
-    on_time:                   NAVY,
-    late:                      AMBER,
-    missed:                    RED,
-    // Missed then answered: RED. The window WAS missed, and a document a
-    // client reads must not soften that because the guard caught up.
-    missed_answered_late:      RED,
-    activity_report:           BLUE,
-    incident_report:           RED,
-    maintenance_report:        AMBER,
-    checkpoint_round_complete: NAVY,
-    checkpoint_round_partial:  AMBER,
-    task_completed:            NAVY,
-  };
-  const STATUS_LABEL: Record<string, string> = {
-    on_time:                   'PING',
-    late:                      'LATE PING',
-    missed:                    'MISSED PING',
-    // Row's `status` already reads "Missed — answered N minutes late";
-    // the badge is the short form.
-    missed_answered_late:      'MISSED / ANSWERED LATE',
-    activity_report:           'ACTIVITY',
-    incident_report:           'INCIDENT',
-    maintenance_report:        'MAINTENANCE',
-    // Deliberately no "x of y" here. This document is generated by an admin
-    // but handed to a client, and the counts are a comparison against the
-    // current checkpoint roster, which can change retroactively. Complete
-    // vs partial is a standalone fact and is safe to print.
-    checkpoint_round_complete: 'ROUND COMPLETE',
-    checkpoint_round_partial:  'ROUND PARTIAL',
-    task_completed:            'TASK COMPLETED',
-  };
-
-  // We don't know the true page total until the stream drains, so
-  // estimate: cover + ~20 rows/page. Header shows "n / estimate".
-  const estRowsPerPage = 20;
-  const estPages       = 1 + Math.max(1, Math.ceil(eventRows.length / estRowsPerPage));
-  let pageNum = 1;
-
-  // ── Page 1 — Cover / filter summary ─────────────────────────────────────
-  drawHeader(doc, 'ACTIVITY LOGS', pageNum, estPages);
-  let y = 90;
-
-  doc.fontSize(22).fillColor(TEXT).font('Helvetica-Bold').text('Activity Logs', ML, y);
-  y += 30;
-
-  doc.fontSize(10).fillColor(MUTED).font('Helvetica')
-     .text(`Period      ${periodStr}`, ML, y);
-  y += 15;
-  doc.text(`Site        ${siteLabel}`, ML, y);
-  y += 15;
-  doc.text(`Guard       ${guardLabel}`, ML, y);
-  y += 15;
-  doc.text(`Generated   ${new Date().toLocaleString('en-GB', { timeZone: 'America/Los_Angeles' })} PT`, ML, y);
-  y += 22;
-
-  doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(0.5).stroke();
-  y += 18;
-
-  // Summary tile row
-  const totalRows        = rows.length;
-  // A window that was missed counts as missed even once it was answered
-  // late — that is the whole point of keeping the resolved row. It is
-  // deliberately NOT also added to pingCount: the merged row is one row,
-  // so counting it in both tiles would stop the cover reconciling with
-  // the body. Row totals are unchanged by the merge (a resolved window
-  // used to emit one ping row; it now emits one missed_answered_late row).
-  const missedCount      = eventRows.filter(
-    (r) => r.status_kind === 'missed' || r.status_kind === 'missed_answered_late',
-  ).length;
-  const incidentCount    = eventRows.filter((r) => r.status_kind === 'incident_report').length;
-  const activityCount    = eventRows.filter((r) => r.status_kind === 'activity_report').length;
-  const maintenanceCount = eventRows.filter((r) => r.status_kind === 'maintenance_report').length;
-  const pingCount        = eventRows.filter((r) => r.status_kind === 'on_time' || r.status_kind === 'late').length;
-  // Patrol rounds are counted so the cover reconciles with the body. Without
-  // this the tiles would report fewer events than the pages actually list.
-  //
-  // One tile, not two: the tile row divides CW evenly, so an eighth tile
-  // narrows every box enough that TOTAL EVENTS / MAINTENANCE wrap onto a
-  // second line and overflow their fixed 56pt height. Complete-vs-partial is
-  // already legible per row via the ROUND COMPLETE / ROUND PARTIAL badges;
-  // splitting it out on the cover is not worth breaking the existing labels.
-  const roundCount       = eventRows.filter((r) => r.kind === 'checkpoint_round').length;
-
-  const stats = [
-    { label: 'TOTAL EVENTS', value: totalRows,        color: TEXT  },
-    { label: 'PINGS',        value: pingCount,        color: NAVY  },
-    { label: 'MISSED',       value: missedCount,      color: RED   },
-    { label: 'ROUNDS',       value: roundCount,       color: NAVY  },
-    { label: 'ACTIVITY',     value: activityCount,    color: BLUE  },
-    { label: 'INCIDENT',     value: incidentCount,    color: RED   },
-    { label: 'MAINTENANCE',  value: maintenanceCount, color: AMBER },
-  ];
-  const statW = CW / stats.length;
-  for (let i = 0; i < stats.length; i++) {
-    const sx = ML + i * statW;
-    doc.rect(sx + 2, y, statW - 4, 56).fill(GRAY1).stroke();
-    doc.rect(sx + 2, y, 3, 56).fill(stats[i].color);
-    doc.fontSize(22).fillColor(stats[i].color).font('Helvetica-Bold')
-       .text(String(stats[i].value), sx + 10, y + 8, { width: statW - 16, lineBreak: false });
-    doc.fontSize(7).fillColor(MUTED).font('Helvetica')
-       .text(stats[i].label, sx + 10, y + 40, { width: statW - 16 });
-  }
-  y += 70;
-
-  if (truncated) {
-    doc.rect(ML, y, CW, 18).fill('#FEF3C7');
-    doc.fontSize(8).fillColor('#92400E').font('Helvetica-Bold')
-       .text(`Truncated: ${totalRows} total events, showing first ${ACTIVITY_PDF_ROW_CAP}. Narrow the filter to see more.`,
-             ML + 8, y + 5, { width: CW - 16, lineBreak: false });
-    y += 24;
-  }
-
-  doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(0.5).stroke();
-  y += 14;
-
-  drawFooter(doc, siteLabel, periodStr);
-
-  // ── Timeline: per-day sections ──────────────────────────────────────────
-  const COL_TIME_X   = ML + 8;
-  const COL_STATUS_X = ML + 60;
-  const COL_GUARD_X  = ML + 170;
-  const COL_SITE_X   = ML + 300;
-  const COL_DESC_X   = ML + 8;
-  const ROW_H        = 18;
-  const ROW_DESC_H   = 26;
-
-  function ensureRoom(needed: number) {
-    if (y + needed > PAGE_H - 40) {
-      drawFooter(doc, siteLabel, periodStr);
-      doc.addPage();
-      pageNum += 1;
-      drawHeader(doc, 'ACTIVITY LOGS', pageNum, estPages);
-      y = 90;
-    }
-  }
-
-  if (eventRows.length === 0) {
-    doc.fontSize(12).fillColor(MUTED).font('Helvetica')
-       .text('No events in this range.', ML, y, { width: CW, align: 'center' });
-  }
-
-  for (const key of dayKeys) {
-    ensureRoom(30);
-    const dayRows = byDay.get(key)!;
-    const dayDate = new Date(dayRows[0].event_time);
-
-    // Day header bar
-    doc.rect(ML, y, CW, 20).fill(NAVY);
-    doc.fontSize(9).fillColor(WHITE).font('Helvetica-Bold')
-       .text(DAY_HEADER.format(dayDate).toUpperCase(), ML + 8, y + 6, { lineBreak: false });
-    doc.fontSize(8).fillColor('#94A3B8').font('Helvetica')
-       .text(`${dayRows.length} event${dayRows.length !== 1 ? 's' : ''}`,
-             0, y + 6, { align: 'right', width: PAGE_W - ML });
-    y += 26;
-
-    for (const r of dayRows) {
-      const descLen = r.description ? Math.min(r.description.length, 180) : 0;
-      const rowHeight = descLen > 0 ? ROW_DESC_H : ROW_H;
-      ensureRoom(rowHeight + 4);
-
-      const color   = STATUS_COLOR[r.status_kind] ?? MUTED;
-      const label   = STATUS_LABEL[r.status_kind] ?? r.status.toUpperCase();
-      const timeStr = r.log_time ? TIME_FMT.format(new Date(r.log_time)) : '—';
-
-      doc.fontSize(8).fillColor(MUTED).font('Helvetica')
-         .text(timeStr, COL_TIME_X, y + 3, { lineBreak: false, width: 50 });
-      badge(doc, COL_STATUS_X, y + 1, label, color);
-      doc.fontSize(8).fillColor(TEXT).font('Helvetica')
-         .text(r.guard_name, COL_GUARD_X, y + 3, { lineBreak: false, width: 120 });
-      doc.fontSize(8).fillColor(MUTED).font('Helvetica')
-         .text(r.site_name, COL_SITE_X, y + 3, { lineBreak: false, width: 200 });
-
-      if (descLen > 0) {
-        const snippet = (r.description ?? '').length > 180
-          ? (r.description ?? '').slice(0, 180) + '…'
-          : (r.description ?? '');
-        doc.fontSize(8).fillColor('#374151').font('Helvetica')
-           .text(snippet, COL_DESC_X, y + 15, { width: CW - 16, height: 10 });
-      }
-
-      const mediaCount = r.log_media_urls?.length ?? 0;
-      if (mediaCount > 0) {
-        doc.fontSize(7).fillColor(MUTED).font('Helvetica')
-           .text(`${mediaCount} photo${mediaCount === 1 ? '' : 's'}`,
-                 0, y + 3, { align: 'right', width: PAGE_W - ML - 10 });
-      }
-
-      y += rowHeight;
-      doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(0.3).stroke();
-      y += 2;
-    }
-    y += 8;
-  }
-
-  drawFooter(doc, siteLabel, periodStr);
-  doc.end();
+  res.send(pdf);
 });
 
 export default router;

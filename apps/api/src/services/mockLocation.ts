@@ -32,7 +32,33 @@
  *   on      — reject when the OS says true
  *
  * Ship at `off`. Move to `shadow`, measure for at least a week, then
- * consider `on`. Flipping back needs no deploy.
+ * consider `on`.
+ *
+ * FLIPPING IT BACK NEEDS NO REBUILD, BUT IT IS NOT FREE. Both variables here
+ * are read from process.env inside the functions below, once per request, so
+ * the running process picks up a new value with no code change and no image
+ * rebuild. The PLATFORM is the cost: a Railway variable write restarts the
+ * service unless it is made with `--skip-deploys`. Budget a cold boot for any
+ * toggle, and prefer `--skip-deploys` when a guard is on post. An earlier
+ * version of this docblock said "flipping back needs no deploy" full stop,
+ * which is true of the code and misleading about the platform.
+ *
+ * ── PER-GUARD EXEMPTION ─────────────────────────────────────────────────
+ *
+ * MOCK_LOCATION_EXEMPT_GUARD_IDS — comma-separated guard UUIDs, DEFAULT EMPTY.
+ *
+ * Exists for app-store review: a Play or App Store reviewer runs on an
+ * emulator, an emulator reports mocked=true, and enforcement would refuse
+ * their clock-in with a message telling them to contact a supervisor. One
+ * UUID on this list is exempted from the REJECTION only.
+ *
+ * It does NOT suppress the verdict. An exempted write still carries
+ * verdict 'mocked', so location_mocked lands on the row exactly as it would
+ * have and the spoof stays auditable after the fact. The exemption is
+ * consulted in one place — inside the mode==='on' + verdict==='mocked'
+ * branch — and on no other path.
+ *
+ * Unset or empty is byte-identical to the behaviour before it existed.
  *
  * BEFORE ANYONE SETS THIS TO `on`, read the safety criterion:
  * in the data already held, observed `mocked`-style bursts have coincided
@@ -56,6 +82,48 @@ export function mockEnforcementMode(): MockEnforcementMode {
   if (raw === 'on') return 'on';
   if (raw === 'shadow') return 'shadow';
   return 'off';
+}
+
+/**
+ * Is this guard on the per-guard exemption allowlist?
+ *
+ * ── THIS FUNCTION CANNOT THROW, AND THAT IS ITS WHOLE POINT ─────────────
+ *
+ * Every operation is total on every input: `??` against a possibly-absent
+ * env var, split/trim/toLowerCase on values that are already strings by
+ * construction, filter and includes on an array that always exists. There is
+ * no JSON.parse, no RegExp construction, no destructuring, no indexing that
+ * can land on undefined.
+ *
+ * WHY THE CONSTRAINT IS STRICTER THAN IT LOOKS: checkMockLocation wraps its
+ * whole body in a catch that returns { reject: false }. That fail-open is
+ * correct for its original scope — a telemetry or config failure must never
+ * deny a guard at shift start. But it means a throw raised ANYWHERE inside
+ * that try exempts EVERY guard on EVERY tenant at once, STARNET included,
+ * and does it silently: no error surfaces, writes simply stop being refused.
+ * A parser that cannot throw is the only thing between a malformed Railway
+ * variable and fleet-wide silent disablement of this layer.
+ *
+ * Read per call, never cached at module scope, so a variable change takes
+ * effect on the next request without a rebuild.
+ *
+ * Absent, empty, or whitespace-only variable yields an empty list and
+ * therefore nobody exempt — byte-identical to the behaviour before this
+ * function existed. A guardId that is undefined or empty is likewise never
+ * exempt: the check fails toward enforcement in every ambiguous case.
+ */
+function isExemptGuard(guardId: string | undefined): boolean {
+  const id = (guardId ?? '').trim().toLowerCase();
+  if (id === '') return false;
+
+  const raw = (process.env.MOCK_LOCATION_EXEMPT_GUARD_IDS ?? '').toLowerCase();
+  if (raw.trim() === '') return false;
+
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '')
+    .includes(id);
 }
 
 export interface MockCheckResult {
@@ -120,6 +188,29 @@ export function checkMockLocation(
     if (verdict !== 'mocked') return { reject: false, verdict };
 
     const reject = mode === 'on';
+
+    // ── Per-guard exemption ───────────────────────────────────────────────
+    // Reached ONLY here. Both early returns above have already run, so
+    // verdict is 'mocked' and mode is 'shadow' or 'on'; the `reject &&`
+    // narrows that to 'on'. Nothing on any other path consults the list.
+    //
+    // Guarding on `reject` rather than on `mode === 'on'` separately is
+    // deliberate: it makes the shadow path provably untouched. In shadow,
+    // reject is already false, this branch is skipped, and the mock.reject
+    // line below still prints with enforced=false exactly as before.
+    //
+    // verdict stays 'mocked' in the return. The caller writes that straight
+    // to location_mocked, so an exempted reviewer's clock-in is recorded as
+    // a mocked fix and stays auditable — the exemption removes the refusal,
+    // not the evidence.
+    if (reject && isExemptGuard(meta.guardId)) {
+      console.log(
+        `mock.exempt route=${ctx} guard=${meta.guardId ?? 'unknown'} site=${meta.siteId ?? 'unknown'} ` +
+        `mode=${mode} enforced=false reason=guard_exempt`,
+      );
+      return { reject: false, verdict };
+    }
+
     // This line is the ONLY place the cause is stated. The guard-facing
     // message deliberately withholds it — see MOCK_LOCATION_ERROR.
     console.log(

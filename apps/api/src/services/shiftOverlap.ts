@@ -193,3 +193,99 @@ export function overlapConflictBody(c: OverlapConflict): {
     },
   };
 }
+
+// ── The constraint, and the race it converts ────────────────────────────
+//
+// N45. Every overlap check above is check-then-act under READ COMMITTED:
+// two concurrent requests can both run findOverlappingShift, both see
+// nothing, and both write. schema_v77 closes that with a PARTIAL exclusion
+// constraint, and the residue is that the losing request now raises
+// SQLSTATE 23P01 instead of silently double-booking.
+//
+// PROVEN, not assumed — local PG 18.6, two concurrent psql sessions, both
+// overlap checks returning 0: A committed, B took 23P01, one row landed
+// instead of two.
+//
+// A 23P01 here is NOT a server fault. It is the same condition the
+// pre-flight check reports as a 409, observed a few milliseconds later.
+// Every caller must render it the way it renders that 409 — an admin or a
+// guard should not be able to tell a race from an ordinary conflict,
+// because operationally it is not a different thing.
+
+/** The constraint added by schema_v77. Matched on, so it is spelled once. */
+export const GUARD_OVERLAP_CONSTRAINT = 'shifts_no_guard_overlap';
+
+/**
+ * True for the exclusion violation schema_v77 raises, and nothing else.
+ *
+ * Matches the CONSTRAINT NAME as well as the SQLSTATE deliberately: 23P01
+ * is the class for every exclusion constraint, and a future one on another
+ * table must not be swallowed by an overlap handler. Same shape as the
+ * 23505 guards at routes/shifts.ts:2700 and :3983.
+ */
+export function isGuardOverlapViolation(err: unknown): boolean {
+  const e = err as { code?: unknown; constraint?: unknown } | null | undefined;
+  return e?.code === '23P01' && e?.constraint === GUARD_OVERLAP_CONSTRAINT;
+}
+
+/**
+ * Name the shift that won the race, for the error message.
+ *
+ * ON A FRESH CONNECTION, AND THAT IS THE WHOLE POINT. A 23P01 aborts the
+ * transaction it fired in — every subsequent statement on that client
+ * raises 25P02 (in_failed_sql_transaction) until it is rolled back. So this
+ * defaults to `pool` rather than taking the caller's client, and callers
+ * must have rolled back before they get here.
+ *
+ * Best-effort by construction: it swallows its own failure and returns
+ * null. A lookup that cannot resolve the collision must degrade to prose,
+ * never replace a 409 the caller already decided on with a 500.
+ */
+export async function resolveOverlapAfterRace(
+  guardId: string,
+  windowStart: Date | string,
+  windowEnd: Date | string,
+  excludeShiftId: string | null,
+): Promise<OverlapConflict | null> {
+  try {
+    return await findOverlappingShift(guardId, windowStart, windowEnd, excludeShiftId);
+  } catch (err) {
+    console.error('[shiftOverlap] post-race conflict lookup failed:', err);
+    return null;
+  }
+}
+
+/**
+ * The 409 body for a lost race, in the ADMIN register.
+ *
+ * `code` carries the enum and `error` keeps prose, because apps/web's
+ * ApiError has no `code` field — it renders `body.error` on screen and
+ * reads the enum off `.body.code` (lib/adminApi.ts:38-47, lib/
+ * bulkShiftCopy.ts:118-129). Putting the enum in `error` here would print
+ * GUARD_OVERLAP at an admin, which is exactly the N78 defect.
+ *
+ * Mobile is NOT a consumer of any route that uses this — the two assign
+ * routes are called only from apps/web (AssignGuardModal, BulkShiftActions,
+ * the shift detail page). The guard-facing races reuse their own existing
+ * 409 vocabulary instead, so no mobile OTA is sequenced ahead of this.
+ */
+export function guardOverlapRaceBody(c: OverlapConflict | null): {
+  code: 'GUARD_OVERLAP';
+  error: string;
+  message: string;
+  conflict?: Omit<OverlapConflict, 'site_tz'>;
+} {
+  if (!c) {
+    const prose =
+      'That guard was given an overlapping shift a moment ago. ' +
+      'Refresh and try again.';
+    return { code: 'GUARD_OVERLAP', error: prose, message: prose };
+  }
+  const body = overlapConflictBody(c);
+  return {
+    code:     'GUARD_OVERLAP',
+    error:    body.error,
+    message:  body.error,
+    conflict: body.conflict,
+  };
+}

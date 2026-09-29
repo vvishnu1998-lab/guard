@@ -10,8 +10,18 @@
  *     sessions get clocked_out_at + total_hours computed
  *
  * Idempotent: the worker's WHERE filter is `status IN ('scheduled','active')
- * AND scheduled_end <= NOW()`, so re-running this script after a successful
- * run is a no-op.
+ * AND scheduled_end + <the auto-close grace> <= NOW()` (autoCloseDueSql,
+ * constants/autoCloseGrace.ts), and countStale / sampleStale below use the
+ * same predicate, so re-running this script after a successful run is a
+ * no-op. A shift still inside the grace is not stale: the worker leaves it for
+ * the cron, and so does this count. (Until U4b these counted from
+ * scheduled_end itself, so any shift inside the grace made the script report
+ * "did not drain" — and the process never exited, because the job module's
+ * cron kept it alive; main() now stops that cron first.)
+ *
+ * The after-count is judged at an instant read just BEFORE the worker ran, so
+ * a shift whose grace ends while the worker is running is not misreported as
+ * "did not drain": the worker's own NOW() is that instant or later.
  *
  * Usage:
  *   railway run npm run script:backfill-stale-shifts
@@ -25,14 +35,22 @@
  * pattern is documented for future incidents.
  */
 import 'dotenv/config';
+import cron from 'node-cron';
 import { pool } from '../src/db/pool';
 import { autoCompleteOverdueShifts } from '../src/jobs/autoCompleteShifts';
+import { autoCloseDueSql } from '../src/constants/autoCloseGrace';
 
-async function countStale(): Promise<number> {
-  const r = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM shifts
-      WHERE status IN ('scheduled','active') AND scheduled_end <= NOW()`,
-  );
+async function countStale(asOf?: Date): Promise<number> {
+  const r = asOf
+    ? await pool.query(
+        `SELECT COUNT(*)::int AS n FROM shifts
+          WHERE status IN ('scheduled','active') AND ${autoCloseDueSql('scheduled_end', '$1::timestamptz')}`,
+        [asOf],
+      )
+    : await pool.query(
+        `SELECT COUNT(*)::int AS n FROM shifts
+          WHERE status IN ('scheduled','active') AND ${autoCloseDueSql('scheduled_end')}`,
+      );
   return r.rows[0]?.n ?? 0;
 }
 
@@ -40,7 +58,7 @@ async function sampleStale(limit = 10) {
   const r = await pool.query(
     `SELECT id, status, scheduled_start, scheduled_end, guard_id, site_id, created_at
        FROM shifts
-      WHERE status IN ('scheduled','active') AND scheduled_end <= NOW()
+      WHERE status IN ('scheduled','active') AND ${autoCloseDueSql('scheduled_end')}
       ORDER BY scheduled_start ASC
       LIMIT $1`,
     [limit],
@@ -49,6 +67,12 @@ async function sampleStale(limit = 10) {
 }
 
 (async function main() {
+  // Importing the job module scheduled its cron through runJob(). Stop every
+  // node-cron task before the first await, so no tick can run underneath this
+  // one-shot sweep and the process can exit after pool.end() (a scheduled task
+  // re-arms a timer that keeps it alive). Same as test-auto-complete-shifts.ts.
+  for (const task of cron.getTasks().values()) task.stop();
+
   console.log('[backfill-stale-shifts] starting');
 
   const before = await countStale();
@@ -65,6 +89,8 @@ async function sampleStale(limit = 10) {
     }
   }
 
+  // Before the worker's BEGIN, so the worker's NOW() is this instant or later.
+  const asOf = (await pool.query<{ t: Date }>('SELECT NOW() AS t')).rows[0].t;
   const client = await pool.connect();
   let result;
   try {
@@ -73,7 +99,7 @@ async function sampleStale(limit = 10) {
     client.release();
   }
 
-  const after = await countStale();
+  const after = await countStale(asOf);
   console.log(
     `  worker: closed ${result.shiftsClosed} shift(s), ` +
     `${result.sessionsClosed} session(s), ${result.breaksClosed} break(s)`,
@@ -83,10 +109,10 @@ async function sampleStale(limit = 10) {
   if (after !== 0) {
     console.error('✗ backfill did not drain all stale shifts — something else is blocking');
     process.exitCode = 1;
-  } else if (before === 0) {
+  } else if (result.shiftsClosed === 0) {
     console.log('✓ no stale shifts found; nothing to do');
   } else {
-    console.log(`✓ backfilled ${before} stale shift(s)`);
+    console.log(`✓ backfilled ${result.shiftsClosed} stale shift(s)`);
   }
 
   await pool.end();

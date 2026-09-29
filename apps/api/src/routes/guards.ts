@@ -145,7 +145,10 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       return res.status(409).json({ error: 'A guard with this badge number already exists' });
     }
     console.error('[POST /api/guards] Error:', err);
-    res.status(500).json({ error: err.message ?? 'Failed to create guard' });
+    // N78 FLOOR: no err.message on the wire. The 23505 branches above are the
+    // only errors with copy worth showing; everything else reaching here is a
+    // driver string, and apps/web renders body.error verbatim.
+    res.status(500).json({ error: 'Failed to create guard' });
   } finally {
     client.release();
   }
@@ -940,7 +943,8 @@ router.post('/:id/assign', requireAuth('company_admin'), async (req, res) => {
       return res.status(409).json({ error: 'Assignment with this start date already exists.' });
     }
     console.error('[POST /api/guards/:id/assign] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to assign guard' });
+    // N78 FLOOR: no err.message on the wire.
+    res.status(500).json({ error: 'Failed to assign guard' });
   } finally {
     client.release();
   }
@@ -1051,7 +1055,9 @@ router.patch('/:guardId/assignments/:id', requireAuth('company_admin', 'vishnu')
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[PATCH /api/guards/:guardId/assignments/:id] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to update assignment' });
+    // N78 FLOOR: no err.message on the wire. This catch has no code branch
+    // above it, so 23505 reaches it too — all the more reason not to echo.
+    res.status(500).json({ error: 'Failed to update assignment' });
   } finally {
     client.release();
   }
@@ -1093,7 +1099,9 @@ router.delete('/:guardId/assignments/:id', requireAuth('company_admin', 'vishnu'
   } catch (err: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[DELETE /api/guards/:guardId/assignments/:id] error:', err);
-    res.status(500).json({ error: err?.message ?? 'Failed to remove assignment' });
+    // N78 FLOOR: no err.message on the wire. No code branch above this one
+    // either.
+    res.status(500).json({ error: 'Failed to remove assignment' });
   } finally {
     client.release();
   }

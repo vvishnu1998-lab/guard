@@ -8,9 +8,9 @@
  *
  * Sends an alert to: the company admin only.
  *
- * Status lifecycle for a no-show: 'scheduled' from creation through
- * scheduled_end. This job fires once during that window (after T+10 min).
- * At scheduled_end the auto-complete cron flips the status from
+ * Status lifecycle for a no-show: 'scheduled' from creation until
+ * scheduled_end + the auto-close grace (15 min); this job fires once in that
+ * window (after T+10 min). Then the auto-complete cron flips the status from
  * 'scheduled' to 'missed' (see jobs/autoCompleteShifts.ts) because the
  * shift has zero shift_sessions rows. The status filter here naturally
  * stops matching after the flip, so no duplicate alert is sent.

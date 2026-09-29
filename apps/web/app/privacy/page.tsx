@@ -70,10 +70,11 @@ export default function PrivacyPolicy() {
 
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">5. Data Retention</h2>
-            <p className="mb-4">We adhere to a strict data retention policy to minimize stored data:</p>
+            <p className="mb-4">We adhere to a strict data retention policy that matches what our customers must keep:</p>
             <ul className="list-disc pl-6 space-y-3">
-              <li><strong>Incident Reports & Photos:</strong> Accessible to clients for 90 days. From 90 to 150 days, they are accessible only to NetraOps administrators. They are permanently deleted at day 150.</li>
-              <li><strong>Location Ping Photos:</strong> Kept on a 7-day rolling deletion schedule.</li>
+              <li><strong>Operational records:</strong> Shift logs, clock-in and clock-out records, hours worked, break records, location check-ins, checkpoint scans, and incident, activity and maintenance reports with their photos are retained for as long as the security company that created your account needs them to meet its contractual, insurance and legal record-keeping obligations, and remain linked to a named employee for that period. Retention periods are set per record type and applied automatically.</li>
+              <li><strong>Location check-in photos:</strong> Kept briefly on a rolling deletion schedule. The verified check-in record itself is retained with the shift.</li>
+              <li><strong>Time, pay and licensing records:</strong> Retained under the obligations of your employer — the security company that created your account — not as a choice of ours, and kept attributable to the individual employee for the period the law requires.</li>
             </ul>
           </section>
 
@@ -91,8 +92,11 @@ export default function PrivacyPolicy() {
 
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">7. Your Rights</h2>
+            <p className="mb-4">
+              You can ask to access or correct your personal information, and you can ask us to delete your account and the data attached to it. Because your account is created and managed by your employer, some records &mdash; time, pay and licensing data &mdash; are kept under their obligations and are not removed on request. Section 5 above explains which.
+            </p>
             <p>
-              You have the right to access, correct, or request the deletion of your personal information. To exercise these rights, please contact your employer (the security company managing your account) or reach out to us directly at <a href="mailto:support@netraops.com?subject=Privacy%20Question" className="text-[#00C8FF] hover:underline">support@netraops.com</a>.
+              Our <Link href="/data-deletion" className="text-[#00C8FF] hover:underline">Account and Data Deletion</Link> page sets out exactly how to make a request, what we delete, what is kept and why, and how long it takes. You can also start by contacting your employer&apos;s administrator, or email us at <a href="mailto:support@netraops.com?subject=Privacy%20Question" className="text-[#00C8FF] hover:underline">support@netraops.com</a>.
             </p>
           </section>
 

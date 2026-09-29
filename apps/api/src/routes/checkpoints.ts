@@ -5,6 +5,7 @@ import { siteLocalDayRange } from '../services/dateRange';
 import { validateAtCheckpoint } from '../services/geofence';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
+import { INHERIT_HOLD_COLUMNS, INHERIT_HOLD_FROM_SESSION_SQL } from '../services/legalHold';
 
 const router = Router();
 
@@ -187,11 +188,48 @@ router.delete('/:id', requireAuth('company_admin'), async (req, res) => {
   );
   if (!ownerCheck.rows[0]) return res.status(404).json({ error: 'Checkpoint not found' });
 
-  const countResult = await pool.query(
-    'SELECT COUNT(*)::int AS scan_count FROM checkpoint_scans WHERE checkpoint_id = $1',
+  const countResult = await pool.query<{ scan_count: number; held_count: number }>(
+    `SELECT COUNT(*)::int                           AS scan_count,
+            COUNT(*) FILTER (WHERE legal_hold)::int AS held_count
+       FROM checkpoint_scans WHERE checkpoint_id = $1`,
     [req.params.id]
   );
   const scanCount = countResult.rows[0].scan_count;
+  const heldCount = countResult.rows[0].held_count;
+
+  // ── LEGAL HOLD IS CHECKED BEFORE THE CONFIRM BRANCH, NOT AFTER ─────────
+  //
+  // checkpoint_scans_checkpoint_id_fkey is ON DELETE CASCADE, so deleting the
+  // checkpoint takes every scan on it. Until PR #70 that could not destroy
+  // held evidence, because nothing wrote checkpoint_scans.legal_hold and all
+  // 585 rows were false. PR #70 made the column live — insert-time
+  // inheritance in this file and the fifth cascade line in routes/admin.ts —
+  // which turned this into the only admin-reachable path that destroys held
+  // rows. Every other destroyer that CAN filter the flag does: every
+  // nightlyPurge step whose table carries a legal_hold column reads it.
+  //
+  // ORDER IS LOAD-BEARING. The confirm branch below returns 409 and the
+  // handler ends there, so a refusal placed after it is unreachable on the
+  // UNCONFIRMED call — which is the only call the web client makes first.
+  //
+  // 423, NOT 409, AND THE HUMAN COPY GOES IN `error`. Two consumer facts,
+  // not taste. apps/web/app/admin/sites/[id]/page.tsx:1226 keys the
+  // destroy-confirmation modal on `res.status === 409` alone and :1228 reads
+  // only `scan_count`, discarding the body's message — so a 409 here would
+  // show an admin a "delete N scans" dialog for a delete that cannot happen.
+  // And :1234 and :1254 both do setCpError(body.error) / throw body.error,
+  // rendered verbatim at :1678 and :2682, so `error` is what an operator
+  // READS on this route. The enum-in-`error` shape at admin.ts:687 is right
+  // for ITS consumer and wrong for this one — the consumer decides.
+  if (heldCount > 0) {
+    return res.status(423).json({
+      error:
+        `${heldCount} of this checkpoint's ${scanCount} scan record(s) are under legal hold ` +
+        `and cannot be deleted. Release the hold first, or set the checkpoint inactive to hide it.`,
+      scan_count: scanCount,
+      held_count: heldCount,
+    });
+  }
 
   if (req.query.confirm !== 'delete_scans') {
     return res.status(409).json({
@@ -201,7 +239,29 @@ router.delete('/:id', requireAuth('company_admin'), async (req, res) => {
     });
   }
 
-  await pool.query('DELETE FROM site_checkpoints WHERE id = $1', [req.params.id]);
+  // The NOT EXISTS is not a second opinion, it is the race. The count above
+  // and this statement are separate round trips, so a hold placed between
+  // them would be destroyed by a check that had already passed. Re-asking
+  // inside the DELETE makes the guard atomic; the count survives only because
+  // it is what produces a message worth reading.
+  const del = await pool.query(
+    `DELETE FROM site_checkpoints
+      WHERE id = $1
+        AND NOT EXISTS (SELECT 1 FROM checkpoint_scans c
+                         WHERE c.checkpoint_id = $1 AND c.legal_hold)`,
+    [req.params.id],
+  );
+  if (del.rowCount === 0) {
+    // Ownership was proven at the top of the handler, so a zero here means
+    // the NOT EXISTS fired: a hold landed inside the window.
+    return res.status(423).json({
+      error:
+        'A legal hold was placed on this checkpoint’s scan records while the delete was in ' +
+        'flight. Nothing was deleted. Release the hold first, or set the checkpoint inactive.',
+      scan_count: scanCount,
+      held_count: null,
+    });
+  }
   res.json({ success: true, scans_deleted: scanCount });
 });
 
@@ -511,12 +571,48 @@ router.post('/scan', requireAuth('guard'), async (req, res) => {
 
   // round_window computed inside the INSERT (no read-then-write race);
   // expires_at intentionally omitted — column DEFAULT applies.
+  //
+  // ── LEGAL HOLD IS INHERITED HERE, INSIDE THE STATEMENT ──────────────────
+  //
+  // Same reasoning as the round_window line above, applied to a different
+  // column. The session is resolved by activeSession() at :446 and the row
+  // lands here, ~95 lines later, with a checkpoint lookup and a geofence
+  // computation in between — so a hold flag read up there would be stale by
+  // an unbounded interval by the time the row is written, and a hold placed
+  // inside that window would be missed by the very mechanism meant to catch
+  // it. That is exactly how ping de9aa0b0 came to sit unheld on a held
+  // session for 68 days.
+  //
+  // Here the argument is stronger than "stale": activeSession() SELECTs
+  // `id, site_id` and nothing else (:291-297), so this handler never had a
+  // hold value in scope at all. Reading it inside the INSERT is not an
+  // optimisation over a value we already had — it is the only read.
+  //
+  // THIS IS THE ONLY CALL SITE WHERE THE FRAGMENT LANDS IN A SELECT LIST
+  // RATHER THAN A VALUES LIST. The other six (locations.ts ×2, reports.ts
+  // ×2, inspections.ts, tasks.ts) are all INSERT ... VALUES; this statement
+  // has to be INSERT ... SELECT because ROUND_WINDOW_SQL reads s.timezone.
+  // Scalar subqueries are legal in either, and they do not change the row
+  // count — verified against production 2026-09-19: the source SELECT
+  // returns one row before and after, the held session yields
+  // legal_hold = true with legal_hold_at = 2026-07-13T20:27:58.744Z
+  // (the parent's own hold time, not NOW()), and a session id matching
+  // nothing yields false rather than NULL, so the COALESCE prevents the
+  // 23502 that would otherwise cost a guard their scan.
+  //
+  // $2 carries shift_session_id and is now read three times in one
+  // statement — once as the inserted value, twice inside the fragment. All
+  // three resolve to uuid, so the parameter type stays unambiguous.
+  //
+  // On ON CONFLICT DO NOTHING nothing is written, inherited flag included;
+  // the existing row already carries whatever it was born with.
   const inserted = await pool.query(
     `INSERT INTO checkpoint_scans
        (checkpoint_id, shift_session_id, guard_id, site_id, round_window,
         scan_lat, scan_lng, accuracy_m, distance_m, note,
-        location_mocked, fix_age_ms)
-     SELECT $1, $2, $3, $4, ${ROUND_WINDOW_SQL}, $5, $6, $7, $8, $9, $10, $11
+        location_mocked, fix_age_ms, ${INHERIT_HOLD_COLUMNS})
+     SELECT $1, $2, $3, $4, ${ROUND_WINDOW_SQL}, $5, $6, $7, $8, $9, $10, $11,
+            ${INHERIT_HOLD_FROM_SESSION_SQL('$2')}
      FROM sites s WHERE s.id = $4
      ON CONFLICT (checkpoint_id, shift_session_id, round_window) DO NOTHING
      RETURNING scanned_at`,

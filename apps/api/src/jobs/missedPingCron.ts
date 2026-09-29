@@ -3,9 +3,18 @@
  *
  * Runs every 5 minutes. Walks every currently-open shift_session (and
  * sessions that clocked out within the last 15 min, to catch the final
- * window of a shift that autoCompleteShifts just closed), computes the
+ * window of a shift closed by a MANUAL or handoff clock-out), computes the
  * completed 30-min windows anchored to the shift's scheduled_start,
  * and INSERTs a missed_pings row for any window that has no ping.
+ *
+ * The 15-min tail does not serve AUTO-closed sessions: autoCompleteShifts
+ * records clocked_out_at at the anchor (scheduled_end, or clocked_in_at if
+ * later) and only once scheduled_end + the 15-min grace has passed (equal to
+ * this tail), so a scheduled_end anchor is past the tail when visible. (A
+ * clock-in during the grace can still match the tail, but it has no
+ * trackable window at all — every window starts before it, R4.) Nothing is
+ * lost: every tracked window ends by scheduled_end (R3), and the session is
+ * still open — so the open arm judges it — on every tick of the grace.
  *
  * Window rules (SD-D + R3 + R4):
  *   * Windows are 30 min slots starting at scheduled_start.
@@ -37,6 +46,7 @@ import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { expiresAtFor } from '../services/retention';
+import { missedWindowInsertSql } from '../services/missedWindowInsert';
 // Window rule lives in services/pingWindows.ts so the daily client report
 // (services/email.ts) counts expected windows with the SAME code that
 // decides whether a missed_pings row is written here.
@@ -148,17 +158,20 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
         // R6 dedup — ON CONFLICT DO NOTHING RETURNING id. If the
         // row already existed (this window was flagged on a prior
         // tick), the RETURNING yields nothing and we skip the push.
+        // Also nothing when the shift's CURRENT end no longer covers the
+        // window — an admin closed it in the past after this tick read the
+        // session (services/missedWindowInsert.ts).
         const inserted = await pool.query<{ id: string }>(
-          `INSERT INTO missed_pings
-             (shift_session_id, site_id, guard_id,
-              window_start, window_end, window_label, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (shift_session_id, window_start) DO NOTHING
-           RETURNING id`,
+          missedWindowInsertSql('missed_pings'),
           [
             s.session_id, s.site_id, s.guard_id,
             w.windowStart, w.windowEnd, label,
-            expiresAtFor('missed_ping'),
+            // Anchored on the row's OWN window_end — the same value going into
+            // $5 — not on insert time. schema_v79 recomputed every existing row
+            // that way; without `from` here each new row would be stamped from
+            // the cron tick instead and drift straight back out of agreement.
+            expiresAtFor('missed_ping', w.windowEnd),
+            s.shift_id,
           ],
         );
         const mpId = inserted.rows[0]?.id;

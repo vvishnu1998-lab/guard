@@ -16,8 +16,9 @@ Re-verify before acting. This file goes stale the moment something deploys.
 | `main` subject | `Merge pull request #23 from vvishnu1998-lab/feat/thread-ping-interval` |
 | last known good `main` sha | `996733c` (PR #19) — Railway `7579554d-4209-4b20-bd73-20208a4818fb` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, `/health` 200, and GitHub's combined status on the sha is `success` on **both** contexts (`adorable-courage - guard`, `Vercel`). Vercel alias confirmed by content-hash match between the apex and the Production deployment, not by trusting the dashboard. **NOT advanced to `dfdcc8c`**: PRs #18/#21/#22/#23 merged green, but "last known good" in this table means post-merge Railway + `/health/crons` + Vercel alias re-verified on the sha, and that pass has not been run since. Advance it only after re-running those four checks. |
 | working tree | clean (untracked only: `.playwright-mcp/`, `.vscode/`, `load test/`, `marketing/`, 4 loose PNGs) |
-| branch protection on `main` | **ENFORCED** — **two** required status checks: `Scan for hard-coded secrets` **and** `Ping window anchor (TS vs SQL)`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
-| CI | **three** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978) — all active. **Not advisory** — `gitleaks` and `window-anchor` supply the two required contexts, so either failing blocks the merge. |
+| branch protection on `main` | **ENFORCED** — **three** required status checks: `Scan for hard-coded secrets`, `Ping window anchor (TS vs SQL)` **and** `tsc (src + scripts) and the N78/N91 response-body floor`. **This row said "two" from 2026-09-08 until 2026-09-23**; the `typecheck` context was added to the protection after the row was written, and nothing updated it. Verified 2026-09-23 with `gh api repos/vvishnu1998-lab/guard/branches/main/protection --jq .required_status_checks.contexts`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
+| CI | **four** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978), `typecheck` (359257173) — all active. **This row said "three" until 2026-09-23**; `typecheck` (N97) landed after the row was last written and nothing updated it, so a PR author reading this file would not have known `check:types` runs on every PR. **Not advisory** — `gitleaks`, `window-anchor` **and `typecheck`** supply the three required contexts, so any one failing blocks the merge (`typecheck` confirmed required 2026-09-23; see the protection row above). |
+| `typecheck` steps | `npm --prefix apps/api run check:types` (= `tsc --noEmit` over **both** `tsconfig.json` and `tsconfig.scripts.json`), then the N78/N91 floor: `grep -rnE 'error:.*err\??\.(message|detail|hint|constraint|code)' apps/api/src/` with the sense INVERTED — a match FAILS the job. Run both locally before pushing. |
 
 **Worktrees** (`git worktree list`) — 6 exist under `.claude/worktrees/`; none pins
 `main`. The primary checkout at `/Users/vishnuvardhanreddy/guard` is on `main` @ `e7e868a`.
@@ -263,16 +264,57 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
-## Schema — verified 2026-09-08 21:40 UTC (v68 applied; v66 rows corrected)
+## Schema — verified 2026-09-14 18:55 UTC (v69-v77 applied; v68 rows retained)
 
 | thing | value |
 |---|---|
-| tip in `migrate.ts` (file) | **v68** — `files` array ends `'schema_v67.sql', 'schema_v68.sql'` (`apps/api/src/db/migrate.ts:10`) |
-| tip on disk | **v68** — `ls schema_v*.sql \| sort -V \| tail -1` → `schema_v68.sql`. 67 files on disk, 67 entries in the array, no duplicates, every entry resolves. |
-| tip applied in prod DB | **v68** — `information_schema.columns` shows `shift_sessions.ping_interval_minutes` `integer`, `is_nullable=YES`, `column_default=null`. Applied by Vishnu 2026-09-08. |
+| tip in `migrate.ts` (file) | **v77** — `files` array ends `'schema_v76.sql', 'schema_v77.sql'` (`apps/api/src/db/migrate.ts:10`) |
+| tip on disk | **v77** — `ls schema_v*.sql \| sort -V \| tail -1` → `schema_v77.sql`. 76 `schema_v*.sql` on disk (78 `.sql` total, incl. `schema.sql` and `schema_auth.sql`), 78 entries in the array, no duplicates, every entry resolves. |
+| tip applied in prod DB | **v77** — `pg_constraint` returns `shifts_no_guard_overlap` on `shifts` with `contype='x'`, and `pg_extension` returns `btree_gist 1.8`. **Applied by hand by Vishnu 2026-09-13**, re-verified by catalog read 2026-09-14. Full `pg_get_constraintdef` below. |
 | **v67** | **APPLIED 2026-09-05.** `to_regclass('public.cron_heartbeats')` returns `cron_heartbeats` — v67's entire contract. |
 | **v68** | **APPLIED 2026-09-08** (PR #21). `shift_sessions.ping_interval_minutes INTEGER NULL`, no default, no CHECK. 211 sessions: **210 NULL, 1 stamped `30`** (first at 19:00:14Z), so the Phase D `COALESCE(x, 30)` resolves to 30 for every row that exists. |
-| **v69** | **FREE** — no `schema_v69.sql` on disk; the chain ends at v68. |
+| **v69** | **APPLIED** — `chk_shift_sessions_ping_interval_minutes` present on `shift_sessions`. |
+| **v70** | **APPLIED** — `to_regclass('public.site_config_audit')` is non-null. |
+| **v71** | **APPLIED** — `shifts.source` present; `chk_shifts_source` and `chk_shifts_created_by_role` both present on `shifts`. |
+| **v72** | **APPLIED** — `to_regclass('public.idx_shifts_guard_scheduled')` is non-null. |
+| **v73** | **APPLIED** — `to_regclass('public.idx_shifts_scheduled_start')` is non-null. |
+| **v74** | **APPLIED** — `chk_shift_reassignments_direction` present; `shift_reassignments.new_guard_id` has `attnotnull = false`. |
+| **v75** | **APPLIED** — `shifts.guard_id` and `clock_in_verifications.site_photo_url` both `attnotnull = false`; `to_regclass('public.idx_prt_token')` is non-null. |
+| **v76** | **APPLIED** — `shifts.unstaffed_warning_sent_at` present. |
+| **v77** | **APPLIED 2026-09-13 BY HAND** (PR #52, `f027f72` / merge `addb974`). Constraint and extension quoted below. |
+| **v78** | **FREE** — no `schema_v78.sql` on disk; the chain ends at v77. |
+
+### v77 — the exact verification
+
+Read from the production catalog 2026-09-14 18:55 UTC via `postgres-readonly`:
+
+```
+conname              | shifts_no_guard_overlap
+contype              | x
+table                | shifts
+pg_get_constraintdef | EXCLUDE USING gist (guard_id WITH =,
+                       tstzrange(scheduled_start, scheduled_end) WITH &&)
+                       WHERE (((status)::text = ANY ((ARRAY['scheduled'::character varying,
+                       'active'::character varying])::text[])))
+
+extname    | btree_gist
+extversion | 1.8
+```
+
+**This table was nine versions stale for six days and that staleness shipped a false
+P2 to Slack.** On 2026-09-14, `ops-triage` run `34881357451` posted
+`BROKE P2 · N45 guard-overlap constraint (schema_v77) shipped in code but migration
+not confirmed applied`. The constraint had been applied the previous evening. The
+model was not guessing: `scripts/ops/triage.sh` embeds this file **verbatim and in
+full** into the context pack, so the `v68` rows above and the `v69 FREE` row were
+handed to it as ground truth, and it cited them.
+
+The lesson is the same one the v66 note below already records, with one addition:
+**a stale row here is not a documentation defect, it is an input to an automated
+alarm.** `c_schema_applied` in `scripts/ops/triage.sh` now reads the catalog on
+every run, so the brief no longer depends on this table being fresh — but the table
+is still what a human reads first, and it must be corrected when a migration is
+applied by hand, in the same sitting.
 
 **The v66 rows above were stale for three days.** This table recorded v66 as the
 tip of both the file and the DB while v67 was already applied and v68 was free.

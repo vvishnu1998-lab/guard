@@ -32,12 +32,14 @@ interface DashboardSite {
   guard_count:         number;
   reports_today:       number;
   hours_this_week:     number;
-  // Phase 1 added the 4-field breakdown alongside the legacy scalar.
-  // ActiveSitesTable prefers `hours.actual_hours` and falls back to
-  // `hours_this_week` when the API hasn't shipped Phase 1 yet.
+  // ActiveSitesTable renders hours.payable_hours ('—' when absent) and
+  // derives STATUS from hours.actual_hours. It never reads hours_this_week,
+  // the stored start-clamped legacy scalar.
   hours?: {
     scheduled_hours: number;
     actual_hours:    number;
+    // Optional: an API from before D19 does not send it.
+    payable_hours?:  number;
     break_hours:     number;
     violation_hours: number;
   };
