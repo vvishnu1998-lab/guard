@@ -14,6 +14,10 @@
  *                                     so the "closes automatically soon" push
  *                                     cannot land on the tick that closes it.
  *   scripts/backfill-stale-shifts.ts  what counts as stale.
+ *   routes/shifts.ts                  PATCH /:id's active-shift end edit
+ *                                     (U2), which will not keep a session
+ *                                     open within a minute of the auto
+ *                                     clock-out (editActiveShiftEnd).
  *
  * It lives here, not in the job module, because importing
  * jobs/autoCompleteShifts.ts registers that job's cron. This module imports

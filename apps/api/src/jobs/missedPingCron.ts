@@ -46,6 +46,7 @@ import { sendPushNotification } from '../services/firebase';
 import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { expiresAtFor } from '../services/retention';
+import { missedWindowInsertSql } from '../services/missedWindowInsert';
 // Window rule lives in services/pingWindows.ts so the daily client report
 // (services/email.ts) counts expected windows with the SAME code that
 // decides whether a missed_pings row is written here.
@@ -157,13 +158,11 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
         // R6 dedup — ON CONFLICT DO NOTHING RETURNING id. If the
         // row already existed (this window was flagged on a prior
         // tick), the RETURNING yields nothing and we skip the push.
+        // Also nothing when the shift's CURRENT end no longer covers the
+        // window — an admin closed it in the past after this tick read the
+        // session (services/missedWindowInsert.ts).
         const inserted = await pool.query<{ id: string }>(
-          `INSERT INTO missed_pings
-             (shift_session_id, site_id, guard_id,
-              window_start, window_end, window_label, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (shift_session_id, window_start) DO NOTHING
-           RETURNING id`,
+          missedWindowInsertSql('missed_pings'),
           [
             s.session_id, s.site_id, s.guard_id,
             w.windowStart, w.windowEnd, label,
@@ -172,6 +171,7 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
             // that way; without `from` here each new row would be stamped from
             // the cron tick instead and drift straight back out of agreement.
             expiresAtFor('missed_ping', w.windowEnd),
+            s.shift_id,
           ],
         );
         const mpId = inserted.rows[0]?.id;

@@ -9,11 +9,16 @@
  * Extracted from the inline modal previously in /admin/shifts/page.tsx.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { adminGet, adminPost } from '../../lib/adminApi';
-import { fmtDate } from '../../lib/shiftFormat';
+import { adminGet, adminPost, ApiError } from '../../lib/adminApi';
+import { fmtDate, zonedInputsToISO } from '../../lib/shiftFormat';
+import { isLongShift, longShiftLabel } from '../../lib/longShift';
+import { localShiftWindow } from '../../lib/shiftWindow';
 
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean }
-interface Site  { id: string; name: string }
+// timezone is optional: callers pass what they have. It only labels the
+// U5 confirm's end time (and resolves specific dates the way the server
+// does); absent, the label falls back to Pacific, where every site is today.
+interface Site  { id: string; name: string; timezone?: string | null }
 
 interface Props {
   open: boolean;
@@ -27,13 +32,6 @@ interface Props {
 
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-
-function buildISO(date: Date, timeStr: string): string {
-  const [h, m] = timeStr.split(':').map(Number);
-  const d = new Date(date);
-  d.setHours(h, m, 0, 0);
-  return d.toISOString();
-}
 
 function MiniCalendar({
   year, month, selectedDate, selectedDates, highlightDows, minDate, multiSelect,
@@ -114,6 +112,9 @@ export default function ScheduleShiftModal({
   const [specificDates, setSpecificDates] = useState<Date[]>([]);
   const [saving,    setSaving]    = useState(false);
   const [formError, setFormError] = useState('');
+  // U5: the confirm step for a shift over 12 hours — the label to show
+  // ('Ends Fri Sep 26, 06:00 — 18h'), or null when not asking.
+  const [longConfirm, setLongConfirm] = useState<string | null>(null);
 
   // Guard→assigned-sites narrowing (unchanged from the previous inline modal).
   const [assignedSites, setAssignedSites] = useState<Site[] | null>(null);
@@ -139,7 +140,13 @@ export default function ScheduleShiftModal({
     setCalYear(today.getFullYear()); setCalMonth(today.getMonth());
     setFormError('');
     setSaving(false);
+    setLongConfirm(null);
   }, [open, prefilledSiteId, prefilledGuardId, today]);
+
+  // Any change to what would be created withdraws a pending confirm: it was
+  // given for different times.
+  useEffect(() => { setLongConfirm(null); },
+    [siteId, guardId, startTime, endTime, singleDate, repeatMode, repeatDays, calStart, specificDates]);
 
   // Session S6 — fetch site's active profile on site pick + auto-fill.
   useEffect(() => {
@@ -244,10 +251,14 @@ export default function ScheduleShiftModal({
   function prevMonth() { if (calMonth === 0) { setCalMonth(11); setCalYear((y) => y - 1); } else setCalMonth((m) => m - 1); }
   function nextMonth() { if (calMonth === 11) { setCalMonth(0); setCalYear((y) => y + 1); } else setCalMonth((m) => m + 1); }
 
-  async function createShift() {
+  // `confirmLong` is set only from the confirm step's button (U5).
+  async function createShift(confirmLong = false) {
     if (!siteId)    { setFormError('Site is required'); return; }
     if (!startTime) { setFormError('Start time is required'); return; }
     if (!endTime)   { setFormError('End time is required'); return; }
+    // An equal start and end is not an overnight (isOvernight is strict) — it
+    // is a zero-length shift, which the API refuses (422). Say so here.
+    if (startTime === endTime) { setFormError('Start and end time are the same. A shift must end after it starts.'); return; }
     if (repeatMode === 'none') {
       if (!singleDate) { setFormError('Date is required'); return; }
     } else if (repeatMode === 'days') {
@@ -258,37 +269,75 @@ export default function ScheduleShiftModal({
       if (specificDates.length > 60)  { setFormError('Pick at most 60 dates'); return; }
     }
 
+    // Build the request, and the real start/end instants it would create —
+    // the same instants the server will write — so the 12-hour check runs on
+    // them rather than on the typed HH:MM.
+    const tz = sites.find((x) => x.id === siteId)?.timezone ?? 'America/Los_Angeles';
+    let payload: any;
+    let windows: Array<{ start: string; end: string }>;
+    if (repeatMode === 'none') {
+      // An overnight ends on the next CALENDAR day — lib/shiftWindow.ts; the
+      // old +86_400_000 ms landed on the same day on the autumn DST date.
+      const w = localShiftWindow(new Date(singleDate + 'T00:00:00'), startTime, endTime);
+      const scheduledStart = w.start;
+      const scheduledEnd   = w.end;
+      payload = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd };
+      windows = [{ start: scheduledStart, end: scheduledEnd }];
+    } else if (repeatMode === 'days') {
+      const w = localShiftWindow(calStart!, startTime, endTime);
+      const scheduledStart = w.start;
+      const scheduledEnd   = w.end;
+      payload = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd, repeat_days: repeatDays };
+      // Every day of the series has this duration: the server copies it.
+      windows = [{ start: scheduledStart, end: scheduledEnd }];
+    } else {
+      payload = {
+        mode: 'specific_dates',
+        site_id: siteId,
+        start_time: startTime,
+        end_time: endTime,
+        dates: specificDates.map(fmtSpecificDate),
+      };
+      // The server resolves each date at the SITE, per date — a DST night is
+      // an hour longer or shorter — so do the same here.
+      windows = specificDates.map(fmtSpecificDate).flatMap((ymd) => {
+        const next = new Date(`${ymd}T00:00:00Z`);
+        next.setUTCDate(next.getUTCDate() + 1);
+        const endYmd = isOvernight ? next.toISOString().slice(0, 10) : ymd;
+        const start = zonedInputsToISO(ymd, startTime, tz);
+        const end   = zonedInputsToISO(endYmd, endTime, tz);
+        return start && end ? [{ start, end }] : [];
+      });
+    }
+    if (guardId) payload.guard_id = guardId;
+
+    if (!confirmLong) {
+      const long = windows.find((w) => isLongShift(w.start, w.end));
+      if (long) {
+        setFormError('');
+        setLongConfirm(longShiftLabel(long.start, long.end, tz));
+        return;
+      }
+    } else {
+      payload.confirm_long_shift = true;
+    }
+
     setSaving(true); setFormError('');
     try {
-      if (repeatMode === 'none') {
-        const baseDate = new Date(singleDate + 'T00:00:00');
-        const scheduledStart = buildISO(baseDate, startTime);
-        const endDate = isOvernight ? new Date(baseDate.getTime() + 86400000) : baseDate;
-        const scheduledEnd = buildISO(endDate, endTime);
-        const payload: any = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd };
-        if (guardId) payload.guard_id = guardId;
-        await adminPost('/api/shifts', payload);
-      } else if (repeatMode === 'days') {
-        const scheduledStart = buildISO(calStart!, startTime);
-        const endBaseDate = isOvernight ? new Date(calStart!.getTime() + 86400000) : calStart!;
-        const scheduledEnd = buildISO(endBaseDate, endTime);
-        const payload: any = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd, repeat_days: repeatDays };
-        if (guardId) payload.guard_id = guardId;
-        await adminPost('/api/shifts', payload);
-      } else {
-        const payload: any = {
-          mode: 'specific_dates',
-          site_id: siteId,
-          start_time: startTime,
-          end_time: endTime,
-          dates: specificDates.map(fmtSpecificDate),
-        };
-        if (guardId) payload.guard_id = guardId;
-        await adminPost('/api/shifts', payload);
-      }
+      await adminPost('/api/shifts', payload);
+      setLongConfirm(null);
       onCreated();
       onClose();
-    } catch (e: any) { setFormError(e.message); }
+    } catch (e: any) {
+      // The API measured a window this form did not (a DST night, a clock
+      // difference): show the same confirm step with the server's label.
+      const body = (e as ApiError)?.body ?? {};
+      if (body.code === 'LONG_SHIFT_CONFIRM_REQUIRED') {
+        setLongConfirm(String(body.ends_at_label ?? e.message));
+      } else {
+        setFormError(e.message);
+      }
+    }
     finally { setSaving(false); }
   }
 
@@ -432,11 +481,35 @@ export default function ScheduleShiftModal({
           )}
         </div>
 
+        {/* U5 — the confirm step for a shift over 12 hours. The real end is
+            spelled out because the usual cause is an AM/PM slip that the
+            overnight roll above turns silently into an 18-hour shift. */}
+        {longConfirm && (
+          <div className="mt-5 bg-amber-400/10 border border-amber-400/50 rounded-lg px-4 py-3">
+            <p className="text-amber-400 text-[10px] tracking-widest font-bold mb-1">OVER 12 HOURS — CONFIRM</p>
+            <p className="text-gray-200 text-sm">{longConfirm}</p>
+            <p className="text-gray-500 text-xs mt-1">Check the times: an end earlier than the start runs into the next day.</p>
+          </div>
+        )}
+
         <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
-          <button onClick={createShift} disabled={saving || noAssignmentsForGuard} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
-            {saving ? 'SAVING…' : repeatMode === 'none' ? 'SCHEDULE' : `CREATE ${repeatMode === 'specific' ? specificDates.length || '' : ''} SHIFTS`.replace(/\s+/g, ' ').trim()}
-          </button>
+          {longConfirm ? (
+            <>
+              <button onClick={() => setLongConfirm(null)} disabled={saving}
+                className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors disabled:opacity-40">GO BACK</button>
+              <button onClick={() => createShift(true)} disabled={saving || noAssignmentsForGuard}
+                className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
+                {saving ? 'SAVING…' : 'CONFIRM LONG SHIFT'}
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={onClose} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-2 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
+              <button onClick={() => createShift()} disabled={saving || noAssignmentsForGuard} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-2 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
+                {saving ? 'SAVING…' : repeatMode === 'none' ? 'SCHEDULE' : `CREATE ${repeatMode === 'specific' ? specificDates.length || '' : ''} SHIFTS`.replace(/\s+/g, ' ').trim()}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -126,6 +126,22 @@ export async function runClockOutReminder(): Promise<number> {
           AND sh.status IN ('active', 'scheduled')
           AND NOW() >= sh.scheduled_end - ($1 || ' minutes')::interval
           AND NOW() <  sh.scheduled_end + ($2 || ' minutes')::interval
+          -- The shift's CURRENT end, re-read under a share lock (U2, the
+          -- services/missedWindowInsert.ts pattern). An admin who moves an
+          -- active shift's end clears this latch in the same transaction so
+          -- the reminder fires for the new end. A tick that had already read
+          -- the OLD end would otherwise wait on the session row, re-check it
+          -- (latch now NULL, so it passes) against its stale shifts row, and
+          -- stamp the latch for the old end — no reminder for the new one.
+          -- Under FOR SHARE the tick waits for the edit's shift lock and judges
+          -- the committed end instead.
+          AND EXISTS (
+                SELECT 1 FROM shifts cur
+                 WHERE cur.id = sh.id
+                   AND NOW() >= cur.scheduled_end - ($1 || ' minutes')::interval
+                   AND NOW() <  cur.scheduled_end + ($2 || ' minutes')::interval
+                   FOR SHARE
+              )
           -- Handoff exclusion, BOTH sides of the relationship.
           AND NOT EXISTS (
                 SELECT 1 FROM shift_swap_requests ssr
