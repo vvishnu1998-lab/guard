@@ -326,7 +326,7 @@ File-path citations point at the load-bearing code so anyone debugging a flow ca
 - `shifts.status = 'completed'`, `shift_sessions.clocked_out_at` populated, `total_hours` computed, any open break closed, mobile back on home in "off shift" state.
 
 **Error / edge cases**:
-- **Already clocked out**: 409 `SESSION_CLOSED` — the sweep closed the session at `scheduled_end` + grace, an admin closed the shift in the past (D20), a handoff moved it to another guard, or the guard's own earlier clock-out committed and its response was lost. The guard's session is closed; nothing is written.
+- **Already clocked out**: 409 `SESSION_CLOSED` — the sweep closed the session at `scheduled_end` + grace, an admin closed the shift in the past (D20), a handoff moved it to another guard, or the guard's own earlier clock-out committed and its response was lost. No `shift_sessions`, `shifts` or `break_sessions` row changes. On the rejected-photo path, a photo whose bytes fail the magic-byte check is still recorded in `quarantined_uploads` (`MAGIC_MISMATCH` only).
 - **No session at all**: 404 "Active session not found" — the guard never had a session on this shift (or it was purged).
 - **Transaction error mid-flight**: ROLLBACK; nothing partially mutates. 500 returned; guard retries.
 - **Auto-complete cron firing in parallel** ([apps/api/src/jobs/autoCompleteShifts.ts](apps/api/src/jobs/autoCompleteShifts.ts)): the cron closes sessions whose `scheduled_end` + grace has passed; if both fire at the same time, the second loses the row lock race and finds the session closed — a clock-out that loses answers 409 `SESSION_CLOSED`. Idempotent on the shift level.

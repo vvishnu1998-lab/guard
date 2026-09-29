@@ -5016,8 +5016,10 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
 // handoff closed it (handoff-clock-in closes A's row and moves shifts.guard_id
 // to B; A's row keeps guard_id = A), the guard's own earlier clock-out
 // committed and its response was lost, or a concurrent close won the row lock.
-// Every app version showed "Clock-Out Failed / Active session not found" and
-// retried into the same wall.
+// Every app version before the 2026-09-29 OTA showed "Clock-Out Failed /
+// Active session not found" and retried into the same wall. That OTA refreshes
+// on the 404 and asks GET /shifts/active-session, and falls back to the old
+// alert only when the refresh fails or still reports a session.
 //
 // For those cases the route now answers 409 SESSION_CLOSED — the shape the
 // four other guard routes already use (locations.ts ping / violation /
@@ -5033,7 +5035,7 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
 export const CLOCK_OUT_SESSION_CLOSED_MESSAGE =
   'You are already clocked out of this shift. Go back to the home screen to refresh.';
 /** Appended only when THIS request carried handover notes: the route answers
- *  before it writes anything, so they are not saved by this attempt (an
+ *  before it writes the session, so they are not saved by this attempt (an
  *  earlier, lost-response attempt may have saved its own — hence "may"). */
 export const CLOCK_OUT_SESSION_CLOSED_NOTES =
   'Your handover notes may not have been saved. Give them to your supervisor.';

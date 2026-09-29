@@ -15,8 +15,9 @@
  * DATABASE_URL points anywhere else, and re-asserts after import that the pool
  * carries no connection string. Point it at a FRESH database with the full
  * migration chain (db/migrate.ts) — the sweep in C1 is global, so leftovers
- * from another run would change what it closes. It writes one company of its
- * own and removes it at the end unless --keep is passed.
+ * from another run would change what it closes, and the script REFUSES a
+ * database that already holds any company. It writes one company of its own
+ * and removes it at the end unless --keep is passed.
  *
  * Sentry, auth, email, S3, firebase and photo validation are replaced in
  * require.cache before the router loads (the test-active-shift-end-edit.ts
@@ -164,6 +165,15 @@ async function main(): Promise<void> {
     console.error('REFUSING: the app pool carries a connection string; unset DATABASE_URL.');
     process.exit(2);
   }
+  // The C1 sweep commits on every overdue open session in the database, not
+  // only on this script's fixtures: refuse anything but a fresh copy.
+  const companies = Number((await pool.query(`SELECT count(*) AS n FROM companies`)).rows[0].n);
+  if (companies !== 0) {
+    console.error(`REFUSING: ${companies} companies already exist in this database; ` +
+                  'point PGDATABASE at a fresh copy of the migrated template.');
+    await pool.end();
+    process.exit(2);
+  }
   const router: any = (await import('../src/routes/shifts')).default;
   const sweepMod: any = await import('../src/jobs/autoCompleteShifts');
   for (const task of cron.getTasks().values()) task.stop();
@@ -215,8 +225,28 @@ async function main(): Promise<void> {
     const sessRow  = async (id: string) => (await q(`SELECT * FROM shift_sessions WHERE id = $1`, [id])).rows[0];
     const snap = async (sessionId: string, shiftId: string) =>
       JSON.stringify({ se: await sessRow(sessionId), sh: await shiftRow(shiftId) });
-    const clockOut = (shiftId: string, body: Record<string, unknown> = {}) =>
-      callRoute(router, 'post', '/:id/clock-out', { params: { id: shiftId }, body });
+    /** Counted on a connection of its own. Through the app pool, pg-pool
+     *  (LIFO) would hand the count the very client the route just released,
+     *  and a transaction leaked on it reports that backend 'active'. */
+    async function idleInTransaction(): Promise<number> {
+      const c = new Client(); await c.connect();
+      try {
+        return Number((await c.query(
+          `SELECT count(*) AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND state = 'idle in transaction'`)).rows[0].n);
+      } finally { await c.end(); }
+    }
+    // Checked straight after EVERY clock-out: a later BEGIN/COMMIT on the same
+    // pooled client would end a leaked transaction before a section-end check.
+    const leaks: string[] = [];
+    let clockOutCalls = 0;
+    const clockOut = async (shiftId: string, body: Record<string, unknown> = {}) => {
+      const r = await callRoute(router, 'post', '/:id/clock-out', { params: { id: shiftId }, body });
+      clockOutCalls += 1;
+      const n = await idleInTransaction();
+      if (n !== 0) leaks.push(`call ${clockOutCalls} (answered ${r.status}): ${n}`);
+      return r;
+    };
     const patch = (shiftId: string, body: Record<string, unknown>) =>
       callRoute(router, 'patch', '/:id', { params: { id: shiftId }, body });
 
@@ -234,9 +264,7 @@ async function main(): Promise<void> {
             `${label}: 404 byte-identical ${BODY_404} (got ${r.status} ${show(wire(r.body))})`);
     }
     async function noIdleInTransaction(label: string): Promise<void> {
-      const n = Number((await q(
-        `SELECT count(*) AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND state = 'idle in transaction'`)).rows[0].n);
+      const n = await idleInTransaction();
       check(n === 0, `${label}: no connection left idle in transaction (got ${n})`);
     }
 
@@ -466,6 +494,10 @@ async function main(): Promise<void> {
       expect409(await clockOut(s1), at(-500).toISOString(), M, 'C12');
       check(await snap(s2s, s2) === before, 'C12: the open S2 session and its shift are unchanged');
     }
+
+    check(clockOutCalls > 0 && leaks.length === 0,
+          `no clock-out left a connection idle in transaction (${clockOutCalls} calls checked, each ` +
+          `straight after it answered${leaks.length ? `; leaked: ${leaks.join('; ')}` : ''})`);
   } finally {
     if (!KEEP && companyId) {
       try {
