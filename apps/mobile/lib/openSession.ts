@@ -25,8 +25,9 @@
  *   site_geofence and builds the geofence object), so it is the only correct
  *   restore source. open_session is used for breadcrumbs only.
  *
- *   NB: the "no geofence on /active-session" comment above refreshFromServer
- *   in store/shiftStore.ts is stale — it predates that LEFT JOIN.
+ *   (The "no geofence on /active-session" comment that used to sit above
+ *   refreshFromServer in store/shiftStore.ts predated that LEFT JOIN; it was
+ *   rewritten with U3.)
  *
  * On refetch failure we deliberately do NOT guess at on-shift state. We show
  * the server's sentence and route home, where restoreOrFetchShift retries

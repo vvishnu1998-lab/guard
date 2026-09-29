@@ -12,7 +12,7 @@
  */
 import { router } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
-import { useShiftStore } from '../store/shiftStore';
+import { useShiftStore, refreshIfActiveShiftEdited } from '../store/shiftStore';
 
 type NotificationData = Record<string, any> | undefined;
 
@@ -47,6 +47,16 @@ export function navigateForNotification(type: string | undefined, data: Notifica
   // they tapped the notification.
   if (type === 'handoff_complete') {
     useShiftStore.getState().clearSession();
+  }
+  // U3 (N146): a tap on an active-shift edit re-reads the shift before the
+  // guard lands on the schedule, so every screen already shows the new end
+  // (or, after a close in the past, no session). Covers a push that arrived
+  // while the app was backgrounded, which the foreground receiver in
+  // _layout.tsx never saw. From a killed app the store is still empty here,
+  // so this is a no-op and home's restore reads the fresh shift instead.
+  // Also reached from an old row in the Notifications tab — one GET at most.
+  if (type === 'shift_schedule_edited') {
+    refreshIfActiveShiftEdited(data);
   }
 
   switch (type) {

@@ -44,10 +44,12 @@
  * session. This check bounds how long a forgotten armed region can keep
  * alerting. The 409 teardown in tasks/locationBackground.ts is the backstop.
  *
- * It judges the end persisted in SecureStore (active_shift_end) at
- * registration. An admin edit to an active shift's end (D20) does not reach
- * that key until the app re-reads the shift (N146), so after an extension
- * this gate still fires at the OLD end + grace.
+ * It judges the end persisted in SecureStore (active_shift_end). When an admin
+ * moves an active shift's end (D20) the app rewrites that key as soon as it
+ * re-reads the shift — on the edit's push, on foreground, on home focus
+ * (store/shiftStore.ts refreshFromServer, then app/_layout.tsx's window
+ * effect). A suspended or killed app that is never reopened runs none of
+ * that, so until it is, this gate still judges the OLD end.
  *
  * Judged at event DELIVERY, not at the exit itself: Android can deliver an
  * Enter/Exit 30 s - 2 min late, so an exit in the last minute or two before

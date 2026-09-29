@@ -16,6 +16,7 @@
     "check:deeplink-gate": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-deeplink-gate.ts",
     "check:notification-routes": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-notification-routes.ts",
     "check:shift-expiry": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-shift-expiry.ts",
+    "check:end-reconcile": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-end-reconcile.ts",
     "postinstall": "node scripts/check-break-constants.js"
   },
   "dependencies": {

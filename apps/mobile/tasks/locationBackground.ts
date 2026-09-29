@@ -57,6 +57,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
 import { isPastShiftExpiry, SHIFT_EXPIRY_GRACE_MS } from '../lib/shiftExpiry';
 import { isBreakActive } from '../lib/breakState';
+import { createSerialQueue } from '../lib/asyncQueue';
 import {
   GEOFENCE_STATE_KEY,
   decideTransition,
@@ -380,13 +381,26 @@ interface StartGeofenceRegion {
   radius_meters: number;
 }
 
+/** Serialises every register and unregister in this JS runtime. Each start is
+ *  a stop-then-start pair across several awaits, and two callers can now ask
+ *  for one — the geofence effect in _layout.tsx and the re-arm after an end
+ *  edit (U3). Interleaved, one caller's hasStarted can read false in the
+ *  middle of the other's stop/start and register twice, or a stop can land
+ *  between the other's stop and start. One at a time, in call order. */
+const geofenceOps = createSerialQueue();
+
 /**
  * Register the guard's active post as a single geofence region. Called
  * from _layout.tsx when activeSession + activeShift.geofence become
- * available. Idempotent — stopGeofencing first so a shift swap or a
+ * available, and again after an end edit that arrived once the old end had
+ * run out (U3). Idempotent — stopGeofencing first so a shift swap or a
  * geofence redefinition takes effect without a stale region lingering.
  */
-export async function startBackgroundLocation(region?: StartGeofenceRegion): Promise<void> {
+export function startBackgroundLocation(region?: StartGeofenceRegion): Promise<void> {
+  return geofenceOps(() => registerRegion(region));
+}
+
+async function registerRegion(region?: StartGeofenceRegion): Promise<void> {
   if (!region) {
     Sentry.addBreadcrumb({
       category: 'geofence', message: 'start skipped — no region', level: 'warning',
@@ -435,7 +449,11 @@ export async function startBackgroundLocation(region?: StartGeofenceRegion): Pro
   });
 }
 
-export async function stopBackgroundLocation(): Promise<void> {
+export function stopBackgroundLocation(): Promise<void> {
+  return geofenceOps(unregisterRegion);
+}
+
+async function unregisterRegion(): Promise<void> {
   const running = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK);
   if (running) {
     await Location.stopGeofencingAsync(GEOFENCE_TASK);
