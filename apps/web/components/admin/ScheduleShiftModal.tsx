@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { adminGet, adminPost, ApiError } from '../../lib/adminApi';
 import { fmtDate, zonedInputsToISO } from '../../lib/shiftFormat';
 import { isLongShift, longShiftLabel } from '../../lib/longShift';
+import { localShiftWindow } from '../../lib/shiftWindow';
 
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean }
 // timezone is optional: callers pass what they have. It only labels the
@@ -31,13 +32,6 @@ interface Props {
 
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-
-function buildISO(date: Date, timeStr: string): string {
-  const [h, m] = timeStr.split(':').map(Number);
-  const d = new Date(date);
-  d.setHours(h, m, 0, 0);
-  return d.toISOString();
-}
 
 function MiniCalendar({
   year, month, selectedDate, selectedDates, highlightDows, minDate, multiSelect,
@@ -282,16 +276,17 @@ export default function ScheduleShiftModal({
     let payload: any;
     let windows: Array<{ start: string; end: string }>;
     if (repeatMode === 'none') {
-      const baseDate = new Date(singleDate + 'T00:00:00');
-      const scheduledStart = buildISO(baseDate, startTime);
-      const endDate = isOvernight ? new Date(baseDate.getTime() + 86400000) : baseDate;
-      const scheduledEnd = buildISO(endDate, endTime);
+      // An overnight ends on the next CALENDAR day — lib/shiftWindow.ts; the
+      // old +86_400_000 ms landed on the same day on the autumn DST date.
+      const w = localShiftWindow(new Date(singleDate + 'T00:00:00'), startTime, endTime);
+      const scheduledStart = w.start;
+      const scheduledEnd   = w.end;
       payload = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd };
       windows = [{ start: scheduledStart, end: scheduledEnd }];
     } else if (repeatMode === 'days') {
-      const scheduledStart = buildISO(calStart!, startTime);
-      const endBaseDate = isOvernight ? new Date(calStart!.getTime() + 86400000) : calStart!;
-      const scheduledEnd = buildISO(endBaseDate, endTime);
+      const w = localShiftWindow(calStart!, startTime, endTime);
+      const scheduledStart = w.start;
+      const scheduledEnd   = w.end;
       payload = { site_id: siteId, scheduled_start: scheduledStart, scheduled_end: scheduledEnd, repeat_days: repeatDays };
       // Every day of the series has this duration: the server copies it.
       windows = [{ start: scheduledStart, end: scheduledEnd }];
