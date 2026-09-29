@@ -378,7 +378,7 @@ Channels: `production`, `preview`, `smoke`, `development` (`eas channel:list`, l
 | channel | runtime | current group | from | published (PT) | rollback target |
 |---|---|---|---|---|---|
 | production | 1.0.17 | `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` | `ddc6f0a` | 2026-09-29 11:33:06 | republish `9db401c9-6319-49b4-ab17-64cf559995a0` (`b3dcd55`, 2026-09-17 15:07) — **it has no Sentry DSN and the 30-min grace (N152, N138)**; before it `948d55c8-75da-44ea-8a2f-6847d87144a7` (batch-17) |
-| production | 1.0.18 | **none** — vc26 runs its embedded bundle | — | — | — |
+| production | 1.0.18 | **none** — vc26 runs its embedded bundle (`~7bff232`: 30-min grace, no U3/T6a). Skipped because vc26 is not known to be in users' hands (Play review, managed publishing ON, outcome UNVERIFIED); only Star Guard test rows run 1.0.18 embedded. **Publish before vc26 is released** — proposed: republish `429943ab` (release-ops §3b) | — | — | — |
 | preview | 1.0.18 | `429943ab-8561-4766-b031-635587d0a6c3` | `f5a84c4` | 2026-09-29 08:39:30 | roll back to embedded (`579ee12` on vc27); no earlier 1.0.18 preview group |
 | preview | 1.0.17 | `ff99ee6f-f732-449c-9eae-38a0fe3f224c` | UNVERIFIED | 2026-09-02 | — |
 | smoke | 1.0.17 | `2e20d40d-ffb3-4689-a7a2-af5183b2995b` at 2026-09-05; **UNVERIFIED since** | — | — | — |

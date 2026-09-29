@@ -4418,7 +4418,9 @@ Published 2026-09-29 (group ids from the publish record; STATE.md has the channe
   11:33:06 PT — reaches iOS 48 and Android vc24;
 - preview runtime 1.0.18: group `429943ab-8561-4766-b031-635587d0a6c3` from `f5a84c4`,
   08:39:30 PT — reaches the vc27 preview APK;
-- production runtime 1.0.18 (vc26): no group.
+- production runtime 1.0.18 (vc26): no group — vc26 is not known to be released (Play
+  review, outcome UNVERIFIED). It must get one before it is released, or its handsets run
+  the 30-minute grace with no U3 and no T6a (release-ops §3b).
 PR #84 (`batch/mobile-18` → main) is open and merges after a TestFlight build from it ships;
 #50 is closed unmerged, and its three commits are in #84.
 The API half: `POST /api/shifts/:id/clock-out` answers 409 `SESSION_CLOSED` with
@@ -4760,8 +4762,10 @@ new update ids arrived the same day. Procedure: DECISIONS D21, release-ops §3b,
 `scripts/ops/ota-export-and-gate.sh`. Both groups report `environment: production`,
 including the preview one (D21); read the channel from `contexts.ota_updates`.
 
-Still dark: every handset that has not adopted one of those groups, including every
-runtime-1.0.16 handset, which can never adopt (N115) — at 15:45 PT, 7 non-revoked STARNET
+Still dark: every handset whose current update id is an OTA published before 2026-09-29 (a
+UUIDv7 id older than `01a0edd2…`), including every runtime-1.0.16 handset on an OTA, which can
+never adopt a new one (N115). A store build's embedded launch is not dark: it reports through
+the DSN inlined at build time (the 204 events). At 15:45 PT, 7 non-revoked STARNET
 iPhone rows on `01a0b168…`, plus GRD0005 `4a71d17d`, GRD0008 `6b1402ba` and GRD0007
 `36478eb1` on 1.0.16 (N138 has the list). From these handsets, "no mobile Sentry events"
 means "no information". Rolling back to a group published before 2026-09-29 turns Sentry
