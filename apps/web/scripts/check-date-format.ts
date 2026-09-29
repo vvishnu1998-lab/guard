@@ -38,6 +38,9 @@ import {
   fmtCalDate, fmtCalRange, fmtDate, fmtDateShort, fmtDT, fmtTime,
   fmtDuration, dayOffsetInZone, isoToZonedInputs, zonedInputsToISO,
 } from '../lib/shiftFormat';
+import {
+  isLongShift, fmtShiftDuration, fmtShiftEnd, longShiftLabel, fmtClockInZone,
+} from '../lib/longShift';
 
 /** Zones spanning both sides of UTC, including a half-hour offset and the two
  *  extremes. Kiritimati is UTC+14, Midway UTC-11. */
@@ -143,6 +146,27 @@ function checkInThisZone(zone: string): void {
   if (back !== '2026-09-10T21:00:00.000Z') {
     fail(`zonedInputsToISO -> '${back}', expected 2026-09-10T21:00:00.000Z`);
   }
+
+  // 8. U2/U5 (lib/longShift.ts). These take an explicit site zone, so they
+  //    must print the SAME string in every browser zone — the confirm step
+  //    names the real end at the site, and "This clocks the guard out at
+  //    18:00" must not become 01:00 for an admin in UTC. Duration and the
+  //    12-hour rule are elapsed time: 19:00 -> 07:00 across the 2026-11-01
+  //    fall-back is 13 h.
+  const la = 'America/Los_Angeles';
+  const cases: [string, string, string][] = [
+    ['fmtShiftEnd', fmtShiftEnd('2026-09-26T13:00:00Z', la), 'Sat Sep 26, 06:00'],
+    ['longShiftLabel', longShiftLabel('2026-09-25T19:00:00Z', '2026-09-26T13:00:00Z', la), 'Ends Sat Sep 26, 06:00 — 18h'],
+    ['fmtClockInZone', fmtClockInZone('2026-09-26T01:00:00Z', la), '18:00'],
+    ['fmtShiftDuration (fall-back night)', fmtShiftDuration('2026-11-01T02:00:00Z', '2026-11-01T15:00:00Z'), '13h'],
+    ['fmtShiftDuration (half hour)', fmtShiftDuration('2026-09-26T02:00:00Z', '2026-09-26T14:30:00Z'), '12h 30m'],
+  ];
+  for (const [name, got, want] of cases) {
+    if (got !== want) fail(`${name} -> '${got}', expected '${want}'`);
+  }
+  if (isLongShift('2026-09-26T01:00:00Z', '2026-09-26T13:00:00Z')) fail('isLongShift: exactly 12 h must not ask');
+  if (!isLongShift('2026-09-26T01:00:00Z', '2026-09-26T13:01:00Z')) fail('isLongShift: 12 h 01 m must ask');
+  if (!isLongShift('2026-11-01T02:00:00Z', '2026-11-01T15:00:00Z')) fail('isLongShift: 13 h elapsed across the fall-back must ask');
 }
 
 // ── Parent: fork one child per zone. Child: run the checks. ───────────────

@@ -15,6 +15,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { adminGet, adminPatch, ApiError } from '../../../../lib/adminApi';
 import { isoToZonedInputs, zonedInputsToISO } from '../../../../lib/shiftFormat';
+import { isLongShift, longShiftLabel, fmtClockInZone } from '../../../../lib/longShift';
 import InactiveSiteBadge from '../../../../components/InactiveSiteBadge';
 
 interface ReassignmentRow {
@@ -102,6 +103,27 @@ interface ShiftDetail {
   // checks this directly rather than inferring it from status — see the
   // canEdit comment below.
   has_session?:         boolean;
+  // U2 — OPTIONAL like the two above. Open sessions on the shift, and the
+  // open one's clock-in when there is exactly one. The end-only edit of an
+  // active shift is offered only when the count is exactly 1.
+  open_session_count?:         number;
+  open_session_clocked_in_at?: string | null;
+}
+
+// PATCH /api/shifts/:id's summary of an active-shift end edit (U2).
+interface ActiveEndEditResult {
+  active_end_edit?: {
+    outcome?:        'extended' | 'shortened' | 'closed';
+    clocked_out_at?: string;
+  };
+}
+
+// The confirm step before an edit is sent (or after the API asked for one
+// with a 409): the lines to show, and which confirmations were already given.
+interface EditConfirm {
+  long?:  string;   // 'Ends Fri Sep 26, 06:00 — 18h'
+  close?: string;   // '18:00' — the time the guard is clocked out
+  flags:  { long?: boolean; close?: boolean };
 }
 
 interface Guard {
@@ -211,6 +233,9 @@ export default function ShiftDetailPage() {
   const [editErr,         setEditErr]         = useState('');
   const [editToast,       setEditToast]       = useState('');
   const [editConflict,    setEditConflict]    = useState<EditConflict | null>(null);
+  // U2: 'end' = an active shift, only its end can move.
+  const [editMode,        setEditMode]        = useState<'schedule' | 'end'>('schedule');
+  const [editConfirm,     setEditConfirm]     = useState<EditConfirm | null>(null);
 
   const load = useCallback(async () => {
     if (!shiftId) return;
@@ -265,6 +290,14 @@ export default function ShiftDetailPage() {
     // no button.
     shift.has_session === false;
 
+  // U2 (D20): an ACTIVE shift's END can move — extended, shortened, or set at
+  // or before now, which clocks the guard out at that time. Offered only with
+  // exactly one open session, which is what PATCH requires (the API also
+  // checks it is the assigned guard's). `=== 1`, not a truthy check: against
+  // an API that predates the field it is undefined and the button stays
+  // hidden.
+  const canEditEnd = !!shift && shift.status === 'active' && shift.open_session_count === 1;
+
   const pickableGuards = guards
     .filter((g) => g.is_active !== false)
     .filter((g) => g.id !== shift?.guard_id);
@@ -296,47 +329,102 @@ export default function ShiftDetailPage() {
     setEditReason('');
     setEditErr('');
     setEditConflict(null);
+    setEditConfirm(null);
+    setEditMode(shift.status === 'active' ? 'end' : 'schedule');
     setShowEditModal(true);
   }
 
-  async function submitEdit() {
+  // `confirmed` carries the confirmations the admin has already given in the
+  // confirm step: the 12-hour one (U5) and, for an active shift, the one that
+  // clocks the guard out (U2). The API enforces both with a 409 as well.
+  async function submitEdit(confirmed: { long?: boolean; close?: boolean } = {}) {
     if (!shift) return;
     const tz = shift.site_tz ?? 'America/Los_Angeles';
-    const startISO = zonedInputsToISO(editStartDate, editStartTime, tz);
-    const endISO   = zonedInputsToISO(editEndDate,   editEndTime,   tz);
+    const endOnly  = editMode === 'end';
+    // An active shift's start is fixed; the form shows it but never sends it.
+    const startISO = endOnly ? shift.scheduled_start : zonedInputsToISO(editStartDate, editStartTime, tz);
+    const endISO   = zonedInputsToISO(editEndDate, editEndTime, tz);
     if (!startISO || !endISO) {
-      setEditErr('Enter a valid date and time for both start and end.');
+      setEditErr(endOnly
+        ? 'Enter a valid date and time for the end.'
+        : 'Enter a valid date and time for both start and end.');
       return;
     }
     if (new Date(endISO) <= new Date(startISO)) {
       setEditErr('End must be after start.');
       return;
     }
+    const clockIn = shift.open_session_clocked_in_at ?? null;
+    if (endOnly && clockIn && new Date(endISO) <= new Date(clockIn)) {
+      setEditErr(`The guard clocked in at ${fmtClockInZone(clockIn, tz)}. The end must be after that.`);
+      return;
+    }
     if (editReason.length > 500) {
       setEditErr('Reason must be 500 characters or fewer.');
       return;
     }
+
+    // The confirm step, before anything is sent.
+    const needLong  = isLongShift(startISO, endISO) && !confirmed.long;
+    const needClose = endOnly && new Date(endISO).getTime() <= Date.now() && !confirmed.close;
+    if (needLong || needClose) {
+      setEditErr('');
+      setEditConflict(null);
+      setEditConfirm({
+        long:  needLong  ? longShiftLabel(startISO, endISO, tz) : undefined,
+        close: needClose ? fmtClockInZone(endISO, tz) : undefined,
+        flags: confirmed,
+      });
+      return;
+    }
+
     setEditSubmitting(true);
     setEditErr('');
     setEditConflict(null);
+    setEditConfirm(null);
     try {
-      const body: { scheduled_start: string; scheduled_end: string; reason?: string } = {
-        scheduled_start: startISO,
-        scheduled_end:   endISO,
-      };
+      const body: {
+        scheduled_start?: string; scheduled_end: string; reason?: string;
+        confirm_long_shift?: boolean; confirm_close_session?: boolean;
+      } = endOnly
+        ? { scheduled_end: endISO }
+        : { scheduled_start: startISO, scheduled_end: endISO };
       if (editReason.trim().length > 0) body.reason = editReason.trim();
-      await adminPatch(`/api/shifts/${shift.id}`, body);
+      if (confirmed.long)  body.confirm_long_shift    = true;
+      if (confirmed.close) body.confirm_close_session = true;
+      const result = await adminPatch<ActiveEndEditResult>(`/api/shifts/${shift.id}`, body);
       setShowEditModal(false);
-      setEditToast('Schedule updated');
+      const outcome = result?.active_end_edit?.outcome;
+      setEditToast(
+          outcome === 'closed'
+        ? `Shift closed — guard clocked out at ${fmtClockInZone(result.active_end_edit?.clocked_out_at ?? endISO, tz)}`
+        : outcome === 'extended'
+        ? 'End time extended'
+        : outcome === 'shortened'
+        ? 'End time moved earlier'
+        : 'Schedule updated',
+      );
       window.setTimeout(() => setEditToast(''), 3000);
       await load();
     } catch (e: any) {
+      // The API asks for a confirmation the form did not (its clock or its
+      // DST arithmetic disagreed): show the same confirm step with the
+      // server's own figures, keeping the confirmations already given.
+      const apiBody = (e as ApiError)?.body ?? {};
+      if (apiBody.code === 'LONG_SHIFT_CONFIRM_REQUIRED') {
+        setEditConfirm({ long: String(apiBody.ends_at_label ?? e?.message ?? ''), flags: confirmed });
+        return;
+      }
+      if (apiBody.code === 'CLOSE_CONFIRM_REQUIRED' && typeof apiBody.clocks_out_at === 'string') {
+        setEditConfirm({ close: fmtClockInZone(apiBody.clocks_out_at, tz), flags: confirmed });
+        return;
+      }
       setEditErr(String(e?.message ?? 'Edit failed. Please try again.'));
       // The 409 from an overlap carries a `conflict` object naming the
       // colliding shift. ApiError preserves the whole body so we can render
       // a link to it — "these hours overlap something" with no way to reach
       // that something is not an actionable error.
-      const conflict = (e as ApiError)?.body?.conflict as EditConflict | undefined;
+      const conflict = apiBody.conflict as EditConflict | undefined;
       if (conflict?.shift_id) setEditConflict(conflict);
     } finally {
       setEditSubmitting(false);
@@ -628,7 +716,7 @@ export default function ShiftDetailPage() {
             disabled-but-visible, because a greyed-out button invites a
             support question and this gate is not something an admin can
             act on (they cannot un-clock-in a guard). */}
-        {canEdit && (
+        {(canEdit || canEditEnd) && (
           <button
             onClick={openEditModal}
             className="px-4 py-2 rounded-lg text-sm font-bold tracking-widest transition-colors border border-[#00C8FF] text-[#00C8FF] hover:bg-[#00C8FF]/10 hover:text-cyan-200"
@@ -922,22 +1010,34 @@ export default function ShiftDetailPage() {
               {shift.site_tz ? ` (${shift.site_tz.split('/')[1]?.replace('_', ' ')})` : ''}.
             </p>
 
+            {editMode === 'end' && (
+              <p className="text-gray-300 text-xs mb-4 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2">
+                The guard is on shift
+                {shift.open_session_clocked_in_at
+                  ? ` (clocked in at ${fmtClockInZone(shift.open_session_clocked_in_at, shift.site_tz ?? 'America/Los_Angeles')})`
+                  : ''}
+                , so only the end can change. An end at or before now clocks the guard out at that time.
+              </p>
+            )}
+
             <div className="space-y-4">
               <div>
-                <label className="block text-gray-500 text-xs tracking-widest mb-1">START</label>
+                <label className="block text-gray-500 text-xs tracking-widest mb-1">
+                  START{editMode === 'end' && <span className="text-gray-600"> (fixed while the guard is on shift)</span>}
+                </label>
                 <div className="flex gap-2">
                   <input
                     type="date"
                     value={editStartDate}
-                    onChange={(e) => setEditStartDate(e.target.value)}
-                    disabled={editSubmitting}
+                    onChange={(e) => { setEditStartDate(e.target.value); setEditConfirm(null); }}
+                    disabled={editSubmitting || editMode === 'end'}
                     className="flex-1 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-[#00C8FF] disabled:opacity-50"
                   />
                   <input
                     type="time"
                     value={editStartTime}
-                    onChange={(e) => setEditStartTime(e.target.value)}
-                    disabled={editSubmitting}
+                    onChange={(e) => { setEditStartTime(e.target.value); setEditConfirm(null); }}
+                    disabled={editSubmitting || editMode === 'end'}
                     className="w-32 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-[#00C8FF] disabled:opacity-50"
                   />
                 </div>
@@ -949,14 +1049,14 @@ export default function ShiftDetailPage() {
                   <input
                     type="date"
                     value={editEndDate}
-                    onChange={(e) => setEditEndDate(e.target.value)}
+                    onChange={(e) => { setEditEndDate(e.target.value); setEditConfirm(null); }}
                     disabled={editSubmitting}
                     className="flex-1 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-[#00C8FF] disabled:opacity-50"
                   />
                   <input
                     type="time"
                     value={editEndTime}
-                    onChange={(e) => setEditEndTime(e.target.value)}
+                    onChange={(e) => { setEditEndTime(e.target.value); setEditConfirm(null); }}
                     disabled={editSubmitting}
                     className="w-32 bg-[#0B1526] border border-[#1A3050] rounded-lg px-3 py-2 text-gray-200 text-sm focus:outline-none focus:border-[#00C8FF] disabled:opacity-50"
                   />
@@ -1009,21 +1109,61 @@ export default function ShiftDetailPage() {
               </div>
             )}
 
+            {/* The confirm step (U2 close, U5 over 12 h) — in the modal, no new
+                screen. The API asks for the same confirmations with a 409, so
+                this is the first line of the rule, not the only one. */}
+            {editConfirm && (editConfirm.close || editConfirm.long) && (
+              <div className="mt-4 bg-amber-400/10 border border-amber-400/50 rounded-lg px-3 py-3 space-y-1">
+                <p className="text-amber-400 text-[10px] tracking-widest font-bold">CONFIRM</p>
+                {editConfirm.close && (
+                  <p className="text-gray-200 text-sm">This clocks the guard out at {editConfirm.close}.</p>
+                )}
+                {editConfirm.long && (
+                  <p className="text-gray-200 text-sm">This shift is over 12 hours: {editConfirm.long}.</p>
+                )}
+              </div>
+            )}
+
             <div className="flex gap-3 mt-5">
-              <button
-                onClick={() => !editSubmitting && setShowEditModal(false)}
-                disabled={editSubmitting}
-                className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-[#0B1526] border border-[#1A3050] text-gray-300 hover:text-gray-200 disabled:opacity-50"
-              >
-                CANCEL
-              </button>
-              <button
-                onClick={submitEdit}
-                disabled={editSubmitting || !editStartDate || !editStartTime || !editEndDate || !editEndTime}
-                className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-[#00C8FF] text-[#0B1526] hover:bg-cyan-300 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {editSubmitting ? 'SAVING…' : 'SAVE CHANGES'}
-              </button>
+              {editConfirm && (editConfirm.close || editConfirm.long) ? (
+                <>
+                  <button
+                    onClick={() => !editSubmitting && setEditConfirm(null)}
+                    disabled={editSubmitting}
+                    className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-[#0B1526] border border-[#1A3050] text-gray-300 hover:text-gray-200 disabled:opacity-50"
+                  >
+                    GO BACK
+                  </button>
+                  <button
+                    onClick={() => submitEdit({
+                      long:  editConfirm.flags.long  || !!editConfirm.long,
+                      close: editConfirm.flags.close || !!editConfirm.close,
+                    })}
+                    disabled={editSubmitting}
+                    className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-amber-400 text-[#0B1526] hover:bg-amber-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {editSubmitting ? 'SAVING…' : editConfirm.close ? `CLOCK OUT AT ${editConfirm.close}` : 'SAVE LONG SHIFT'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => !editSubmitting && setShowEditModal(false)}
+                    disabled={editSubmitting}
+                    className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-[#0B1526] border border-[#1A3050] text-gray-300 hover:text-gray-200 disabled:opacity-50"
+                  >
+                    CANCEL
+                  </button>
+                  <button
+                    onClick={() => submitEdit()}
+                    disabled={editSubmitting || !editEndDate || !editEndTime
+                      || (editMode === 'schedule' && (!editStartDate || !editStartTime))}
+                    className="flex-1 px-4 py-2 rounded-lg text-sm font-bold tracking-widest bg-[#00C8FF] text-[#0B1526] hover:bg-cyan-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {editSubmitting ? 'SAVING…' : 'SAVE CHANGES'}
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

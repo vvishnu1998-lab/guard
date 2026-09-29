@@ -44,7 +44,7 @@ interface Shift {
 }
 
 interface Guard { id: string; name: string; badge_number: string; is_active?: boolean; photo_url?: string | null; }
-interface Site  { id: string; name: string; address?: string; company_name?: string }
+interface Site  { id: string; name: string; address?: string; company_name?: string; timezone?: string | null }
 
 // Coverage snapshot per site. Window is today 00:00 SITE-LOCAL through
 // +14 days — the server expands the active profile into dated slots and
