@@ -313,7 +313,7 @@ File-path citations point at the load-bearing code so anyone debugging a flow ca
 2. Tap Confirm → POST `/api/shifts/:id/clock-out` with `{handover_notes}` ([apps/api/src/routes/shifts.ts:329-396](apps/api/src/routes/shifts.ts:329)).
 3. Server transaction (`BEGIN`):
    - `UPDATE shift_sessions SET clocked_out_at = NOW() WHERE shift_id = $1 AND guard_id = $2 AND clocked_out_at IS NULL RETURNING ...` (joined with `shifts` to pull `scheduled_start`).
-   - If no row: ROLLBACK + 404 "Active session not found."
+   - If no row: look up this guard's latest CLOSED session on this shift (only if they have no open one on it). If one exists: ROLLBACK + 409 `{ error: 'SESSION_CLOSED', message, clocked_out_at }`, message "You are already clocked out of this shift. Go back to the home screen to refresh." plus a notes sentence when the request carried notes. Otherwise: ROLLBACK + 404 "Active session not found." (unchanged). The same 409 answers a rejected photo on an already-closed session (2026-09-29).
    - Close any open `break_sessions` row: `UPDATE break_sessions SET break_end = NOW(), duration_minutes = ...` for rows with `break_end IS NULL`.
    - Compute totals: sum break minutes, then `total_hours = max(0, gross_hours - break_hours)` where `gross_hours = max(0, (clock_out - max(clock_in, scheduled_start)) / 3_600_000)`. Early arrivals don't earn pay before scheduled_start; late stays still count ("Option C" math, matching `autoCompleteShifts.ts` for consistency).
    - `UPDATE shift_sessions SET total_hours = $1, handover_notes = $2`.
@@ -326,9 +326,10 @@ File-path citations point at the load-bearing code so anyone debugging a flow ca
 - `shifts.status = 'completed'`, `shift_sessions.clocked_out_at` populated, `total_hours` computed, any open break closed, mobile back on home in "off shift" state.
 
 **Error / edge cases**:
-- **No active session**: 404 (guard tried to clock out without clocking in, or session already closed elsewhere).
+- **Already clocked out**: 409 `SESSION_CLOSED` — the sweep closed the session at `scheduled_end` + grace, an admin closed the shift in the past (D20), a handoff moved it to another guard, or the guard's own earlier clock-out committed and its response was lost. The guard's session is closed; nothing is written.
+- **No session at all**: 404 "Active session not found" — the guard never had a session on this shift (or it was purged).
 - **Transaction error mid-flight**: ROLLBACK; nothing partially mutates. 500 returned; guard retries.
-- **Auto-complete cron firing in parallel** ([apps/api/src/jobs/autoCompleteShifts.ts](apps/api/src/jobs/autoCompleteShifts.ts)): the cron closes shifts whose `scheduled_end` is in the past; if both fire at the same time, the second loses (no row to UPDATE). Idempotent on the shift level.
+- **Auto-complete cron firing in parallel** ([apps/api/src/jobs/autoCompleteShifts.ts](apps/api/src/jobs/autoCompleteShifts.ts)): the cron closes sessions whose `scheduled_end` + grace has passed; if both fire at the same time, the second loses the row lock race and finds the session closed — a clock-out that loses answers 409 `SESSION_CLOSED`. Idempotent on the shift level.
 
 ---
 

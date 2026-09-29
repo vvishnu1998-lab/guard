@@ -5007,6 +5007,94 @@ router.post('/:id/clock-in', requireAuth('guard'), idempotent('clock-in'), async
   }
 });
 
+// ── Clock-out after the session already closed ──────────────────────────────
+//
+// A clock-out that finds no OPEN session for (shift, guard) used to answer one
+// 404, `{ error: 'Active session not found' }`, whatever the reason. Most of
+// the time the reason is that the session is already CLOSED: the sweep closed
+// it at scheduled_end + grace (U4b), an admin closed it in the past (D20), a
+// handoff closed it (handoff-clock-in closes A's row and moves shifts.guard_id
+// to B; A's row keeps guard_id = A), the guard's own earlier clock-out
+// committed and its response was lost, or a concurrent close won the row lock.
+// Every app version showed "Clock-Out Failed / Active session not found" and
+// retried into the same wall.
+//
+// For those cases the route now answers 409 SESSION_CLOSED — the shape the
+// four other guard routes already use (locations.ts ping / violation /
+// clock-in-verification, tasks.ts complete) and the one the 2026-09-29 OTA
+// treats as proof (apps/mobile/lib/clockOutOutcome.ts). A shift the guard
+// never had a session on (or one purged since) keeps the 404, byte-identical.
+
+/** Shown by every app version older than the 2026-09-29 OTA, verbatim, under
+ *  its "Clock-Out Failed" title. True in every case above — "this shift has
+ *  ended" is not, after a handoff (the shift carries on under the other
+ *  guard). The second sentence is the one step that repairs those builds:
+ *  the home tab's focus refresh sees no session and clears the stale one. */
+export const CLOCK_OUT_SESSION_CLOSED_MESSAGE =
+  'You are already clocked out of this shift. Go back to the home screen to refresh.';
+/** Appended only when THIS request carried handover notes: the route answers
+ *  before it writes anything, so they are not saved by this attempt (an
+ *  earlier, lost-response attempt may have saved its own — hence "may"). */
+export const CLOCK_OUT_SESSION_CLOSED_NOTES =
+  'Your handover notes may not have been saved. Give them to your supervisor.';
+
+function clockOutSessionClosedBody(clockedOutAt: Date, sentNotes: boolean) {
+  return {
+    error:   'SESSION_CLOSED',
+    message: sentNotes
+      ? `${CLOCK_OUT_SESSION_CLOSED_MESSAGE} ${CLOCK_OUT_SESSION_CLOSED_NOTES}`
+      : CLOCK_OUT_SESSION_CLOSED_MESSAGE,
+    clocked_out_at: clockedOutAt.toISOString(),
+  };
+}
+
+/**
+ * This guard's latest CLOSED session on this shift, if they have no OPEN one;
+ * otherwise null. Scoped to the shift AND the caller: scoping by shift alone
+ * would 409 a guard who never worked it, and it never reveals anyone else's
+ * session. Latest first, because a handoff back (B hands the shift to A again)
+ * gives A a second session. clock_out_reason is read for the log only — a
+ * handoff's reason embeds the other guard's uuid and never goes on the wire.
+ *
+ * Never throws: a failed lookup returns null, so the caller answers exactly
+ * what it answered before this existed. Pass the transaction's client inside
+ * one (read committed: it sees a close committed while the UPDATE waited).
+ */
+async function closedSessionWithoutOpen(
+  db: Pick<PoolClient, 'query'>, shiftId: string, guardId: string,
+): Promise<{ id: string; clocked_out_at: Date; clock_out_reason: string | null } | null> {
+  try {
+    const r = await db.query<{ id: string; clocked_out_at: Date; clock_out_reason: string | null }>(
+      `SELECT c.id, c.clocked_out_at, c.clock_out_reason
+         FROM shift_sessions c
+        WHERE c.shift_id = $1 AND c.guard_id = $2 AND c.clocked_out_at IS NOT NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM shift_sessions o
+                 WHERE o.shift_id = $1 AND o.guard_id = $2 AND o.clocked_out_at IS NULL)
+        ORDER BY c.clocked_out_at DESC
+        LIMIT 1`,
+      [shiftId, guardId],
+    );
+    return r.rows[0] ?? null;
+  } catch (err) {
+    console.error('[clock-out.closed_lookup_error] answering as before:', err);
+    return null;
+  }
+}
+
+function logClockOutSessionClosed(
+  where: 'no_open_session' | 'photo_rejected',
+  shiftId: string, guardId: string,
+  closed: { id: string; clocked_out_at: Date; clock_out_reason: string | null },
+): void {
+  const reason = closed.clock_out_reason;
+  console.warn('[clock-out.session_closed]', {
+    where, shift_id: shiftId, shift_session_id: closed.id, guard_id: guardId,
+    clocked_out_at: closed.clocked_out_at.toISOString(),
+    closed_by: reason?.startsWith('handed_off_to_') ? 'handoff' : (reason ?? 'unknown'),
+  });
+}
+
 // POST /api/shifts/:id/clock-out
 //
 // Wrapped in an explicit transaction (CB2/CB3): previously four independent
@@ -5058,12 +5146,27 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
   // retry the whole clock-out cleanly. A photo that fails validation is the
   // ONE thing that stops a clock-out, and only because the guard can drop
   // the photo and immediately succeed — skipping is always available.
+  // Notes on THIS request, for the already-closed answer's extra sentence.
+  const sentNotes = typeof handover_notes === 'string' && handover_notes.trim().length > 0;
+
   if (photoUrl) {
     const v = await validatePhotoOrQuarantine(photoUrl, {
       guardId:   req.user!.sub,
       companyId: req.user!.company_id,
     });
-    if (!v.ok) return res.status(v.status).json(v.body);
+    if (!v.ok) {
+      // A rejected photo on a session that is already closed: the photo is
+      // moot, and the app's PHOTO_REJECTED copy would tell the guard their
+      // shift has NOT been closed yet, which is false. Checked only on this
+      // path, so a normal clock-out pays nothing for it; the UPDATE below
+      // stays the authority.
+      const closed = await closedSessionWithoutOpen(pool, id, req.user!.sub);
+      if (closed) {
+        logClockOutSessionClosed('photo_rejected', id, req.user!.sub, closed);
+        return res.status(409).json(clockOutSessionClosedBody(closed.clocked_out_at, sentNotes));
+      }
+      return res.status(v.status).json(v.body);
+    }
   }
 
   // ── clock_out_reason, computed from what actually arrived ──────────────
@@ -5110,7 +5213,14 @@ router.post('/:id/clock-out', requireAuth('guard'), async (req, res) => {
       [id, req.user!.sub]
     );
     if (!sessionResult.rows[0]) {
+      // No OPEN session for (shift, guard). A CLOSED one → 409 SESSION_CLOSED
+      // (see closedSessionWithoutOpen above); none → the 404, unchanged.
+      const closed = await closedSessionWithoutOpen(client, id, req.user!.sub);
       await client.query('ROLLBACK');
+      if (closed) {
+        logClockOutSessionClosed('no_open_session', id, req.user!.sub, closed);
+        return res.status(409).json(clockOutSessionClosedBody(closed.clocked_out_at, sentNotes));
+      }
       return res.status(404).json({ error: 'Active session not found' });
     }
     const session = sessionResult.rows[0];
