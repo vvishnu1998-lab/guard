@@ -161,6 +161,7 @@ async function main(): Promise<void> {
   }
   const router: any = (await import('../src/routes/shifts')).default;
   const sweepMod: any = await import('../src/jobs/autoCompleteShifts');
+  const reminderMod: any = await import('../src/jobs/clockOutReminder');
   for (const task of cron.getTasks().values()) task.stop();
   let missedInsert: any = null;
   // A non-literal specifier, so this file still compiles against a tree that
@@ -508,6 +509,34 @@ async function main(): Promise<void> {
       const r8 = await patch(sh7, { scheduled_end: at(90).toISOString() });
       check(r8.status === 404, `other company's admin -> 404 (got ${r8.status})`);
       actor = admin;
+      // R9 the UNCHANGED end, already passed (inside the grace): that is a close at the stored end, not a no-op
+      const g9 = await mkGuard();
+      const sh9 = await mkShift(g9, -240, -5, 'active');
+      const ss9 = await mkSession(sh9, g9, -240);
+      const r9 = await patch(sh9, { scheduled_end: at(-5).toISOString() });
+      check(r9.status === 409 && r9.body?.code === 'CLOSE_CONFIRM_REQUIRED',
+            `same end, already passed, no flag -> 409 CLOSE_CONFIRM_REQUIRED (got ${r9.status} ${show(r9.body)})`);
+      const r9b = await patch(sh9, { scheduled_end: at(-5).toISOString(), confirm_close_session: true });
+      const s9 = await sessRow(ss9);
+      check(r9b.status === 200 && r9b.body?.active_end_edit?.outcome === 'closed'
+            && ms(s9.clocked_out_at) === at(-5).getTime() && s9.clock_out_reason === 'admin_corrected'
+            && (await auditRows(sh9)).length === 1,
+            `...with the flag -> closed at the stored end, 'admin_corrected', audited (got ${r9b.status} ${show(r9b.body?.active_end_edit)})`);
+      // R10 a confirmed close whose end has not arrived by the database's clock
+      const g10 = await mkGuard();
+      const sh10 = await mkShift(g10, -240, 120, 'active');
+      await mkSession(sh10, g10, -240);
+      const r10 = await patch(sh10, { scheduled_end: at(2).toISOString(), confirm_close_session: true });
+      check(r10.status === 409 && r10.body?.code === 'CLOSE_END_NOT_PAST' && ms((await shiftRow(sh10)).scheduled_end) === at(120).getTime(),
+            `confirmed close with a future end -> 409 CLOSE_END_NOT_PAST, end unchanged (got ${r10.status} ${show(r10.body)})`);
+      // R11 order: an extension that overlaps AND runs past 12 h answers the overlap, not the confirm
+      const g11 = await mkGuard();
+      const sh11 = await mkShift(g11, -600, 60, 'active');
+      await mkSession(sh11, g11, -600);
+      const nx11 = await mkShift(g11, 120, 300, 'scheduled');
+      const r11 = await patch(sh11, { scheduled_end: at(150).toISOString() });
+      check(r11.status === 409 && r11.body?.conflict?.shift_id === nx11,
+            `overlap + over 12 h -> the overlap 409, not the confirm (got ${r11.status} ${show(r11.body?.code ?? r11.body?.conflict)})`);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -653,6 +682,36 @@ async function main(): Promise<void> {
       const r2 = await callRoute(router, 'get', '/:id', { params: { id: c1Shift } });
       check(r2.body?.open_session_count === 0 && r2.body?.open_session_clocked_in_at === null && r2.body?.has_session === true,
             `closed: 0, null, has_session true (got ${show([r2.body?.open_session_count, r2.body?.open_session_clocked_in_at])})`);
+    }
+
+    section('REM the clock-out reminder re-reads the current end (decision 11a under concurrency)');
+    {
+      // An extension clears the latch; a reminder tick that had already read the OLD end must not stamp it.
+      const g = await mkGuard();
+      const sh = await mkShift(g, -240, 3, 'active');     // the reminder window for the old end is open
+      const ss = await mkSession(sh, g, -240);
+      const adminTx = new Client(); await adminTx.connect();
+      try {
+        await adminTx.query('BEGIN');
+        await adminTx.query(`SELECT 1 FROM shifts WHERE id = $1 FOR UPDATE`, [sh]);
+        await adminTx.query(`SELECT 1 FROM shift_sessions WHERE id = $1 FOR NO KEY UPDATE`, [ss]);
+        await adminTx.query(`UPDATE shifts SET scheduled_end = $2 WHERE id = $1`, [sh, at(120)]);
+        await adminTx.query(`UPDATE shift_sessions SET clock_out_reminder_sent_at = NULL WHERE id = $1`, [ss]);
+        const tick = reminderMod.runClockOutReminder();
+        await sleep(300);
+        await adminTx.query('COMMIT');
+        await tick;
+        const se = await sessRow(ss);
+        check(se.clock_out_reminder_sent_at === null,
+              `a reminder tick racing an extension leaves the latch NULL for the new end (got ${se.clock_out_reminder_sent_at})`);
+      } finally { await adminTx.end(); }
+      // Control: with the end NOT moved, the same tick claims the session.
+      const g2 = await mkGuard();
+      const sh2 = await mkShift(g2, -240, 3, 'active');
+      const ss2 = await mkSession(sh2, g2, -240);
+      await reminderMod.runClockOutReminder();
+      check((await sessRow(ss2)).clock_out_reminder_sent_at !== null, 'control: an unmoved shift in its window is claimed');
+      void sh2;
     }
 
     section('M the missed-window INSERT re-checks the current end (decision 2a)');

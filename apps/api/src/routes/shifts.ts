@@ -1798,15 +1798,21 @@ async function editActiveShiftEnd(client: PoolClient, x: ActiveEndInput): Promis
     return refuse(422, 'END_BEFORE_CLOCK_IN',
       `The guard clocked in at ${timeAt(clockIn)}. The new end must be after that.`);
   }
-  if (newEnd.getTime() === oldEnd.getTime()) return { kind: 'noop' };
-
-  if (isLongShift(start, newEnd) && !x.confirmLong) {
-    return { kind: 'refuse', status: 409, body: longShiftConfirmBody(start, newEnd, tz) };
-  }
-
   const clockNow = async (): Promise<number> =>
     new Date((await client.query<{ now: Date }>('SELECT clock_timestamp() AS now')).rows[0].now).getTime();
   const nowMs        = await clockNow();
+
+  // Unchanged end: nothing to do — but ONLY while the session would stay
+  // open. An unchanged end that has already passed (the shift is inside the
+  // grace, not yet swept) is the admin clocking the guard out at the stored
+  // end, and goes down the close path below.
+  if (newEnd.getTime() === oldEnd.getTime() && newEnd.getTime() > nowMs) return { kind: 'noop' };
+
+  // U5, asked after every hard refusal in each branch below, so nobody
+  // confirms an edit that would then fail.
+  const longRefusal = (): ActiveEndResult | null => (isLongShift(start, newEnd) && !x.confirmLong
+    ? { kind: 'refuse', status: 409, body: longShiftConfirmBody(start, newEnd, tz) }
+    : null);
   const autoClosesAt = oldEnd.getTime() + AUTO_CLOSE_GRACE_MINUTES * 60_000;
   const tooLateToKeepOpen = (ms: number): boolean => ms >= autoClosesAt - AUTO_CLOSE_EDIT_MARGIN_MS;
   const autoClosingBody = (): ActiveEndResult => refuse(409, 'SHIFT_AUTO_CLOSING',
@@ -1832,10 +1838,21 @@ async function editActiveShiftEnd(client: PoolClient, x: ActiveEndInput): Promis
 
   // ── Keep the session open: extend, or shorten to a later-than-now end ──────
   if (newEnd.getTime() > nowMs) {
+    // The admin confirmed a CLOSE (their browser judged this end past) but by
+    // the database's clock it has not arrived. Never turn a confirmed clock-out
+    // into a shorten that leaves the guard on shift.
+    if (x.confirmClose) {
+      return refuse(409, 'CLOSE_END_NOT_PAST',
+        `${timeAt(newEnd)} has not passed yet, so the guard cannot be clocked out at that time. ` +
+        'Choose an earlier end, or wait a moment and try again.',
+        { server_now: new Date(nowMs).toISOString() });
+    }
     if (tooLateToKeepOpen(nowMs)) return autoClosingBody();
 
     const overlapBody = await editOverlapBody(client, guardId, x.id, start, newEnd);
     if (overlapBody) return { kind: 'refuse', status: 409, body: overlapBody };
+    const longKeep = longRefusal();
+    if (longKeep) return longKeep;
 
     const updated = await client.query(
       `UPDATE shifts SET scheduled_end = $2 WHERE id = $1 RETURNING *`,
@@ -1865,15 +1882,17 @@ async function editActiveShiftEnd(client: PoolClient, x: ActiveEndInput): Promis
   }
 
   // ── Close in the past: clock the guard out at the new end ─────────────────
-  if (!x.confirmClose) {
-    return refuse(409, 'CLOSE_CONFIRM_REQUIRED',
-      `This clocks the guard out at ${timeAt(newEnd)}. Confirm to close the shift.`,
-      { clocks_out_at: newEnd.toISOString(), confirm_with: { confirm_close_session: true } });
-  }
   // Decision 9a — the q8a/q9c precedent: a held record is not rewritten here.
   if (x.shift.legal_hold || sess.legal_hold) {
     return refuse(409, 'LEGAL_HOLD',
       'This shift is on legal hold, so it cannot be closed here. Its end can still be extended.');
+  }
+  const longClose = longRefusal();
+  if (longClose) return longClose;
+  if (!x.confirmClose) {
+    return refuse(409, 'CLOSE_CONFIRM_REQUIRED',
+      `This clocks the guard out at ${timeAt(newEnd)}. Confirm to close the shift.`,
+      { clocks_out_at: newEnd.toISOString(), confirm_with: { confirm_close_session: true } });
   }
 
   // 1. Open breaks end at the new end — the sweep's step 1 formula with the
@@ -2209,7 +2228,11 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
       }
       await client.query('COMMIT');
       res.json(out.body);
-      out.afterCommit();
+      // Best-effort, after the response: a push or handoff failure must not
+      // reach the catch below, which would try to answer a second time.
+      try { out.afterCommit(); } catch (err) {
+        console.error('[shifts.edit.active] after-commit work failed:', err);
+      }
       return;
     }
 
