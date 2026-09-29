@@ -157,8 +157,9 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
     return;
   }
 
-  // Local expiry gate. autoCompleteShifts closes the session server-side at
-  // scheduled_end, and a backgrounded or killed app never learns that — the
+  // Local expiry gate. autoCompleteShifts closes the session server-side once
+  // scheduled_end + its 15-minute grace has passed (SHIFT_EXPIRY_GRACE_MS
+  // mirrors it), and a backgrounded or killed app never learns that — the
   // region stays armed and keeps reporting. This is the only check that works
   // with no network on an app the OS has killed, so it runs before anything
   // is delivered or sent.
@@ -259,9 +260,18 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
       //   * It does nothing without network. A dead zone is exactly where a
       //     guard is most likely to trip a geofence, and there the fetch
       //     rejects and we never see a status at all.
-      // The local expiry gate above is the primary mechanism; this is the
-      // backstop that happens to be what stops the 2026-08-06 repeat, since
-      // both of those exits fell inside the grace window.
+      // The local expiry gate above is the primary mechanism for the auto
+      // clock-out. This is the backstop for what the gate cannot see: an
+      // active_shift_end that was absent or rejected at registration (the
+      // gate fails open), a device clock running behind, and a session
+      // closed any other way while the region is still armed — an admin
+      // shortening or closing an active shift (D20), or a handoff. It does
+      // NOT cover the 0-5 minutes between the grace running out and the sweep
+      // tick: the gate suppresses those exits before any POST while the
+      // session is still open, so nothing reports them (lib/shiftExpiry.ts).
+      // Once the gate has judged the shift over it returns before any POST,
+      // so this teardown never runs there and the region stays armed,
+      // silently, until the app is next opened.
       if (res.status === 409) {
         Sentry.addBreadcrumb({
           category: 'geofence',
