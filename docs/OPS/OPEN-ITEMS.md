@@ -297,6 +297,8 @@ the following 24h — its only issue was `NETRAOPS-MOBILE-9 startBackgroundLocat
 (2) the `environment` tag — two STARNET devices are on runtime **1.0.16**, not 1.0.17 (see **N7**), so
 the failing device may be running older JS entirely, (3) **flush on background** — React Native drops
 queued events if the app is backgrounded before the transport runs, (4) sample rate.
+*Update 2026-09-29:* (1) holds for any handset that was running an OTA — no OTA published before
+2026-09-29 carried the DSN (N152).
 **Test with a forced capture**: add a temporary dev-only button that calls
 `Sentry.captureException(new Error('n25-probe'))` and confirm the event arrives from a real device on
 the production channel. Until this resolves, **treat "no mobile Sentry events" as "no information",
@@ -3912,6 +3914,12 @@ after an auto-close gets a generic failure and a stale store.
 Use the `SESSION_CLOSED` shape (status + code) on all three, and check the mobile
 callers in the same dispatch. **Size M (API + mobile batch), Tier 1.**
 
+*Update 2026-09-29:* clock-out now sends it too (N138), with its own message. The four
+existing `SESSION_CLOSED` bodies (`routes/locations.ts:363`, `:716`, `:916`;
+`routes/tasks.ts:146`) all open "This shift has already ended.", which is false after a
+handoff: the outgoing guard's session is closed while the shift carries on under the
+incoming guard. Reword them in the same dispatch.
+
 ### N112 — `STATE.md` says the schema tip is v77 (v78 free); v80 is on disk and appears applied
 
 verified: `apps/api/src/db/migrate.ts` lists 81 files ending `schema_v80.sql`;
@@ -4400,6 +4408,58 @@ U4b** unless the item says so. API lines are read at `761d7f5`; mobile lines at
 
 ### N138 — mobile `SHIFT_EXPIRY_GRACE_MS` is still 30 minutes; the server's grace is 15 (next OTA)
 
+**Update 2026-09-29 — PUBLISHED by OTA, and the API half is CLOSED by PR #<n>; open until
+the device checks pass.** The grace is 15 on `batch/mobile-18` (`4558ae9`;
+`lib/shiftExpiry.ts:61` at `ddc6f0a`). A clock-out after a close reads "Shift Ended / You
+are already clocked out of this shift." (`c5f4a63`): `lib/clockOutOutcome.ts:41` takes 409
+`SESSION_CLOSED` as proof, and on a 404 refreshes, then decides.
+Published 2026-09-29 (group ids from the publish record; STATE.md has the channel table):
+- production runtime 1.0.17: group `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` from `ddc6f0a`,
+  11:33:06 PT — reaches iOS 48 and Android vc24;
+- preview runtime 1.0.18: group `429943ab-8561-4766-b031-635587d0a6c3` from `f5a84c4`,
+  08:39:30 PT — reaches the vc27 preview APK;
+- production runtime 1.0.18 (vc26): no group.
+PR #84 (`batch/mobile-18` → main) is open and merges after a TestFlight build from it ships;
+#50 is closed unmerged, and its three commits are in #84.
+The API half: `POST /api/shifts/:id/clock-out` answers 409 `SESSION_CLOSED` with
+`clocked_out_at` when a closed session exists for that shift and guard and none is open
+(sweep, admin close, handoff, the guard's own lost response, a concurrent close); the 404
+is byte-identical otherwise. Message: "You are already clocked out of this shift. Go back
+to the home screen to refresh.", plus "Your handover notes may not have been saved. Give
+them to your supervisor." when the request carried notes. A rejected photo on a closed
+session gets the same 409. Proven by `apps/api/scripts/test-clock-out-session-closed.ts`
+(PR #<n>).
+Device checks, numbered as in the batch-18 test plan:
+1. clock-in: a "geofence registered" Sentry event on the new update id (proves the update
+   and the DSN);
+2. extend with the app open on Home: the banner, and Time Left / SCHEDULED END change within
+   about 5 s, with no restart;
+3. extend while the app is backgrounded, reopen from the icon: SCHEDULED END shows the new end;
+4. shorten with the app open: "Shift end changed… Clock out at that time." and the new end
+   on screen;
+5a. admin close in the past with the clock-out screen open: "Shift ended…", then "No active
+   shift to clock out of.";
+5b. clock-out after the sweep closed the session (offline across the close): "Shift Ended /
+   You are already clocked out of this shift." with the notes sentence;
+6. the 15-minute grace: an exit before end+15 raises the alert and a violation row; a
+   re-entry after end+15 raises no "Back on post";
+7. T6a (N146): phone locked, stored end expired, shift extended on the server: the exit alert
+   still fires on the lock screen.
+Android (vc27 + `429943ab`, Star Guard GRD0001 `9a92092e`, shift `0d1817ab` at Mosser
+Towers, 2026-09-29): 1, 2 and 3 passed; 5a passed server-side (`admin_corrected`, 10:45:00,
+1.25 h; the screen was not observed). 4 and 7 were not exercised: the app was backgrounded
+from 09:42:31, so it missed the shorten, and the 10:41:51 exit went by the normal path
+(stored end 10:30, still inside the grace). 5b and 6 were not run. The iPhone run (TestFlight
+48 + `fe530a7a`) of 4, 5b, 6 and 7 is scheduled after PR #<n> deploys, so 5b exercises the 409.
+Still open: handsets that have not adopted either group, and every runtime-1.0.16 handset
+(N115), keep the 30-minute gate; from PR #<n> on they show the 409 message under "Clock-Out
+Failed" instead of "Active session not found".
+Adoption at 15:45 PT (non-revoked STARNET `guard_devices` rows): 3 of 10 runtime-1.0.17
+iPhone rows on `fe530a7a` (GRD0010 `c4c9b7f7`, GRD0015 `68f76ea9`, GRD0026 `610755ca`), 7
+still on `9db401c9`'s `01a0b168…`; runtime 1.0.16: GRD0007 `36478eb1` (iOS, last seen 09-03),
+GRD0005 `4a71d17d` (Android, 09-14), GRD0008 `6b1402ba` (Android, 09-27); 4 rows with no
+client string, last seen in August. No non-revoked STARNET row is on Android 1.0.18.
+
 verified: `apps/mobile/lib/shiftExpiry.ts:35` `export const SHIFT_EXPIRY_GRACE_MS =
 30 * 60 * 1000;` — the local expiry gate the background location task applies
 (`tasks/locationBackground.ts:160`, `:179`). The server closes sessions at
@@ -4408,7 +4468,8 @@ ships (U4b, 2026-09-26):
 - between end+15 and end+30 an exit from the fence raises the local "Outside post
   boundary" alert; the server answers 409 `SESSION_CLOSED` and cannot retract it;
 - a clock-out in the same band gets 404 `Active session not found`
-  (`apps/api/src/routes/shifts.ts:4500`), and the app shows "Clock-Out Failed" with
+  (`POST /api/shifts/:id/clock-out` in `apps/api/src/routes/shifts.ts`, cited by route because
+  the line moves — `:4500` at `761d7f5`), and the app shows "Clock-Out Failed" with
   that raw server text and one OK button (`app/clock-out/index.tsx:171`;
   `guardMessage` returns `ApiError.message`, `lib/errorCopy.ts:53`; only 400
   `PHOTO_REJECTED` is special-cased, `:151`). It should say the shift has already
@@ -4527,6 +4588,19 @@ wrong for an admin outside the site's zone; every site is Pacific today.
 
 ### N146 — U3: the app must re-read an active shift's end after an admin edit; until then an extension disarms the geofence 30 min after the OLD end
 
+**Update 2026-09-29 — PUBLISHED by OTA with N138; open until the device checks pass.**
+U3 is `f536620` on `batch/mobile-18`:
+- it re-reads on the edit push, on foreground and on home focus;
+- it rewrites only `scheduled_start`/`scheduled_end`, one queue writes `active_shift_end`,
+  and the region is re-armed only if the old end had run out;
+- a close in the past clears the session.
+With it ships T6a (`ddc6f0a`): before suppressing an event past the stored end, the
+background task asks the server once, by raw XHR (see N151). Same groups, device checks and
+results as N138: the push and foreground re-reads (checks 2, 3) passed on Android; the
+shorten (4) and T6a (7) are still unproven on a device. Until a handset adopts, the text
+below still describes it. The extend push keeps its "Fully close and reopen NetraOps" copy
+until adoption is broad.
+
 verified (code; `origin/main` is what the shipped app runs): the app caches
 `activeShift.scheduled_end` at clock-in, and `refreshFromServer` never rewrites it —
 it only clears a session the server reports gone (`apps/mobile/store/shiftStore.ts:186-196`).
@@ -4599,3 +4673,96 @@ verified, each against the code at `2c0e8a7`:
   cites sweep line numbers from before U4a.
 
 Comment-only; fold into the next change to each file. **Size XS.**
+
+*Added 2026-09-29* (mobile lines at `ddc6f0a`; `f5a84c4` does not touch them):
+- `apps/mobile/lib/clockOutOutcome.ts:5-21` says the route answers with "one 404 carrying
+  prose only" and that a 409 is "planned (the follow-up API PR)"; the route has sent the
+  409 since N138's API half.
+- `apps/mobile/scripts/check-clockout-copy.ts:56` labels the sweep / admin close / handoff /
+  lost-response case a 404; those are 409 now. The 404 stays a valid input (an older or
+  rolled-back API), so keep the case and relabel it.
+- `apps/mobile/lib/apiClient.ts:52-55`: the comment is right, but the fallback label
+  `'embedded'` is not — a store build's embedded bundle reports a random v4 id, and
+  `update/embedded` means expo-updates is off. `Updates.runtimeVersion ?? 'unknown'` also
+  lets an empty string through (`runtime/;` in production rows).
+- `apps/api/src/routes/auth.ts:220-222` says `update/embedded` means "running the binary's
+  baked-in bundle"; see the line above. It is on the login path, so fold it into the next
+  auth change.
+
+## New from mobile batch 18 and its OTA publish (2026-09-29)
+
+Two items from the batch-18 build and publish (PR #84). Mobile lines are read at `ddc6f0a`;
+`f5a84c4` does not touch them.
+
+### N151 — Android: the background geofence task handles the violation POST's response only at the next resume
+
+verified (source, not on a device; mobile ref `batch/mobile-18` @ `ddc6f0a`; react-native
+0.81.5, whatwg-fetch 3.6.20, expo-task-manager 14.0.9, expo-location 19.0.8, per the
+lockfile): on Android, JS timers do not run while the app is backgrounded or started
+headless. `JavaTimerManager.kt:53` starts `isPaused = AtomicBoolean(true)`, only
+`onHostResume` clears it (`:83`), and the frame callback returns early
+`if (isPaused.get() && !isRunningTasks.get())` (`:276`). `isRunningTasks` is set only by
+`onHeadlessJsTaskStart` (`:91`), and neither expo-task-manager nor expo-location starts a
+HeadlessJsTask. React Native's `fetch` is whatwg-fetch (`Libraries/Network/fetch.js:15`),
+which settles only through `setTimeout(function() { … }, 0)` (`fetch.umd.js:560`–`:578`).
+
+This holds on the New Architecture (bridgeless), which the app runs by default — Expo SDK 54,
+and `app.json` sets no `newArchEnabled` (UNVERIFIED against a built binary; check a
+prebuild's `android/gradle.properties`, or the APK). There `setTimeout` goes through the C++
+`TimerManager` to `JavaTimerRegistry.cpp:17` → `JavaTimerManager.createTimer`, which queues
+even a 0 ms timer for the next frame (`:161-162`). On the legacy bridge it would not stall:
+`TimingModule.createTimer` → `createAndMaybeCallTimer` fires a 0 ms one-shot at once (`:210`).
+The same caveat applies to T6a's reason for using XHR.
+
+So in `apps/mobile/tasks/locationBackground.ts` the violation request itself is SENT at once
+(`:327`, `const res = await fetch(\`${apiUrl}/api/locations/violation\`, {`) — the local alert has
+already fired (`:313`) and `geofence_state` is already `outside`/unreported (`:303`) — but nothing
+after the `await` runs until the guard next opens the app:
+- the 409 teardown (`:360`, `if (res.status === 409) {`) does not disarm the region in the
+  background, so a closed session's region keeps waking the task;
+- `persistGeofenceState(sessionId, 'outside', true)` (`:384`) is not written, so a duplicate exit
+  from a re-registration re-POSTs instead of being suppressed.
+
+Not new in batch 18. Every shipped tree checked has the same `await fetch`: `579ee12`
+(embedded 1.0.18) and `b3dcd55` (production OTA `9db401c9`) at `:241` / `:265` / `:289`;
+`c932c09` (embedded 1.0.17) at `:162` / `:186`, without the reported flag; `146387b`
+(1.0.16) at `:143`. iOS keeps firing JS timers in the background — `RCTTiming` swaps its
+display link for an `NSTimer` (`RCTTiming.mm:180-188`, `:300-302`) — so this is Android-only.
+
+T6a's re-check (`getActiveSession`, `:123`, same file) already avoids this: a raw
+`XMLHttpRequest` (`:132`) whose load/timeout events come from native network events and whose
+`xhr.timeout` is native (`:135`), plus a late-answer guard (`lib/pastExpiryRecheck.ts:46`,
+`RECHECK_LATE_AFTER_MS`). The violation POST can take the same shape. Device-verify both on an
+Android handset with the screen locked before relying on either: the 2026-09-29 Android run
+did not exercise T6a (N138, check 7). **Size S (mobile OTA), Tier 1.** Links: N146 (U3), N138.
+
+### N152 — every OTA before 2026-09-29 ran with Sentry off: no `EXPO_PUBLIC_SENTRY_DSN` in the bundle (fixed for new publishes; open until adoption)
+
+verified (repo and eas-cli; the Sentry counts were read in the batch-18 session, not
+re-read here): `initSentry` returns before `Sentry.init` when the DSN is absent
+(`apps/mobile/lib/sentry.ts:64`, `if (!dsn()) return;`), and `dsn()` reads only
+`process.env.EXPO_PUBLIC_SENTRY_DSN`. Store builds get the DSN from an EAS secret at build
+time (`:5-6`). `apps/mobile/eas.json` sets only `EXPO_PUBLIC_API_URL` and
+`EXPO_PUBLIC_SENTRY_ENV` per build profile (`:65`), and `eas update` applies no build-profile
+`env`: eas-cli 18.5.0 `build/commands/update/index.js:190-195` merges only server-side
+variables, and only with `--environment`. What each earlier publish's shell or `.env` held
+is UNVERIFIED; the result is not.
+- In the 90 days to 2026-09-29, `netraops-mobile` had 204 error events, all from embedded
+  bundles and none carrying an OTA update id (Sentry, read in the batch-18 session).
+- Meanwhile most handsets sat on OTA ids for weeks: on the morning of 2026-09-29 every
+  non-revoked STARNET runtime-1.0.17 iPhone row was on `01a0b168…` (group `9db401c9`,
+  2026-09-17).
+- This is N25's hypothesis (1).
+
+Fixed for new publishes: `fe530a7a` and `429943ab` were exported with the DSN and gated —
+the exact DSN and exactly one Sentry public key in both Hermes bundles — and events from the
+new update ids arrived the same day. Procedure: DECISIONS D21, release-ops §3b,
+`scripts/ops/ota-export-and-gate.sh`. Both groups report `environment: production`,
+including the preview one (D21); read the channel from `contexts.ota_updates`.
+
+Still dark: every handset that has not adopted one of those groups, including every
+runtime-1.0.16 handset, which can never adopt (N115) — at 15:45 PT, 7 non-revoked STARNET
+iPhone rows on `01a0b168…`, plus GRD0005 `4a71d17d`, GRD0008 `6b1402ba` and GRD0007
+`36478eb1` on 1.0.16 (N138 has the list). From these handsets, "no mobile Sentry events"
+means "no information". Rolling back to a group published before 2026-09-29 turns Sentry
+off again. **Size XS remaining (watch adoption), Tier 1.**

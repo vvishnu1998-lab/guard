@@ -334,14 +334,14 @@ objects, not read from a ledger — that is the only method available.
 
 ---
 
-## Mobile — verified 2026-09-05 08:32 UTC
+## Mobile — `app.json` re-read 2026-09-29 at `95a10a38`; iOS 48 / Android 24 rows verified 2026-09-05 08:32 UTC; vc26/vc27 rows from session records, UNVERIFIED
 
 `apps/mobile/app.json` literal values:
 
 | field | value |
 |---|---|
-| `expo.version` | `1.0.17` |
-| `expo.runtimeVersion` | `{"policy": "appVersion"}` → resolves to **`1.0.17`** |
+| `expo.version` | `1.0.18` (bumped in `b0f3c85`, 2026-09-18). The 1.0.17 runtime's JS is published from `batch/mobile-18`'s `ddc6f0a` (D21) |
+| `expo.runtimeVersion` | `{"policy": "appVersion"}` → resolves to **`1.0.18`** on main |
 | `expo.ios.buildNumber` | `41` |
 | `expo.android.versionCode` | `17` |
 | `expo.updates.url` | `https://u.expo.dev/5fd28125-2461-4165-b9df-7f34ced8b194` |
@@ -351,20 +351,55 @@ objects, not read from a ledger — that is the only method available.
 **`buildNumber` and `versionCode` in `app.json` are ignored.** EAS remote
 versioning is source of truth. The real shipped numbers, from `eas build:list`:
 
-| platform | appVersion | build | commit | channel | status | created |
+| platform | appVersion | build | commit | profile / channel | status | created |
 |---|---|---|---|---|---|---|
 | IOS | 1.0.17 | **48** | `c932c09` | production | FINISHED | 2026-08-30T01:21:10Z |
 | ANDROID | 1.0.17 | **24** | `c932c09` | production | FINISHED | 2026-08-30T01:21:11Z |
+| ANDROID | 1.0.18 | **26** | ~`7bff232` (API 36) — UNVERIFIED | production | Play production review submitted 2026-09-18, managed publishing ON — **outcome UNVERIFIED** | 2026-09-18 |
+| ANDROID | 1.0.18 | **27** | `579ee12` — UNVERIFIED | preview (APK, build `6113295c`) | FINISHED — UNVERIFIED; fingerprint = vc26 | 2026-09-27 |
+| ANDROID | — | (27 consumed) | — | production (build `b08cbf4c`) | CANCELED, no artifact — **next production build is vc28** — UNVERIFIED | UNVERIFIED |
 | ANDROID | 1.0.16 | 23 | `ef1e230` | smoke | FINISHED | 2026-08-23T19:29:21Z |
 | ANDROID | 1.0.16 | 23 | `4cd4956` | development | FINISHED | 2026-08-23T18:17:27Z |
+
+The vc26, vc27 and `b08cbf4c` rows come from session records; Vishnu fills them from
+`eas build:list`.
 
 `c932c09` = `feat(mobile): download hours summary as PDF from the profile screen`.
 
 ---
 
-## EAS channels + last update group — verified 2026-09-05 08:33 UTC
+## EAS channels + update groups — updated 2026-09-29 (groups from the publish record and Vishnu's `eas update:list`; adoption from `guard_devices.client`)
 
-Channels (`eas channel:list`): `production`, `preview`, `smoke`, `development`.
+Channels: `production`, `preview`, `smoke`, `development` (`eas channel:list`, last run
+2026-09-05). A binary polls only its own channel, and only its own runtime (policy
+`appVersion`). An update applies on the second launch after publish (`ON_LOAD`,
+`fallbackToCacheTimeout: 0`). How to publish: DECISIONS D21, release-ops §3b.
+
+| channel | runtime | current group | from | published (PT) | rollback target |
+|---|---|---|---|---|---|
+| production | 1.0.17 | `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` | `ddc6f0a` | 2026-09-29 11:33:06 | republish `9db401c9-6319-49b4-ab17-64cf559995a0` (`b3dcd55`, 2026-09-17 15:07) — **it has no Sentry DSN and the 30-min grace (N152, N138)**; before it `948d55c8-75da-44ea-8a2f-6847d87144a7` (batch-17) |
+| production | 1.0.18 | **none** — vc26 runs its embedded bundle | — | — | — |
+| preview | 1.0.18 | `429943ab-8561-4766-b031-635587d0a6c3` | `f5a84c4` | 2026-09-29 08:39:30 | roll back to embedded (`579ee12` on vc27); no earlier 1.0.18 preview group |
+| preview | 1.0.17 | `ff99ee6f-f732-449c-9eae-38a0fe3f224c` | UNVERIFIED | 2026-09-02 | — |
+| smoke | 1.0.17 | `2e20d40d-ffb3-4689-a7a2-af5183b2995b` at 2026-09-05; **UNVERIFIED since** | — | — | — |
+| development | — | none at 2026-09-05; **UNVERIFIED since** | — | — | — |
+| (any) | 1.0.16 | last updates 2026-08-22 (iOS `01a02a71…`) and 2026-08-26 (Android `01a04071-040b…` 16:39:03, `01a04071-d36e…` 16:39:56, `01a04072…` 16:40:23 — likely one change on three channels); groups and channels UNVERIFIED | — | — | none planned (N115) |
+
+Earlier 1.0.17 production group: `9386a6d2` (2026-09-10; update ids `01a08a24…`, per
+netraops-invariants). Other 1.0.17 update ids seen on devices, channel UNVERIFIED:
+`01a096c1…` (2026-09-12, Android only), `01a09773…` (2026-09-12).
+
+**Preview reaches a paying customer.** STARNET guard GRD0024 (`94ab7696`) ran the vc27
+preview APK (Vishnu gave it to them; confirmed 2026-09-29), `guard_devices` rows on embedded
+`dc827710…` from 2026-09-28 04:52 to 2026-09-29 14:23 PT, when the guard signed in on an
+iPhone again (production, `01a0b168…`). The Android row never adopted `429943ab`.
+
+Non-revoked STARNET `guard_devices` rows at 2026-09-29 15:45 PT: 3 iPhones on `fe530a7a`
+(GRD0010, GRD0015, GRD0026), 7 on `9db401c9`'s `01a0b168…`; runtime 1.0.16: GRD0007 (iOS,
+last seen 09-03), GRD0005 (Android, 09-14), GRD0008 (Android, 09-27); 4 rows with no client
+string, last seen in August. N138 has the uuids.
+
+History, verified 2026-09-05 08:33 UTC (`eas channel:list`):
 
 | channel | last update group | message | runtime | platforms |
 |---|---|---|---|---|

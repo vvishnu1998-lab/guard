@@ -246,6 +246,10 @@ edits, 12-hour confirm).
   15), U2 (edit an active shift's end), U5 (12-hour confirm) and U6 (Payable)
   are decided and not yet built. *Update, same day:* U4a shipped (`1d6b60b`); U6
   is built on `feat/payable-hours` and not yet merged; U4b, U2 and U5 remain.
+  *Update 2026-09-29:* U6 shipped 2026-09-26 (`4a577e6`, PR #80), U4b 2026-09-27
+  (`579ee12`, PR #82), U2 and U5 2026-09-28 (`95a10a38`, PR #83) — D18, D19, D20. The
+  mobile half, U3 (N146), and the mobile grace of 15 (N138) were published by OTA
+  2026-09-29.
 - The 206 historical auto clock-outs that carry the same 30-35 min are corrected by
   rule, not in this incident: the q9c backfill runs only after U4a is deployed and
   verified (D18). *Update:* it ran the same day — see §3.
