@@ -3979,6 +3979,22 @@ aborts one of them. Pre-dates U4a. Not observed; Sentry was not searched for it.
 
 Take locks in one order in both paths (shift, then session). **Size M, Tier 1.**
 
+**Evidence 2026-09-28 (U2 Phase 1) — the missing shift lock, reproduced.** The
+sweep takes no lock on the shift row: step 2 is `UPDATE shift_sessions … FROM
+shifts`, and when it has to wait for a session row it re-checks that row against
+the shift row it read BEFORE waiting. `apps/api/scripts/test-active-shift-end-edit.ts`
+(section HAZARD) holds a transaction that locks a due shift and its session and
+EXTENDS the end, starts a sweep tick, then commits: the tick closed the session at
+the OLD end (`'auto'`), and step 3 — a fresh statement — saw the new end and
+skipped the shift, leaving it `active` with no open session. Reproduced in all 7
+runs (5 on the U2 branch, 2 on `579ee12`). The U2 end edit keeps clear of it by
+refusing to keep a session open within a minute of the auto clock-out (D20), and
+the clock-out reminder's claim — the same `UPDATE … FROM shifts` shape — now
+re-reads the shift under `FOR SHARE`. The sweep itself is unchanged. Doing this
+item in the sweep — lock the due shift rows first (`FOR UPDATE SKIP LOCKED`) and
+restrict steps 1–3 to them — removes the class, and closes N117 with it. Manual
+clock-out and the legal-hold cascade take the same session-first order (N144).
+
 ### N117 — the sweep can orphan a session between its session step and its status flip
 
 verified: `autoCompleteShifts` closes open sessions in step 2 and flips shift status
@@ -3990,6 +4006,10 @@ through Sentry. Pre-dates U4a.
 
 Either lock the shift rows first, or have step 3 skip shifts that still have an open
 session. **Size S/M, Tier 1.**
+
+See N116's 2026-09-28 evidence: the same missing shift lock, reproduced, with the
+roles reversed (there the session is closed against a stale end and the shift is
+left `active`). Locking the due shifts first fixes both.
 
 ### N118 — the daily client email reads only the latest session of a handoff shift
 
@@ -4016,7 +4036,15 @@ mobile `/violations` (`routes/locations.ts:215`) and the analytics export
 
 Clamp at read on those surfaces, or at write. **Size S/M, Tier 1.**
 
-### N120 — `clock_out_reason = 'admin_corrected'` exists in prod with no code path
+### N120 — CLOSED 2026-09-28 — `clock_out_reason = 'admin_corrected'` exists in prod with no code path
+
+**Closed by** U2 (D20, decision 1a): an admin who sets an active shift's end at or
+before now closes the session with `clock_out_reason = 'admin_corrected'`
+(`editActiveShiftEnd`, `routes/shifts.ts`), so the value has a writer. Filed
+separately: the hours export still flags only `'auto'` (N148), and the reason
+vocabulary comments do not list the value (N150).
+
+Original finding, retained:
 
 verified: prod has **1** such row — session `cc1cf358`, written by the 2026-09-26 Q11
 correction. `git grep admin_corrected` finds no code. The column has no CHECK by
@@ -4438,3 +4466,136 @@ exit. If a future import registers another job, or the script runs inside a
 longer-lived process, that job is stopped too, silently. Revisit then: stop only
 the autoCompleteShifts task, or move the worker into a module that does not call
 `runJob`. **Size XS.**
+
+### N142 — reassign can leave an active shift `scheduled` over the old guard's open session
+
+verified: `PATCH /api/shifts/:id/reassign` (`routes/shifts.ts:977`) refuses only
+`completed` and `missed` (`:1042`), so it admits `active` — deliberately (`:1316`) —
+and writes `guard_id = <new guard>, status = 'scheduled'` (`:1119`) with no session
+check. The old guard's session stays open under a `scheduled` shift assigned to
+someone else, and the new guard can then clock in: a second open session on one
+shift (the only open-session uniqueness is per guard, `db/schema_v9.sql:17`). The
+U2 end edit refuses that state (`SESSION_STATE_CONFLICT`). Prod 2026-09-28: 0 open
+sessions under a non-active shift, 0 shifts with two open sessions, 0 open sessions
+whose guard is not the shift's. Found in the U2 Phase 0 audit.
+
+Decide what reassigning an in-progress shift means — a handoff (close the old
+session, open the new) or a refusal — and make the route do that. **Size M, Tier 1.**
+
+### N143 — guard deactivation can leave an `unassigned`, guard-less shift over an open session
+
+verified: deactivation locks the guard's `scheduled`/`active` shifts
+(`routes/guards.ts:788-794`), re-checks only the deactivated guard's OWN open
+session (`:800`; `services/openSession.ts:73` filters by guard) and writes
+`status = 'unassigned', guard_id = NULL` (`:847`). In N142's state — another guard's
+session under the shift — deactivating the newly assigned guard leaves that session
+open under an `unassigned` shift with no guard. The sweep never closes a session
+there (`jobs/autoCompleteShifts.ts:221` admits `active`/`scheduled` only); only
+`orphanedSessionCheck` would notice. Prod 2026-09-28: 0. Reachable only through
+N142; fixing N142 removes it. **Size S, Tier 1.**
+
+### N144 — manual clock-out and the legal-hold cascade lock the session before the shift (links N116)
+
+verified: the guard's clock-out updates its session first (`routes/shifts.ts:5103`,
+`UPDATE shift_sessions … WHERE … clocked_out_at IS NULL`), then its breaks, then the
+shift (`:5275`, `status = 'completed'`). The legal-hold cascade updates
+`shift_sessions` (`routes/admin.ts:428`) before `shifts` (`:451`). Handoff clock-in
+(`routes/shifts.ts:3446`, `FOR UPDATE OF ssr, sh`), PATCH and the other admin shift
+routes take the shift first. So clock-out against a handoff, and the cascade against
+any shift-first writer, can deadlock, and Postgres aborts one side. The U2 end edit
+waits at most 500 ms for anything after the shift (below the 1 s
+`deadlock_timeout`), so it yields rather than making a guard's clock-out the
+victim. Not observed; Sentry not searched. Found in the U2 Phase 0 audit.
+
+Take the shift lock first in both (a `SELECT … FOR UPDATE` on the shift before the
+session write), alongside N116. **Size S/M, Tier 1.**
+
+### N145 — CLOSED 2026-09-28 — the create modal put an overnight end on the wrong day across the autumn DST change
+
+**Closed by** `2c0e8a7` (D20 build, decision 3a). Single and repeat-days modes built
+an overnight end as local midnight + 86 400 000 ms; the autumn DST day is 25 hours
+long, so that lands on the SAME date, and a 19:00 → 07:00 shift starting 2026-11-01
+ended before it started — written as an inverted row before U5, refused with a 422
+since. The end is now the next calendar day (`apps/web/lib/shiftWindow.ts`);
+`apps/web/scripts/check-date-format.ts` pins 2026-10-31 → 11-01 (13 h) and
+2026-11-01 → 11-02 (12 h) in America/Los_Angeles and fails against the old roll.
+Found in the U2 Phase 0 audit.
+
+Unchanged: those two modes still build instants in the BROWSER's zone (specific
+dates resolve at the site). `apps/web/lib/shiftFormat.ts` documents why that is
+wrong for an admin outside the site's zone; every site is Pacific today.
+
+### N146 — U3: the app must re-read an active shift's end after an admin edit; until then an extension disarms the geofence 30 min after the OLD end
+
+verified (code; `origin/main` is what the shipped app runs): the app caches
+`activeShift.scheduled_end` at clock-in, and `refreshFromServer` never rewrites it —
+it only clears a session the server reports gone (`apps/mobile/store/shiftStore.ts:186-196`).
+The background geofence task reads a SecureStore mirror, `active_shift_end`
+(written at `app/_layout.tsx:386`), and stops alerting and posting violations once
+it is past that + `SHIFT_EXPIRY_GRACE_MS` (30 min; `lib/shiftExpiry.ts:35`, `:57`;
+`tasks/locationBackground.ts:172`). So after an admin EXTENDS an active shift (D20),
+a warm app stops reporting breaches 30 min after the OLD end while the server still
+has the guard on shift, until a cold start — which the extend push asks for ("Fully
+close and reopen NetraOps to update your screen"). Also stale until then: home's
+Time Left, and the active-shift screen's SCHEDULED END and PING NOW tile ("Shift
+ending" after the old end). The Schedule tab and shift detail fetch fresh and show
+the new end. A shorten or close is picked up on the next foreground, from the
+server's session state. The `shift_schedule_edited` push is received but not acted
+on: no handler, and on the shipped build the tap routes nowhere.
+
+U3: on that push, and on foreground, re-read the active shift and rewrite
+`activeShift` and `active_shift_end`. The reason given in shiftStore for never
+rewriting it is stale — `/shifts/active-session` does return the geofence
+(`routes/shifts.ts:3986`; `apps/mobile/lib/openSession.ts:28` says so). Handsets
+below the published runtime cannot take it (N115). Ship with N138. **Size M
+(mobile OTA), Tier 1.**
+
+### N147 — assign-slots creates shifts up to 24 h with no 12-hour confirm (U5 scope, decision 12a)
+
+verified: `POST /api/scheduling/site/:siteId/assign-slots` (`routes/scheduling.ts:721`,
+company_admin and vishnu) inserts shifts (`:976`) whose length comes from the site's
+profile template, limited only to 0–24 h (`db/schema_v32.sql:27`). U5 left it out by
+decision. Prod 2026-09-28: 0 shifts ever created this way (`source = 'profile'`);
+templates exist only for Star Guard (25 rows, 5 over 12 h, none active).
+
+Ask when a template over 12 h is saved (the profile editor,
+`apps/web/app/admin/sites/page.tsx`), not per assignment. **Size S.**
+
+### N148 — the hours export gives an admin close no flag
+
+verified: `services/hoursExport.ts:371` sets `AUTO_CLOSED` only for
+`clock_out_reason = 'auto'`, and the workbook explains it as "closed by the
+auto-complete cron" (`services/hoursWorkbook.ts:376`). A session an admin closed
+with the U2 end edit (`'admin_corrected'`) — whose clock-out time the admin chose,
+not the guard — carries no flag, as the one Q11 row does today.
+
+Decide whether billing review needs an `ADMIN_CLOSED` flag and a workbook note. **Size S.**
+
+### N149 — the incoming guard on a handoff shift never gets the clock-out reminder
+
+verified: the reminder's claim excludes every session on either side of a handoff
+(`jobs/clockOutReminder.ts:145-150`: `NOT EXISTS … ssr.from_session_id = ss.id OR
+ssr.to_session_id = ss.id`). The outgoing guard is already clocked out; the
+incoming guard works to the scheduled end and is never reminded, so their close
+falls to the sweep. Pre-dates U2; found in its audit. **Size S.**
+
+### N150 — stale comments found during U2
+
+verified, each against the code at `2c0e8a7`:
+- `apps/mobile/lib/notificationTray.ts:52-54` says `shift_schedule_edited` writes no
+  notifications row; PATCH has written one since v58 (`insertNotification` in
+  `routes/shifts.ts`).
+- `apps/mobile/store/shiftStore.ts:188-195` says `/shifts/active-session` returns no
+  site geofence; it does (N146).
+- `apps/api/src/db/schema_v71.sql:21` and `:33` say every shift INSERT lives in
+  `routes/shifts.ts` and that `routes/scheduling.ts` has none; `routes/scheduling.ts:976`
+  inserts.
+- `apps/web/app/admin/shifts/[shiftId]/page.tsx:319` says the edit form uses "the
+  same clock the panel above the button shows"; the panel is hardcoded Pacific, the
+  form uses the site's zone.
+- The `clock_out_reason` vocabulary (`apps/api/src/db/schema_v55.sql:94-98`) lists
+  neither `'admin_corrected'` (N120) nor the handoff's `'handed_off_to_<id>'`.
+- `docs/OPS/INCIDENTS/2026-09-26-bethel-18h-shift/q11_bethel_c3574592_correction_COMMIT.sql:25-27`
+  cites sweep line numbers from before U4a.
+
+Comment-only; fold into the next change to each file. **Size XS.**

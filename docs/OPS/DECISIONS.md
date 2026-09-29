@@ -264,6 +264,16 @@ Taken during the Bethel 18-hour shift incident
   harness run against `6638018`'s job is **49/14** — the 14 are exactly the new
   cases (shifts ended t0−20 and t0−16, a break from t0−25) and the counts.
 
+**Status update 2026-09-27 — U4b SHIPPED.** PR #82 merged as `579ee12` at 10:04:06 PT
+by gate route PROXY, 9 s after a STARNET ping; Railway deployment `6c6107f9`
+SUCCESS, API live 10:05:37 PT. `/health` answered on `579ee12`; `/health/crons` 20
+jobs, none stale; the first on-post ping after the deploy landed and the restart
+caused no missed ping. Staged test (Star Guard GRD0001 at SFMTA, scheduled
+09:30–11:03 PT, never clocked out): the 11:15 tick closed nothing and the **11:20
+tick** closed it — `clocked_out_at` 11:03:00 (the anchor), `clock_out_reason`
+`'auto'`, `total_hours` 1.55, shift completed. Under the old 30-minute grace it
+would have closed at 11:35.
+
 - The sweep still **fires** at `scheduled_end` + grace; it no longer **records**
   that moment. One anchor, `GREATEST(clocked_in_at, scheduled_end)`, is used for
   `clocked_out_at`, `total_hours`, open breaks (`GREATEST(break_start, anchor)`)
@@ -376,6 +386,72 @@ after.
 
 ### D20. Admin shift edits: on an ACTIVE shift, the end time only; a confirm step above 12 hours.
 
+**Status 2026-09-28 — BUILT (U2, U5)** on `feat/active-shift-end-edit`, not yet merged
+or deployed: `8081f62` (v81), `18e2038` (U5, API), `4db2b69` (missed-window crons),
+`8094269` (U2, API), `da9eca0` (harness), `c2f34f9` (review fixes), `dcb8ec2` (web),
+`2c0e8a7` (the create modal's overnight roll). Choices made while building it —
+Phase 0 decisions 1a–13a and the Phase 1 decisions, approved 2026-09-28:
+- **The end edit** (`editActiveShiftEnd`, `routes/shifts.ts`). Gate: status
+  `active`, exactly one open session, and it is the assigned guard's (409
+  `NO_OPEN_SESSION` / `SESSION_STATE_CONFLICT`; a reassign can leave another
+  guard's session under the shift, N142). The start is fixed (422 `START_LOCKED`);
+  the end must follow the start and the clock-in (422 `END_NOT_AFTER_START` /
+  `END_BEFORE_CLOCK_IN`).
+- **A later-than-now end** keeps the session open, moves `scheduled_end`, and clears
+  the session's clock-out-reminder latch so the reminder fires for the new end;
+  the reminder's claim now re-reads the shift's current end under `FOR SHARE`, or a
+  tick racing the edit could stamp the latch for the old end.
+- **An end at or before now** — including the unchanged end once it has passed —
+  closes the session at that time in one transaction, with the sweep's formulas and
+  the Bethel q11/q8a shape: `clock_out_reason = 'admin_corrected'` (N120's writer),
+  `total_hours` in the same statement, open breaks cut at the end (`ended_by`
+  `'auto_complete'`; breaks already closed are left as recorded), every missed ping
+  and report whose window ends after the new end deleted, resolved or not (both
+  missed-window crons now re-check the shift's current end under `FOR SHARE` at
+  insert), violations resolved by the sweep rule, the shift `completed`. It needs
+  `confirm_close_session` (409 `CLOSE_CONFIRM_REQUIRED`), so the server's clock, not
+  the browser's, decides a clock-out happened; a confirmed close whose end has not
+  arrived is 409 `CLOSE_END_NOT_PAST`. Refused on legal hold (409 `LEGAL_HOLD`).
+  After COMMIT, open handoffs on the shift are cancelled and both guards told.
+- **The sweep race.** The sweep closes sessions with `UPDATE … FROM shifts` and no
+  lock on the shift row, so an extension committed while a tick that had already
+  judged the old end due was waiting was closed at the OLD end, leaving the shift
+  `active` with no open session — reproduced locally (evidence under N116). An edit
+  that keeps the session open is refused (409 `SHIFT_AUTO_CLOSING`) once the auto
+  clock-out is less than a minute away, judged on entry and again before COMMIT.
+- **Locks.** Shift row first (lock_timeout 3 s), then the session `FOR NO KEY
+  UPDATE` and child rows under a 500 ms lock_timeout, below the 1 s
+  deadlock_timeout: against a writer that takes the session first (the guard's
+  clock-out, the sweep) the admin yields with 409 `SHIFT_BUSY`, never the guard.
+- **Audit and push.** The existing `shift_schedule_edited` audit row, before/after
+  with both keys. Push type unchanged; bodies: "Your shift now ends Fri, Sep 26,
+  6:00 AM. Fully close and reopen NetraOps to update your screen." (extend), "…
+  Clock out at that time." (shorten), "Your admin ended this shift at 6:00 AM. You
+  are now clocked out." (close).
+- **U5.** Every create and edit path refuses end ≤ start (422
+  `END_NOT_AFTER_START`) and asks above 12 hours of elapsed time —
+  `confirm_long_shift`, else 409 `LONG_SHIFT_CONFIRM_REQUIRED` with the real end —
+  enforced by the API, not only the web. Exactly 12:00 does not ask. v81 adds
+  `CHECK (scheduled_end > scheduled_start)`, applied by hand before the merge
+  (`scripts/ops/v81_shifts_end_after_start*.sql`). assign-slots stays out of U5
+  (N147). The create modal rolls an overnight end by calendar date; the old
+  `+86_400_000 ms` put a 19:00 → 07:00 shift starting 2026-11-01 before its start.
+- **Web.** EDIT SCHEDULE shows for an active shift with exactly one open session
+  (fails closed on an older API); the start is shown but fixed; a confirm step in
+  the modal ("This clocks the guard out at HH:MM." / "over 12 hours: Ends … —
+  18h"); the create modal asks the same. **Mobile is unchanged** — the refetch is
+  U3 (N146).
+- **Deploy: one PR.** Admin tabs loaded before the deploy send no
+  `confirm_long_shift`: until reloaded, a create or edit over 12 h gets the 409 with
+  no confirm button. Its message says why; a reload fixes it.
+- **Proof** (outside CI; local Postgres 18.6):
+  `apps/api/scripts/test-active-shift-end-edit.ts` is **115/0** on the branch and
+  **30/83** against `579ee12`, where every new behaviour fails;
+  `test-auto-complete-shifts.ts` 63/0; `check-date-format` passes in 5 zones, and
+  its overnight-roll cases fail against the old roll.
+
+Earlier status, kept as history:
+
 **Status: decided 2026-09-26. NOT YET BUILT (U2, U5).**
 
 - **U2:** the shift detail EDIT control works on an **active** shift for the
@@ -394,6 +470,13 @@ after.
 Evidence (2026-09-26, prod, read-only): STARNET had 4 shifts over 12 h in the last
 60 days — 2 were this AM/PM mistake (`b3a29807`, `c3574592`, both 18 h at Bethel),
 2 were real overnights (13 h, 12.5 h).
+
+Drift noted 2026-09-28 (prod, read-only): the same count now reads **3** — `b3a29807`
+(18 h), `238fbb77` (13 h), `87125a0a` (12.5 h). The 2026-09-26 Q11 correction moved
+`c3574592` to 12:00–18:00 by hand, with no `shift_schedule_audit` row, so it is no
+longer over 12 h. STARNET also scheduled 90 shifts of exactly 12 h in those 60 days,
+which is why the confirm asks only above 12 h. 0 of 837 shifts have
+`scheduled_end <= scheduled_start`.
 
 ---
 
