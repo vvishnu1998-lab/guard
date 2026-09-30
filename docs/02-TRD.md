@@ -286,7 +286,7 @@ Cron schedule: `0 0 * * *` UTC ([apps/api/src/jobs/nightlyPurge.ts:17](apps/api/
 
 | Service | Used for | Fallback story |
 |---|---|---|
-| Railway (Postgres + API host) | Primary database and API runtime | None — outage = full platform outage. Single-region (us-east). Daily backups via Railway's default policy; restore procedure not documented or tested. |
+| Railway (Postgres + API host) | Primary database and API runtime | None — outage = full platform outage. Single-region (us-east). Postgres volume backups scheduled since the Pro upgrade on 2026-09-29 (daily kept 6 days, weekly 27, monthly 89); no point-in-time recovery yet (`OPS/OPEN-ITEMS.md` N158); restore procedure not documented or tested. |
 | AWS S3 | Photo + PDF storage | S3 outage = uploads fail. Mobile shows "S3 not configured" path and reports proceed with `selfie_url: 'pending'` (legacy fallback, marked for removal). |
 | Firebase FCM + Expo Push API | Push notifications | Expo Push API for `ExponentPushToken[*]` tokens; Firebase Admin SDK for raw FCM tokens ([apps/api/src/services/firebase.ts:54-110](apps/api/src/services/firebase.ts:54)). If Firebase admin credentials are missing, Expo tokens still work — degraded but functional. |
 | SendGrid | All transactional email (4 types) | No fallback. Outage = email queue grows in SendGrid; if our API call fails, no internal retry queue. |
@@ -300,7 +300,7 @@ Cron schedule: `0 0 * * *` UTC ([apps/api/src/jobs/nightlyPurge.ts:17](apps/api/
 | Surface | Host | Pipeline | Status |
 |---|---|---|---|
 | API | Railway service in `adorable-courage` project | `git push origin main` → Railway auto-deploys | Live, single-instance, no horizontal scaling |
-| Postgres | Railway managed Postgres (same project) | n/a | Live, PG 16, single-instance, Railway default backups |
+| Postgres | Railway managed Postgres (same project) | n/a | Live, PG 18 (18.6), single-instance, scheduled volume backups (N158) |
 | Web | Vercel (`apps/web`) | `git push origin main` → Vercel auto-deploys | Live at app.netraops.com (also a `guard-web-one.vercel.app` legacy URL still referenced from Play Store) |
 | Mobile iOS | EAS Build → TestFlight | `cd apps/mobile && eas build --platform ios --profile <preview\|production>`; `eas submit` for App Store | TestFlight active; App Store review pending |
 | Mobile Android | EAS Build → Google Play | `eas build --platform android --profile production` + `eas submit` to internal track | Internal-testing track live; production track pending closed-test feedback |
@@ -397,7 +397,7 @@ The change itself — `"start": "node dist/index.js"` → `"start": "npm run db:
 
 **Finding**: [apps/api/src/db/migrate.ts](apps/api/src/db/migrate.ts) is a hardcoded array of forward-only `.sql` filenames. No tracking table records which migrations ran. No rollback hook. Idempotency is by convention (every file uses `IF NOT EXISTS` / `IF EXISTS`).
 
-**Recovery story**: restore from Railway daily backup. There is no `migrate down` capability and there will not be one without a meaningful infra investment.
+**Recovery story**: restore from a Railway volume backup (daily, weekly or monthly; no point-in-time recovery yet — N158). There is no `migrate down` capability and there will not be one without a meaningful infra investment.
 
 **Implication**: every schema change is a one-way door. Pre-deploy review of `schema_vN.sql` is the only safety net.
 

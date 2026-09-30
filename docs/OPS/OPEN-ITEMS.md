@@ -4931,7 +4931,8 @@ v3 (post-launch). **Size M total, Tier 1 each (+ gated deploys).**
 ### N158 — Railway Postgres auto-updates: security patches restart the prod database on a weekend window, outside the deploy gate
 
 verified (`railway environment config --json`, read-only): the Postgres service (`2ccaf6bf`,
-image `ghcr.io/railwayapp-templates/postgres-ssl:18`, PostgreSQL 18.6, Hobby plan) has
+image `ghcr.io/railwayapp-templates/postgres-ssl:18`, PostgreSQL 18.6; Hobby plan until the
+upgrade to Pro on 2026-09-29 ~22:29 PT) has
 `source.autoUpdates = {type: "vuln", schedule: Sat 10:00–Sun 18:00 UTC}` (Sat 03:00–Sun 11:00
 PDT), Railway's default window. History: two "vuln-remediation" redeploys on Mon 2026-08-10
 (18.3 → 18.4, outside the window; trigger unknown) and one "autoupdate" on Sat 2026-08-22 04:52
@@ -4940,21 +4941,28 @@ gate; one of those sessions' missed ping window contains it. The DB has run sinc
 2026-08-22 11:53:56Z, and its stats reset times suggest that stop was not clean.
 - `vuln` is described only in an unmerged Railway docs PR (CVE-matched patches only, never a
   major; urgent patches apply regardless). Official docs: an update redeploys the service
-  (typically under 2 minutes of downtime with a volume), and Hobby services can also be moved
-  between hosts at any time, which cannot be opted out of — so the DB can restart whatever this
-  setting says.
+  (typically under 2 minutes of downtime with a volume), and Railway-initiated host migrations
+  (security or fault) are mandatory and cannot be opted out of — so the DB can restart whatever
+  this setting says. (The pre-emptive host moves the docs describe are for Hobby services.)
 - On the API side (from the pg 8.23 / pg-pool 3.14 source, not observed): a client checked out
   with `pool.connect()` when Postgres goes down emits an unhandled `'error'` and crashes the
   process (35 call sites in 12 files); Railway then restarts it. Fix: an error listener on every
   pool client (`pool.on('connect', …)`), a small API change.
-- Backups: WAL archiving is off, and the Hobby plan takes no routine pre-update backup; the
-  repo's "daily backups by default" (`docs/02-TRD.md:289`, `docs/05-BACKEND-SCHEMA.md:554`) is
-  unverified. Whether any backup exists is Vishnu's to check in the dashboard.
+- **Backups — updated 2026-09-29 ~22:30 PT (Vishnu):** Railway upgraded to **Pro** (~22:29 PT).
+  Postgres volume backups are now scheduled: **daily (kept 6 days), weekly (27 days), monthly
+  (89 days)**. A manual Railway backup was taken at 22:32 PT (145 MB, locked), and a local
+  `pg_dump` at 22:15 PT (50 tables, verified). **Point-in-time recovery is NOT enabled** (WAL
+  archiving is off): Railway says enabling it redeploys Postgres once, so it is planned for a
+  quiet window **after the pool error-listener fix ships**, since that fix is what lets the API
+  ride through a DB restart. Before these, no backup was known to exist. The repo's older
+  "daily backups by default" text (`docs/02-TRD.md`, `docs/05-BACKEND-SCHEMA.md`) is corrected
+  in the same change.
 - The Postgres service also carries `CLIENT_JWT_SECRET` and `VISHNU_JWT_SECRET` variables
   (names only): API secrets on the DB service.
 Turning updates off (`disabled`) makes patching manual and does not stop Railway-initiated
 restarts. The Phase 0 recommendation is to keep `vuln` but move the window. No idle window
 exists (STARNET is scheduled around the clock until at least 2026-10-27), so choose the
 least-busy hours (14:00–16:00 or 03:00–06:00 UTC), save it with Alt+Deploy so the database is
-not redeployed, and move it by an hour when DST ends on 2026-11-01. **Size S, Tier 2 (a
-dashboard change that can restart the prod DB).**
+not redeployed, and move it by an hour when DST ends on 2026-11-01. Then, after the pool fix
+ships, enable point-in-time recovery in a quiet window (one Postgres redeploy). **Size S, Tier 2
+(dashboard changes that can restart the prod DB).**
