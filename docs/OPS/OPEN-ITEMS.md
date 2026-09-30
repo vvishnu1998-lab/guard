@@ -4816,3 +4816,145 @@ Before the deadline, with time for guards to install:
 
 Suggested act-by date: **2026-11-14**, two weeks ahead, since each guard has to act on their
 own phone. Unrelated to F2, which is lifted (`FREEZES.md`). **Size S, Tier 2.**
+
+## New from the Railway deploy-trigger and build review (2026-09-29)
+
+Read-only: `railway environment config --json`, `railway deployment list --json`,
+`railway logs --build`, `apps/api/railway.json` at `a8ba597a`, and Railway's docs.
+
+### N154 — Railway Watch Paths: NOT adopted (Vishnu, 2026-09-29); docs- and scripts-only changes keep riding with the next code PR
+
+verified: the API service `guard` (project adorable-courage; `production` is the only
+environment) deploys from `vvishnu1998-lab/guard` `main` with Root Directory `/apps/api` and
+config file `/apps/api/railway.json`. No watch patterns are set in the dashboard or the file
+(`watchPatterns: []` on all of the last 200 deployments), and Wait for CI is off. So every
+push to main deploys 2–3 s after it lands: since 2026-07-19, 62 of 199 deploys came from
+pushes that changed nothing under `apps/api` (24 of 93 in September). The dashboard's own
+build settings (Railpack, `npm run build`, `npm run start`) disagree with `railway.json`
+(Nixpacks, `npm install && npm run build`, `node dist/index.js`); the file wins, so moving
+or renaming it would silently switch builders.
+
+Mechanically one pattern would do it, `/apps/api/**`: patterns match from the repo root even
+with a Root Directory, a push that matches nothing creates no deployment, and apps/api
+imports nothing outside apps/api. Not adopted, because:
+- Railway does not document whether it matches the head commit or the whole push. PRs #58
+  and #61 were rebase-merged with the API change under a web/docs-only head commit, and
+  rebase merging is still allowed; head-only matching would have skipped both.
+- The tooling and docs assume a deploy per merge. `scripts/ops/triage.sh` on main reports a
+  MISMATCH when `/health` lags main; `scripts/ops/proxy-merge.sh` refuses unless the newest
+  deployment is the live one (a SKIPPED row, if Railway lists them, would block it, failing
+  closed); POLICY.md ("merge to main (= Railway restart)"), DISPATCH-TEMPLATE, the invariants
+  skill and STATE.md would all need rewriting.
+- Silent failure modes: a wrong pattern freezes API deploys; dashboard patterns have been
+  reported to vanish (so they belong in `railway.json`); empty commits stop redeploying; an
+  unresolved Railway Help Station report (2025-11) describes skips on pushes that mix watched
+  and unwatched files, which is what our code PRs do.
+- Turning it on changes `apps/api/railway.json`, which is itself a gated deploy.
+Before revisiting: disallow rebase merges; check whether skipped pushes appear as SKIPPED rows
+in `railway deployment list --json`; test head-commit vs whole-push matching with one held
+two-commit push. Until then, docs- and scripts-only work rides with the next API code PR
+(PR #86 is the first). **Size S when revisited, Tier 1.**
+
+### N155 — apps/api has no lockfile: every Railway build resolves dependencies afresh (non-reproducible)
+
+verified: the only `package-lock.json` is at the repo root, and Root Directory `/apps/api`
+uploads only that folder, so Nixpacks plans `install │ npm i` and resolves from the registry
+on every build. Proof of drift with identical dependency blocks: build `dcdbcb3f`
+(2026-09-11, `2f6b640`) logged "added 572 packages" and 37 vulnerabilities; live `ecc4c4af`
+logged 571 and 35; re-resolving with `--before=2026-09-11T21:03Z` gives 13 version differences
+from the live tree (express 4.22.2 → 4.22.3, qs 6.15.3 → 6.16.0, @grpc/grpc-js, fast-xml-parser
+and others). Separately, 10 builds between 09-17 and 09-23 installed 515 packages: the
+production-only tree (devDependencies omitted; Nixpacks' `NPM_CONFIG_PRODUCTION=false`/`CI=true`
+were not in effect, cause on Railway's side unknown); `dist/` is byte-identical either way.
+Three different trees exist: CI and local dev test the root lock (6 direct dependencies differ
+from prod: pg 8.20.0 vs 8.23.0, express 4.22.2 vs 4.22.3, …), and prod resolves its own.
+
+Also a security control: the repo is public, Dependabot alerts are disabled, and every build
+runs install scripts (aws-sdk, bcrypt, protobufjs) with the service's variables, secrets
+included, passed in as Docker build ARG/ENV — so a malicious in-range release would run at
+build time with them. And the service has no healthcheck (`healthcheckPath` null): a build
+that succeeds but crashes at boot replaces the live deployment.
+
+Plan (Phase 0 2026-09-29; the next API code PR): a standalone `apps/api/package-lock.json`
+generated with `--workspaces=false --before=<live deployment createdAt>` from a clean export
+(no `apps/api/node_modules`), pinning exactly the live tree (0 version changes in scratch);
+`railway.json` buildCommand `npm run build` (never `npm ci && …`: the build phase's cache
+mount makes it fail with EBUSY); a CI job that runs a standalone `npm ci` in apps/api; and,
+because a lock ends the in-range auto-patching today's builds get, Dependabot (npm, `/apps/api`)
+or a scheduled lock refresh. **Size M, Tier 1 (+ a gated deploy).**
+
+### N156 — the API runs Node 18.20.5, end-of-life since 2025-04-30
+
+verified: apps/api/package.json has no `engines`, so Nixpacks uses its default, `nodejs_18`
+(18.20.5, which also misses the 18.20.6 security release); the root `engines` (>=20) is never
+seen through the Root Directory. The npm that runs is Node's bundled one (≥10.6, from the log's
+lowercase `npm warn`), not the `npm-9_x` the setup line prints. CI runs Node 22
+(`typecheck.yml:42`, `window-anchor.yml:78`), so CI and prod differ; `ops-triage.yml` runs
+Node 20 (EOL 2026-04-30). Schedule on 2026-09-29: 22 is Maintenance LTS (EOL 2027-04-30); 24
+is Active LTS (Maintenance from 2026-10-20, EOL 2028-04-30); 26 becomes LTS on 2026-10-28.
+Nixpacks is in maintenance mode and serves one frozen patch per major (24 → 24.10.0, which
+misses 4 security releases; 22 → 22.14.0, 6); an odd or unknown major silently falls back to
+18. `NIXPACKS_NODE_VERSION` is not a safe override (it changes the package name but not the
+nixpkgs archive, so 18 then fails the build).
+
+Plan: `"engines": {"node": "24.x"}` in apps/api/package.json only (not root, not `.nvmrc`),
+CI `node-version-file: apps/api/package.json`, and a build/boot log line that prints the
+Node, npm and OpenSSL versions. In scratch on 22 and 24: the same resolved tree, byte-identical
+`dist/`, both type-checks, a 17-dependency smoke test and the 16 DB-free unit tests all pass.
+Staying patched needs a builder change (Railpack with an exact version and `npm ci`, or a
+digest-pinned `node:24` Dockerfile) as its own later stage. **Size S (pin) / M (builder),
+Tier 1 (+ a gated deploy).**
+
+### N157 — npm audit: 35 flagged packages (1 critical, 3 high) in prod, plus multer, which audit misses
+
+verified (build `ecc4c4af`, 2026-09-29): "35 vulnerabilities (31 moderate, 3 high, 1
+critical)", all production dependencies. They are package names, from 18 distinct advisories
+(1 critical, 10 high, 6 moderate, 1 low) in 6 root causes: tar (via bcrypt 5's binary
+download; install-time only), xlsx (no npm fix), @anthropic-ai/sdk, @opentelemetry/core (via
+@sentry/node 8), uuid and aws-sdk. On the runtime paths checked none is reachable (tar never
+loads at runtime; xlsx is write-only here; uuid only `v4()`; Sentry's propagator replaces the
+vulnerable baggage parsing; the SDK's memory tool is unused; aws-sdk's region comes from env).
+The count moves without a manifest change (37 on 09-11) and with the npm major (npm 11 reports
+34 on the same tree), so it is not a proof of anything by itself. **npm audit misses
+`multer@1.4.5-lts.2`** (a prerelease version, which audit's range check skips): 11 GitHub
+advisories (10 high DoS, 1 low), and it is reachable by an authenticated company_admin upload
+(`POST /sites/:id/instructions`).
+
+Plan, one PR per stage and none inside the lockfile PR (which must not change versions):
+multer ^2.4.0 first (same API; staged upload test), then bcrypt ^6 (clears the critical and
+two highs, drops the GitHub binary download; hashes compatible both ways in scratch), uuid ^11
+with an override (it has to be in the root package.json too — overrides in apps/api are
+ignored by the root workspace install), @anthropic-ai/sdk, xlsx → exceljs
+(`scripts/test-payable-hours.ts` reads with `XLSX.read`), @sentry/node 10 (two majors), aws-sdk
+v3 (post-launch). **Size M total, Tier 1 each (+ gated deploys).**
+
+### N158 — Railway Postgres auto-updates: security patches restart the prod database on a weekend window, outside the deploy gate
+
+verified (`railway environment config --json`, read-only): the Postgres service (`2ccaf6bf`,
+image `ghcr.io/railwayapp-templates/postgres-ssl:18`, PostgreSQL 18.6, Hobby plan) has
+`source.autoUpdates = {type: "vuln", schedule: Sat 10:00–Sun 18:00 UTC}` (Sat 03:00–Sun 11:00
+PDT), Railway's default window. History: two "vuln-remediation" redeploys on Mon 2026-08-10
+(18.3 → 18.4, outside the window; trigger unknown) and one "autoupdate" on Sat 2026-08-22 04:52
+PDT (18.4 → 18.6) with 2 STARNET sessions open: a production DB restart that bypassed the deploy
+gate; one of those sessions' missed ping window contains it. The DB has run since
+2026-08-22 11:53:56Z, and its stats reset times suggest that stop was not clean.
+- `vuln` is described only in an unmerged Railway docs PR (CVE-matched patches only, never a
+  major; urgent patches apply regardless). Official docs: an update redeploys the service
+  (typically under 2 minutes of downtime with a volume), and Hobby services can also be moved
+  between hosts at any time, which cannot be opted out of — so the DB can restart whatever this
+  setting says.
+- On the API side (from the pg 8.23 / pg-pool 3.14 source, not observed): a client checked out
+  with `pool.connect()` when Postgres goes down emits an unhandled `'error'` and crashes the
+  process (35 call sites in 12 files); Railway then restarts it. Fix: an error listener on every
+  pool client (`pool.on('connect', …)`), a small API change.
+- Backups: WAL archiving is off, and the Hobby plan takes no routine pre-update backup; the
+  repo's "daily backups by default" (`docs/02-TRD.md:289`, `docs/05-BACKEND-SCHEMA.md:554`) is
+  unverified. Whether any backup exists is Vishnu's to check in the dashboard.
+- The Postgres service also carries `CLIENT_JWT_SECRET` and `VISHNU_JWT_SECRET` variables
+  (names only): API secrets on the DB service.
+Turning updates off (`disabled`) makes patching manual and does not stop Railway-initiated
+restarts. The Phase 0 recommendation is to keep `vuln` but move the window. No idle window
+exists (STARNET is scheduled around the clock until at least 2026-10-27), so choose the
+least-busy hours (14:00–16:00 or 03:00–06:00 UTC), save it with Alt+Deploy so the database is
+not redeployed, and move it by an hour when DST ends on 2026-11-01. **Size S, Tier 2 (a
+dashboard change that can restart the prod DB).**
