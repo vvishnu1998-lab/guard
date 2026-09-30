@@ -4948,6 +4948,15 @@ gate; one of those sessions' missed ping window contains it. The DB has run sinc
   with `pool.connect()` when Postgres goes down emits an unhandled `'error'` and crashes the
   process (35 call sites in 12 files); Railway then restarts it. Fix: an error listener on every
   pool client (`pool.on('connect', …)`), a small API change.
+  **Updated 2026-09-30 (pool-fix Phase 0):** the crash happens whether or not a query is in
+  flight, at any of the 35 `pool.connect()` call sites in the API process (36 counting
+  `db/migrate.ts`); `pool.query()` and idle clients were already safe. One replica, so a crash is a full outage until ON_FAILURE restarts it. Not
+  observed in production: none of the 28 issues Sentry still holds matches; Sentry recorded
+  zero error events in the 2026-08-10 and 2026-08-22 restart windows (checked against a known
+  event on 2026-08-01); and every API deployment that booted since 2026-09-02 booted exactly
+  once (Railway deploy logs, which are kept about 30 days, not 7). The fix is D22: a listener
+  added on pool `acquire` and removed on `release`, not `connect`, which would log every
+  idle-client error twice.
 - **Backups — updated 2026-09-29 ~22:30 PT (Vishnu):** Railway upgraded to **Pro** (~22:29 PT).
   Postgres volume backups are now scheduled: **daily (kept 6 days), weekly (27 days), monthly
   (89 days)**. A manual Railway backup was taken at 22:32 PT (145 MB, locked), and a local
@@ -4964,5 +4973,146 @@ restarts. The Phase 0 recommendation is to keep `vuln` but move the window. No i
 exists (STARNET is scheduled around the clock until at least 2026-10-27), so choose the
 least-busy hours (14:00–16:00 or 03:00–06:00 UTC), save it with Alt+Deploy so the database is
 not redeployed, and move it by an hour when DST ends on 2026-11-01. Then, after the pool fix
-ships, enable point-in-time recovery in a quiet window (one Postgres redeploy). **Size S, Tier 2
-(dashboard changes that can restart the prod DB).**
+ships, enable point-in-time recovery in a quiet window (one Postgres redeploy).
+**Superseded 2026-09-30 by the decision below** (the hours above predate the 2026-09-27 roster
+change).
+
+**DECIDED 2026-09-30 (Vishnu): keep `vuln`; Window A, Saturday 18:00–20:00 UTC.** The value is
+`source.autoUpdates = {"type":"vuln","schedule":[{"day":6,"startHour":18,"endHour":20}]}` on
+`2ccaf6bf`. Railway evaluates schedules in UTC, so this is Sat 11:00–13:00 PDT until
+2026-11-01 and Sat 10:00–12:00 PST after; it stays clean in both, so no edit is needed at DST.
+Site `ab450901` has been staffed 24/7 since 2026-09-27, so there is no idle window; A has the
+fewest guards on post with no handovers. On the forward STARNET roster (Oct 3–24) it has exactly
+1 guard on post (the `ab450901` day post; that site has no active client) and 0 shift starts
+or ends within ±30 min, in both DST states. Over the past 8 weeks it averaged 0.38 on post.
+The current window averages 1.66 on post and 11.5 handovers a week on the same roster. On that
+forward roster A is not uniquely clean (the other Saturday daytime 2-hour starts are too); it
+was picked for weekend daytime PT and clearance from the 09:00 PT daily report email.
+- **When:** after D22 (the pool fix) ships, in the **same gated slot as enabling
+  point-in-time recovery**. Both may restart Postgres once: `railway environment edit` commits
+  by default, and Railway documents auto-update settings as dashboard-only. After D22 the API
+  rides through a DB restart.
+- **Deadline this sets for D22:** the CURRENT window next opens **Sat 2026-10-03 10:00 UTC
+  (03:00 PDT)**, with about 3 STARNET guards on post and nobody watching. So D22 merges Thu
+  2026-10-01 or Fri 2026-10-02.
+- **Before applying:** re-run the Saturday 09:30–13:30 PT boundary query. The roster changed on
+  09-27 and 09-29, and on 09-26 `ab450901` had a 10:00 PT start. **After applying:** watch the
+  first update. Railway documents no minimum window and no catch-up, and the only data point
+  (2026-08-22) landed 1 h 53 min after the window opened. If 2 hours proves too narrow, use
+  **Window B, 18:00–21:00 UTC**, and never go past 21:00 UTC: past Saturdays (Sep 12, 19 and 26)
+  had 14:00 PDT starts and handovers, even though the forward roster has none.
+- **What no window bounds:** the two 2026-08-10 `vuln-remediation` deployments carry no
+  `patchId`, which manual deploys and redeploys do, and the same image digest (`0c72a05e`). That
+  weakly suggests Railway started them outside any schedule. Host moves can restart Postgres at
+  any time. Postgres has not restarted since 2026-08-22 11:53:56Z (`pg_postmaster_start_time()`,
+  read 2026-09-30).
+**Size S, Tier 2 (dashboard changes that can restart the prod DB).**
+
+## New from the pool error-listener fix (2026-09-30)
+
+Read-only: `git grep` / `git show` at `a8ba597`, and the `postgres-readonly` MCP on
+2026-09-30 about 00:10–00:40 PT.
+
+### N159 — seven bare `ROLLBACK`s in catch blocks: after D22, a dead DB turns clock-out's JSON 500 into Express's HTML 500
+
+verified at `a8ba597`: 27 catch-block `ROLLBACK`s are already guarded (25 ×
+`.catch(() => {})`, 2 with a comment inside the braces); these seven are not:
+
+| Site | Handler | What follows the `ROLLBACK` |
+|---|---|---|
+| `jobs/autoCompleteShifts.ts:356` | `autoCompleteOverdueShifts` (the 5-minute sweep) | `throw err;` |
+| `routes/admin.ts:1034` | `PATCH /companies/:company_id/primary-admin/:admin_id` | `throw err;` |
+| `routes/locations.ts:619` | `POST /ping` | `throw err;` |
+| `routes/shifts.ts:4999` | clock-in | the 23505 branch (`:5001`), then `throw err;` (`:5004`) |
+| `routes/shifts.ts:5407` | clock-out | `console.error('clock-out error:', err);`, then `res.status(500).json({ error: 'Failed to clock out' })` (`:5413`) |
+| `routes/sites.ts:160` | `POST /` (create site) | `throw err;` |
+| `routes/tasks.ts:203` | `POST /instances/:id/complete` | `throw err;` |
+
+Each is `await client.query('ROLLBACK');` on a client whose backend may be gone. Once pg has
+marked the client not queryable, that `ROLLBACK` rejects, and the rejection leaves the catch
+block. Before D22 the process crashed first, so this never showed. After D22:
+- **Clock-out** skips its own log line and its JSON 500. The guard app gets Express's default
+  text/html 500 with no `body.error`, and mobile reads `body.error`. This is the one
+  customer-visible change.
+- **The other six already rethrow** (clock-in too: a dead backend is never its 23505). Their
+  response does not change, but the `ROLLBACK`'s error replaces the original (57P01 /
+  "Connection terminated unexpectedly") in the logs and in Sentry.
+- The 5-minute sweep's tick fails either way; `runJob` logs and reports it.
+Fix: the existing idiom, `await client.query('ROLLBACK').catch(() => {});`, at all seven. It is
+a follow-up PR after D22 (Vishnu, 2026-09-30: D22 stays `pool.ts` only). Its proof can reuse
+D22's harness (`apps/api/scripts/test-pool-client-error.ts`), where the clock-out case could
+then pin the exact JSON body. **Size S, Tier 1 (API code; gated merge).**
+
+### N160 — DEADLINE 2026-11-01: fix the N48 root cause before DST ends (one live shift already sits an hour early)
+
+verified: `routes/shifts.ts:485` (N48's defect 2; N48 still cites its older line number) sets
+each repeated shift's time of day with `shiftStart.setHours(baseStart.getHours(), …)`. That is
+server-local time, which is UTC on Railway, so every shift in a series keeps the same **UTC**
+time and moves an hour in local time when DST changes. The series runs from `baseStart` to
+`baseStart + 28 days` (`:468–469`), so **any series whose first shift falls within 28 days
+before a DST change crosses it.** The next changes are 2026-11-01 and 2027-03-14.
+
+**The live occurrence** (read 2026-09-30 ~00:10 PT): shift
+`4cf22350-40e1-4887-ba1a-fbc9a423f65e`, site Bethel AME Church
+(`53c71c64-1973-4f82-be9c-98e4800beece`), guard `610755ca` GRD0026, **Sun 2026-11-01, scheduled
+08:00–14:00 PST (16:00–22:00 UTC).** Its series is four more Sunday shifts, Oct 4–25, all
+09:00–15:00 PDT, all created 2026-09-29 17:20:47Z. The correct time is **09:00–15:00 PST
+(17:00–23:00 UTC)**. Vishnu is correcting this one shift in admin. At 00:19 PT on 2026-09-30
+the row was still 16:00 UTC and `shift_schedule_audit` held no edit since 2026-09-29 22:00:55
+PT, so the correction is pending until the row is re-read. The admin form itself is DST-correct:
+`zonedInputsToISO` (`apps/web/lib/shiftFormat.ts:180`) converts 2026-11-01 09:00 and 15:00
+America/Los_Angeles to 17:00 and 23:00 UTC (run 2026-09-30). This was the only scheduled or
+unassigned shift after the DST change in any tenant at that read.
+
+Until the fix ships, run this detector after any repeat-series creation near a DST change. It
+flags batches whose UTC start is fixed while the local start moves (the N48 signature). On
+2026-09-30 it returned exactly the Bethel series above (5 shifts, local 08:00 and 09:00), which
+is its positive control:
+```sql
+SELECT left(s.site_id::text, 8) AS site, left(coalesce(s.guard_id::text, '-'), 8) AS guard,
+       to_char(date_trunc('minute', s.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS batch_utc,
+       to_char(s.scheduled_start AT TIME ZONE 'UTC', 'HH24:MI') AS utc_start,
+       string_agg(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:MI'), ',') AS local_starts,
+       count(*) AS future_shifts
+FROM shifts s JOIN sites si ON si.id = s.site_id
+WHERE s.status IN ('scheduled', 'unassigned') AND s.scheduled_start > now()
+GROUP BY s.site_id, s.guard_id, date_trunc('minute', s.created_at), to_char(s.scheduled_start AT TIME ZONE 'UTC', 'HH24:MI')
+HAVING count(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:MI')) > 1;
+```
+(Grouping by creation minute alone is not enough: one minute can hold several series with
+different start times on purpose.) Fix: compute each shift's start as the base's wall-clock
+time on that date in the site's timezone (the `dowInTimeZone` / `services/siteTime.ts`
+approach already used for the day of week), plus a test that creates a series across
+2026-11-01 and 2027-03-14. Shifts created before the fix are not corrected by it; re-run the
+detector after it ships. **Size S, Tier 1 (API code; gated merge). Due before 2026-11-01.**
+
+### N161 — the daily report email counts skips as "sent", in the log and in the database
+
+verified at `a8ba597`: `jobs/dailyShiftEmail.ts:35–38` does `await sendDailyShiftReport(shift.id);
+sent++;` for every row, and `:49` logs `Done — sent: ${sent}, failed: ${failed}`. But
+`sendDailyShiftReport` (`services/email.ts:540`) returns without sending in two cases:
+- no row (`:560`);
+- no active client (`:565–571`). This case also runs `UPDATE shifts SET
+  daily_report_email_sent = true, daily_report_email_sent_at = NOW()`, so that the cron does not
+  retry forever.
+So the log line **and** the `daily_report_email_sent` / `_sent_at` columns record a send that
+never happened. Evidence: the 2026-09-29 16:00Z run on deployment `157494b0` logged "sent: 7,
+failed: 0", and all 7 were "no active client" skips (Phase 0 window verifier, from Railway
+logs).
+
+Scale (DB, 2026-09-30, STARNET, shifts completed in the last 30 days): 127 are flagged sent. Only
+Bethel AME Church (`53c71c64`, 44 flagged) and 23000 Cristo Rey Los Altos (`fea19254`, 1) have
+an active client. The other 82 flagged shifts (Jasper 34, 375 Shopping Complex `ab450901` 29,
+CCDC Folsom 17, 88 S 4th St 2) had no client, so no email was sent. `ab450901` is the
+24/7 post.
+
+Also to check (not verified as a bug): the report finds its client only through
+`clients.site_id` (`email.ts:555`, `LEFT JOIN clients c ON c.site_id = si.id AND c.is_active`),
+never through `client_sites`. Bethel has 1 active client by `site_id` and 2 by `client_sites`.
+The second is linked to Bethel only through `client_sites` (since 2026-08-21); its own
+`site_id` is Cristo Rey (`fea19254`). So it gets Cristo Rey's daily report but not Bethel's, and
+if a site's clients are all linked through `client_sites`, its shifts are flagged sent with no
+email at all. Is that intended? (Vishnu is deciding for Bethel, 2026-09-30.)
+Fix: count `sent`, `skipped_no_client` and `failed` separately, and record the skip as a skip
+(for example `daily_report_email_skipped_at`, or a reason column) rather than as a send. Check
+every reader of `daily_report_email_sent` before changing it. **Size S, Tier 1.**

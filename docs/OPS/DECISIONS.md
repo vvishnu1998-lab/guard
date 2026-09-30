@@ -551,6 +551,69 @@ had 204 error events, none from an OTA update id (Sentry, read in the batch-18 s
 
 ---
 
+## 2026-09-30 — the database pool
+
+Taken in the pool error-listener fix (`OPEN-ITEMS.md` N158; Phase 0 on 2026-09-29/30). PR #86
+(`scripts/ops/proxy-merge.sh` and the #85 SHIPPED docs) is folded into the same PR by merge
+commit `b5b549d`, so both land in one gated merge.
+
+### D22. Every checked-out pool client carries an `'error'` listener: a dying connection fails its request, never the process.
+
+**Status 2026-09-30 — BUILT, not merged or deployed**, on `fix/pool-client-error-listener`
+(`apps/api/src/db/pool.ts` only).
+**Proof (2026-09-30, local PG 18.6, `apps/api/scripts/test-pool-client-error.ts`).** Each case
+runs in its own child process, and the parent injects the fault:
+- `pg_terminate_backend` on a checked-out client, with no query and mid-query;
+- a FATAL mid-query, then a plain `release()` before the socket closes (V10);
+- a TCP reset through a proxy, and an idle client;
+- `pg_ctl stop -m fast` and `-m immediate`;
+- `POST /shifts/:id/clock-out`, `PATCH /shifts/:id/cancel`, and the autoCompleteShifts tick
+  through `runJob`.
+origin/main's `pool.ts` is the negative control. Mutations M1–M9 each remove one part of the
+fix. Every mode must fail exactly its predicted set, and the predictions were written before
+the first run. Tested `pool.ts` blob `c6e2ec40`. Results:
+- **Node 25.7.0, pg 8.20.0 / pg-pool 3.13.0, plain, Sentry off:** fix 79/0, main 29/50, M1
+  29/50, M2 76/3, M3 62/17, M4 60/19, M9 78/1.
+- **Node 25.7.0, pg 8.23.0 / pg-pool 3.14.0 (production's), TLS, real `Sentry.init` with an
+  in-memory transport:** fix 106/0, main 32/74, M1 32/74, M2 100/6, M3 77/29, M4 78/28, and
+  M5, M6, M6d, M6e and M7 at 100/6 each.
+- **Node 18.20.5 (production's Node):** fix 79/0 and 106/0; main 29/50 and 32/74; M5, M6, M6d,
+  M6e and M7 at 100/6 each, so the stale-context leak is real on Node 18 too.
+The Sentry checks: one warning event per dying client, and no stale user, tag, request or
+trace. M5–M7 fail them. An independent verifier reproduced every count on its own cluster,
+and an unlisted mutation ('connect' instead of 'acquire') was caught (C1 44/35).
+Not covered: half-open TCP (a hang, not a crash); CI, which has no Postgres.
+- **What:** on pool `acquire` a listener is added to the client, and on `release` it is
+  removed. pg-pool emits `acquire` before it removes its own idle listener and `release` after
+  it puts it back (`_acquireClient` / `_release` in pg-pool 3.13.0 and 3.14.0), so a client
+  always has a listener. It covers `pool.connect()` and `pool.query()` clients.
+- **Why:** a checked-out client has no `'error'` listener, and pg emits `'error'` synchronously
+  whenever the connection dies, query in flight or not. So any Postgres restart or network drop
+  while a client is checked out kills the API: 35 `pool.connect()` call sites in the API
+  process (36 with `db/migrate.ts`), 1 replica. Not observed in production (N158), so this is
+  preventive. It must merge before the current Postgres auto-update window next opens
+  (Sat 2026-10-03 10:00 UTC).
+- **Sentry:** each dying client is captured once (a client usually emits twice): level
+  `warning`, tags `flow: db_pool` and `pg_code`, fingerprinted by code. The capture runs with
+  cleared isolation and current scopes and no active span. The listener runs in the async
+  context of whichever request opened the socket, so without that the event would carry that
+  request's user, tags, URL and trace. There is no capture when no Sentry client exists, and
+  the listener never throws. Log tag: `[pg.client_error]`.
+- **Idle-client log:** prints `code`, `severity` and `message` only. The error object carries
+  `err.client` (host, port, user, database, socket).
+- **Behaviour change:** a request caught at the moment the DB dies now gets a 500 instead of a
+  connection reset, and a cron tick fails instead of the process. After a plain `release()` the
+  dead client is dropped on release, or through pg-pool's idle listener when its socket closes.
+  One wasted reuse is possible; a crash is not.
+- **Rejected:** `pool.on('connect', …)`, which also stops the crash but logs every idle-client
+  error twice; `process.on('uncaughtException')`, which would stop Sentry exiting on real
+  crashes; `release(err)` at every call site, which is not needed to prevent the crash.
+- **Not in D22:** the seven bare catch-block `ROLLBACK`s (N159); half-open TCP hangs (no
+  keepAlive, `query_timeout` or `statement_timeout`); `idle_in_transaction_session_timeout`;
+  ending the pool on SIGTERM; a DB-free CI tripwire (a later stage, Vishnu 2026-09-30).
+
+---
+
 ## How to add to this file
 
 One dated section per decision batch. State the decision, then — if it references
