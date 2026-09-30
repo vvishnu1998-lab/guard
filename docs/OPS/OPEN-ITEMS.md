@@ -5043,7 +5043,7 @@ a follow-up PR after D22 (Vishnu, 2026-09-30: D22 stays `pool.ts` only). Its pro
 D22's harness (`apps/api/scripts/test-pool-client-error.ts`), where the clock-out case could
 then pin the exact JSON body. **Size S, Tier 1 (API code; gated merge).**
 
-### N160 — DEADLINE 2026-11-01: fix the N48 root cause before DST ends (one live shift already sits an hour early)
+### N160 — DEADLINE 2026-11-01: fix the N48 root cause and correct every drifted shift before DST ends (one live shift already sits an hour early)
 
 verified: `routes/shifts.ts:485` (N48's defect 2; N48 still cites its older line number) sets
 each repeated shift's time of day with `shiftStart.setHours(baseStart.getHours(), …)`. That is
@@ -5057,12 +5057,24 @@ before a DST change crosses it.** The next changes are 2026-11-01 and 2027-03-14
 (`53c71c64-1973-4f82-be9c-98e4800beece`), guard `610755ca` GRD0026, **Sun 2026-11-01, scheduled
 08:00–14:00 PST (16:00–22:00 UTC).** Its series is four more Sunday shifts, Oct 4–25, all
 09:00–15:00 PDT, all created 2026-09-29 17:20:47Z. The correct time is **09:00–15:00 PST
-(17:00–23:00 UTC)**. Vishnu is correcting this one shift in admin. At 00:19 PT on 2026-09-30
-the row was still 16:00 UTC and `shift_schedule_audit` held no edit since 2026-09-29 22:00:55
-PT, so the correction is pending until the row is re-read. The admin form itself is DST-correct:
-`zonedInputsToISO` (`apps/web/lib/shiftFormat.ts:180`) converts 2026-11-01 09:00 and 15:00
-America/Los_Angeles to 17:00 and 23:00 UTC (run 2026-09-30). This was the only scheduled or
-unassigned shift after the DST change in any tenant at that read.
+(17:00–23:00 UTC)**. It was still 16:00 UTC at 07:27 PT on 2026-09-30. This was the only
+scheduled or unassigned shift after the DST change in any tenant on 2026-09-30. **Vishnu,
+2026-09-30 07:30 PT: it will NOT be edited in admin; N160 corrects it.** (The admin form would
+have been correct: `zonedInputsToISO` at `apps/web/lib/shiftFormat.ts:180` converts 2026-11-01
+09:00 and 15:00 America/Los_Angeles to 17:00 and 23:00 UTC; run 2026-09-30.)
+
+**Scope (Vishnu, 2026-09-30).** Both parts are due before 2026-11-01. Phase 0 starts after D22
+merges.
+1. **The code fix**, so that no new series drifts.
+2. **A data correction for every existing drifted shift**, the Bethel Nov 1 shift included.
+   The set is whatever the detector below returns at correction time, not just the one shift
+   listed here: every series created before the fix whose first shift falls within 28 days
+   before 2026-11-01 can add more. Apply it as a gated production data fix: a predicate proven
+   to match exactly the detector's rows, counts asserted inside the transaction, and the
+   before-values kept so it can be reversed. After it, the detector must return zero rows.
+   Open questions for Phase 0: whether the assigned guard is told (a direct correction sends no
+   notification, while an admin edit does, per D20), and whether a `shift_schedule_audit` row
+   is written for each corrected shift.
 
 Until the fix ships, run this detector after any repeat-series creation near a DST change. It
 flags batches whose UTC start is fixed while the local start moves (the N48 signature). On
@@ -5083,8 +5095,10 @@ HAVING count(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:
 different start times on purpose.) Fix: compute each shift's start as the base's wall-clock
 time on that date in the site's timezone (the `dowInTimeZone` / `services/siteTime.ts`
 approach already used for the day of week), plus a test that creates a series across
-2026-11-01 and 2027-03-14. Shifts created before the fix are not corrected by it; re-run the
-detector after it ships. **Size S, Tier 1 (API code; gated merge). Due before 2026-11-01.**
+2026-11-01 and 2027-03-14. The code fix does not touch existing shifts; part 2 above does, after
+the code fix ships, so that no new drifted series appears after the correction.
+**Size S (code) + S (data correction). Tier 1 for the code (gated merge); Tier 2 for the data
+correction (a production write, Vishnu present). Due before 2026-11-01.**
 
 ### N161 — the daily report email counts skips as "sent", in the log and in the database
 
