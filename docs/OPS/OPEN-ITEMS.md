@@ -4407,7 +4407,24 @@ Four items from U4b's Phase 0 audit and build (`761d7f5`). **None is changed by
 U4b** unless the item says so. API lines are read at `761d7f5`; mobile lines at
 `6638018`, and `batch/mobile-17` (3 commits ahead of main) does not touch them.
 
-### N138 — mobile `SHIFT_EXPIRY_GRACE_MS` is still 30 minutes; the server's grace is 15 (next OTA)
+### N138 — mobile grace 30 → 15 and the clock-out 409 (published by OTA 2026-09-29; API shipped in #85; device checks pending)
+
+**Update 2026-09-29 (as of 19:32 PT) — the API half SHIPPED; open until the device checks
+pass.** PR #85 merged as `a8ba597a` at 19:00:51 PT by gate route PROXY, about 12.7 s after
+GRD0015's (`68f76ea9`, session `16bc307d`) 19:00-window ping (DB `pinged_at` 19:00:38.253;
+Railway's 201 at 19:00:38.283; GitHub's `mergedAt` 19:00:51 is to the second). Railway
+deployment `ecc4c4af` was SUCCESS on that commit by 19:02:10 (container up 71 s after the
+merge; the old `157494b0` stopped at 88 s). `/health` reports `a8ba597a`, and
+`/health/crons` 20 jobs, 0 stale. 0 4xx/5xx on either deployment from 19:00:45 to 19:04 PT.
+The three reports filed at 19:00:18, :40 and :47 — before the merge, on `157494b0` — all
+have rows, and no write reached either deployment from the merge until 19:30:27. 0
+`netraops-api` Sentry events after the merge (checked 19:04), and the 19:30 pings (GRD0015
+`68f76ea9` 19:30:28, GRD0024 `94ab7696` 19:31:54) landed as 201s on the new deployment. Not
+yet exercised in production: the 409 itself, which needs a real clock-out on a closed
+session — device check 5b on the iPhone run, still pending with 4, 6 and 7. Rollback
+target: `157494b0` (Railway dashboard, within 72 h of the switchover). The merge ran as the
+session's `proxy_merge85.sh` (not committed; sha256 `604423dc…`); `scripts/ops/proxy-merge.sh`
+is that script rebuilt byte for byte and generalized, and has not yet run with `--live`.
 
 **Update 2026-09-29 — PUBLISHED by OTA, and the API half is CLOSED by PR #85; open until
 the device checks pass.** The grace is 15 on `batch/mobile-18` (`4558ae9`;
@@ -4799,3 +4816,317 @@ Before the deadline, with time for guards to install:
 
 Suggested act-by date: **2026-11-14**, two weeks ahead, since each guard has to act on their
 own phone. Unrelated to F2, which is lifted (`FREEZES.md`). **Size S, Tier 2.**
+
+## New from the Railway deploy-trigger and build review (2026-09-29)
+
+Read-only: `railway environment config --json`, `railway deployment list --json`,
+`railway logs --build`, `apps/api/railway.json` at `a8ba597a`, and Railway's docs.
+
+### N154 — Railway Watch Paths: NOT adopted (Vishnu, 2026-09-29); docs- and scripts-only changes keep riding with the next code PR
+
+verified: the API service `guard` (project adorable-courage; `production` is the only
+environment) deploys from `vvishnu1998-lab/guard` `main` with Root Directory `/apps/api` and
+config file `/apps/api/railway.json`. No watch patterns are set in the dashboard or the file
+(`watchPatterns: []` on all of the last 200 deployments), and Wait for CI is off. So every
+push to main deploys 2–3 s after it lands: since 2026-07-19, 62 of 199 deploys came from
+pushes that changed nothing under `apps/api` (24 of 93 in September). The dashboard's own
+build settings (Railpack, `npm run build`, `npm run start`) disagree with `railway.json`
+(Nixpacks, `npm install && npm run build`, `node dist/index.js`); the file wins, so moving
+or renaming it would silently switch builders.
+
+Mechanically one pattern would do it, `/apps/api/**`: patterns match from the repo root even
+with a Root Directory, a push that matches nothing creates no deployment, and apps/api
+imports nothing outside apps/api. Not adopted, because:
+- Railway does not document whether it matches the head commit or the whole push. PRs #58
+  and #61 were rebase-merged with the API change under a web/docs-only head commit, and
+  rebase merging is still allowed; head-only matching would have skipped both.
+- The tooling and docs assume a deploy per merge. `scripts/ops/triage.sh` on main reports a
+  MISMATCH when `/health` lags main; `scripts/ops/proxy-merge.sh` refuses unless the newest
+  deployment is the live one (a SKIPPED row, if Railway lists them, would block it, failing
+  closed); POLICY.md ("merge to main (= Railway restart)"), DISPATCH-TEMPLATE, the invariants
+  skill and STATE.md would all need rewriting.
+- Silent failure modes: a wrong pattern freezes API deploys; dashboard patterns have been
+  reported to vanish (so they belong in `railway.json`); empty commits stop redeploying; an
+  unresolved Railway Help Station report (2025-11) describes skips on pushes that mix watched
+  and unwatched files, which is what our code PRs do.
+- Turning it on changes `apps/api/railway.json`, which is itself a gated deploy.
+Before revisiting: disallow rebase merges; check whether skipped pushes appear as SKIPPED rows
+in `railway deployment list --json`; test head-commit vs whole-push matching with one held
+two-commit push. Until then, docs- and scripts-only work rides with the next API code PR
+(PR #86 is the first). **Size S when revisited, Tier 1.**
+
+### N155 — apps/api has no lockfile: every Railway build resolves dependencies afresh (non-reproducible)
+
+verified: the only `package-lock.json` is at the repo root, and Root Directory `/apps/api`
+uploads only that folder, so Nixpacks plans `install │ npm i` and resolves from the registry
+on every build. Proof of drift with identical dependency blocks: build `dcdbcb3f`
+(2026-09-11, `2f6b640`) logged "added 572 packages" and 37 vulnerabilities; live `ecc4c4af`
+logged 571 and 35; re-resolving with `--before=2026-09-11T21:03Z` gives 13 version differences
+from the live tree (express 4.22.2 → 4.22.3, qs 6.15.3 → 6.16.0, @grpc/grpc-js, fast-xml-parser
+and others). Separately, 10 builds between 09-17 and 09-23 installed 515 packages: the
+production-only tree (devDependencies omitted; Nixpacks' `NPM_CONFIG_PRODUCTION=false`/`CI=true`
+were not in effect, cause on Railway's side unknown); `dist/` is byte-identical either way.
+Three different trees exist: CI and local dev test the root lock (6 direct dependencies differ
+from prod: pg 8.20.0 vs 8.23.0, express 4.22.2 vs 4.22.3, …), and prod resolves its own.
+
+Also a security control: the repo is public, Dependabot alerts are disabled, and every build
+runs install scripts (aws-sdk, bcrypt, protobufjs) with the service's variables, secrets
+included, passed in as Docker build ARG/ENV — so a malicious in-range release would run at
+build time with them. And the service has no healthcheck (`healthcheckPath` null): a build
+that succeeds but crashes at boot replaces the live deployment.
+
+Plan (Phase 0 2026-09-29; the next API code PR): a standalone `apps/api/package-lock.json`
+generated with `--workspaces=false --before=<live deployment createdAt>` from a clean export
+(no `apps/api/node_modules`), pinning exactly the live tree (0 version changes in scratch);
+`railway.json` buildCommand `npm run build` (never `npm ci && …`: the build phase's cache
+mount makes it fail with EBUSY); a CI job that runs a standalone `npm ci` in apps/api; and,
+because a lock ends the in-range auto-patching today's builds get, Dependabot (npm, `/apps/api`)
+or a scheduled lock refresh. **Size M, Tier 1 (+ a gated deploy).**
+
+### N156 — the API runs Node 18.20.5, end-of-life since 2025-04-30
+
+verified: apps/api/package.json has no `engines`, so Nixpacks uses its default, `nodejs_18`
+(18.20.5, which also misses the 18.20.6 security release); the root `engines` (>=20) is never
+seen through the Root Directory. The npm that runs is Node's bundled one (≥10.6, from the log's
+lowercase `npm warn`), not the `npm-9_x` the setup line prints. CI runs Node 22
+(`typecheck.yml:42`, `window-anchor.yml:78`), so CI and prod differ; `ops-triage.yml` runs
+Node 20 (EOL 2026-04-30). Schedule on 2026-09-29: 22 is Maintenance LTS (EOL 2027-04-30); 24
+is Active LTS (Maintenance from 2026-10-20, EOL 2028-04-30); 26 becomes LTS on 2026-10-28.
+Nixpacks is in maintenance mode and serves one frozen patch per major (24 → 24.10.0, which
+misses 4 security releases; 22 → 22.14.0, 6); an odd or unknown major silently falls back to
+18. `NIXPACKS_NODE_VERSION` is not a safe override (it changes the package name but not the
+nixpkgs archive, so 18 then fails the build).
+
+Plan: `"engines": {"node": "24.x"}` in apps/api/package.json only (not root, not `.nvmrc`),
+CI `node-version-file: apps/api/package.json`, and a build/boot log line that prints the
+Node, npm and OpenSSL versions. In scratch on 22 and 24: the same resolved tree, byte-identical
+`dist/`, both type-checks, a 17-dependency smoke test and the 16 DB-free unit tests all pass.
+Staying patched needs a builder change (Railpack with an exact version and `npm ci`, or a
+digest-pinned `node:24` Dockerfile) as its own later stage. **Size S (pin) / M (builder),
+Tier 1 (+ a gated deploy).**
+
+### N157 — npm audit: 35 flagged packages (1 critical, 3 high) in prod, plus multer, which audit misses
+
+verified (build `ecc4c4af`, 2026-09-29): "35 vulnerabilities (31 moderate, 3 high, 1
+critical)", all production dependencies. They are package names, from 18 distinct advisories
+(1 critical, 10 high, 6 moderate, 1 low) in 6 root causes: tar (via bcrypt 5's binary
+download; install-time only), xlsx (no npm fix), @anthropic-ai/sdk, @opentelemetry/core (via
+@sentry/node 8), uuid and aws-sdk. On the runtime paths checked none is reachable (tar never
+loads at runtime; xlsx is write-only here; uuid only `v4()`; Sentry's propagator replaces the
+vulnerable baggage parsing; the SDK's memory tool is unused; aws-sdk's region comes from env).
+The count moves without a manifest change (37 on 09-11) and with the npm major (npm 11 reports
+34 on the same tree), so it is not a proof of anything by itself. **npm audit misses
+`multer@1.4.5-lts.2`** (a prerelease version, which audit's range check skips): 11 GitHub
+advisories (10 high DoS, 1 low), and it is reachable by an authenticated company_admin upload
+(`POST /sites/:id/instructions`).
+
+Plan, one PR per stage and none inside the lockfile PR (which must not change versions):
+multer ^2.4.0 first (same API; staged upload test), then bcrypt ^6 (clears the critical and
+two highs, drops the GitHub binary download; hashes compatible both ways in scratch), uuid ^11
+with an override (it has to be in the root package.json too — overrides in apps/api are
+ignored by the root workspace install), @anthropic-ai/sdk, xlsx → exceljs
+(`scripts/test-payable-hours.ts` reads with `XLSX.read`), @sentry/node 10 (two majors), aws-sdk
+v3 (post-launch). **Size M total, Tier 1 each (+ gated deploys).**
+
+### N158 — Railway Postgres auto-updates: security patches restart the prod database on a weekend window, outside the deploy gate
+
+verified (`railway environment config --json`, read-only): the Postgres service (`2ccaf6bf`,
+image `ghcr.io/railwayapp-templates/postgres-ssl:18`, PostgreSQL 18.6; Hobby plan until the
+upgrade to Pro on 2026-09-29 ~22:29 PT) has
+`source.autoUpdates = {type: "vuln", schedule: Sat 10:00–Sun 18:00 UTC}` (Sat 03:00–Sun 11:00
+PDT), Railway's default window. History: two "vuln-remediation" redeploys on Mon 2026-08-10
+(18.3 → 18.4, outside the window; trigger unknown) and one "autoupdate" on Sat 2026-08-22 04:52
+PDT (18.4 → 18.6) with 2 STARNET sessions open: a production DB restart that bypassed the deploy
+gate; one of those sessions' missed ping window contains it. The DB has run since
+2026-08-22 11:53:56Z, and its stats reset times suggest that stop was not clean.
+- `vuln` is described only in an unmerged Railway docs PR (CVE-matched patches only, never a
+  major; urgent patches apply regardless). Official docs: an update redeploys the service
+  (typically under 2 minutes of downtime with a volume), and Railway-initiated host migrations
+  (security or fault) are mandatory and cannot be opted out of — so the DB can restart whatever
+  this setting says. (The pre-emptive host moves the docs describe are for Hobby services.)
+- On the API side (from the pg 8.23 / pg-pool 3.14 source, not observed): a client checked out
+  with `pool.connect()` when Postgres goes down emits an unhandled `'error'` and crashes the
+  process (35 call sites in 12 files); Railway then restarts it. Fix: an error listener on every
+  pool client (`pool.on('connect', …)`), a small API change.
+  **Updated 2026-09-30 (pool-fix Phase 0):** the crash happens whether or not a query is in
+  flight, at any of the 35 `pool.connect()` call sites in the API process (36 counting
+  `db/migrate.ts`); `pool.query()` and idle clients were already safe. One replica, so a crash is a full outage until ON_FAILURE restarts it. Not
+  observed in production: none of the 28 issues Sentry still holds matches; Sentry recorded
+  zero error events in the 2026-08-10 and 2026-08-22 restart windows (checked against a known
+  event on 2026-08-01); and every API deployment that booted since 2026-09-02 booted exactly
+  once (Railway deploy logs, which are kept about 30 days, not 7). The fix is D22: a listener
+  added on pool `acquire` and removed on `release`, not `connect`, which would log every
+  idle-client error twice.
+- **Backups — updated 2026-09-29 ~22:30 PT (Vishnu):** Railway upgraded to **Pro** (~22:29 PT).
+  Postgres volume backups are now scheduled: **daily (kept 6 days), weekly (27 days), monthly
+  (89 days)**. A manual Railway backup was taken at 22:32 PT (145 MB, locked), and a local
+  `pg_dump` at 22:15 PT (50 tables, verified). **Point-in-time recovery is NOT enabled** (WAL
+  archiving is off): Railway says enabling it redeploys Postgres once, so it is planned for a
+  quiet window **after the pool error-listener fix ships**, since that fix is what lets the API
+  ride through a DB restart. Before these, no backup was known to exist. The repo's older
+  "daily backups by default" text (`docs/02-TRD.md`, `docs/05-BACKEND-SCHEMA.md`) is corrected
+  in the same change.
+- The Postgres service also carries `CLIENT_JWT_SECRET` and `VISHNU_JWT_SECRET` variables
+  (names only): API secrets on the DB service.
+Turning updates off (`disabled`) makes patching manual and does not stop Railway-initiated
+restarts. The Phase 0 recommendation is to keep `vuln` but move the window. No idle window
+exists (STARNET is scheduled around the clock until at least 2026-10-27), so choose the
+least-busy hours (14:00–16:00 or 03:00–06:00 UTC), save it with Alt+Deploy so the database is
+not redeployed, and move it by an hour when DST ends on 2026-11-01. Then, after the pool fix
+ships, enable point-in-time recovery in a quiet window (one Postgres redeploy).
+**Superseded 2026-09-30 by the decision below** (the hours above predate the 2026-09-27 roster
+change).
+
+**DECIDED 2026-09-30 (Vishnu): keep `vuln`; Window A, Saturday 18:00–20:00 UTC.** The value is
+`source.autoUpdates = {"type":"vuln","schedule":[{"day":6,"startHour":18,"endHour":20}]}` on
+`2ccaf6bf`. Railway evaluates schedules in UTC, so this is Sat 11:00–13:00 PDT until
+2026-11-01 and Sat 10:00–12:00 PST after; it stays clean in both, so no edit is needed at DST.
+Site `ab450901` has been staffed 24/7 since 2026-09-27, so there is no idle window; A has the
+fewest guards on post with no handovers. On the forward STARNET roster (Oct 3–24) it has exactly
+1 guard on post (the `ab450901` day post; that site has no active client) and 0 shift starts
+or ends within ±30 min, in both DST states. Over the past 8 weeks it averaged 0.38 on post.
+The current window averages 1.66 on post and 11.5 handovers a week on the same roster. On that
+forward roster A is not uniquely clean (the other Saturday daytime 2-hour starts are too); it
+was picked for weekend daytime PT and clearance from the 09:00 PT daily report email.
+- **When:** after D22 (the pool fix) ships, in the **same gated slot as enabling
+  point-in-time recovery**. Both may restart Postgres once: `railway environment edit` commits
+  by default, and Railway documents auto-update settings as dashboard-only. After D22 the API
+  rides through a DB restart.
+- **Deadline this sets for D22:** the CURRENT window next opens **Sat 2026-10-03 10:00 UTC
+  (03:00 PDT)**, with about 3 STARNET guards on post and nobody watching. So D22 merges Thu
+  2026-10-01 or Fri 2026-10-02.
+- **Before applying:** re-run the Saturday 09:30–13:30 PT boundary query. The roster changed on
+  09-27 and 09-29, and on 09-26 `ab450901` had a 10:00 PT start. **After applying:** watch the
+  first update. Railway documents no minimum window and no catch-up, and the only data point
+  (2026-08-22) landed 1 h 53 min after the window opened. If 2 hours proves too narrow, use
+  **Window B, 18:00–21:00 UTC**, and never go past 21:00 UTC: past Saturdays (Sep 12, 19 and 26)
+  had 14:00 PDT starts and handovers, even though the forward roster has none.
+- **What no window bounds:** the two 2026-08-10 `vuln-remediation` deployments carry no
+  `patchId`, which manual deploys and redeploys do, and the same image digest (`0c72a05e`). That
+  weakly suggests Railway started them outside any schedule. Host moves can restart Postgres at
+  any time. Postgres has not restarted since 2026-08-22 11:53:56Z (`pg_postmaster_start_time()`,
+  read 2026-09-30).
+**Size S, Tier 2 (dashboard changes that can restart the prod DB).**
+
+## New from the pool error-listener fix (2026-09-30)
+
+Read-only: `git grep` / `git show` at `a8ba597`, and the `postgres-readonly` MCP on
+2026-09-30 about 00:10–00:40 PT.
+
+### N159 — seven bare `ROLLBACK`s in catch blocks: after D22, a dead DB turns clock-out's JSON 500 into Express's HTML 500
+
+verified at `a8ba597`: 27 catch-block `ROLLBACK`s are already guarded (25 ×
+`.catch(() => {})`, 2 with a comment inside the braces); these seven are not:
+
+| Site | Handler | What follows the `ROLLBACK` |
+|---|---|---|
+| `jobs/autoCompleteShifts.ts:356` | `autoCompleteOverdueShifts` (the 5-minute sweep) | `throw err;` |
+| `routes/admin.ts:1034` | `PATCH /companies/:company_id/primary-admin/:admin_id` | `throw err;` |
+| `routes/locations.ts:619` | `POST /ping` | `throw err;` |
+| `routes/shifts.ts:4999` | clock-in | the 23505 branch (`:5001`), then `throw err;` (`:5004`) |
+| `routes/shifts.ts:5407` | clock-out | `console.error('clock-out error:', err);`, then `res.status(500).json({ error: 'Failed to clock out' })` (`:5413`) |
+| `routes/sites.ts:160` | `POST /` (create site) | `throw err;` |
+| `routes/tasks.ts:203` | `POST /instances/:id/complete` | `throw err;` |
+
+Each is `await client.query('ROLLBACK');` on a client whose backend may be gone. Once pg has
+marked the client not queryable, that `ROLLBACK` rejects, and the rejection leaves the catch
+block. Before D22 the process crashed first, so this never showed. After D22:
+- **Clock-out** skips its own log line and its JSON 500. The guard app gets Express's default
+  text/html 500 with no `body.error`, and mobile reads `body.error`. This is the one
+  customer-visible change.
+- **The other six already rethrow** (clock-in too: a dead backend is never its 23505). Their
+  response does not change, but the `ROLLBACK`'s error replaces the original (57P01 /
+  "Connection terminated unexpectedly") in the logs and in Sentry.
+- The 5-minute sweep's tick fails either way; `runJob` logs and reports it.
+Fix: the existing idiom, `await client.query('ROLLBACK').catch(() => {});`, at all seven. It is
+a follow-up PR after D22 (Vishnu, 2026-09-30: D22 stays `pool.ts` only). Its proof can reuse
+D22's harness (`apps/api/scripts/test-pool-client-error.ts`), where the clock-out case could
+then pin the exact JSON body. **Size S, Tier 1 (API code; gated merge).**
+
+### N160 — DEADLINE 2026-11-01: fix the N48 root cause and correct every drifted shift before DST ends (one live shift already sits an hour early)
+
+verified: `routes/shifts.ts:485` (N48's defect 2; N48 still cites its older line number) sets
+each repeated shift's time of day with `shiftStart.setHours(baseStart.getHours(), …)`. That is
+server-local time, which is UTC on Railway, so every shift in a series keeps the same **UTC**
+time and moves an hour in local time when DST changes. The series runs from `baseStart` to
+`baseStart + 28 days` (`:468–469`), so **any series whose first shift falls within 28 days
+before a DST change crosses it.** The next changes are 2026-11-01 and 2027-03-14.
+
+**The live occurrence** (read 2026-09-30 ~00:10 PT): shift
+`4cf22350-40e1-4887-ba1a-fbc9a423f65e`, site Bethel AME Church
+(`53c71c64-1973-4f82-be9c-98e4800beece`), guard `610755ca` GRD0026, **Sun 2026-11-01, scheduled
+08:00–14:00 PST (16:00–22:00 UTC).** Its series is four more Sunday shifts, Oct 4–25, all
+09:00–15:00 PDT, all created 2026-09-29 17:20:47Z. The correct time is **09:00–15:00 PST
+(17:00–23:00 UTC)**. It was still 16:00 UTC at 07:27 PT on 2026-09-30. This was the only
+scheduled or unassigned shift after the DST change in any tenant on 2026-09-30. **Vishnu,
+2026-09-30 07:30 PT: it will NOT be edited in admin; N160 corrects it.** (The admin form would
+have been correct: `zonedInputsToISO` at `apps/web/lib/shiftFormat.ts:180` converts 2026-11-01
+09:00 and 15:00 America/Los_Angeles to 17:00 and 23:00 UTC; run 2026-09-30.)
+
+**Scope (Vishnu, 2026-09-30).** Both parts are due before 2026-11-01. Phase 0 starts after D22
+merges.
+1. **The code fix**, so that no new series drifts.
+2. **A data correction for every existing drifted shift**, the Bethel Nov 1 shift included.
+   The set is whatever the detector below returns at correction time, not just the one shift
+   listed here: every series created before the fix whose first shift falls within 28 days
+   before 2026-11-01 can add more. Apply it as a gated production data fix: a predicate proven
+   to match exactly the detector's rows, counts asserted inside the transaction, and the
+   before-values kept so it can be reversed. After it, the detector must return zero rows.
+   Open questions for Phase 0: whether the assigned guard is told (a direct correction sends no
+   notification, while an admin edit does, per D20), and whether a `shift_schedule_audit` row
+   is written for each corrected shift.
+
+Until the fix ships, run this detector after any repeat-series creation near a DST change. It
+flags batches whose UTC start is fixed while the local start moves (the N48 signature). On
+2026-09-30 it returned exactly the Bethel series above (5 shifts, local 08:00 and 09:00), which
+is its positive control:
+```sql
+SELECT left(s.site_id::text, 8) AS site, left(coalesce(s.guard_id::text, '-'), 8) AS guard,
+       to_char(date_trunc('minute', s.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS batch_utc,
+       to_char(s.scheduled_start AT TIME ZONE 'UTC', 'HH24:MI') AS utc_start,
+       string_agg(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:MI'), ',') AS local_starts,
+       count(*) AS future_shifts
+FROM shifts s JOIN sites si ON si.id = s.site_id
+WHERE s.status IN ('scheduled', 'unassigned') AND s.scheduled_start > now()
+GROUP BY s.site_id, s.guard_id, date_trunc('minute', s.created_at), to_char(s.scheduled_start AT TIME ZONE 'UTC', 'HH24:MI')
+HAVING count(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:MI')) > 1;
+```
+(Grouping by creation minute alone is not enough: one minute can hold several series with
+different start times on purpose.) Fix: compute each shift's start as the base's wall-clock
+time on that date in the site's timezone (the `dowInTimeZone` / `services/siteTime.ts`
+approach already used for the day of week), plus a test that creates a series across
+2026-11-01 and 2027-03-14. The code fix does not touch existing shifts; part 2 above does, after
+the code fix ships, so that no new drifted series appears after the correction.
+**Size S (code) + S (data correction). Tier 1 for the code (gated merge); Tier 2 for the data
+correction (a production write, Vishnu present). Due before 2026-11-01.**
+
+### N161 — the daily report email counts skips as "sent", in the log and in the database
+
+verified at `a8ba597`: `jobs/dailyShiftEmail.ts:35–38` does `await sendDailyShiftReport(shift.id);
+sent++;` for every row, and `:49` logs `Done — sent: ${sent}, failed: ${failed}`. But
+`sendDailyShiftReport` (`services/email.ts:540`) returns without sending in two cases:
+- no row (`:560`);
+- no active client (`:565–571`). This case also runs `UPDATE shifts SET
+  daily_report_email_sent = true, daily_report_email_sent_at = NOW()`, so that the cron does not
+  retry forever.
+So the log line **and** the `daily_report_email_sent` / `_sent_at` columns record a send that
+never happened. Evidence: the 2026-09-29 16:00Z run on deployment `157494b0` logged "sent: 7,
+failed: 0", and all 7 were "no active client" skips (Phase 0 window verifier, from Railway
+logs).
+
+Scale (DB, 2026-09-30, STARNET, shifts completed in the last 30 days): 127 are flagged sent. Only
+Bethel AME Church (`53c71c64`, 44 flagged) and 23000 Cristo Rey Los Altos (`fea19254`, 1) have
+an active client. The other 82 flagged shifts (Jasper 34, 375 Shopping Complex `ab450901` 29,
+CCDC Folsom 17, 88 S 4th St 2) had no client, so no email was sent. `ab450901` is the
+24/7 post.
+
+Also to check (not verified as a bug): the report finds its client only through
+`clients.site_id` (`email.ts:555`, `LEFT JOIN clients c ON c.site_id = si.id AND c.is_active`),
+never through `client_sites`. Bethel has 1 active client by `site_id` and 2 by `client_sites`.
+The second is linked to Bethel only through `client_sites` (since 2026-08-21); its own
+`site_id` is Cristo Rey (`fea19254`). So it gets Cristo Rey's daily report but not Bethel's, and
+if a site's clients are all linked through `client_sites`, its shifts are flagged sent with no
+email at all. Is that intended? (Vishnu is deciding for Bethel, 2026-09-30.)
+Fix: count `sent`, `skipped_no_client` and `failed` separately, and record the skip as a skip
+(for example `daily_report_email_skipped_at`, or a reason column) rather than as a send. Check
+every reader of `daily_report_email_sent` before changing it. **Size S, Tier 1.**

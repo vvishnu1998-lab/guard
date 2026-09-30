@@ -262,7 +262,8 @@ Taken during the Bethel 18-hour shift incident
     *Update 2026-09-29:* the mobile gate is 15 in the 2026-09-29 OTAs (N138), and a
     clock-out on an already-closed session now answers 409 `SESSION_CLOSED`
     ("You are already clocked out of this shift. Go back to the home screen to
-    refresh.") instead of the 404 — see N138.
+    refresh.") instead of the 404 — see N138. Shipped in PR #85 (`a8ba597a`, merged
+    2026-09-29 19:00:51 PT; Railway `ecc4c4af`).
 - Proof lives outside CI (the harness needs a local Postgres):
   `apps/api/scripts/test-auto-complete-shifts.ts` is **63/0 on `761d7f5`**; the same
   harness run against `6638018`'s job is **49/14** — the 14 are exactly the new
@@ -514,7 +515,8 @@ Sentry DSN (`OPEN-ITEMS.md` N152).
 
 **Status: decided 2026-09-29.** First used for `429943ab` (preview 1.0.18, `f5a84c4`,
 08:39:30 PT) and `fe530a7a` (production 1.0.17, `ddc6f0a`, 11:33:06 PT). The procedure is
-release-ops §3b; the tool is `scripts/ops/ota-export-and-gate.sh`.
+release-ops §3b; the tool is `scripts/ops/ota-export-and-gate.sh`. In `main` since PR #85
+(`a8ba597a`, merged 2026-09-29 19:00:51 PT by gate route PROXY).
 - **Export each runtime from a clean worktree at the publish commit**, with
   `EXPO_PUBLIC_API_URL` (from `eas.json` `build.<channel>.env`), `EXPO_PUBLIC_SENTRY_ENV` and
   `EXPO_PUBLIC_SENTRY_DSN` set explicitly, and no `apps/mobile/.env*` in the tree. A build
@@ -546,6 +548,69 @@ Evidence (2026-09-29): `apps/mobile/lib/sentry.ts:64` skips `Sentry.init` withou
 eas-cli 18.5.0 merges only server-side variables into an update, and only with
 `--environment` (`build/commands/update/index.js:190-195`); in 90 days `netraops-mobile`
 had 204 error events, none from an OTA update id (Sentry, read in the batch-18 session).
+
+---
+
+## 2026-09-30 — the database pool
+
+Taken in the pool error-listener fix (`OPEN-ITEMS.md` N158; Phase 0 on 2026-09-29/30). PR #86
+(`scripts/ops/proxy-merge.sh` and the #85 SHIPPED docs) is folded into the same PR by merge
+commit `b5b549d`, so both land in one gated merge.
+
+### D22. Every checked-out pool client carries an `'error'` listener: a dying connection fails its request, never the process.
+
+**Status 2026-09-30 — BUILT, not merged or deployed**, on `fix/pool-client-error-listener`
+(`apps/api/src/db/pool.ts` only).
+**Proof (2026-09-30, local PG 18.6, `apps/api/scripts/test-pool-client-error.ts`).** Each case
+runs in its own child process, and the parent injects the fault:
+- `pg_terminate_backend` on a checked-out client, with no query and mid-query;
+- a FATAL mid-query, then a plain `release()` before the socket closes (V10);
+- a TCP reset through a proxy, and an idle client;
+- `pg_ctl stop -m fast` and `-m immediate`;
+- `POST /shifts/:id/clock-out`, `PATCH /shifts/:id/cancel`, and the autoCompleteShifts tick
+  through `runJob`.
+origin/main's `pool.ts` is the negative control. Mutations M1–M9 each remove one part of the
+fix. Every mode must fail exactly its predicted set, and the predictions were written before
+the first run. Tested `pool.ts` blob `c6e2ec40`. Results:
+- **Node 25.7.0, pg 8.20.0 / pg-pool 3.13.0, plain, Sentry off:** fix 79/0, main 29/50, M1
+  29/50, M2 76/3, M3 62/17, M4 60/19, M9 78/1.
+- **Node 25.7.0, pg 8.23.0 / pg-pool 3.14.0 (production's), TLS, real `Sentry.init` with an
+  in-memory transport:** fix 106/0, main 32/74, M1 32/74, M2 100/6, M3 77/29, M4 78/28, and
+  M5, M6, M6d, M6e and M7 at 100/6 each.
+- **Node 18.20.5 (production's Node):** fix 79/0 and 106/0; main 29/50 and 32/74; M5, M6, M6d,
+  M6e and M7 at 100/6 each, so the stale-context leak is real on Node 18 too.
+The Sentry checks: one warning event per dying client, and no stale user, tag, request or
+trace. M5–M7 fail them. An independent verifier reproduced every count on its own cluster,
+and an unlisted mutation ('connect' instead of 'acquire') was caught (C1 44/35).
+Not covered: half-open TCP (a hang, not a crash); CI, which has no Postgres.
+- **What:** on pool `acquire` a listener is added to the client, and on `release` it is
+  removed. pg-pool emits `acquire` before it removes its own idle listener and `release` after
+  it puts it back (`_acquireClient` / `_release` in pg-pool 3.13.0 and 3.14.0), so a client
+  always has a listener. It covers `pool.connect()` and `pool.query()` clients.
+- **Why:** a checked-out client has no `'error'` listener, and pg emits `'error'` synchronously
+  whenever the connection dies, query in flight or not. So any Postgres restart or network drop
+  while a client is checked out kills the API: 35 `pool.connect()` call sites in the API
+  process (36 with `db/migrate.ts`), 1 replica. Not observed in production (N158), so this is
+  preventive. It must merge before the current Postgres auto-update window next opens
+  (Sat 2026-10-03 10:00 UTC).
+- **Sentry:** each dying client is captured once (a client usually emits twice): level
+  `warning`, tags `flow: db_pool` and `pg_code`, fingerprinted by code. The capture runs with
+  cleared isolation and current scopes and no active span. The listener runs in the async
+  context of whichever request opened the socket, so without that the event would carry that
+  request's user, tags, URL and trace. There is no capture when no Sentry client exists, and
+  the listener never throws. Log tag: `[pg.client_error]`.
+- **Idle-client log:** prints `code`, `severity` and `message` only. The error object carries
+  `err.client` (host, port, user, database, socket).
+- **Behaviour change:** a request caught at the moment the DB dies now gets a 500 instead of a
+  connection reset, and a cron tick fails instead of the process. After a plain `release()` the
+  dead client is dropped on release, or through pg-pool's idle listener when its socket closes.
+  One wasted reuse is possible; a crash is not.
+- **Rejected:** `pool.on('connect', …)`, which also stops the crash but logs every idle-client
+  error twice; `process.on('uncaughtException')`, which would stop Sentry exiting on real
+  crashes; `release(err)` at every call site, which is not needed to prevent the crash.
+- **Not in D22:** the seven bare catch-block `ROLLBACK`s (N159); half-open TCP hangs (no
+  keepAlive, `query_timeout` or `statement_timeout`); `idle_in_transaction_session_timeout`;
+  ending the pool on SIGTERM; a DB-free CI tripwire (a later stage, Vishnu 2026-09-30).
 
 ---
 
