@@ -262,7 +262,8 @@ Taken during the Bethel 18-hour shift incident
     *Update 2026-09-29:* the mobile gate is 15 in the 2026-09-29 OTAs (N138), and a
     clock-out on an already-closed session now answers 409 `SESSION_CLOSED`
     ("You are already clocked out of this shift. Go back to the home screen to
-    refresh.") instead of the 404 — see N138.
+    refresh.") instead of the 404 — see N138. Shipped in PR #85 (`a8ba597a`, merged
+    2026-09-29 19:00:51 PT; Railway `ecc4c4af`).
 - Proof lives outside CI (the harness needs a local Postgres):
   `apps/api/scripts/test-auto-complete-shifts.ts` is **63/0 on `761d7f5`**; the same
   harness run against `6638018`'s job is **49/14** — the 14 are exactly the new
@@ -514,7 +515,8 @@ Sentry DSN (`OPEN-ITEMS.md` N152).
 
 **Status: decided 2026-09-29.** First used for `429943ab` (preview 1.0.18, `f5a84c4`,
 08:39:30 PT) and `fe530a7a` (production 1.0.17, `ddc6f0a`, 11:33:06 PT). The procedure is
-release-ops §3b; the tool is `scripts/ops/ota-export-and-gate.sh`.
+release-ops §3b; the tool is `scripts/ops/ota-export-and-gate.sh`. In `main` since PR #85
+(`a8ba597a`, merged 2026-09-29 19:00:51 PT by gate route PROXY).
 - **Export each runtime from a clean worktree at the publish commit**, with
   `EXPO_PUBLIC_API_URL` (from `eas.json` `build.<channel>.env`), `EXPO_PUBLIC_SENTRY_ENV` and
   `EXPO_PUBLIC_SENTRY_DSN` set explicitly, and no `apps/mobile/.env*` in the tree. A build

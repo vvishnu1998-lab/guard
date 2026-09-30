@@ -4407,7 +4407,24 @@ Four items from U4b's Phase 0 audit and build (`761d7f5`). **None is changed by
 U4b** unless the item says so. API lines are read at `761d7f5`; mobile lines at
 `6638018`, and `batch/mobile-17` (3 commits ahead of main) does not touch them.
 
-### N138 — mobile `SHIFT_EXPIRY_GRACE_MS` is still 30 minutes; the server's grace is 15 (next OTA)
+### N138 — mobile grace 30 → 15 and the clock-out 409 (published by OTA 2026-09-29; API shipped in #85; device checks pending)
+
+**Update 2026-09-29 (as of 19:32 PT) — the API half SHIPPED; open until the device checks
+pass.** PR #85 merged as `a8ba597a` at 19:00:51 PT by gate route PROXY, about 12.7 s after
+GRD0015's (`68f76ea9`, session `16bc307d`) 19:00-window ping (DB `pinged_at` 19:00:38.253;
+Railway's 201 at 19:00:38.283; GitHub's `mergedAt` 19:00:51 is to the second). Railway
+deployment `ecc4c4af` was SUCCESS on that commit by 19:02:10 (container up 71 s after the
+merge; the old `157494b0` stopped at 88 s). `/health` reports `a8ba597a`, and
+`/health/crons` 20 jobs, 0 stale. 0 4xx/5xx on either deployment from 19:00:45 to 19:04 PT.
+The three reports filed at 19:00:18, :40 and :47 — before the merge, on `157494b0` — all
+have rows, and no write reached either deployment from the merge until 19:30:27. 0
+`netraops-api` Sentry events after the merge (checked 19:04), and the 19:30 pings (GRD0015
+`68f76ea9` 19:30:28, GRD0024 `94ab7696` 19:31:54) landed as 201s on the new deployment. Not
+yet exercised in production: the 409 itself, which needs a real clock-out on a closed
+session — device check 5b on the iPhone run, still pending with 4, 6 and 7. Rollback
+target: `157494b0` (Railway dashboard, within 72 h of the switchover). The merge ran as the
+session's `proxy_merge85.sh` (not committed; sha256 `604423dc…`); `scripts/ops/proxy-merge.sh`
+is that script rebuilt byte for byte and generalized, and has not yet run with `--live`.
 
 **Update 2026-09-29 — PUBLISHED by OTA, and the API half is CLOSED by PR #85; open until
 the device checks pass.** The grace is 15 on `batch/mobile-18` (`4558ae9`;
