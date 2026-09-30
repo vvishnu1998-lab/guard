@@ -259,6 +259,10 @@ Taken during the Bethel 18-hour shift incident
     409 cannot retract, and a clock-out attempt gets 404 and an alert reading
     "Clock-Out Failed" / "Active session not found" (the raw server text, one OK
     button, no refresh).
+    *Update 2026-09-29:* the mobile gate is 15 in the 2026-09-29 OTAs (N138), and a
+    clock-out on an already-closed session now answers 409 `SESSION_CLOSED`
+    ("You are already clocked out of this shift. Go back to the home screen to
+    refresh.") instead of the 404 — see N138.
 - Proof lives outside CI (the harness needs a local Postgres):
   `apps/api/scripts/test-auto-complete-shifts.ts` is **63/0 on `761d7f5`**; the same
   harness run against `6638018`'s job is **49/14** — the 14 are exactly the new
@@ -386,6 +390,27 @@ after.
 
 ### D20. Admin shift edits: on an ACTIVE shift, the end time only; a confirm step above 12 hours.
 
+**Status 2026-09-28 — SHIPPED (U2, U5).** PR #83 merged as `95a10a38` at 19:30:44 PT by
+gate route PROXY — a scripted push about 8.4 s after a STARNET ping (GRD0015 `68f76ea9`;
+`pinged_at` 19:30:35.626 PT, GitHub's `mergedAt` 19:30:44 to the second). Railway
+deployment `157494b0` SUCCESS on that commit (created 19:30:46 PT per `railway deployment
+list`; live about 19:31:58 per the session record). v81 (`shifts_end_after_start`) was
+applied by hand before the merge (about 18:49 PT) and is validated in production.
+Staged test the same evening, Star Guard shift `7267a4ae` (scheduled 19:30–20:30 PT;
+session `345bba98`, clock-in 19:40:41), edited by a company_admin:
+- extend 20:30 → 21:45 at 19:44:12, then shorten → 21:15 at 19:45:00; the session stayed open;
+- close at 20:45, applied 21:02:05: `clocked_out_at` 20:45:00, `clock_out_reason`
+  `'admin_corrected'`, `total_hours` 1.0717, shift `completed`; the 20:00 missed ping was
+  kept and the 20:30 one deleted;
+- 3 `shift_schedule_edited` audit rows (before/after `scheduled_end`) and 3 notification
+  rows with D20's three bodies (push delivery not checked);
+- the 21:05, 21:10 and 21:15 sweep ticks closed nothing.
+The guard handset was a development build (`guard_devices.client` `runtime/;
+update/embedded`), so this proves the server. The mobile half (U3, N146) was published by
+OTA on 2026-09-29 (production 1.0.17 `fe530a7a`, preview 1.0.18 `429943ab`; D21).
+
+Earlier status, kept as history:
+
 **Status 2026-09-28 — BUILT (U2, U5)** on `feat/active-shift-end-edit`, not yet merged
 or deployed: `8081f62` (v81), `18e2038` (U5, API), `4db2b69` (missed-window crons),
 `8094269` (U2, API), `da9eca0` (harness), `c2f34f9` (review fixes), `dcb8ec2` (web),
@@ -477,6 +502,50 @@ Drift noted 2026-09-28 (prod, read-only): the same count now reads **3** — `b3
 longer over 12 h. STARNET also scheduled 90 shifts of exactly 12 h in those 60 days,
 which is why the confirm asks only above 12 h. 0 of 837 shifts have
 `scheduled_end <= scheduled_start`.
+
+---
+
+## 2026-09-29 — OTA publishing
+
+Taken during the batch-18 publish, which found that no OTA bundle had ever carried the
+Sentry DSN (`OPEN-ITEMS.md` N152).
+
+### D21. An OTA is exported and gated from a clean tree, then published with `--skip-bundler` — never bundled by `eas update`, never from a dirty tree.
+
+**Status: decided 2026-09-29.** First used for `429943ab` (preview 1.0.18, `f5a84c4`,
+08:39:30 PT) and `fe530a7a` (production 1.0.17, `ddc6f0a`, 11:33:06 PT). The procedure is
+release-ops §3b; the tool is `scripts/ops/ota-export-and-gate.sh`.
+- **Export each runtime from a clean worktree at the publish commit**, with
+  `EXPO_PUBLIC_API_URL` (from `eas.json` `build.<channel>.env`), `EXPO_PUBLIC_SENTRY_ENV` and
+  `EXPO_PUBLIC_SENTRY_DSN` set explicitly, and no `apps/mobile/.env*` in the tree. A build
+  profile's `env` does not reach an update.
+- **`EXPO_PUBLIC_SENTRY_ENV` is `production` on every channel**, preview included. Sentry's
+  `environment` therefore does not name the channel; `contexts.ota_updates` (`channel`,
+  `update_id`, `is_embedded_launch`) does.
+- **Gate every bundle before any publish:** in each Hermes bundle, the API URL is present;
+  no `localhost:3001`; no `undefined/api`; the exact DSN is present; exactly one Sentry
+  public key, equal to the DSN's. A FAIL stops the publish.
+- **Keep a sha256 manifest** beside the export, and check it before publishing.
+- **Publish with `eas update --skip-bundler --input-dir <export>` from the matching tree's
+  `apps/mobile`**, so the runtime and commit EAS records are that tree's. Vishnu runs every
+  `eas` command.
+- **Never a dirty tree.** It would publish code no commit holds, under HEAD's sha. Every
+  publish before 2026-09-29 was made from a dirty tree (Vishnu, from the update list).
+- **Publish each runtime to every channel that has a live binary at it.** A skipped channel
+  is written down with the reason. The same bytes to a second channel go by republish, not a
+  second export.
+- **Preview is not a test-only channel.** STARNET guard GRD0024 (`94ab7696`) ran the vc27
+  preview APK, which Vishnu gave them (confirmed 2026-09-29): its `guard_devices` rows, embedded
+  id `dc827710…`, run from 2026-09-28 04:52 to 2026-09-29 14:23 PT, when the guard signed in
+  on an iPhone (production) again. A preview publish can reach a paying customer.
+- **The DSN never touches a tree, the chat or a terminal's output:**
+  `umask 077 && printf 'EXPO_PUBLIC_SENTRY_DSN=%s\n' "$(pbpaste)" > <scratch>/dsn.env` —
+  one line, mode 0600, outside every worktree, deleted after the export.
+
+Evidence (2026-09-29): `apps/mobile/lib/sentry.ts:64` skips `Sentry.init` without a DSN;
+eas-cli 18.5.0 merges only server-side variables into an update, and only with
+`--environment` (`build/commands/update/index.js:190-195`); in 90 days `netraops-mobile`
+had 204 error events, none from an OTA update id (Sentry, read in the batch-18 session).
 
 ---
 
