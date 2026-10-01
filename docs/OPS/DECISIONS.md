@@ -559,6 +559,26 @@ commit `b5b549d`, so both land in one gated merge.
 
 ### D22. Every checked-out pool client carries an `'error'` listener: a dying connection fails its request, never the process.
 
+**Status 2026-09-30 — SHIPPED.** PR #87 was merged as `d1218f09` at 16:00:30 PT by gate route
+PROXY: `scripts/ops/proxy-merge.sh --live`, 12.5 s after a STARNET ping from GRD0024 (`94ab7696`;
+HTTP 201 at 23:00:18.007Z; GitHub `mergedAt` 23:00:30Z). It gated on that one guard (D23),
+after the 13:00 attempt aborted at its deadline without merging while waiting on a guard who
+never pinged.
+- **Deploy:** Railway deployment `c07bf30a` finished SUCCESS on that commit (created
+  23:00:32.569Z, booted once at 23:01:43Z), and `/health` reported `d1218f09` from 16:02:00 PT.
+- **Switchover:** no 5xx on either deployment. The only 4xx were 401s from one browser polling
+  `/api/chat/rooms` with a stale token, at the same rate as the hour before.
+- **After it:** no `[pg.client_error]` and no idle-client errors. Sentry (netraops-api) had
+  0 events 15:30–16:30 PT, against 23 in the previous 7 days. All 15 short-interval crons
+  ticked `ok` on the new deployment by 16:33, and STARNET pings landed on it (16:05, 16:30).
+- **PR #86** (folded in by `b5b549d`, its merge commit, an ancestor of `d1218f09`) shows merged
+  at 23:00:32Z.
+- **Earlier that day:** both 10:30 dry runs passed, one gating on one guard and one on two. A
+  Vercel preview failure made #87 UNSTABLE, which the script refuses, until the preview was
+  redeployed; the cause was a Google Fonts fetch in `next/font` (N162).
+
+Earlier status, kept as history:
+
 **Status 2026-09-30 — BUILT, not merged or deployed**, on `fix/pool-client-error-listener`
 (`apps/api/src/db/pool.ts` only).
 **Proof (2026-09-30, local PG 18.6, `apps/api/scripts/test-pool-client-error.ts`).** Each case
@@ -611,6 +631,69 @@ Not covered: half-open TCP (a hang, not a crash); CI, which has no Postgres.
 - **Not in D22:** the seven bare catch-block `ROLLBACK`s (N159); half-open TCP hangs (no
   keepAlive, `query_timeout` or `statement_timeout`); `idle_in_transaction_session_timeout`;
   ending the pool on SIGTERM; a DB-free CI tripwire (a later stage, Vishnu 2026-09-30).
+
+
+---
+
+## 2026-09-30 — the PROXY gate, and daily report recipients
+
+### D23. The PROXY gate waits for ONE calibrated guard's ping, not every open session's.
+
+**Status: decided 2026-09-30 (Vishnu).** First applied to PR #87 (D22).
+- **Rule:** before arming, choose one STARNET guard who pinged in the window before the
+  boundary. Their device UA must be calibrated (Railway HTTP 201s matched to that session's DB
+  ping rows) and shared by no other session open at arming. The UA file names that guard only.
+  Silent sessions never gate. If that guard has not pinged in the window before the boundary,
+  choose another calibrated guard who has; still one.
+- **Why:** the gate is a timing signal. The merge goes out in the quiet seconds right after a
+  ping, so the restart falls between ping windows. Waiting for every open session let one
+  silent guard decide the slot: on 2026-09-30 the 13:00 run aborted at its deadline because
+  GRD0026 never pinged for 13:00, although GRD0010 and GRD0024 pinged at 13:00:09 and 13:00:13.
+- **Accepted consequence:** another guard's ping can land during the 1–2 minute switchover.
+  #87's switchover had no 5xx (D22).
+- Recorded in POLICY.md (route 2) and the header of `scripts/ops/proxy-merge.sh`, which still
+  accepts several gating lines.
+
+### D24. The daily shift report goes to every active client linked to the site through `client_sites`; a skip is never flagged sent.
+
+**Status 2026-09-30 — BUILT, not merged or deployed**, on `fix/daily-report-recipients`
+(OPEN-ITEMS N161). Decided by Vishnu after the N161 Phase 0 the same day:
+1. **Recipients:** every active client linked to the site through `client_sites`, in the site's
+   own company. `clients.site_id`, legacy since v36, is not read. Reading it as well would add
+   nobody today (every client's primary site also has a `client_sites` row), but a client whose
+   primary site an admin unlinked would keep getting that site's reports.
+2. **Gates:** no report for a site whose client access is disabled (the portal toggle, and site
+   deactivation, which sets the same column) or whose company is inactive.
+3. **Partial failure:** the shift is flagged sent once at least one recipient got it. A
+   recipient whose send failed is not retried, so nobody gets a duplicate. If every recipient
+   failed, the shift stays unflagged and counts as failed.
+4. **Skips are logged and counted, never flagged.** The 36-hour window limits re-checks to at
+   most two runs. A durable skip record is a follow-up (N163).
+5. **The ping line is sent as it is,** including for Bethel AME Church, which has enforcement
+   off (D11). Vishnu tells STARNET's admin before the client's reports start.
+6. **One message per recipient** (personalized greeting), rendered inside the async callback.
+   A render error goes to Sentry under `stage: render`, never through the SendGrid failure
+   reporter. A shift whose every recipient failed produces ONE Sentry event, carrying the
+   original error (render or SendGrid), and the job tags `service: sendgrid` only on send
+   failures. The incident alert gets the same render fix.
+7. **Counters:** the job logs `sent (partial), skipped (reasons), failed; emails delivered,
+   failed`. `scripts/ops/triage.sh` counts reports due by the same rule.
+- **Not in D24:** Bethel's 2026-09-30 report (shift `605b067a`), which the old code skips on
+  2026-10-01; Vishnu accepted it as lost, with no production write. The durable skip column
+  (N163).
+- **Merge gate:** Tier 2, because it starts daily reports to STARNET's client (POLICY.md Tier
+  2 covers anything sent to STARNET's people or its guards). Vishnu present; never 08:55–09:05 PT, because jobs
+  have no lock and overlapping containers could send the 09:00 run twice. Vishnu confirms the
+  two Star Guard test inboxes first; this change starts reports to them too.
+- **Proof (2026-09-30, local PG 18.6, `apps/api/scripts/test-daily-report-recipients.ts`):**
+  - 16 seeded cases and one cross-cutting check, run twice through the real job callback.
+    Fix: 45/0.
+  - origin/main, the negative control, fails exactly its predicted 21 checks.
+  - Mutations M1–M13 each fail exactly their predicted set. M12 and M13 (a render failure
+    sent to the SendGrid reporter) were added after the Phase 1 verifier showed the harness
+    could not see that case.
+  - The single-client send payload is byte-identical to origin/main's (4,666 bytes).
+  - The existing email tests pass.
 
 ---
 

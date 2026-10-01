@@ -518,16 +518,17 @@ merged event log rather than a path.
 **Steps**:
 
 1. At 9:00 PT: query `shifts WHERE status = 'completed' AND daily_report_email_sent = false AND scheduled_end >= NOW() - INTERVAL '36 hours' AND scheduled_end < NOW() - INTERVAL '1 hour'`.
-2. For each shift, call `sendDailyShiftReport(shift.id)` ([apps/api/src/services/email.ts:115 onward](apps/api/src/services/email.ts:115)).
-3. SendGrid delivers an HTML digest with site name, guard, shift duration, report counts, photo gallery.
-4. Mark `shifts.daily_report_email_sent = true, daily_report_email_sent_at = NOW()`.
-5. Log `[daily-email] Done — sent: N, failed: M`.
+2. For each shift, call `sendDailyShiftReport(shift.id)` (`apps/api/src/services/email.ts`). Recipients are every active client linked to the site through `client_sites`, in the site's own company (D24). A site whose client access is disabled, or whose company is inactive, gets none.
+3. SendGrid delivers one HTML digest per recipient (personalized greeting): site name, guard, shift duration, report counts, ping ratio.
+4. If at least one recipient got it, mark `shifts.daily_report_email_sent = true, daily_report_email_sent_at = NOW()`. A skip (no recipient, access disabled, company inactive) is logged and **not** marked.
+5. Log `[daily-email] Done — sent: N (partial: P), skipped: S (reasons), failed: F; emails delivered: D, failed: E`.
 
-**Success criteria**: Each completed shift in the window gets exactly one digest email.
+**Success criteria**: Each completed shift in the window whose site has a linked active client gets exactly one digest per client.
 
 **Error / edge cases**:
 - **DST flip**: handled automatically by the cron's `timezone: 'America/Los_Angeles'` option. Verified to fire correctly across the 2026-03 flip.
-- **SendGrid down**: per-shift error logged, retry happens on the next 9 AM run (the `daily_report_email_sent = false` filter catches the failed shift the next day).
+- **SendGrid down**: the shift stays unmarked and counts as failed. The 36-hour window gives it a second run only if it ended roughly 21:00–08:00 PT; a day shift gets one attempt.
+- **One of several recipients fails**: the shift is marked sent (no duplicates for the others) and the failure is counted under `emails … failed`. That recipient is not retried.
 
 ---
 

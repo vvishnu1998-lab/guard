@@ -62,8 +62,11 @@ API.** Hold the deploy gate for it like any other merge.
 1. **CONDITION** — zero active STARNET shifts and zero open STARNET sessions. No
    ping can land, so the proxy is unsatisfiable while the thing it protects
    (nobody on post to disrupt) is trivially true. Safest window, not a bypass.
-2. **PROXY** — the normal path: a STARNET ping row lands, push inside 90s. The
-   gate is company-wide, not per-guard.
+2. **PROXY** — the normal path: a STARNET guard's new ping lands, push inside 90s.
+   **One calibrated guard gates (D23):** the merge waits for a new ping from ONE
+   STARNET guard whose device UA is calibrated, chosen from those who pinged in
+   the window before the boundary. Silent sessions never gate. The tool is
+   `scripts/ops/proxy-merge.sh`.
 3. **OVERRIDE** — Vishnu waives it explicitly. Record as a bypass and capture what
    landed during the window.
 
