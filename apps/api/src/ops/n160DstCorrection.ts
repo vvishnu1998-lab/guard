@@ -22,9 +22,11 @@
  *
  * FINDING ONE. The base pair is not stored, so each series is rebuilt from the
  * rows: manual shifts at one site by one creator, each inserted within 2 s of
- * the one before (the old loop committed one INSERT per date). A series has
- * at least 4 shifts, because 29 days hold every weekday at least 4 times, so
- * a smaller batch (a single shift above all) is never treated as one. The
+ * the one before (the old loop committed one INSERT per date, so its rows
+ * never share created_at; a specific_dates batch, one transaction, always
+ * does, and is never a series). A series has at least 4 shifts, because 29
+ * days hold every weekday at least 4 times, so a smaller batch (a single
+ * shift above all) is never treated as one. The
  * series' first shift by start that no admin has edited since (no
  * shift_schedule_audit row), whatever its status now, is the reference: the
  * base was at most 6 days earlier, on the same side of a DST change unless
@@ -39,19 +41,21 @@
  * scheduled rows, so once October's shifts completed, a drifted Nov 1 shift
  * had nothing left to differ from and the detector went quiet.
  *
- *   corrected  start and end each move by 0 or 1 hour, at least one moves,
- *              both the same way; the new start is not in the past; the shift
- *              has no session; no overlap with the guard's other shifts once
- *              every correction is applied.
+ *   corrected  start and end each move by exactly the UTC-offset change
+ *              between the reference and this shift (what the old loop's
+ *              fixed UTC time did); the new start is not in the past; the
+ *              shift has no session; no overlap with the guard's other shifts
+ *              once every correction is applied.
  *   refused    every other difference (a series near midnight, where the old
  *              loop also moved the date), a shift an admin has edited since it
  *              was created (an edit of exactly an hour looks like drift, and a
  *              correction must never undo it), an inverted window, an overlap,
  *              a start moving into the past, a session. Listed for a person.
  *   suspect    a series whose reference may itself be wrong, because it
- *              straddles a DST change or a change fell in the 6 days before
- *              it after the series was created. Never corrected; listed for
- *              Vishnu's review, because the rows cannot show the base.
+ *              straddles a DST change, or a change fell after the series was
+ *              created and between 6 days before its first shift (edited or
+ *              not) and the reference. Never corrected; listed for Vishnu's
+ *              review, because the rows cannot show the base.
  *
  * EACH CORRECTION IS THE ADMIN EDIT of a scheduled or unassigned shift
  * (PATCH /api/shifts/:id, D20): latches cleared; start, end and expires_at
@@ -61,8 +65,9 @@
  * through the edit's own sender, services/shiftEditPush.ts. Every correction
  * commits in ONE transaction, after the plan is re-read under FOR UPDATE and
  * its count matches --expect, and only if a fresh plan inside that
- * transaction then finds nothing left to correct. Running it again changes
- * nothing.
+ * transaction then finds nothing left to correct and no corrected shift
+ * refused. Each UPDATE returns what it wrote, which must equal the plan.
+ * Running it again changes nothing.
  */
 import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
@@ -108,11 +113,12 @@ export interface Plan { corrections: Correction[]; refused: Refusal[]; suspects:
 export class N160Refusal extends Error {}
 
 // One series per run of manual shifts at a site by one creator, inserted
-// within 2 s of each other. The reference is the series' first shift by start
-// that has no shift_schedule_audit row; a series whose every shift was edited
-// has none and drops out.
+// within 2 s of each other and not all at one instant. The reference is the
+// series' first shift by start that has no shift_schedule_audit row; a series
+// whose every shift was edited has none and drops out.
 // off_* are UTC offsets at the site: at the reference's start and end, and at
-// the later of the series' creation and 6 days before the reference.
+// look_from, the later of the series' creation and 6 days before its first
+// shift (edited or not): the earliest the base can have been.
 const SERIES_SQL = `
   m AS (
     SELECT s.id, s.site_id, s.guard_id, s.created_by, s.status, s.created_at,
@@ -130,24 +136,27 @@ const SERIES_SQL = `
   ),
   series AS (
     SELECT b.site_id, b.created_by, b.batch_no, si.timezone AS tz, si.name AS site_name,
-           COUNT(*)::int AS n, MIN(b.created_at) AS created_at,
+           COUNT(*)::int AS n, MIN(b.created_at) AS created_at, MIN(b.scheduled_start) AS first_start,
            (ARRAY_AGG(b.id ORDER BY b.scheduled_start, b.id) FILTER (WHERE NOT b.edited))[1] AS ref_id
       FROM b JOIN sites si ON si.id = b.site_id
      GROUP BY b.site_id, b.created_by, b.batch_no, si.timezone, si.name
-    HAVING COUNT(*) >= 4
+    HAVING COUNT(*) >= 4 AND COUNT(DISTINCT b.created_at) > 1
   ),
   ref AS (
-    SELECT se.*, r.scheduled_start AS ref_start,
-           r.scheduled_start AT TIME ZONE se.tz AS ref_ls,
-           r.scheduled_end   AT TIME ZONE se.tz AS ref_le,
-           (r.scheduled_start AT TIME ZONE se.tz) - (r.scheduled_start AT TIME ZONE 'UTC') AS off_start,
-           (r.scheduled_end   AT TIME ZONE se.tz) - (r.scheduled_end   AT TIME ZONE 'UTC') AS off_end,
-           (GREATEST(se.created_at, r.scheduled_start - INTERVAL '6 days') AT TIME ZONE se.tz)
-             - (GREATEST(se.created_at, r.scheduled_start - INTERVAL '6 days') AT TIME ZONE 'UTC') AS off_before
-      FROM series se JOIN shifts r ON r.id = se.ref_id
+    SELECT x.*, (x.look_from AT TIME ZONE x.tz) - (x.look_from AT TIME ZONE 'UTC') AS off_before
+      FROM (
+        SELECT se.*, r.scheduled_start AS ref_start,
+               r.scheduled_start AT TIME ZONE se.tz AS ref_ls,
+               r.scheduled_end   AT TIME ZONE se.tz AS ref_le,
+               (r.scheduled_start AT TIME ZONE se.tz) - (r.scheduled_start AT TIME ZONE 'UTC') AS off_start,
+               (r.scheduled_end   AT TIME ZONE se.tz) - (r.scheduled_end   AT TIME ZONE 'UTC') AS off_end,
+               GREATEST(se.created_at, se.first_start - INTERVAL '6 days') AS look_from
+          FROM series se JOIN shifts r ON r.id = se.ref_id
+      ) x
   ),
   member AS (
     SELECT b.*, ref.ref_id, ref.tz, ref.site_name, ref.ref_ls, ref.ref_le,
+           ref.off_start AS ref_off_start, ref.off_end AS ref_off_end,
            (ref.off_start <> ref.off_end OR ref.off_before <> ref.off_start) AS suspect
       FROM b
       JOIN ref ON ref.site_id = b.site_id
@@ -173,7 +182,12 @@ export async function planCorrections(db: Querier = pool, now?: Date): Promise<P
             mb.scheduled_start AS old_start, mb.scheduled_end AS old_end,
             ((mb.scheduled_start AT TIME ZONE mb.tz)::date + mb.ref_ls::time) AT TIME ZONE mb.tz AS new_start,
             ((mb.scheduled_start AT TIME ZONE mb.tz)::date + (mb.ref_le::date - mb.ref_ls::date)
-               + mb.ref_le::time) AT TIME ZONE mb.tz AS new_end
+               + mb.ref_le::time) AT TIME ZONE mb.tz AS new_end,
+            -- what the old loop's fixed UTC time did to this shift: the offset change since the reference
+            EXTRACT(EPOCH FROM mb.ref_off_start
+              - ((mb.scheduled_start AT TIME ZONE mb.tz) - (mb.scheduled_start AT TIME ZONE 'UTC')))::int AS dst_ds,
+            EXTRACT(EPOCH FROM mb.ref_off_end
+              - ((mb.scheduled_end AT TIME ZONE mb.tz) - (mb.scheduled_end AT TIME ZONE 'UTC')))::int AS dst_de
        FROM member mb
        LEFT JOIN guards g ON g.id = mb.guard_id
       WHERE NOT mb.suspect
@@ -202,7 +216,7 @@ export async function planCorrections(db: Querier = pool, now?: Date): Promise<P
     createdAt: r.created_at, firstStart: r.ref_start,
     reason: r.straddles
       ? 'its first shift straddles a DST change, so the series\' end time cannot be read from it'
-      : 'a DST change fell in the 6 days before its first shift, after it was created, so the base may be on the other side',
+      : 'a DST change fell between 6 days before its first shift and its reference, after it was created: if the old loop made it, its base may be on the other side',
   }));
 
   const refused: Refusal[] = [];
@@ -217,11 +231,10 @@ export async function planCorrections(db: Querier = pool, now?: Date): Promise<P
     const de = c.newEnd.getTime() - c.oldEnd.getTime();
     if (ds === 0 && de === 0) continue;                       // matches its series
     const refuse = (reason: string) => { const { long: _l, ...rest } = c; refused.push({ ...rest, reason }); };
-    const oneHour = (d: number) => d === 0 || Math.abs(d) === HOUR;
     if (r.edited) {
       refuse('edited by an admin since it was created (shift_schedule_audit); a correction must not undo an edit');
-    } else if (!oneHour(ds) || !oneHour(de) || ds * de < 0) {
-      refuse('not a one-hour DST move of the start and/or end (near midnight the old loop also moved the date)');
+    } else if (ds !== r.dst_ds * 1000 || de !== r.dst_de * 1000) {
+      refuse('not the shift DST made: start and end must each move by the UTC-offset change since the series\' first shift (near midnight the old loop also moved the date)');
     } else if (c.newEnd.getTime() <= c.newStart.getTime()) {
       refuse('the corrected window does not end after it starts');
     } else if (ds !== 0 && c.newStart.getTime() < dbNow.getTime()) {
@@ -344,11 +357,17 @@ export async function applyCorrections(opts: {
             SET scheduled_start = $1,
                 scheduled_end   = $2,
                 expires_at      = $3
-          WHERE id = $4 AND status = $5 AND scheduled_start = $6 AND scheduled_end = $7`,
+          WHERE id = $4 AND status = $5 AND scheduled_start = $6 AND scheduled_end = $7
+          RETURNING scheduled_start, scheduled_end`,
         [c.newStart.toISOString(), c.newEnd.toISOString(), expiresAtFor('shift', c.newStart),
          c.id, c.status, c.oldStart.toISOString(), c.oldEnd.toISOString()],
       );
       if (u.rowCount !== 1) throw new N160Refusal(`shift ${c.id}: updated ${u.rowCount} rows, not 1. Nothing written.`);
+      const w = u.rows[0];
+      if (new Date(w.scheduled_start).getTime() !== c.newStart.getTime()
+          || new Date(w.scheduled_end).getTime() !== c.newEnd.getTime()) {
+        throw new N160Refusal(`shift ${c.id}: wrote ${new Date(w.scheduled_start).toISOString()} – ${new Date(w.scheduled_end).toISOString()}, not the plan's window. Nothing written.`);
+      }
       await client.query(
         `INSERT INTO shift_schedule_audit
            (shift_id, action, changed_by, changed_by_role, reason, before, after)
@@ -372,9 +391,16 @@ export async function applyCorrections(opts: {
     if (after.corrections.length !== 0) {
       throw new N160Refusal(`${after.corrections.length} correction(s) still planned after applying. Nothing written.`);
     }
+    // A corrected row now has an audit row, so a wrong write would surface as
+    // "refused: edited", never as "still planned". Neither may appear.
+    const stray = after.refused.filter((r) => cs.some((c) => c.id === r.id));
+    if (stray.length) {
+      throw new N160Refusal(`${stray.length} corrected shift(s) no longer match their series (${stray.map((r) => r.id).join(', ')}). Nothing written.`);
+    }
 
     await client.query('COMMIT');
     applied = ordered;
+    log(`committed: ${applied.length} correction(s)`);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -418,7 +444,7 @@ export function printPlan(plan: Plan, log: (line: string) => void): void {
   if (plan.corrections.length && direction(plan.corrections) === 0) {
     log('  WARNING: these move both later and earlier; --apply will refuse.');
   }
-  log(`refused (correct by hand): ${plan.refused.length}`);
+  log(`refused (not corrected; check each by hand): ${plan.refused.length}`);
   for (const r of plan.refused) log(`${describe(r)}\n    reason: ${r.reason}`);
   log(`suspect series (cannot be checked from the rows; review by hand): ${plan.suspects.length}`);
   for (const s of plan.suspects) {
@@ -432,8 +458,9 @@ export async function main(argv: string[], log: (line: string) => void = (l) => 
   const confirmLong = argv.includes('--confirm-long');
   const expectArg = argv.find((a) => a.startsWith('--expect='));
   const unknown = argv.filter((a) => a !== '--apply' && a !== '--confirm-long' && !a.startsWith('--expect='));
-  const expect = expectArg ? Number(expectArg.slice('--expect='.length)) : NaN;
-  if (unknown.length || (apply && !(Number.isInteger(expect) && expect >= 0)) || (!apply && expectArg)) {
+  const expectText = expectArg ? expectArg.slice('--expect='.length) : '';
+  const expect = /^\d+$/.test(expectText) ? Number(expectText) : NaN;
+  if (unknown.length || (apply && !Number.isInteger(expect)) || (!apply && expectArg)) {
     log('usage: n160DstCorrection.js                          dry run, writes nothing');
     log('       n160DstCorrection.js --apply --expect=N [--confirm-long]');
     return 2;
@@ -450,7 +477,6 @@ export async function main(argv: string[], log: (line: string) => void = (l) => 
   log(`N160 DST correction: APPLY, expecting ${expect} (${new Date().toISOString()})`);
   try {
     const applied = await applyCorrections({ expect, confirmLong, log });
-    log(`committed: ${applied.length} correction(s)`);
     for (const c of applied) log(describe(c));
     const after = await planCorrections();
     log(`detector after: ${after.corrections.length} planned, ${after.refused.length} refused, ${after.suspects.length} suspect`);
@@ -465,7 +491,7 @@ if (require.main === module) {
   main(process.argv.slice(2))
     .then(async (code) => { await pool.end().catch(() => {}); process.exit(code); })
     .catch(async (err) => {
-      console.error('[n160] failed, nothing committed unless "committed" was printed:', err);
+      console.error('[n160] failed; nothing was committed unless a "committed:" line was printed:', err);
       await pool.end().catch(() => {});
       process.exit(1);
     });
