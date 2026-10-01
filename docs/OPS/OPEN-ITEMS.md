@@ -1024,8 +1024,8 @@ repeat_days refuse a deactivated site. Two statements above had gone wrong by th
 - **The line numbers.** On `a83bae0` the window loop was at `routes/shifts.ts:462–490` (the
   `setHours` at `:485`), the overlap checks at `:507–566`, and the INSERT at `:577–589`.
 - **"Currently unobservable" was false.** The server runs UTC, so the drift shows whenever a
-  series crosses a DST change, whatever the site's zone. Bethel AME Church's 2026-11-01 shift is
-  the live case (N160).
+  series crosses a DST change at a site whose zone observes DST. Bethel AME Church's 2026-11-01
+  shift is the live case (N160).
 The coupling warning still holds, and the fix keeps it: the checks and the INSERT read the same
 windows.
 
@@ -5122,7 +5122,8 @@ correction (a production write, Vishnu present). Due before 2026-11-01.**
   - compares start AND end;
   - groups a series by insert gap, not by creation minute;
   - refuses a shift whose date the old loop also moved, or that an admin edited.
-- **Production plan, read-only, 2026-10-01 about 10:15 PT:**
+- **Production plan, read-only, 2026-10-01 about 10:15 PT, and the same at 10:55 PT after the
+  review's fixes:**
   - 1 correction: Bethel `4cf22350` to 09:00–15:00 PST;
   - 1 refusal: a 375 Shopping Complex shift an admin edited;
   - 0 suspects.
@@ -5136,6 +5137,8 @@ correction (a production write, Vishnu present). Due before 2026-11-01.**
   4. Run the dry run again: it should plan 0. Then read the audit rows and the guard's
      notification row through the read-only connection.
   Refused and suspect shifts are fixed by hand in admin, after Vishnu reads them.
+  5. After the run, remove `src/ops/n160DstCorrection.ts` and the harness's C section in the next
+     code PR. The fixed route makes no new drift, so nothing is left for the script to find.
 - **Left:** the deploy (gated), then the correction, both before 2026-11-01.
 
 ### N161 — the daily report email counts skips as "sent", in the log and in the database

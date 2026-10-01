@@ -758,10 +758,16 @@ Earlier status, kept as history:
     Asia/Kolkata, 17 at America/Los_Angeles, where the Bethel case passes. The first prediction
     was wrong on one check: on main a Sunday 00:30 series writes Sunday Nov 1 twice and no
     Nov 22, so its row count comes out right.
-  - 15 mutations (6 of the route, 9 of the correction) each fail exactly their predicted set.
+  - 18 mutations (6 of the route, 12 of the correction) each fail exactly their predicted set.
+  - One verifier, the same day: no must-fix. Its three should-fix gaps in the correction are
+    closed. A shift is corrected only by the exact UTC-offset change the old loop made, which
+    stops a second series an hour apart from being "corrected". The suspect window starts at the
+    series' first shift, edited or not. Each UPDATE's result is checked against the plan.
+    Mutations 17–19 are those three cases.
   - `test-active-shift-end-edit.ts` 115/0 at UTC and America/Los_Angeles.
   - The correction's planner SQL, captured from the module and run read-only on production at
-    about 10:15 PT (`$1` replaced by `NOW()`, nothing else): 1 correction, Bethel `4cf22350` to
+    about 10:15 PT and again at 10:55 PT after the review's fixes (`$1` replaced by `NOW()`,
+    nothing else): 1 correction, Bethel `4cf22350` to
     09:00–15:00 PST (17:00–23:00 UTC), no overlap and no session; 1 refusal, the edited shift
     above; 0 suspects.
 
