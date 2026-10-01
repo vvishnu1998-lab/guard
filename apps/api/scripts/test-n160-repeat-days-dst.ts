@@ -523,8 +523,9 @@ async function main(): Promise<void> {
       await q(`INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clock_in_coords)
                VALUES ($1, $2, $3, NOW(), '(0,0)')`, [c8[4], g16, siteC]);
       // C9, C10 CORRECT series (09:00–15:00 at the site every Sunday) that an admin later edited,
-      // with the audit row PATCH /:id writes. C9: its FIRST shift moved an hour earlier, which must
-      // not become the reference. C10: a later shift moved an hour later, which must not be undone.
+      // with the audit row PATCH /:id writes. C9: its FIRST shift moved an hour later, which must
+      // not become the reference (it would move Nov 1 to 10:00). C10: Nov 8 moved an hour earlier,
+      // exactly what drift looks like, which must not be undone.
       const auditEdit = async (id: string, to: [string, string]) => {
         const was = (await q(`SELECT scheduled_start, scheduled_end FROM shifts WHERE id = $1`, [id])).rows[0];
         await q(`UPDATE shifts SET scheduled_start = $2, scheduled_end = $3 WHERE id = $1`, [id, to[0], to[1]]);
@@ -538,9 +539,22 @@ async function main(): Promise<void> {
         ...extra.map((d): [string, string] => [`2026-${d}T17:00:00.000Z`, `2026-${d}T23:00:00.000Z`]),
       ], 'unassigned', NOW_C);
       const c9 = await seed({ guardId: null, creator: randomUUID(), createdAt: '2026-09-28T10:00:00.000Z', rows: correct(['11-01']) });
-      await auditEdit(c9[0], ['2026-10-04T15:00:00.000Z', '2026-10-04T21:00:00.000Z']);
+      await auditEdit(c9[0], ['2026-10-04T17:00:00.000Z', '2026-10-04T23:00:00.000Z']);
       const c10 = await seed({ guardId: null, creator: randomUUID(), createdAt: '2026-09-28T11:00:00.000Z', rows: correct(['11-01', '11-08']) });
-      await auditEdit(c10[5], ['2026-11-08T18:00:00.000Z', '2026-11-09T00:00:00.000Z']);
+      await auditEdit(c10[5], ['2026-11-08T16:00:00.000Z', '2026-11-08T22:00:00.000Z']);
+      // C11 one admin, one site, two series created 1 s apart (one batch), 08:00–16:00 and
+      // 09:00–17:00 PDT, Oct 27–30: an hour apart with no DST change between them. Nothing drifted.
+      const creatorX = randomUUID();
+      const c11a = await seed({ guardId: null, creator: creatorX, createdAt: '2026-10-21T08:00:00.000Z',
+        rows: ['27', '28', '29', '30'].map((d): [string, string, string] => [`2026-10-${d}T15:00:00.000Z`, `2026-10-${d}T23:00:00.000Z`, 'unassigned']) });
+      const c11b = await seed({ guardId: null, creator: creatorX, createdAt: '2026-10-21T08:00:01.000Z',
+        rows: [['27', '28'], ['28', '29'], ['29', '30'], ['30', '31']].map(([d, e]): [string, string, string] => [`2026-10-${d}T16:00:00.000Z`, `2026-10-${e}T00:00:00.000Z`, 'unassigned']) });
+      // C12 the old loop's Sundays at 16:00Z from Oct 25, its first two shifts edited by an admin, so
+      // the reference is Nov 8, itself an hour early. Only "suspect" is right: nothing to compare with.
+      const c12 = await seed({ guardId: null, creator: randomUUID(), createdAt: '2026-10-19T10:00:00.000Z',
+        rows: asOld(oldLoopUtc('2026-10-25T16:00:00.000Z', '2026-10-25T22:00:00.000Z', [0], LA), 'unassigned', NOW_C) });
+      await auditEdit(c12[0], ['2026-10-25T15:00:00.000Z', '2026-10-25T21:00:00.000Z']);
+      await auditEdit(c12[1], ['2026-11-01T17:00:00.000Z', '2026-11-01T23:00:00.000Z']);
 
       const H = (s: string) => new Date(s);
       const want = new Map<string, [string, string]>([
@@ -553,9 +567,10 @@ async function main(): Promise<void> {
         [c3[1],    ['2026-11-01T07:30:00.000Z', '2026-11-01T16:30:00.000Z']],
       ]);
       const wantRefused = new Map<string, RegExp>([
-        [c3[2], /not a one-hour/], [c3[3], /not a one-hour/], [c3[4], /not a one-hour/],
+        [c3[2], /not the shift DST made/], [c3[3], /not the shift DST made/], [c3[4], /not the shift DST made/],
         [c6[4], new RegExp(`overlaps shift ${c6block}`)], [c8[4], /has a session/],
         [c10[5], /edited by an admin/],
+        ...c11b.map((id): [string, RegExp] => [id, /not the shift DST made/]),
       ]);
       const rRows = Object.values(rIds).flat();
 
@@ -569,13 +584,13 @@ FROM shifts s JOIN sites si ON si.id = s.site_id
 WHERE s.status IN ('scheduled', 'unassigned') AND s.scheduled_start > now()
 GROUP BY s.site_id, s.guard_id, date_trunc('minute', s.created_at), to_char(s.scheduled_start AT TIME ZONE 'UTC', 'HH24:MI')
 HAVING count(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:MI')) > 1`)).rows;
-      check('C.olddetector', !old.some((r: any) => r.guard === g10.slice(0, 8)),
-            `the old detector returns nothing for C1 (blind spot reproduced) (got ${show(old.map((r: any) => r.guard))})`);
+      check('C.olddetector', !old.some((r: any) => r.guard === g10.slice(0, 8)) && old.some((r: any) => r.guard === g11.slice(0, 8)),
+            `the old detector flags C2, still all scheduled, and returns nothing for C1 once October completed (got ${show(old.map((r: any) => r.guard))})`);
 
       const plan0 = await n160.planCorrections(pool, NOW_C);
       const touched = [...plan0.corrections, ...plan0.refused].map((c: any) => c.id).filter((id: string) => rRows.includes(id));
-      check('C.plan.control', touched.length === 0 && sameSet(plan0.suspects.map((s: any) => s.refId), [c4[0], rIds.R4?.[0], rIds.R10?.[0]]),
-            `series made by the fixed route are never corrected; R4 and R10 (first shift after the change) are suspects with C4 (touched ${show(touched)}, suspects ${show(plan0.suspects.map((s: any) => s.refId))})`);
+      check('C.plan.control', touched.length === 0 && sameSet(plan0.suspects.map((s: any) => s.refId), [c4[0], c12[2], rIds.R4?.[0], rIds.R10?.[0]]),
+            `series made by the fixed route are never corrected; R4 and R10 (first shift after the change) are suspects with C4 and C12 (touched ${show(touched)}, suspects ${show(plan0.suspects.map((s: any) => s.refId))})`);
 
       // From here on, only the seeded rows.
       await q(`DELETE FROM shifts WHERE site_id = ANY($1::uuid[])`, [[siteA, siteLon]]);
@@ -587,9 +602,9 @@ HAVING count(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:
             `only the Oct 31 night ends up over 12 h (got ${show(plan.corrections.filter((c: any) => c.long).map((c: any) => c.id))})`);
       check('C.plan.refused', plan.refused.length === wantRefused.size
             && plan.refused.every((r: any) => wantRefused.get(r.id)?.test(r.reason)),
-            `refused: C3's three re-dated Sundays, C6 (overlap), C8 (session), C10 (an admin's edit) (got ${show(plan.refused.map((r: any) => [r.id, r.reason]))})`);
-      check('C.plan.suspects', sameSet(plan.suspects.map((s: any) => s.refId), [c4[0]]),
-            `suspect: C4 only (got ${show(plan.suspects.map((s: any) => s.refId))})`);
+            `refused: C3's three re-dated Sundays, C6 (overlap), C8 (session), C10 (an admin's edit), C11's second series (no DST change) (got ${show(plan.refused.map((r: any) => [r.id, r.reason]))})`);
+      check('C.plan.suspects', sameSet(plan.suspects.map((s: any) => s.refId), [c4[0], c12[2]]),
+            `suspects: C4, and C12 by its first shift (got ${show(plan.suspects.map((s: any) => s.refId))})`);
 
       const N = plan.corrections.length;
       const auditCount = async () => (await q(`SELECT COUNT(*)::int AS n FROM shift_schedule_audit WHERE reason = $1`, [n160.N160_REASON])).rows[0].n;
@@ -613,7 +628,7 @@ HAVING count(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:
 
       const rows = new Map<string, any>((await q(`SELECT * FROM shifts WHERE site_id = $1`, [siteC])).rows.map((r: any) => [r.id, r]));
       const seeded = new Map<string, [string, string]>();
-      for (const id of [...c1, ...day, ...night, ...c3, ...c4, ...c6, c6block, ...c8, ...c9, ...c10]) {
+      for (const id of [...c1, ...day, ...night, ...c3, ...c4, ...c6, c6block, ...c8, ...c9, ...c10, ...c11a, ...c11b, ...c12]) {
         const r = rows.get(id);
         seeded.set(id, [iso(r?.scheduled_start), iso(r?.scheduled_end)]);
       }
