@@ -13,7 +13,7 @@
 
 import { runJob } from './_run';
 import { pool } from '../db/pool';
-import { sendDailyShiftReport } from '../services/email';
+import { sendDailyShiftReport, DailyReportDeliveryError } from '../services/email';
 import { Sentry } from '../services/sentry';
 
 runJob(
@@ -30,23 +30,53 @@ runJob(
          AND scheduled_end  < NOW() - INTERVAL '1 hour'`,
     );
 
+    // Shifts, then emails. "sent" used to count every shift the loop touched,
+    // skips included (N161); now each outcome is counted for what it is.
     let sent = 0;
+    let partial = 0;
     let failed = 0;
+    let skippedTotal = 0;
+    const skipped: Record<string, number> = {};
+    let emailsDelivered = 0;
+    let emailsFailed = 0;
     for (const shift of result.rows) {
       try {
-        await sendDailyShiftReport(shift.id);
-        sent++;
+        const outcome = await sendDailyShiftReport(shift.id);
+        if (outcome.status === 'sent') {
+          sent++;
+          emailsDelivered += outcome.delivered;
+          emailsFailed += outcome.failed;
+          if (outcome.failed > 0) partial++;
+        } else {
+          skippedTotal++;
+          skipped[outcome.reason] = (skipped[outcome.reason] ?? 0) + 1;
+        }
       } catch (err) {
         console.error('[daily-email] Failed for shift', shift.id, err);
-        Sentry.captureException(err, {
-          tags: { service: 'sendgrid', flow: 'daily_shift_report' },
-          extra: { shift_id: shift.id },
+        const delivery = err instanceof DailyReportDeliveryError ? err : null;
+        if (delivery) emailsFailed += delivery.attempted;
+        // One event per failed shift, carrying the ORIGINAL error (render or
+        // SendGrid), so it keeps its stack and SendGrid status. service:sendgrid
+        // only when SendGrid is what failed; render and query errors used to
+        // carry it too, which sent triage to the wrong place.
+        Sentry.captureException(delivery?.original ?? err, {
+          tags: {
+            flow: 'daily_shift_report',
+            stage: delivery?.stage ?? 'other',
+            ...(delivery?.stage === 'send' ? { service: 'sendgrid' } : {}),
+          },
+          extra: { shift_id: shift.id, ...(delivery ? { recipients_attempted: delivery.attempted } : {}) },
         });
         failed++;
       }
     }
 
-    console.log(`[daily-email] Done — sent: ${sent}, failed: ${failed}`);
+    const reasons = Object.entries(skipped).map(([reason, n]) => `${reason} ${n}`).join(', ');
+    console.log(
+      `[daily-email] Done — sent: ${sent} (partial: ${partial}), ` +
+      `skipped: ${skippedTotal}${reasons ? ` (${reasons})` : ''}, failed: ${failed}; ` +
+      `emails delivered: ${emailsDelivered}, failed: ${emailsFailed}`,
+    );
   },
   { timezone: 'America/Los_Angeles', sentryMonitor: false },
 );

@@ -31,9 +31,13 @@
 # be raised for --dry-run only. macOS + bash 3.2; needs gh, railway, sntp, perl
 # and /opt/homebrew/bin/python3.
 #
-# GATE: every gating (pinging) STARNET session, identified by its device's
-# exact clientUa, has a NEW ping at or after BOUNDARY, and the merge follows the
+# GATE: every gating session in the UA file, identified by its device's exact
+# clientUa, has a NEW ping at or after BOUNDARY, and the merge follows the
 # latest of them within 90 s (MAX_AGE 75 s leaves margin), never after DEADLINE.
+# By DECISIONS.md D23 the file names exactly ONE calibrated STARNET guard,
+# chosen from those who pinged in the window before BOUNDARY; silent sessions
+# never gate. The script still accepts several lines, but waiting for every
+# guard turned one silent guard into a missed slot (13:00, 2026-09-30).
 # BOUNDARY must be a :00/:30 ping-window open and DEADLINE at most 25 min after
 # it, so one arm never spans two windows. Re-arm per window.
 #
@@ -50,9 +54,11 @@
 # two sessions ("+").
 #
 # NOT checked in here (no DB access from a shell; postgres-readonly is an MCP
-# tool): the arming check that the open sessions are exactly the expected
-# STARNET set and that no non-STARNET session is open. Run it right before
-# arming.
+# tool): the arming check, run right before arming. The gating guard's session
+# is open, pinged in the window before BOUNDARY, and its UA is calibrated and
+# shared by no other session open at arming. Record which other sessions are
+# open, STARNET or not: they do not gate, and their pings may land during the
+# switchover.
 #
 # Fail closed everywhere. Every external call is bounded by timed(), which
 # kills the whole process group (gh ignores SIGALRM; railway's node wrapper

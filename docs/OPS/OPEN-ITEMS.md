@@ -5130,3 +5130,56 @@ email at all. Is that intended? (Vishnu is deciding for Bethel, 2026-09-30.)
 Fix: count `sent`, `skipped_no_client` and `failed` separately, and record the skip as a skip
 (for example `daily_report_email_skipped_at`, or a reason column) rather than as a send. Check
 every reader of `daily_report_email_sent` before changing it. **Size S, Tier 1.**
+
+**Updated 2026-09-30 — Phase 0 answered "is that intended?": no, it is a bug. BUILT as D24**, on
+`fix/daily-report-recipients`, not merged.
+- **Why it's a bug:** since v36 `client_sites` is the source of truth (`routes/clients.ts:63`),
+  and the incident alert already fans out through it. The daily report was the only
+  client-facing email still reading `clients.site_id`.
+- **The STARNET client** (primary site Cristo Rey, linked to Bethel through `client_sites` on
+  2026-08-21) has received **none** of Bethel's 65 daily reports. 54 were no-client skips
+  flagged as sent; 11 went to a test client that was Bethel's only primary-site client from
+  2026-09-22 until it was deactivated on 2026-09-30. Cristo Rey itself was deactivated on
+  2026-09-30 00:35 PT.
+- **Elsewhere:** six Star Guard (test tenant) sites reach a client only through `client_sites`,
+  and one `starnet` site has two primary clients, of which the old code emailed one.
+- **Another reader of the flag:** `scripts/ops/triage.sh` used `daily_report_email_sent_at` as
+  its email-liveness signal; it now counts reports due by D24's rule.
+- **Tier 2 for the merge, not the "Tier 1" above:** it starts a new email stream to STARNET's
+  client (POLICY.md Tier 2). Decisions, proof and gate are in D24.
+- **The durable skip record** is split out as N163; the reason is logged and counted, not
+  stored.
+
+## New from the D22 merge and N161 (2026-09-30)
+
+### N162 — self-host the web fonts (`next/font/local`) so a Google Fonts outage cannot fail a web build, or block an API merge
+
+verified: `apps/web/app/layout.tsx:2` is the only Google font load (`import { Inter,
+Barlow_Condensed, DM_Sans } from 'next/font/google'`).
+- **What happened:** on 2026-09-30 PR #87's Vercel preview for `46cfe13` failed at 14:34:04Z,
+  44 s after Vercel marked the commit pending (14:33:20Z). Vercel inspect showed a `next/font`
+  Google Fonts fetch failure (a TypeError reading '1' in the google loader). The preview for `0a55bd3`, with identical web
+  code, had passed at 14:13Z.
+- **Why it mattered:** the failed commit status made #87 `UNSTABLE`, and
+  `scripts/ops/proxy-merge.sh` merges only when `CLEAN`. So a web-font outage blocked an API
+  merge until Vishnu redeployed the preview.
+- **Fix:** vendor the woff2 files for the three families, and only the weights used, under
+  `apps/web` (all OFL-licensed). Switch to `next/font/local` with the same CSS variables. Prove
+  it with a build that has no network access. Downloading the font files needs Vishnu's go
+  (file names and sizes stated first).
+- **Size S. Tier 1** (web code; a merge to main also restarts Railway, so it rides with an API
+  PR or is gated).
+
+### N163 — follow-up to D24: a durable record of why a daily report was not sent
+
+Vishnu, 2026-09-30: logs and counters now; the durable skip column as a follow-up.
+- **The gap:** since D24 a skipped shift (no client, client access disabled, company inactive)
+  stays `daily_report_email_sent = false`, and its reason exists only in the Railway log line
+  `[email] sendDailyShiftReport: skipped — <reason> for site "<site>" (shift <id>)` and the job's
+  counters. Railway keeps logs for about 30 days. After that, "skipped", "failed in both runs" and
+  "the job never ran" cannot be told apart for a shift.
+- **Proposal:** an expand-only migration (its own step, column first) adding
+  `daily_report_skipped_at` and `daily_report_skip_reason`. Write them on every skip, without
+  touching `daily_report_email_sent`. Exclude both from `LATCH_COLUMNS` and say so in the
+  `services/shiftLatches.ts` docblock. Teach `scripts/ops/triage.sh` to report skip counts.
+- **Size S. Tier 1** (migration plus a code change, gated merges).
