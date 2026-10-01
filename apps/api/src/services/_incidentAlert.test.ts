@@ -19,6 +19,12 @@
  * assertion below is NO-THROW, not a rejected promise — a test that awaited a
  * settled rejection would pass against the broken code.
  *
+ * UPDATE 2026-09-30 (D24): sendIncidentAlert now renders INSIDE the async
+ * callback, so a render that throws rejects only that recipient's promise and
+ * is reported under stage=render. scripts/test-daily-report-recipients.ts
+ * (C16) proves that against a real database. This file still pins the renderer
+ * itself, and the paragraph above is kept as history.
+ *
  * Two properties, matching the two directions this can regress:
  *   - severity NULL renders without throwing, emits no severity badge, keeps
  *     the timestamp span, and leaks neither "NULL" nor "undefined" into the
