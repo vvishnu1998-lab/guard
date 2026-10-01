@@ -57,6 +57,7 @@ import {
 import { siteLocalDayRange } from '../services/dateRange';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
 import { insertNotification } from '../services/notifications';
+import { notifyShiftScheduleEdited } from '../services/shiftEditPush';
 import {
   isLongShift, longShiftConfirmBody, readLongShiftConfirm, LONG_SHIFT_CONFIRM_FLAG,
 } from '../constants/longShift';
@@ -2386,54 +2387,17 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     // time; that is the whole point of the edit reaching them. Pulled out of
     // the transaction and fire-and-forget after the response, so a push
     // failure can never undo a committed edit — same shape as reassign.
+    // The row, push and wording live in services/shiftEditPush.ts, which the
+    // N160 DST correction sends through too.
     if (shift.guard_id) {
-      const tz = (shift.site_tz as string | null) ?? 'America/Los_Angeles';
-      const day = new Intl.DateTimeFormat('en-US', {
-        month: 'short', day: 'numeric', timeZone: tz,
-      }).format(newStart);
-      const from = new Intl.DateTimeFormat('en-US', {
-        hour: 'numeric', minute: '2-digit', timeZone: tz,
-      }).format(newStart);
-      const to = new Intl.DateTimeFormat('en-US', {
-        hour: 'numeric', minute: '2-digit', timeZone: tz,
-      }).format(newEnd);
-
-      // The old query carried `AND fcm_token IS NOT NULL`. That filter is
-      // redundant now: getActivePushToken returns null when the guard has no
-      // active device, which is precisely what the guard below branches on.
-      const editTitle = `Shift time changed at ${shift.site_name}`;
-      const editBody  = `Now ${day}, ${from} – ${to}. Tap to view details.`;
-      const editData  = {
-        type: 'shift_schedule_edited',
-        shift_id: id,
-        scheduled_start: newStart.toISOString(),
-        scheduled_end:   newEnd.toISOString(),
-      };
-      // Row unconditionally; the push is best-effort on top of it. A guard
-      // whose shift moved needs the new time whether or not their handset has
-      // an active device row.
-      insertNotification({
-        guardId: shift.guard_id,
-        type:    'shift_schedule_edited',
-        title:   editTitle,
-        body:    editBody,
-        data:    editData,
-        shiftSessionId: null,
-      })
-        .then(async (notifId) => {
-          const token = await getActivePushToken(shift.guard_id);
-          if (!token) return;
-          return sendPushNotification({
-            token,
-            title: editTitle,
-            body:  editBody,
-            data:  editData,
-            notificationId: notifId,
-            channelId:      channelForType('shift_schedule_edited'),
-            collapseId:     collapseIdFor('shift_schedule_edited', { shift_id: id }),
-          });
-        })
-        .catch((err) => console.error('[shifts.edit] FCM push failed:', err));
+      notifyShiftScheduleEdited({
+        guardId:  shift.guard_id,
+        shiftId:  id,
+        siteName: shift.site_name,
+        siteTz:   shift.site_tz as string | null,
+        newStart,
+        newEnd,
+      }).catch((err) => console.error('[shifts.edit] FCM push failed:', err));
     }
     return;
   } catch (err: any) {
