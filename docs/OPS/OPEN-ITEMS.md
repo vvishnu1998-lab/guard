@@ -1018,6 +1018,17 @@ Currently unobservable in production: all 23 sites are `America/Los_Angeles`.
 
 **Size S each. Tier 1.**
 
+**Updated 2026-10-01 (N160, D25).** Both defects are fixed on `fix/n160-repeat-days-dst`, not
+merged: repeat_days builds each window in SQL at the site's wall clock, and single and
+repeat_days refuse a deactivated site. Two statements above had gone wrong by then:
+- **The line numbers.** On `a83bae0` the window loop was at `routes/shifts.ts:462–490` (the
+  `setHours` at `:485`), the overlap checks at `:507–566`, and the INSERT at `:577–589`.
+- **"Currently unobservable" was false.** The server runs UTC, so the drift shows whenever a
+  series crosses a DST change at a site whose zone observes DST. Bethel AME Church's 2026-11-01
+  shift is the live case (N160).
+The coupling warning still holds, and the fix keeps it: the checks and the INSERT read the same
+windows.
+
 ---
 
 **N49. `repeat_days` runs N pre-loop overlap queries where one `unnest` would do.**
@@ -5100,6 +5111,36 @@ the code fix ships, so that no new drifted series appears after the correction.
 **Size S (code) + S (data correction). Tier 1 for the code (gated merge); Tier 2 for the data
 correction (a production write, Vishnu present). Due before 2026-11-01.**
 
+**Updated 2026-10-01 — BUILT (D25)** on `fix/n160-repeat-days-dst`, not merged or deployed.
+- **The code fix:** repeat_days windows at the site's wall clock; single and repeat_days refuse
+  a deactivated site (D25, decisions 1–3).
+- **The correction:** `src/ops/n160DstCorrection.ts` (D25, decision 4).
+- **The detector above is superseded.** It reads only future scheduled rows, so it went blind
+  once October's Sundays completed; the harness shows it returning nothing for the Bethel shape.
+  The script instead:
+  - reads each series' first unedited shift, whatever its status;
+  - compares start AND end;
+  - groups a series by insert gap, not by creation minute;
+  - refuses a shift whose date the old loop also moved, or that an admin edited.
+- **Production plan, read-only, 2026-10-01 about 10:15 PT, and the same at 10:55 PT after the
+  review's fixes:**
+  - 1 correction: Bethel `4cf22350` to 09:00–15:00 PST;
+  - 1 refusal: a 375 Shopping Complex shift an admin edited;
+  - 0 suspects.
+- **Runbook** (Tier 2, Vishnu present; after the deploy is verified; not 08:55–09:05 PT):
+  1. Locate the build: `railway ssh -s guard -e production -- sh -c 'pwd; ls dist/ops'`.
+  2. The dry run: `railway ssh -s guard -e production -- node dist/ops/n160DstCorrection.js`.
+     Read every line: corrections, refusals, suspects.
+  3. Apply: `railway ssh -s guard -e production -- node dist/ops/n160DstCorrection.js --apply --expect=N`,
+     with N from the dry run. Add `--confirm-long` only if the dry run marked a shift over
+     12 h.
+  4. Run the dry run again: it should plan 0. Then read the audit rows and the guard's
+     notification row through the read-only connection.
+  Refused and suspect shifts are fixed by hand in admin, after Vishnu reads them.
+  5. After the run, remove `src/ops/n160DstCorrection.ts` and the harness's C section in the next
+     code PR. The fixed route makes no new drift, so nothing is left for the script to find.
+- **Left:** the deploy (gated), then the correction, both before 2026-11-01.
+
 ### N161 — the daily report email counts skips as "sent", in the log and in the database
 
 verified at `a8ba597`: `jobs/dailyShiftEmail.ts:35–38` does `await sendDailyShiftReport(shift.id);
@@ -5150,6 +5191,10 @@ every reader of `daily_report_email_sent` before changing it. **Size S, Tier 1.*
 - **The durable skip record** is split out as N163; the reason is logged and counted, not
   stored.
 
+**Updated 2026-10-01 — SHIPPED (D24):** PR #88, `a83bae0b`, 2026-09-30 21:04:22 PT. The
+2026-10-01 09:00 PT run sent Bethel's 2026-09-30 report to STARNET's client and left the 8
+no-client skips unflagged; details in D24.
+
 ## New from the D22 merge and N161 (2026-09-30)
 
 ### N162 — self-host the web fonts (`next/font/local`) so a Google Fonts outage cannot fail a web build, or block an API merge
@@ -5183,3 +5228,29 @@ Vishnu, 2026-09-30: logs and counters now; the durable skip column as a follow-u
   touching `daily_report_email_sent`. Exclude both from `LATCH_COLUMNS` and say so in the
   `services/shiftLatches.ts` docblock. Teach `scripts/ops/triage.sh` to report skip counts.
 - **Size S. Tier 1** (migration plus a code change, gated merges).
+
+## New from N160 (2026-10-01)
+
+### N164 — assign-slots creates shifts at a deactivated site
+
+verified: `routes/scheduling.ts:751` reads `SELECT company_id, timezone FROM sites WHERE id = $1`
+and never checks `sites.is_active`. specific_dates always refused a deactivated site; single and
+repeat_days refuse one since N160 (D25, decision 3). Vishnu, 2026-10-01: slot assignment is filed
+for later. STARNET has 2 inactive sites, so this is reachable.
+- **Fix:** select `is_active` and answer the same 409 before any write. Check that the web's
+  assign-slots caller shows the message.
+- **Size XS. Tier 1.**
+
+### N165 — the create modal's repeat base is built in the browser's zone, and one comment is now wrong
+
+verified: `apps/web/components/admin/ScheduleShiftModal.tsx` builds the single and repeat_days
+base instants with `lib/shiftWindow.ts` `localShiftWindow`, the wall clock in the BROWSER's zone
+(only specific_dates resolves at the site). The server fix (N160) reads that base at the site,
+so the result is right only while the admin's browser is in the site's zone, which holds today
+(every site and admin is Pacific). The comment at `:291`, "Every day of the series has this
+duration: the server copies it", has been false since N160: windows on a DST night are an hour
+longer or shorter. The web still shows the server's 409 label for the night it did not measure,
+so nothing breaks.
+- **Fix:** build the base with `zonedInputsToISO` at the site, as specific_dates' check does, and
+  correct the comment. Ships with the next web change.
+- **Size XS. Tier 1.**

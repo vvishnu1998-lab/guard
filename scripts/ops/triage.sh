@@ -383,6 +383,7 @@ c_schema_applied() {
   # replays every file in array order on each invocation, so reaching vM
   # implies running vN only because the loop has no way to skip one.
   map="$(cat <<'MAP'
+v81|constraint|shifts_end_after_start
 v80|index|idx_clock_in_verifications_verified_at
 v79|dataonly|recomputes expires_at onto the locked tiers; creates no catalog object
 v78|column|checkpoint_scans.legal_hold_at

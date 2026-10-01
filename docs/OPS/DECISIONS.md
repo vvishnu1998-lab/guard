@@ -656,6 +656,25 @@ Not covered: half-open TCP (a hang, not a crash); CI, which has no Postgres.
 
 ### D24. The daily shift report goes to every active client linked to the site through `client_sites`; a skip is never flagged sent.
 
+**Status 2026-10-01 — SHIPPED.** PR #88 merged as `a83bae0b` at 21:04:22 PT on 2026-09-30 by
+gate route PROXY, on the D23 one-guard gate (GRD0015's 21:04:10 ping). Railway deployment
+`c7f59660` SUCCESS; `/health` reported `a83bae0b` from 21:05:53 PT. The first run on it,
+2026-10-01 09:00 PT, checked at 09:25 PT from Railway logs, the database and Sentry:
+- one `[daily-email] Starting` line (16:00:00.919Z) and one `Done` line, `sent: 1 (partial: 0),
+  skipped: 8 (no_client 8), failed: 0; emails delivered: 1, failed: 0`. No other deployment and
+  no error line in the window, so no double send;
+- Bethel AME Church's 2026-09-30 shift (`605b067a`) was flagged at 09:00:01.502 PT, the only
+  shift the run flagged. Its one recipient is STARNET's client, linked through `client_sites`.
+  The 8 shifts at sites with no client are still unflagged;
+- Sentry: no netraops-api issue with an event since 07:00 PT, and no event tagged
+  `flow:daily_shift_report` in 24 h. A 14-day control query returned events, so the search
+  works;
+- `scripts/ops/triage.sh`'s email-liveness queries, run as written: last daily client report
+  0.5 h ago, 1 report due in the last 26 h, ALARM none;
+- STARNET's admin confirmed the same morning that STARNET is receiving the daily reports.
+
+Earlier status, kept as history:
+
 **Status 2026-09-30 — BUILT, not merged or deployed**, on `fix/daily-report-recipients`
 (OPEN-ITEMS N161). Decided by Vishnu after the N161 Phase 0 the same day:
 1. **Recipients:** every active client linked to the site through `client_sites`, in the site's
@@ -678,9 +697,10 @@ Not covered: half-open TCP (a hang, not a crash); CI, which has no Postgres.
    failures. The incident alert gets the same render fix.
 7. **Counters:** the job logs `sent (partial), skipped (reasons), failed; emails delivered,
    failed`. `scripts/ops/triage.sh` counts reports due by the same rule.
-- **Not in D24:** Bethel's 2026-09-30 report (shift `605b067a`), which the old code skips on
-  2026-10-01; Vishnu accepted it as lost, with no production write. The durable skip column
-  (N163).
+- **Not in D24:** the durable skip column (N163). (Corrected 2026-10-01: this bullet also
+  listed Bethel's 2026-09-30 report, shift `605b067a`, as accepted lost, because the old code
+  would have skipped it in the 2026-10-01 run. It was not lost: the merge landed the evening
+  before, and that run sent it.)
 - **Merge gate:** Tier 2, because it starts daily reports to STARNET's client (POLICY.md Tier
   2 covers anything sent to STARNET's people or its guards). Vishnu present; never 08:55–09:05 PT, because jobs
   have no lock and overlapping containers could send the 09:00 run twice. Vishnu confirms the
@@ -694,6 +714,62 @@ Not covered: half-open TCP (a hang, not a crash); CI, which has no Postgres.
     could not see that case.
   - The single-client send payload is byte-identical to origin/main's (4,666 bytes).
   - The existing email tests pass.
+
+---
+
+## 2026-10-01 — repeat series and DST
+
+### D25. A repeat_days series is the base's wall clock at the site on every date; drifted shifts are corrected by a script in the guard container.
+
+**Status 2026-10-01 — BUILT, not merged or deployed**, on `fix/n160-repeat-days-dst`
+(OPEN-ITEMS N160). Decided by Vishnu after the N160 Phase 0 the same day:
+1. **Wall-clock end.** Each date's start and end are the base's local times at the site, as on
+   specific_dates. An 18:00 → 06:00 post stays covered until 06:00 on both DST nights: 13 h in
+   autumn, 11 h in spring. A night over 12 h asks for the U5 confirm, judged per date.
+2. **The repeated hour.** On 2026-11-01 the local hour 01:00–01:59 happens twice. Every date,
+   day 0 included, takes Postgres's reading (the later, PST, instant), as specific_dates does.
+   The web sends the earlier (PDT) instant for day 0, so day 0 can land an hour after what was
+   sent.
+3. **Deactivated sites.** single and repeat_days now refuse one, with specific_dates' 409.
+   assign-slots still does not check: filed as N164.
+4. **The correction** is `src/ops/n160DstCorrection.ts`, run inside the guard container with
+   `railway ssh`. Dry run by default; `--apply --expect=N` writes only when the plan holds the
+   dry run's count. Each correction makes the admin edit's writes and sends its notice, under
+   the super-admin token's sub with reason `N160 DST correction`. Everything commits in one
+   transaction, and it can be re-run safely.
+5. **Series the rows cannot settle**, because their reference shift may itself be wrong, are
+   listed for Vishnu's review and never corrected.
+6. **Timing:** the code fix this week, the correction right after it is live, both before
+   2026-11-01.
+- **Found while building it.** An admin's later edit of one shift in a series looks like drift.
+  Production has one: a 375 Shopping Complex series whose shifts on 09-29 and 10-01 were edited
+  on 09-29 and 09-30. A shift with a `shift_schedule_audit` row is never corrected, and never
+  serves as the reference.
+- **Not `railway run`,** which Phase 0 proposed: the guard service's `DATABASE_URL` is Railway's
+  private host, which does not resolve from a workstation. The script ships in the image
+  (`dist/ops/`).
+- **Merge gate:** Tier 2 (this file changes; POLICY.md), on the PROXY route with the D23 gate,
+  and never 08:55–09:05 PT. The correction is Tier 2 on its own: Vishnu present, after the
+  deploy is verified.
+- **Proof (2026-10-01, local Postgres 18.6 at Etc/UTC,
+  `apps/api/scripts/test-n160-repeat-days-dst.ts`):**
+  - 53/0 with the process clock at UTC, America/Los_Angeles and Asia/Kolkata.
+  - origin/main, the negative control, fails exactly its predicted checks: 21 at UTC and
+    Asia/Kolkata, 17 at America/Los_Angeles, where the Bethel case passes. The first prediction
+    was wrong on one check: on main a Sunday 00:30 series writes Sunday Nov 1 twice and no
+    Nov 22, so its row count comes out right.
+  - 18 mutations (6 of the route, 12 of the correction) each fail exactly their predicted set.
+  - One verifier, the same day: no must-fix. Its three should-fix gaps in the correction are
+    closed. A shift is corrected only by the exact UTC-offset change the old loop made, which
+    stops a second series an hour apart from being "corrected". The suspect window starts at the
+    series' first shift, edited or not. Each UPDATE's result is checked against the plan.
+    Mutations 17–19 are those three cases.
+  - `test-active-shift-end-edit.ts` 115/0 at UTC and America/Los_Angeles.
+  - The correction's planner SQL, captured from the module and run read-only on production at
+    about 10:15 PT and again at 10:55 PT after the review's fixes (`$1` replaced by `NOW()`,
+    nothing else): 1 correction, Bethel `4cf22350` to
+    09:00–15:00 PST (17:00–23:00 UTC), no overlap and no session; 1 refusal, the edited shift
+    above; 0 suspects.
 
 ---
 

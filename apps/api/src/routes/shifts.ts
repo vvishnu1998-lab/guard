@@ -4,7 +4,6 @@ import * as Sentry from '@sentry/node';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { generateTaskInstancesForShift } from '../services/tasks';
-import { dowInTimeZone } from '../services/siteTime';
 import { validateAtSite } from '../services/geofence';
 import { streamS3Object, extractS3Key, headS3Object } from '../services/s3';
 import { idempotent } from '../services/idempotency';
@@ -57,6 +56,7 @@ import {
 import { siteLocalDayRange } from '../services/dateRange';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
 import { insertNotification } from '../services/notifications';
+import { notifyShiftScheduleEdited } from '../services/shiftEditPush';
 import {
   isLongShift, longShiftConfirmBody, readLongShiftConfirm, LONG_SHIFT_CONFIRM_FLAG,
 } from '../constants/longShift';
@@ -437,14 +437,18 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
     return res.status(400).json({ error: `${LONG_SHIFT_CONFIRM_FLAG} must be true or false` });
   }
 
-  // Verify site belongs to this company. Grab timezone up-front for the
-  // repeat_days DOW calc below (server-local getDay() would off-by-one on
-  // shifts scheduled near local midnight).
+  // Verify site belongs to this company. Grab timezone up-front: the
+  // repeat_days windows below are built at the site's wall clock.
   const siteCheck = await pool.query(
-    'SELECT id, timezone FROM sites WHERE id = $1 AND company_id = $2',
+    'SELECT id, timezone, is_active FROM sites WHERE id = $1 AND company_id = $2',
     [site_id, req.user!.company_id]
   );
   if (!siteCheck.rows[0]) return res.status(400).json({ error: 'Site not found' });
+  // N48 defect 2: single and repeat_days never checked this, so they created
+  // shifts at a deactivated site. Same 409 as specific_dates above.
+  if (!siteCheck.rows[0].is_active) {
+    return res.status(409).json({ error: 'Site is deactivated. Reactivate it before scheduling shifts.' });
+  }
   const siteTz = siteCheck.rows[0].timezone as string;
 
   // If guard_id provided, verify it
@@ -460,33 +464,69 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
 
   // If repeat_days provided, create one shift per selected day within 4 weeks
   if (Array.isArray(repeat_days) && repeat_days.length > 0) {
-    const baseStart = new Date(scheduled_start);
-    const baseEnd   = new Date(scheduled_end);
-    const durationMs = baseEnd.getTime() - baseStart.getTime();
+    // Days of the week, 0 = Sunday … 6 = Saturday (the web's DAYS order). A
+    // value outside that set matched no day, so the request answered 201 and
+    // created nothing.
+    if (!repeat_days.every((d: unknown) => typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 6)) {
+      return res.status(422).json({ error: 'repeat_days must be whole numbers from 0 (Sunday) to 6 (Saturday).' });
+    }
 
-    // Collect all dates within 4 weeks from base start
-    const horizon = new Date(baseStart);
-    horizon.setDate(horizon.getDate() + 28); // 4 weeks
+    // N160 (N48 defect 1). Every window is the base's WALL CLOCK at the SITE
+    // on that date, built in SQL with the expression specific_dates uses
+    // above. The old loop stamped the base's time of day with a server-local
+    // setHours, UTC on Railway, so a series kept its UTC time and moved an
+    // hour in local time across a DST change inside its 28 days: a Bethel
+    // Sunday series created 2026-09-29 put its 2026-11-01 shift an hour early.
+    //
+    //   dates  the base start's local date at the site + 0..28 days (the old
+    //          inclusive horizon), kept when the local day of week is in
+    //          repeat_days
+    //   start  (date + the base start's local time) AT TIME ZONE site
+    //   end    (date + the base pair's local day offset + the base end's
+    //          local time) AT TIME ZONE site: WALL CLOCK, not elapsed
+    //
+    // Wall-clock end (Vishnu, 2026-10-01): an 18:00 -> 06:00 post stays
+    // covered until 06:00 on both DST nights, so the autumn night is 13 h and
+    // the spring night 11 h, as on specific_dates. The base pair is re-read
+    // the same way, day 0 included, so a start inside the repeated 01:00 hour
+    // of 2026-11-01 takes Postgres's reading (the later, PST, instant) on
+    // every date, as specific_dates does.
+    //
+    // SQL reads the JS-parsed request instants (toISOString), the values the
+    // checks above validated, not the raw strings.
+    const windows = await pool.query<{ d: string; s: Date; e: Date }>(
+      `WITH base AS (
+         SELECT $1::timestamptz AT TIME ZONE $3 AS ls,
+                $2::timestamptz AT TIME ZONE $3 AS le
+       ), days AS (
+         SELECT ls::date + k AS dt, ls, le FROM base, generate_series(0, 28) AS k
+       )
+       SELECT to_char(dt, 'YYYY-MM-DD')                               AS d,
+              (dt + ls::time) AT TIME ZONE $3                         AS s,
+              (dt + (le::date - ls::date) + le::time) AT TIME ZONE $3 AS e
+         FROM days
+        WHERE EXTRACT(DOW FROM dt)::int = ANY($4::int[])
+        ORDER BY dt`,
+      [reqStart.toISOString(), reqEnd.toISOString(), siteTz, repeat_days],
+    );
+    // Expanded first so the whole set is validated BEFORE any INSERT: the
+    // past-date guard rejects the entire request rather than silently
+    // dropping past dates.
+    const pending: { d: string; start: Date; end: Date }[] =
+      windows.rows.map((r) => ({ d: r.d, start: r.s, end: r.e }));
 
-    // Expand first into in-memory pairs so we can validate the whole set
-    // BEFORE any INSERT — past-date guard rejects the entire request rather
-    // than silently dropping past dates.
-    const pending: { start: Date; end: Date }[] = [];
-    const cur = new Date(baseStart);
-    // Compute DOW in the SITE's timezone so a shift-day computed near
-    // midnight isn't off-by-one because the server runs UTC. The helper
-    // moved to services/siteTime.ts (semantics unchanged) when
-    // services/tasks.ts needed the same answer for its recurrence gate —
-    // one implementation, two callers.
-    while (cur <= horizon) {
-      const dow = dowInTimeZone(cur, siteTz);
-      if (repeat_days.includes(dow)) {
-        const shiftStart = new Date(cur);
-        shiftStart.setHours(baseStart.getHours(), baseStart.getMinutes(), baseStart.getSeconds(), 0);
-        const shiftEnd = new Date(shiftStart.getTime() + durationMs);
-        pending.push({ start: shiftStart, end: shiftEnd });
+    // U5 — end after start on EVERY date, not only the base pair. A wall-clock
+    // window can invert on the spring DST date (times in or around the
+    // skipped hour), and the shifts_end_after_start CHECK would then fail the
+    // INSERT mid-loop, after the earlier rows had committed (this loop has no
+    // transaction). First offending date; nothing is written.
+    for (const p of pending) {
+      if (p.end.getTime() <= p.start.getTime()) {
+        return res.status(422).json({
+          code:  'END_NOT_AFTER_START',
+          error: `On ${p.d} these times give a shift that does not end after it starts. Adjust the times.`,
+        });
       }
-      cur.setDate(cur.getDate() + 1);
     }
 
     if (pending.some(p => isPastPacificDate(p.start))) {
@@ -512,15 +552,11 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       // separate defect, filed rather than fixed here.
       //
       // WHAT IS ACTUALLY BEING COMPARED. pending[].start/.end are the exact
-      // Date instants the INSERT below binds via toISOString(). They were
-      // built by resolving the day-of-week in SITE tz (:373) and then
-      // stamping time-of-day with a SERVER-local setHours (:376), so the
-      // intended site wall-clock can drift by an hour across a DST boundary
-      // inside the 28-day horizon. That drift is already baked into the
-      // values that get persisted — so checking these same objects checks
-      // precisely what will be written. The check is exactly as correct as
-      // the INSERT: it neither repairs that defect nor is fooled by it.
-      // Filed separately.
+      // Date instants the INSERT below binds via toISOString(): the site
+      // wall-clock windows built in SQL above (N160). Checking these same
+      // objects checks precisely what will be written. Keep it that way (the
+      // N48 coupling): a check built from one set of windows and an INSERT
+      // from another would test a different series than the one created.
 
       // (a) The series against ITSELF. Free, in memory, and runs first so an
       // internally inconsistent request never costs a round trip. A series
@@ -565,12 +601,15 @@ router.post('/', requireAuth('company_admin'), async (req, res) => {
       }
     }
 
-    // U5 — every row of the series has the template's elapsed duration
-    // (shiftEnd = shiftStart + durationMs above), so one check covers the
-    // whole series. Last, after every refusal, so the admin is never asked to
-    // confirm a request that would then fail.
-    if (isLongShift(reqStart, reqEnd) && !confirmLong) {
-      return res.status(409).json(longShiftConfirmBody(reqStart, reqEnd, siteTz));
+    // U5 — over 12 hours asks, judged per DATE. With wall-clock ends the
+    // series' windows differ by an hour on a DST night (an 18:00 -> 06:00
+    // post is 13 h on 2026-10-31), so the base pair no longer speaks for
+    // every row. The first long window in date order, with its real end.
+    // Last, after every refusal, so the admin is never asked to confirm a
+    // request that would then fail.
+    if (!confirmLong) {
+      const long = pending.find((p) => isLongShift(p.start, p.end));
+      if (long) return res.status(409).json(longShiftConfirmBody(long.start, long.end, siteTz));
     }
 
     const created: Array<Record<string, unknown>> = [];
@@ -2386,54 +2425,17 @@ router.patch('/:id', requireAuth('company_admin', 'vishnu'), async (req, res) =>
     // time; that is the whole point of the edit reaching them. Pulled out of
     // the transaction and fire-and-forget after the response, so a push
     // failure can never undo a committed edit — same shape as reassign.
+    // The row, push and wording live in services/shiftEditPush.ts, which the
+    // N160 DST correction sends through too.
     if (shift.guard_id) {
-      const tz = (shift.site_tz as string | null) ?? 'America/Los_Angeles';
-      const day = new Intl.DateTimeFormat('en-US', {
-        month: 'short', day: 'numeric', timeZone: tz,
-      }).format(newStart);
-      const from = new Intl.DateTimeFormat('en-US', {
-        hour: 'numeric', minute: '2-digit', timeZone: tz,
-      }).format(newStart);
-      const to = new Intl.DateTimeFormat('en-US', {
-        hour: 'numeric', minute: '2-digit', timeZone: tz,
-      }).format(newEnd);
-
-      // The old query carried `AND fcm_token IS NOT NULL`. That filter is
-      // redundant now: getActivePushToken returns null when the guard has no
-      // active device, which is precisely what the guard below branches on.
-      const editTitle = `Shift time changed at ${shift.site_name}`;
-      const editBody  = `Now ${day}, ${from} – ${to}. Tap to view details.`;
-      const editData  = {
-        type: 'shift_schedule_edited',
-        shift_id: id,
-        scheduled_start: newStart.toISOString(),
-        scheduled_end:   newEnd.toISOString(),
-      };
-      // Row unconditionally; the push is best-effort on top of it. A guard
-      // whose shift moved needs the new time whether or not their handset has
-      // an active device row.
-      insertNotification({
-        guardId: shift.guard_id,
-        type:    'shift_schedule_edited',
-        title:   editTitle,
-        body:    editBody,
-        data:    editData,
-        shiftSessionId: null,
-      })
-        .then(async (notifId) => {
-          const token = await getActivePushToken(shift.guard_id);
-          if (!token) return;
-          return sendPushNotification({
-            token,
-            title: editTitle,
-            body:  editBody,
-            data:  editData,
-            notificationId: notifId,
-            channelId:      channelForType('shift_schedule_edited'),
-            collapseId:     collapseIdFor('shift_schedule_edited', { shift_id: id }),
-          });
-        })
-        .catch((err) => console.error('[shifts.edit] FCM push failed:', err));
+      notifyShiftScheduleEdited({
+        guardId:  shift.guard_id,
+        shiftId:  id,
+        siteName: shift.site_name,
+        siteTz:   shift.site_tz as string | null,
+        newStart,
+        newEnd,
+      }).catch((err) => console.error('[shifts.edit] FCM push failed:', err));
     }
     return;
   } catch (err: any) {
