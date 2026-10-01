@@ -619,10 +619,14 @@ c_failures_24h() {
   # The oracle needs no new table. Both columns are stamped only AFTER a send
   # succeeds (email.ts, and shifts.daily_report_email_sent_at at the end of
   # sendDailyShiftReport), so their age is the age of the last delivered email.
+  # For daily_report_email_sent_at that has been true only since D24 (N161):
+  # before it, a shift whose site had no client was stamped as well, so the
+  # column claimed deliveries that never happened.
   #
   # Two columns, not one, because they have different cadences:
   #   missed_alert_sent_at      -- sparse; only stamps when a shift is a no-show
-  #   daily_report_email_sent_at -- daily; stamps per shift with an active client
+  #   daily_report_email_sent_at -- daily; stamps per shift delivered to at
+  #                                 least one client
   # The alarm uses GREATEST of the two: any successful email resets the clock.
   # Using missed_alert alone would false-fire on any week without a no-show.
   #
@@ -647,11 +651,18 @@ c_failures_24h() {
              FROM shifts"
   printf '  shifts_ended_last_26h: '
   psql_at "SELECT COUNT(*) FROM shifts WHERE scheduled_end > NOW() - INTERVAL '26 hours' AND scheduled_end <= NOW()"
+  # The job's own recipient rule (D24): a completed shift whose site has an
+  # active client linked through client_sites, in the site's company, with
+  # client access enabled and the company active. DISTINCT, so a site with two
+  # clients is one report due, not two.
   printf '  of_those_with_active_client (report was due): '
-  psql_at "SELECT COUNT(*) FROM shifts sh
+  psql_at "SELECT COUNT(DISTINCT sh.id) FROM shifts sh
              JOIN sites si ON si.id = sh.site_id
-             JOIN clients c ON c.site_id = si.id AND c.is_active = true
-            WHERE sh.scheduled_end > NOW() - INTERVAL '26 hours' AND sh.scheduled_end <= NOW()"
+             JOIN companies co ON co.id = si.company_id
+             JOIN client_sites cs ON cs.site_id = si.id
+             JOIN clients c ON c.id = cs.client_id AND c.is_active = true AND c.company_id = si.company_id
+            WHERE sh.status = 'completed' AND co.is_active AND si.client_access_disabled_at IS NULL
+              AND sh.scheduled_end > NOW() - INTERVAL '26 hours' AND sh.scheduled_end <= NOW()"
   printf '  ALARM: '
   psql_at "SELECT CASE
              WHEN GREATEST(MAX(missed_alert_sent_at), MAX(daily_report_email_sent_at)) IS NULL
