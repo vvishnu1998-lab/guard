@@ -12,13 +12,17 @@ import {
 import * as Location from 'expo-location';
 import { locationSignals, NO_LOCATION_SIGNALS, type LocationSignals } from '../../lib/locationSignals';
 import { router } from 'expo-router';
+import * as Sentry from '@sentry/react-native';
 import { useShiftStore } from '../../store/shiftStore';
-import { apiClient, ApiError } from '../../lib/apiClient';
+import { apiClient } from '../../lib/apiClient';
 import { uploadToS3 } from '../../lib/uploadToS3';
 import CameraCapture, { CapturedPhoto } from '../../components/CameraCapture';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
 import { syncTrayAndBadge } from '../../lib/notificationSync';
+import {
+  classifyClockOutError, isConfirmedClosed, ALREADY_CLOCKED_OUT_TITLE, alreadyClockedOutBody,
+} from '../../lib/clockOutOutcome';
 
 const GPS_TIMEOUT_MS = 3000;
 
@@ -144,11 +148,12 @@ export default function ClockOutScreen() {
         );
       }
     } catch (err: any) {
+      const failure = classifyClockOutError(err);
       // HARD REQUIREMENT: a rejected photo is NOT a failed clock-out.
       // Branch on status PLUS code — never on message prose (the 2026-08-22
       // invariant). The server gained this code in the same ship; any other
       // 4xx keeps the existing behaviour, deliberately not widened.
-      if (err instanceof ApiError && err.status === 400 && err.code === 'PHOTO_REJECTED') {
+      if (failure === 'photo_rejected') {
         setSubmitting(false);
         Alert.alert(
           "Photo Couldn't Be Saved",
@@ -167,6 +172,37 @@ export default function ClockOutScreen() {
           { cancelable: false },
         );
         return;
+      }
+      // The session was already closed — by the sweep at end + grace, by an
+      // admin closing the shift in the past (D20), by a handoff, or by this
+      // guard's own earlier clock-out whose response was lost. A 409
+      // SESSION_CLOSED says so outright. The route's 404 does not (prose
+      // only), so it only makes us ASK: refreshFromServer's answer decides,
+      // and its null branch clears the store and disarms the region
+      // (_layout.tsx). The 404's wording is never read (lib/clockOutOutcome.ts).
+      if (failure === 'session_closed' || failure === 'maybe_closed') {
+        await useShiftStore.getState().refreshFromServer();
+        const confirmed = isConfirmedClosed(failure, !!useShiftStore.getState().activeSession);
+        if (confirmed) {
+          // clock_out_reminder never auto-erases, so its banner would
+          // outlive the shift, exactly as on the success path above.
+          void syncTrayAndBadge();
+          Sentry.addBreadcrumb({
+            category: 'session_closed',
+            message: `clock-out found the session already closed (${failure})`,
+            level: 'warning',
+            data: { session_id: activeSession?.id ?? null, status: err?.status ?? null },
+          });
+          Alert.alert(
+            ALREADY_CLOCKED_OUT_TITLE,
+            alreadyClockedOutBody({ notes: notes.trim().length > 0, photo: !!url }),
+            [{ text: 'OK', onPress: () => router.replace('/(tabs)/home') }],
+            { cancelable: false },
+          );
+          return;
+        }
+        // The server still reports an open session, or the refresh failed:
+        // the 404 was not this session going away. Today's alert below.
       }
       Alert.alert('Clock-Out Failed', guardMessage(err, 'Could not end your shift. Try again, or tell your supervisor.', 'clock-out'));
     } finally {

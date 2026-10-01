@@ -21,11 +21,11 @@ import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
 import { useAuthStore } from '../store/authStore';
 import { useUnreadStore } from '../store/unreadStore';
-import { useShiftStore } from '../store/shiftStore';
+import { useShiftStore, syncShiftEndMirror, refreshIfActiveShiftEdited } from '../store/shiftStore';
 import { apiClient } from '../lib/apiClient';
 import { navigateForNotification } from '../lib/navigateForNotification';
 import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locationBackground';
-import { isUsableShiftEnd } from '../lib/shiftExpiry';
+import { shouldRearmAfterWindowChange } from '../lib/activeShiftReconcile';
 import { initSentry } from '../lib/sentry';
 import { setupAndroidChannels } from '../lib/notifications';
 import { syncTrayAndBadge, syncBadge } from '../lib/notificationSync';
@@ -232,6 +232,14 @@ export default function RootLayout() {
       if (data?.type === 'handoff_complete') {
         useShiftStore.getState().clearSession();
       }
+      // U3 (N146): an admin moved or closed this guard's ACTIVE shift (D20).
+      // Re-read it now, not at the next cold start — an extend or shorten
+      // rewrites the cached window (Time Left, SCHEDULED END, the background
+      // task's expiry gate), a close in the past clears the session. The
+      // push itself already told the guard, so no Alert here either.
+      if (data?.type === 'shift_schedule_edited') {
+        refreshIfActiveShiftEdited(data);
+      }
       // Requester-side outbound handoff refresh — accepted/declined/
       // cancelled arriving in the foreground should update the home
       // PENDING HANDOFF card faster than its 30s poll. Home reads from
@@ -333,8 +341,10 @@ export default function RootLayout() {
       SecureStore.deleteItemAsync('active_session_id').catch(() => {});
       // A stale shift end is its own hazard — it would let the task judge a
       // NEW session against a PREVIOUS shift's clock. Always cleared with the
-      // session id it belongs to.
-      SecureStore.deleteItemAsync('active_shift_end').catch(() => {});
+      // session id it belongs to. Through the same serial queue as every
+      // write of the key, so a write still in flight cannot land after this
+      // and resurrect it: this turn reads "no session" and deletes.
+      void syncShiftEndMirror();
       // Break mirror dies with the session (lib/breakState.ts).
       SecureStore.deleteItemAsync('active_break_until').catch(() => {});
       // Legacy keys — safe to delete even when unused so a downgrade to
@@ -374,30 +384,16 @@ export default function RootLayout() {
         });
         // Persist the shift's end so the background task can decide, with no
         // network and on an app the OS has killed, that a shift is over — see
-        // lib/shiftExpiry.ts. Written at the same moment as the session id and
-        // cleared with it, so the two can never describe different shifts.
+        // lib/shiftExpiry.ts. Written right after the session id and cleared
+        // with it, so the two can never describe different shifts.
         //
-        // Rejected values are DELETED rather than left alone: clock-in/step4's
-        // fallback shape sets scheduled_end === scheduled_start, and persisting
-        // that would put expiry at clock-in + grace and silence real breaches
-        // mid-shift. isUsableShiftEnd rejects it; the task then falls back to
-        // notifying, which is the safe direction.
-        if (isUsableShiftEnd(activeShift.scheduled_start, activeShift.scheduled_end)) {
-          await SecureStore.setItemAsync('active_shift_end', activeShift.scheduled_end, {
-            keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
-          });
-        } else {
-          Sentry.addBreadcrumb({
-            category: 'geofence',
-            message: 'shift end not persisted — unusable scheduled_start/end',
-            level: 'warning',
-            data: {
-              scheduled_start: activeShift.scheduled_start ?? null,
-              scheduled_end:   activeShift.scheduled_end ?? null,
-            },
-          });
-          await SecureStore.deleteItemAsync('active_shift_end').catch(() => {});
-        }
+        // syncShiftEndMirror reads the store when its turn comes, not the
+        // activeShift this effect captured, and deletes rather than writes an
+        // unusable window (clock-in/step4's fallback shape sets end === start;
+        // persisting that would silence real breaches mid-shift). A later end
+        // edit is written by the window effect below; this effect does not
+        // re-run for one, because it depends on the geofence's identity.
+        await syncShiftEndMirror();
         if (cancelled) return;
         await startBackgroundLocation(activeShift.geofence);
       } catch (err) {
@@ -408,6 +404,77 @@ export default function RootLayout() {
 
     return () => { cancelled = true; };
   }, [activeSession?.id, activeShift?.geofence]);
+
+  // U3 (N146) — the shift's WINDOW changed under an open session: an admin
+  // moved its end (D20) and refreshFromServer rewrote scheduled_start/end in
+  // place. The geofence effect above does not re-run for that (it depends on
+  // the geofence's identity, which the rewrite keeps on purpose), so this
+  // effect owns the follow-up:
+  //
+  //   1. Rewrite 'active_shift_end', so the background task's expiry gate
+  //      judges the NEW end from its next event.
+  //   2. Re-register the region, but ONLY when the OLD end had already run
+  //      out (and the new one has not) by the time the change arrived. In
+  //      that gap the gate dropped every event without recording it in
+  //      geofence_state, so the record can be wrong — it says inside while
+  //      the guard left during the gap. Re-registering makes the OS report
+  //      the current inside/outside state (a synthetic Enter or Exit), which
+  //      corrects the record and alerts on a real exit. Otherwise the region
+  //      is left alone: nothing was dropped, and a restart would only cost a
+  //      synthetic event.
+  //
+  // The first render of a session belongs to the geofence effect: it writes
+  // the session id and then the end, and that order is what keeps the two
+  // keys describing the same shift.
+  const lastWindowRef = useRef<{ sessionId: string; start: string; end: string; rearm: boolean } | null>(null);
+  useEffect(() => {
+    if (!activeSession || !activeShift) {
+      lastWindowRef.current = null;
+      return;
+    }
+    const sessionId = activeSession.id;
+    const prev = lastWindowRef.current;
+    const next = {
+      sessionId,
+      start: activeShift.scheduled_start,
+      end:   activeShift.scheduled_end,
+      rearm: false,
+    };
+    lastWindowRef.current = next;
+    if (!prev || prev.sessionId !== sessionId) return;
+    if (prev.start === next.start && prev.end === next.end) return;
+
+    // prev.rearm carries a re-arm that a second, quicker edit cancelled (its
+    // cleanup below) before it ran.
+    next.rearm = shouldRearmAfterWindowChange(prev.rearm, prev.end, next.end, Date.now());
+    Sentry.addBreadcrumb({
+      category: 'geofence',
+      message: 'shift window changed — syncing active_shift_end',
+      level: 'info',
+      data: { session_id: sessionId, old_end: prev.end, new_end: next.end, rearm: next.rearm },
+    });
+
+    let cancelled = false;
+    (async () => {
+      await syncShiftEndMirror();
+      if (cancelled || !next.rearm) return;
+      const st = useShiftStore.getState();
+      if (st.activeSession?.id !== sessionId || !st.activeShift?.geofence) return;
+      // The task needs the session id as much as the end; rewrite it too so
+      // the re-armed region can never fire against a missing key.
+      await SecureStore.setItemAsync('active_session_id', sessionId, {
+        keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+      });
+      if (cancelled) return;
+      await startBackgroundLocation(st.activeShift.geofence);
+      next.rearm = false;
+    })().catch((err) => {
+      console.warn('[bg-loc] re-arm after end edit failed:', err);
+      Sentry.captureException(err, { tags: { flow: 'geofence_rearm_end_edit' } });
+    });
+
+    return () => { cancelled = true; };
+  }, [activeSession?.id, activeShift?.scheduled_start, activeShift?.scheduled_end]);
 
   if (!fontsLoaded || status === 'unknown') return null;
 
