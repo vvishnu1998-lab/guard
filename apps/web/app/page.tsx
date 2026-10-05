@@ -7,6 +7,7 @@ import NavBar from '../components/marketing/NavBar';
 import HeroSection from '../components/marketing/HeroSection';
 import ContactForm from '../components/marketing/ContactForm';
 import LogoImage from '../components/marketing/LogoImage';
+import Testimonial from '../components/marketing/Testimonial';
 
 export const metadata: Metadata = {
   alternates: { canonical: '/' },
@@ -142,6 +143,9 @@ export default function LandingPage() {
           </div>
         </div>
       </section>
+
+      {/* ── TESTIMONIAL ─────────────────────────────────────────────────────── */}
+      <Testimonial />
 
       {/* ── HOW IT WORKS ────────────────────────────────────────────────────── */}
       <section id="how-it-works" className="relative z-10 py-28 px-6 border-t border-white/[0.05]">

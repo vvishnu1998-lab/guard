@@ -4,6 +4,7 @@ import FadeSection from '../../components/marketing/FadeSection';
 import NavBar from '../../components/marketing/NavBar';
 import ContactForm from '../../components/marketing/ContactForm';
 import LogoImage from '../../components/marketing/LogoImage';
+import Testimonial from '../../components/marketing/Testimonial';
 
 // Landing page for the printed-brochure QR codes (https://netraops.com/demo, apex
 // 308s to www). Walkthrough video above the same contact form the homepage uses.
@@ -67,6 +68,9 @@ export default function DemoPage() {
           </FadeSection>
         </div>
       </section>
+
+      {/* ── TESTIMONIAL (no walkthrough link — this page IS the walkthrough) ── */}
+      <Testimonial showWalkthroughLink={false} />
 
       {/* ── CONTACT ─────────────────────────────────────────────────────────── */}
       <section id="contact" className="relative z-10 py-28 px-6 border-t border-white/[0.05]">
