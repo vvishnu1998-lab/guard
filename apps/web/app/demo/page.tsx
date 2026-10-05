@@ -69,7 +69,7 @@ export default function DemoPage() {
         </div>
       </section>
 
-      {/* ── TESTIMONIAL (no walkthrough link — this page IS the walkthrough) ── */}
+      {/* ── TESTIMONIAL (story button only — this page IS the walkthrough) ──── */}
       <Testimonial showWalkthroughLink={false} />
 
       {/* ── CONTACT ─────────────────────────────────────────────────────────── */}

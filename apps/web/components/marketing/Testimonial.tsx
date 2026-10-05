@@ -5,10 +5,13 @@ import FadeSection from './FadeSection';
 // QUOTE and the attribution are VERBATIM as approved — do not edit a word,
 // and do not add a title, city, photo, logo, metric or site name.
 // Layout follows the "STARNET Testimonial & Case Study — Sample" canvas,
-// artboard A. Its "Read the Starnet story" button is deliberately absent:
-// the case study page does not exist yet.
+// artboard A: the "Read the Starnet story" button, then the walkthrough link.
+// The button shows everywhere; /demo hides only the walkthrough link (it would
+// point at the page it sits on).
 
-const QUOTE =
+// Exported for app/customers/starnet/page.tsx, which renders the same quote.
+// One constant, so the two pages cannot drift apart.
+export const QUOTE =
   'Before NetraOps, I found out about a problem when the client called. Now I know a guard is late or off post before they do, every shift is on the record, and my client gets their reports without asking me. It runs on the phones my guards already carry.';
 
 export default function Testimonial({ showWalkthroughLink = true }: { showWalkthroughLink?: boolean }) {
@@ -64,17 +67,22 @@ export default function Testimonial({ showWalkthroughLink = true }: { showWalkth
             </figcaption>
           </figure>
 
-          {showWalkthroughLink && (
-            <div>
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-3" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>
+            <Link
+              href="/customers/starnet"
+              className="inline-flex items-center min-h-[44px] rounded-lg bg-[#C9A84C] hover:bg-[#D4B560] px-[22px] text-[#0B1526] text-sm font-bold uppercase tracking-[0.08em] transition-colors"
+            >
+              Read the Starnet story
+            </Link>
+            {showWalkthroughLink && (
               <Link
                 href="/demo"
                 className="inline-flex items-center min-h-[44px] text-white hover:text-[#C9A84C] text-[15px] font-bold transition-colors"
-                style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}
               >
                 Watch the 3-minute walkthrough&nbsp;<span aria-hidden="true">→</span>
               </Link>
-            </div>
-          )}
+            )}
+          </div>
         </FadeSection>
       </div>
     </section>

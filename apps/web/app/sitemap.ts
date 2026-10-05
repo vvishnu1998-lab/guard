@@ -8,6 +8,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${base}/`, changeFrequency: 'monthly', priority: 1 },
     // Printed-brochure QR codes point here (apex 308s to www); no nav link.
     { url: `${base}/demo`, changeFrequency: 'monthly', priority: 0.7 },
+    // Linked from the homepage testimonial; no nav or footer link.
+    { url: `${base}/customers/starnet`, changeFrequency: 'monthly', priority: 0.6 },
     { url: `${base}/support`, changeFrequency: 'monthly', priority: 0.5 },
     { url: `${base}/security`, changeFrequency: 'monthly', priority: 0.5 },
     { url: `${base}/privacy`, changeFrequency: 'yearly', priority: 0.3 },
