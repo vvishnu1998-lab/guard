@@ -5257,6 +5257,11 @@ so nothing breaks.
 
 ## New from Company Profile, Phase A (2026-10-06)
 
+**Status 2026-10-06 — PR #92 SHIPPED** (schema_v82, the `POINTER_COLUMNS` entry, the v82 hand-apply
+scripts and the triage map line). v82 was hand-applied by Vishnu before the merge; merged as `deab5eb`
+at 12:06:02 PT by PROXY (gating guard GRD0024); Railway `80e63900` SUCCESS. Details in STATE.md,
+"Shipped 2026-10-06". The API routes (this PR) and the Settings page follow.
+
 ### N166 — POLICY.md: the deploy gate's CONDITION route cannot be met while STARNET staffs a post around the clock
 
 verified 2026-10-06 ~07:10 PT, read-only: STARNET has zero free intervals in the next 14 days

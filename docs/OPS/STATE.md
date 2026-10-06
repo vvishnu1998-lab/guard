@@ -264,7 +264,23 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-06 — PR #92, schema v82 (Company Profile, Phase A) — verified 2026-10-06 12:34 PT
+
+| thing | value |
+|---|---|
+| merge | PR #92 merged as `deab5eb` at **12:06:02 PT** by gate route **PROXY** (`scripts/ops/proxy-merge.sh --live`). Gating guard GRD0024 (`okhttp/4.12.0`, calibrated against its DB ping rows; GRD0010 was ineligible because GRD0013's open session shared its iOS UA). Boundary 12:00 PT; GRD0024's ping 12:05:47.159 PT; merged at ping age 12 s. CONDITION was unavailable (N166). |
+| v82 | **Applied by hand by Vishnu as `postgres` before the merge**: `scripts/ops/v82_company_profile.sql` (preview, ROLLBACK), then `v82_company_profile_COMMIT.sql`; summary row `14 \| t \| 4 \| t`. Verified via `postgres-readonly` at 11:49:58 PT: eight new `companies` columns with the v82 types, all NULLable, no DEFAULT; `company_profile_audit` present, FK `ON DELETE CASCADE`, readable by `claude_readonly`, 0 rows. |
+| Railway | `80e63900-c04d-4559-b709-3a6a3ee58663` **SUCCESS** at 12:08:44 PT from `deab5eb`; the previous `950665a1` was removed. |
+| health | `/health` commit `deab5eb`; `/health/crons` 20 jobs, `stale: []` (12:24 PT). |
+| switchover | 0 5xx: the old deployment served 45 requests during the build, the new one 89 by 12:24. Sentry `netraops-api` and `netraops-mobile`: 0 issues seen and 0 new, 12:08-12:24 PT. First STARNET writes on the new deployment: pings at 12:30:20, 12:30:23 and 12:31:47 PT, all 201. |
+| schema tip | **v82** applied in prod; `migrate.ts` ends `'schema_v82.sql'`. Read `migrate.ts` for the next free number, never this row. |
+| S3 IAM | `starguard-app` is allowed `s3:PutObject`, `s3:GetObject` and `s3:DeleteObject` on `guard-media-prod/company-logos/*`: `aws iam simulate-principal-policy`, run by Vishnu 2026-10-06. |
+
+---
+
 ## Schema — verified 2026-09-14 18:55 UTC (v69-v77 applied; v68 rows retained)
+
+The tip below is superseded: v82 is applied (section above). The rows stay as the record of v67-v77.
 
 | thing | value |
 |---|---|
