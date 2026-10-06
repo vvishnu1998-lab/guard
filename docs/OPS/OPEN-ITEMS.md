@@ -5254,3 +5254,33 @@ so nothing breaks.
 - **Fix:** build the base with `zonedInputsToISO` at the site, as specific_dates' check does, and
   correct the comment. Ships with the next web change.
 - **Size XS. Tier 1.**
+
+## New from Company Profile, Phase A (2026-10-06)
+
+### N166 — POLICY.md: the deploy gate's CONDITION route cannot be met while STARNET staffs a post around the clock
+
+verified 2026-10-06 ~07:10 PT, read-only: STARNET has zero free intervals in the next 14 days
+(each shift padded 30 min before its start and 20 min after its end, for early clock-in and the
+auto-close sweep). 88 S 4th St and 375 Shopping Complex are staffed back to back around the
+clock; 120 future shifts run through Mon 11-02. The same query on Bethel AME Church alone returns
+its overnight gaps, so the empty company-wide result is real, not a broken query.
+- **The gap:** `docs/OPS/POLICY.md` "Notes on applying the tiers" lists three routes. CONDITION
+  (zero active STARNET shifts and zero open STARNET sessions) cannot occur while any STARNET site
+  is staffed 24/7, so PROXY (`scripts/ops/proxy-merge.sh`, one calibrated guard, D23) is the only
+  route short of OVERRIDE. A plan that waits for a CONDITION window waits indefinitely.
+- **Fix:** a note under the three routes: CONDITION is unavailable while 24/7 coverage holds;
+  check the schedule (the gap query, with a one-site control) before planning on it. Vishnu,
+  2026-10-06: record it here; do not edit POLICY.md now.
+- **Size XS. Tier 1** (docs/OPS).
+
+### N167 — Phase B letterhead: a logo that passes the upload checks but will not decode falls back to the company name
+
+verified: `apps/api/src/services/imageDimensions.ts` reads only the PNG IHDR chunk or the first
+JPEG frame header, and `apps/api/scripts/test-image-dimensions.ts` asserts that a valid header
+followed by garbage is ACCEPTED. So `POST /api/admin/company/logo` can store an object that
+pdfkit, exceljs or a mail client cannot draw.
+- **Requirement (Vishnu, 2026-10-06):** every letterhead surface renders with such a logo by
+  falling back to the company name. A logo never fails a document.
+- **Test:** a header-valid, garbage-body PNG and JPEG through each renderer (PDF, XLSX, email):
+  the document is produced and the company name stands where the logo would be.
+- **Size: part of Phase B. Tier 1.**
