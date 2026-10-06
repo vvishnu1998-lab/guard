@@ -22,6 +22,7 @@
 import Module from 'node:module';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { jpegHeader, pngHeader } from './test-image-dimensions';
 
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost']);
 const KEEP = process.argv.includes('--keep');
@@ -81,16 +82,29 @@ async function main(): Promise<void> {
   refuseUnlessLocal();
   process.env.JWT_SECRET = JWT_SECRET;
 
+  const sentry: Array<{ kind: 'message' | 'exception'; what: unknown; ctx: any }> = [];
   inject('../src/services/sentry', {
     Sentry: {
-      captureMessage: () => 'evt',
-      captureException: () => 'evt',
+      captureMessage: (what: unknown, ctx: unknown) => { sentry.push({ kind: 'message', what, ctx }); return 'evt'; },
+      captureException: (what: unknown, ctx: unknown) => { sentry.push({ kind: 'exception', what, ctx }); return 'evt'; },
       addBreadcrumb: () => undefined,
       withScope: (fn: (s: unknown) => void) => fn({ setTag: () => undefined, setExtra: () => undefined }),
     },
     tagRequest: () => undefined,
   });
   inject('../src/services/email', stubModule('email'));
+
+  // S3, recorded. A delete also records how many companies rows pointed at
+  // the object AT THAT MOMENT: zero proves the delete ran after the commit
+  // (or after a rollback), never while the row still referenced it.
+  const S3_HOST = 'test-bucket.s3.us-east-1.amazonaws.com';
+  const s3 = {
+    puts: [] as Array<{ key: string; contentType: string; bytes: number; url: string }>,
+    deletes: [] as Array<{ url: string; referencedAtDelete: number }>,
+    putFails: false,
+    deleteOutcome: { status: 'deleted' } as Record<string, unknown>,
+  };
+  let poolRef: any = null;
   const presignedKeys: string[] = [];
   inject('../src/services/s3', stubModule('s3', {
     urlOrPresign: async (stored: string | null | undefined) => {
@@ -98,6 +112,17 @@ async function main(): Promise<void> {
       const key = stored.replace(/^https?:\/\/[^/]+\//, '');
       presignedKeys.push(key);
       return `https://signed.test/${key}?X-Amz-Expires=900`;
+    },
+    uploadBufferToS3: async (key: string, buf: Buffer, contentType: string) => {
+      if (s3.putFails) throw new Error('stub: PutObject AccessDenied');
+      const url = `https://${S3_HOST}/${key}`;
+      s3.puts.push({ key, contentType, bytes: buf.length, url });
+      return url;
+    },
+    deleteS3Object: async (url: string) => {
+      const n = (await poolRef.query('SELECT count(*)::int AS n FROM companies WHERE logo_url = $1', [url])).rows[0].n;
+      s3.deletes.push({ url, referencedAtDelete: n });
+      return s3.deleteOutcome;
     },
   }));
 
@@ -108,6 +133,7 @@ async function main(): Promise<void> {
     console.error('REFUSING: the app pool carries a connection string; unset DATABASE_URL.');
     process.exit(2);
   }
+  poolRef = pool;
   await import('express-async-errors');   // as index.ts does, before any request
   const express = (await import('express')).default;
   const router = (await import('../src/routes/companyProfile')).default;
@@ -349,6 +375,182 @@ async function main(): Promise<void> {
     check(presignedKeys.length === 0, `W7 no presign while no logo is set (got ${presignedKeys.length})`);
 
     // ══════════════════════════════════════════════════════════════════════
+    const MAX = 2 * 1024 * 1024;   // LOGO_MAX_BYTES, written out independently
+    const pad = (b: Buffer, size: number): Buffer => Buffer.concat([b, Buffer.alloc(size - b.length)]);
+    function form(bytes: Buffer, opts: { field?: string; filename?: string; type?: string; twice?: boolean } = {}): FormData {
+      const f = new FormData();
+      const blob = new Blob([new Uint8Array(bytes)], { type: opts.type ?? 'image/png' });
+      f.append(opts.field ?? 'file', blob, opts.filename ?? 'logo.png');
+      if (opts.twice) f.append(opts.field ?? 'file', blob, 'second.png');
+      return f;
+    }
+    const logoAudit = async (id: string) => (await auditRows(id)).filter((a: any) => a.field === 'logo_url');
+    const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+
+    section('L  POST /logo: every refusal happens before S3 and writes nothing');
+    {
+      const r = await call('POST', '/logo', tSecondA, form(pngHeader(512, 512)));
+      check(r.status === 403 && r.body?.code === 'NOT_PRIMARY_ADMIN', `L1 secondary admin: 403 NOT_PRIMARY_ADMIN (got ${r.status} ${show(r.body)})`);
+    }
+    {
+      const f = new FormData();
+      f.append('note', 'no file here');
+      const r = await call('POST', '/logo', tPrimaryA, f);
+      check(r.status === 400 && r.body?.code === 'LOGO_FILE_REQUIRED', `L2 multipart without a file: 400 LOGO_FILE_REQUIRED (got ${r.status} ${show(r.body)})`);
+      const r2 = await call('POST', '/logo', tPrimaryA, { file: 'not multipart' });
+      check(r2.status === 400 && r2.body?.code === 'LOGO_FILE_REQUIRED', `L2b a JSON body: 400 LOGO_FILE_REQUIRED (got ${r2.status} ${show(r2.body)})`);
+    }
+    {
+      const r = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512), { field: 'logo' }));
+      check(r.status === 400 && r.body?.code === 'INVALID_UPLOAD', `L3 file under the wrong field name: 400 INVALID_UPLOAD (got ${r.status} ${show(r.body)})`);
+      const r2 = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512), { twice: true }));
+      check(r2.status === 400 && r2.body?.code === 'INVALID_UPLOAD', `L3b two files: 400 INVALID_UPLOAD (got ${r2.status} ${show(r2.body)})`);
+    }
+    {
+      const gif = Buffer.from('GIF89a\x00\x02\x00\x02\x00\x00', 'latin1');
+      const r = await call('POST', '/logo', tPrimaryA, form(gif, { type: 'image/png', filename: 'logo.png' }));
+      check(r.status === 400 && r.body?.code === 'LOGO_UNSUPPORTED_TYPE', `L4 GIF bytes named logo.png, declared image/png: 400 LOGO_UNSUPPORTED_TYPE (got ${r.status} ${show(r.body)})`);
+      const webp = Buffer.concat([Buffer.from('RIFF\x24\x00\x00\x00WEBPVP8 ', 'latin1'), Buffer.alloc(32)]);
+      const r2 = await call('POST', '/logo', tPrimaryA, form(webp, { type: 'image/webp', filename: 'logo.webp' }));
+      check(r2.status === 400 && r2.body?.code === 'LOGO_UNSUPPORTED_TYPE', `L5 WebP: 400 LOGO_UNSUPPORTED_TYPE (got ${r2.status} ${show(r2.body)})`);
+      const r3 = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512).subarray(0, 20)));
+      check(r3.status === 400 && r3.body?.code === 'LOGO_UNREADABLE', `L6 PNG with a truncated header: 400 LOGO_UNREADABLE (got ${r3.status} ${show(r3.body)})`);
+    }
+    for (const [label, bytes, w, h] of [
+      ['PNG 255 × 255', pngHeader(255, 255), 255, 255],
+      ['PNG 2049 × 100', pngHeader(2049, 100), 2049, 100],
+      ['JPEG 200 × 150', jpegHeader(200, 150), 200, 150],
+      ['JPEG 4000 × 10', jpegHeader(4000, 10), 4000, 10],
+    ] as Array<[string, Buffer, number, number]>) {
+      const r = await call('POST', '/logo', tPrimaryA, form(bytes, { type: label.startsWith('PNG') ? 'image/png' : 'image/jpeg' }));
+      check(r.status === 400 && r.body?.code === 'LOGO_DIMENSIONS_OUT_OF_RANGE' && r.body?.width === w && r.body?.height === h,
+        `L7 ${label}: 400 LOGO_DIMENSIONS_OUT_OF_RANGE with the measured size (got ${r.status} ${r.body?.code} ${r.body?.width}×${r.body?.height})`);
+    }
+    {
+      const r = await call('POST', '/logo', tPrimaryA, form(pad(pngHeader(512, 512), MAX + 1)));
+      check(r.status === 413 && r.body?.code === 'LOGO_TOO_LARGE', `L8 2 MiB + 1 byte: 413 LOGO_TOO_LARGE (got ${r.status} ${show(r.body)})`);
+    }
+    {
+      const row = await companyRow(companyA);
+      check(s3.puts.length === 0 && s3.deletes.length === 0, `L9 no S3 call for any refusal (puts ${s3.puts.length}, deletes ${s3.deletes.length})`);
+      check(row.logo_url === null && row.logo_updated_at === null && (await logoAudit(companyA)).length === 0, 'L9 logo_url, logo_updated_at and the audit untouched');
+    }
+
+    section('U  POST /logo: upload, replace, and the failure orderings');
+    let url1 = '';
+    let url2 = '';
+    let url3 = '';
+    {
+      const before = await companyRow(companyA);
+      const r = await call('POST', '/logo', tPrimaryA, form(pad(pngHeader(256, 256), MAX), { type: 'application/octet-stream', filename: 'logo.bin' }));
+      check(r.status === 200, `U1 PNG 256 × 256 padded to exactly 2 MiB (both bounds inclusive), declared octet-stream: 200 (got ${r.status} ${r.body?.code ?? ''})`);
+      const put = s3.puts[0];
+      check(s3.puts.length === 1 && new RegExp(`^company-logos/${companyA}/${UUID}\\.png$`).test(put?.key ?? ''), `U1 one PUT at company-logos/{company_id}/{uuid}.png (got ${show(put?.key)})`);
+      check(put?.contentType === 'image/png' && put?.bytes === MAX, `U1 content type from the magic bytes, all ${MAX} bytes sent (got ${put?.contentType}, ${put?.bytes})`);
+      url1 = put?.url ?? '';
+      const row = await companyRow(companyA);
+      check(row.logo_url === url1 && url1.startsWith(`https://${S3_HOST}/company-logos/`), 'U1 logo_url stores the FULL URL, not a bare key');
+      check(!Number.isNaN(ms(row.logo_updated_at)) && ms(row.updated_at) === ms(row.logo_updated_at) && ms(row.updated_at) > ms(before.updated_at),
+        'U1 logo_updated_at set, updated_at moved with it');
+      check(r.body?.logo_url === `https://signed.test/${put?.key}?X-Amz-Expires=900`, 'U1 the response carries a presigned URL, never the stored one');
+      const audit = await logoAudit(companyA);
+      check(audit.length === 1 && audit[0].old_value === null && audit[0].new_value === url1 && audit[0].actor_admin_id === primaryA,
+        'U1 one audit row: logo_url, old NULL, new = the full URL, actor = the primary');
+      check(s3.deletes.length === 0, 'U1 nothing deleted on a first upload');
+    }
+    {
+      const before = await companyRow(companyA);
+      const r = await call('POST', '/logo', tPrimaryA, form(jpegHeader(2048, 1024), { type: 'image/jpeg', filename: 'logo.jpg' }));
+      const put = s3.puts[1];
+      url2 = put?.url ?? '';
+      check(r.status === 200 && new RegExp(`^company-logos/${companyA}/${UUID}\\.jpg$`).test(put?.key ?? '') && put?.contentType === 'image/jpeg',
+        `U2 replace with JPEG 2048 × 1024 (upper bound): 200, .jpg key, image/jpeg (got ${r.status} ${show(put)})`);
+      check((await companyRow(companyA)).logo_url === url2, 'U2 logo_url now the new object');
+      check(s3.deletes.length === 1 && s3.deletes[0].url === url1, `U2 the previous object deleted (got ${show(s3.deletes)})`);
+      check(s3.deletes[0]?.referencedAtDelete === 0, 'U2 ...and only after the commit: no row pointed at it when the delete ran');
+      const audit = await logoAudit(companyA);
+      check(audit.length === 2 && audit[1].old_value === url1 && audit[1].new_value === url2, 'U2 audit row old = previous URL, new = new URL');
+      check(ms((await companyRow(companyA)).logo_updated_at) > ms(before.logo_updated_at), 'U2 logo_updated_at advanced');
+    }
+    {
+      s3.deleteOutcome = { status: 'failed', detail: 'stub: DeleteObject AccessDenied' };
+      const sentryBefore = sentry.length;
+      const r = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512)));
+      s3.deleteOutcome = { status: 'deleted' };
+      url3 = s3.puts[2]?.url ?? '';
+      check(r.status === 200 && (await companyRow(companyA)).logo_url === url3, `U3 previous-object delete FAILS: the request still succeeds (got ${r.status})`);
+      check(s3.deletes.length === 2 && s3.deletes[1].url === url2, 'U3 the delete of the previous object was attempted');
+      const ev = sentry.slice(sentryBefore);
+      check(ev.length === 1 && ev[0].kind === 'message' && ev[0].what === 'company_logo_delete_failed' && ev[0].ctx?.tags?.reason === 'replaced',
+        `U3 reported to Sentry as company_logo_delete_failed, reason replaced (got ${show(ev.map((e) => [e.kind, e.what, e.ctx?.tags]))})`);
+    }
+    {
+      s3.putFails = true;
+      const auditBefore = (await logoAudit(companyA)).length;
+      const sentryBefore = sentry.length;
+      const deletesBefore = s3.deletes.length;
+      const r = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512)));
+      s3.putFails = false;
+      check(r.status === 502 && r.body?.code === 'LOGO_UPLOAD_FAILED', `U4 S3 PUT fails: 502 LOGO_UPLOAD_FAILED (got ${r.status} ${show(r.body)})`);
+      check((await companyRow(companyA)).logo_url === url3 && (await logoAudit(companyA)).length === auditBefore && s3.deletes.length === deletesBefore,
+        'U4 nothing written, nothing deleted');
+      const ev = sentry.slice(sentryBefore);
+      check(ev.length === 1 && ev[0].kind === 'exception' && ev[0].ctx?.tags?.step === 'logo_put', 'U4 the PUT failure is reported to Sentry');
+    }
+    {
+      // The transaction fails AFTER the PUT: the audit insert hits a missing table.
+      const thrownBefore = thrown.length;
+      const putsBefore = s3.puts.length;
+      await q('ALTER TABLE company_profile_audit RENAME TO company_profile_audit_off');
+      let r: Reply;
+      try {
+        r = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512)));
+      } finally {
+        await q('ALTER TABLE company_profile_audit_off RENAME TO company_profile_audit');
+      }
+      const orphan = s3.puts[putsBefore]?.url;
+      check(r.status === 500 && thrown.length === thrownBefore + 1, `U5 DB failure after the PUT: 500 through the error handler (got ${r.status})`);
+      check((await companyRow(companyA)).logo_url === url3, 'U5 the row still points at the previous logo (rolled back)');
+      const del = s3.deletes[s3.deletes.length - 1];
+      check(del?.url === orphan && del?.referencedAtDelete === 0, 'U5 the just-uploaded object is deleted again; the live one is not');
+    }
+    {
+      const r = await call('POST', '/logo', tPrimaryB, form(pngHeader(300, 300)));
+      const put = s3.puts[s3.puts.length - 1];
+      check(r.status === 200 && put?.key.startsWith(`company-logos/${companyB}/`), `U6 company B's primary: key under B's id (got ${put?.key})`);
+      check((await companyRow(companyA)).logo_url === url3, 'U6 A\'s logo untouched');
+    }
+
+    section('D  DELETE /logo');
+    {
+      const deletesBefore = s3.deletes.length;
+      const r = await call('DELETE', '/logo', tSecondA);
+      check(r.status === 403 && r.body?.code === 'NOT_PRIMARY_ADMIN', `D1 secondary admin: 403 NOT_PRIMARY_ADMIN (got ${r.status} ${show(r.body)})`);
+      check((await companyRow(companyA)).logo_url === url3 && s3.deletes.length === deletesBefore, 'D1 nothing changed, nothing deleted');
+      check((await call('DELETE', '/logo', tGuard)).status === 403, 'D2 a guard token: 403');
+    }
+    {
+      const before = await companyRow(companyA);
+      const auditBefore = (await logoAudit(companyA)).length;
+      const r = await call('DELETE', '/logo', tPrimaryA);
+      const row = await companyRow(companyA);
+      check(r.status === 200 && r.body?.removed === true && r.body?.logo_url === null, `D3 primary: 200, removed true, logo_url null (got ${r.status} ${show(r.body?.removed)})`);
+      check(row.logo_url === null && ms(row.logo_updated_at) > ms(before.logo_updated_at), 'D3 logo_url NULL in the DB, logo_updated_at advanced');
+      const audit = await logoAudit(companyA);
+      check(audit.length === auditBefore + 1 && audit[audit.length - 1].old_value === url3 && audit[audit.length - 1].new_value === null,
+        'D3 audit row old = the URL, new NULL');
+      const del = s3.deletes[s3.deletes.length - 1];
+      check(del?.url === url3 && del?.referencedAtDelete === 0, 'D3 the object deleted after the commit');
+    }
+    {
+      const deletesBefore = s3.deletes.length;
+      const auditBefore = (await logoAudit(companyA)).length;
+      const r = await call('DELETE', '/logo', tPrimaryA);
+      check(r.status === 200 && r.body?.removed === false, `D4 again: 200, removed false (got ${r.status} ${show(r.body?.removed)})`);
+      check(s3.deletes.length === deletesBefore && (await logoAudit(companyA)).length === auditBefore, 'D4 no delete, no audit row');
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
     section('E  error shape on every coded reply: { code, error: copy, message: copy }');
     {
       const coded = replies.filter((r) => r.status >= 400 && r.body && typeof r.body.code === 'string');
@@ -357,7 +559,8 @@ async function main(): Promise<void> {
       check(coded.length >= 30, `E1 ${coded.length} coded error replies collected`);
       check(bad.length === 0, `E2 every one carries copy in error and message, never the enum (bad: ${show(bad.slice(0, 2))})`);
     }
-    check(thrown.length === 0, `E3 no route threw (got ${thrown.length}: ${show(thrown.map(String))})`);
+    check(thrown.length === 1 && String(thrown[0]).includes('company_profile_audit'),
+      `E3 the only throw is U5's deliberate one (got ${thrown.length}: ${show(thrown.map(String))})`);
   } finally {
     if (KEEP) {
       console.log(`\n--keep: left companies ${companyIds.join(', ')} in place`);
