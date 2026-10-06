@@ -5257,10 +5257,16 @@ so nothing breaks.
 
 ## New from Company Profile, Phase A (2026-10-06)
 
-**Status 2026-10-06 — PR #92 SHIPPED** (schema_v82, the `POINTER_COLUMNS` entry, the v82 hand-apply
-scripts and the triage map line). v82 was hand-applied by Vishnu before the merge; merged as `deab5eb`
-at 12:06:02 PT by PROXY (gating guard GRD0024); Railway `80e63900` SUCCESS. Details in STATE.md,
-"Shipped 2026-10-06". The API routes (this PR) and the Settings page follow.
+**Status 2026-10-06 — PR #92 and PR #93 SHIPPED.**
+- **PR #92:** schema_v82, the `POINTER_COLUMNS` entry, the v82 hand-apply scripts and the triage
+  map line. Vishnu hand-applied v82 before the merge. Merged as `deab5eb` at 12:06:02 PT by PROXY
+  (gating guard GRD0024). Railway `80e63900` SUCCESS.
+- **PR #93:** the API routes. Merged as `66ac758` at 14:00:20 PT by **OVERRIDE**: Vishnu waived the
+  gate after the 13:30 PROXY run aborted on a silent gating guard. Railway `b553eae1` SUCCESS, and
+  0 STARNET writes landed in the restart window.
+
+Details are in STATE.md, "Shipped 2026-10-06". The Settings page (this PR) comes next; the Star
+Guard prod logo test runs from that page once it ships.
 
 ### N166 — POLICY.md: the deploy gate's CONDITION route cannot be met while STARNET staffs a post around the clock
 

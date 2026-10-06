@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-06 — PR #93, Company Profile API (Phase A) — verified 2026-10-06 14:17 PT
+
+| thing | value |
+|---|---|
+| merge | PR #93 merged as `66ac758` at **14:00:20 PT** by gate route **OVERRIDE**. The 13:30 PROXY run aborted with no merge when its gating guard, GRD0026, went silent. Vishnu then waived the single-guard gate: merge within 60 s of the first STARNET 201 ping after 14:00:00 PT from any guard, and no merge if none landed by 14:10. The first was GRD0010's ping at 14:00:07.844 PT. Prechecks passed (head `e3cf4fb` CLEAN, main `deab5eb`, deployment `80e63900` SUCCESS). One `gh pr merge --match-head-commit` merged it 9 s after the ping. |
+| Railway | `b553eae1-1d34-4549-809b-9a0d8dbdcae6` **SUCCESS** at 14:01:46 PT from `66ac758`; the previous `80e63900` was removed. No DB step: v82 shipped with #92. |
+| health | `/health` commit `66ac758`; `/health/crons` 20 jobs, `stale: []` (14:17 PT). |
+| routes | Without a token: `GET /api/admin/company` went from 404 (13:05 PT) to **401** after the deploy. `POST /api/admin/company/logo` returns **401**. `GET /api/admin/company/logo` returns 404 because there is no GET handler, by design. |
+| restart window | From the merge (14:00:20) to the switchover (14:01:46): **0 STARNET writes** across the 25 event types checked (pings, sessions, reports, notifications, missed pings and reports, breaks, scans, violations, devices and others). After the merge the old deployment served only reads; its last request was at 14:01:25. |
+| switchover | 0 5xx: the old deployment served 32 requests from 13:58, the new one 232 by 14:17. Sentry, 14:00-14:17 PT: `netraops-api` 0 issues; `netraops-mobile` only the recurring MOBILE-13, 0 new. First STARNET writes on the new deployment: GRD0024's ping (14:05:34) and report (14:05:56), both 201, then GRD0026's ping (14:11:53) and GRD0013's report (14:17:28). |
+| still to run | The prod logo upload and remove on Star Guard. Vishnu runs it from the Settings page after the web PR ships (his call, 2026-10-06). |
+
+---
+
 ## Shipped 2026-10-06 — PR #92, schema v82 (Company Profile, Phase A) — verified 2026-10-06 12:34 PT
 
 | thing | value |
