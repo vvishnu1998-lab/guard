@@ -5257,10 +5257,16 @@ so nothing breaks.
 
 ## New from Company Profile, Phase A (2026-10-06)
 
-**Status 2026-10-06 — PR #92 SHIPPED** (schema_v82, the `POINTER_COLUMNS` entry, the v82 hand-apply
-scripts and the triage map line). v82 was hand-applied by Vishnu before the merge; merged as `deab5eb`
-at 12:06:02 PT by PROXY (gating guard GRD0024); Railway `80e63900` SUCCESS. Details in STATE.md,
-"Shipped 2026-10-06". The API routes (this PR) and the Settings page follow.
+**Status 2026-10-06 — PR #92 and PR #93 SHIPPED.**
+- **PR #92:** schema_v82, the `POINTER_COLUMNS` entry, the v82 hand-apply scripts and the triage
+  map line. Vishnu hand-applied v82 before the merge. Merged as `deab5eb` at 12:06:02 PT by PROXY
+  (gating guard GRD0024). Railway `80e63900` SUCCESS.
+- **PR #93:** the API routes. Merged as `66ac758` at 14:00:20 PT by **OVERRIDE**: Vishnu waived the
+  gate after the 13:30 PROXY run aborted on a silent gating guard. Railway `b553eae1` SUCCESS, and
+  0 STARNET writes landed in the restart window.
+
+Details are in STATE.md, "Shipped 2026-10-06". The Settings page (this PR) comes next; the Star
+Guard prod logo test runs from that page once it ships.
 
 ### N166 — POLICY.md: the deploy gate's CONDITION route cannot be met while STARNET staffs a post around the clock
 
@@ -5289,3 +5295,26 @@ pdfkit, exceljs or a mail client cannot draw.
 - **Test:** a header-valid, garbage-body PNG and JPEG through each renderer (PDF, XLSX, email):
   the document is produced and the company name stands where the logo would be.
 - **Size: part of Phase B. Tier 1.**
+
+## New from the PR #93 post-deploy check (2026-10-06)
+
+### N168 — a STARNET guard's reports reach prod, but it has sent no pings since 2026-09-30
+
+verified 2026-10-06 ~14:25 PT, read-only (`postgres-readonly`). The guard is GRD0013 on
+**STARNET SECURITY** (`95505419-123e-4f70-abf1-88c7f8742d54`). Its open session
+`3884abbf-2506-43fc-957b-945bf292f62c` at Jasper clocked in at 06:02 PT and is scheduled to end
+at 22:00 PT.
+- **What the session holds:** 0 pings and 15 `missed_pings` rows, but 8 reports (07:04 to 14:17
+  PT). So the device does reach the API.
+- **History:** this guard's last ping on any session was at **2026-09-30 21:31 PT**. Its 12
+  other sessions in the last 14 days hold 44 pings between them.
+- **Hypothesis (Vishnu, unverified):** the same root as Sentry `NETRAOPS-MOBILE-13`, "Background
+  location permission denied". That issue was first seen 2026-09-29 13:55 PT and was still firing
+  at 2026-10-06 14:16 PT. Not yet checked: whether MOBILE-13's events come from this device.
+- **First step:** match MOBILE-13's events to this guard by their user or device tags. Then read
+  how the ping path handles permissions on the build this device runs (UA `NetraOps/48 …`).
+  - Do not attribute traffic by UA: GRD0010 and GRD0013 share
+    `NetraOps/48 CFNetwork/3860.700.1 Darwin/25.6.0`.
+  - A side effect: while GRD0013's session is open, GRD0010 cannot gate a PROXY merge.
+- Vishnu, 2026-10-06: log it; do not act yet.
+- **Size S, Tier 0** (read-only investigation).
