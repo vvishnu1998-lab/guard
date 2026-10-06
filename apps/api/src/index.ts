@@ -18,6 +18,7 @@ import sitesRoutes from './routes/sites';
 import guardsRoutes from './routes/guards';
 import clientsRoutes from './routes/clients';
 import adminRoutes from './routes/admin';
+import companyProfileRoutes from './routes/companyProfile';
 import exportRoutes from './routes/exports';
 import uploadRoutes from './routes/uploads';
 import clientPortalRoutes from './routes/clientPortal';
@@ -259,6 +260,9 @@ app.use('/api/tasks', tasksRoutes);
 app.use('/api/sites', sitesRoutes);
 app.use('/api/guards', guardsRoutes);
 app.use('/api/clients', clientsRoutes);
+// Before /api/admin so the narrower prefix is matched first; admin.ts has no
+// /company route of its own.
+app.use('/api/admin/company', companyProfileRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/exports', exportRoutes);
 app.use('/api/uploads', uploadRoutes);
