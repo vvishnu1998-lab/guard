@@ -5295,3 +5295,26 @@ pdfkit, exceljs or a mail client cannot draw.
 - **Test:** a header-valid, garbage-body PNG and JPEG through each renderer (PDF, XLSX, email):
   the document is produced and the company name stands where the logo would be.
 - **Size: part of Phase B. Tier 1.**
+
+## New from the PR #93 post-deploy check (2026-10-06)
+
+### N168 — a STARNET guard's reports reach prod, but it has sent no pings since 2026-09-30
+
+verified 2026-10-06 ~14:25 PT, read-only (`postgres-readonly`). The guard is GRD0013 on
+**STARNET SECURITY** (`95505419-123e-4f70-abf1-88c7f8742d54`). Its open session
+`3884abbf-2506-43fc-957b-945bf292f62c` at Jasper clocked in at 06:02 PT and is scheduled to end
+at 22:00 PT.
+- **What the session holds:** 0 pings and 15 `missed_pings` rows, but 8 reports (07:04 to 14:17
+  PT). So the device does reach the API.
+- **History:** this guard's last ping on any session was at **2026-09-30 21:31 PT**. Its 12
+  other sessions in the last 14 days hold 44 pings between them.
+- **Hypothesis (Vishnu, unverified):** the same root as Sentry `NETRAOPS-MOBILE-13`, "Background
+  location permission denied". That issue was first seen 2026-09-29 13:55 PT and was still firing
+  at 2026-10-06 14:16 PT. Not yet checked: whether MOBILE-13's events come from this device.
+- **First step:** match MOBILE-13's events to this guard by their user or device tags. Then read
+  how the ping path handles permissions on the build this device runs (UA `NetraOps/48 …`).
+  - Do not attribute traffic by UA: GRD0010 and GRD0013 share
+    `NetraOps/48 CFNetwork/3860.700.1 Darwin/25.6.0`.
+  - A side effect: while GRD0013's session is open, GRD0010 cannot gate a PROXY merge.
+- Vishnu, 2026-10-06: log it; do not act yet.
+- **Size S, Tier 0** (read-only investigation).
