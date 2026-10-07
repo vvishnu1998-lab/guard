@@ -15,14 +15,16 @@ Vercel and CI do not read this directory.
 ```
 netraops_builder.html    the tool — open it, that is all there is
 screens/                 the five source captures, in frame order
-vendor/                  html-to-image, JSZip, FileSaver, and the webfonts
+vendor/                  html-to-image, JSZip, FileSaver
 out/                     exported images (gitignored — never committed)
 ```
 
+The two webfonts are **not** in `vendor/` — they are base64 data URIs inside
+the HTML. See "Why the fonts are inlined" below.
+
 ## Opening it
 
-The tool needs `fetch()` on its own vendored files, which the `file://`
-origin blocks. Serve the directory over HTTP instead:
+Serving over HTTP is still the recommended way:
 
 ```bash
 cd marketing/play-store && python3 -m http.server 8777 --bind 127.0.0.1
@@ -32,6 +34,37 @@ Then open <http://127.0.0.1:8777/netraops_builder.html>.
 
 `--bind 127.0.0.1` matters: without it the server listens on every interface
 and anyone on the network can read the directory.
+
+Opening the file directly works too. The tool shows an amber banner when it
+detects `file://` and exports stay enabled — the fonts are inlined, so they
+survive, but Tailwind still comes from a CDN and any asset added later would
+be fetched the same way the fonts once were.
+
+## Why the fonts are inlined
+
+html-to-image rebuilds the frame as an SVG `foreignObject`, which means it has
+to **`fetch()`** every `@font-face` source and re-embed it as a data URI. Under
+`file://` that fetch is blocked — `Fetch API cannot load file:///… URL scheme
+"file" is not supported` — so the embed step silently produced no font and the
+export fell back to Arial.
+
+The failure was invisible from the page: the browser's own CSS `url()` load is
+*not* subject to that restriction, so the live preview rendered Barlow
+correctly while the exported file did not. Only the written file was wrong.
+
+Symptoms in the export were severe — "EVERY SHIFT." wrapped onto two lines in
+the fallback face, and the "Verified." subline collided with the second line.
+
+Both faces are therefore `url(data:font/woff2;base64,…)` in the `@font-face`
+rules. A data URI needs no fetch, so it survives any origin. That costs about
+84 KB of base64 in the HTML, which is the price of a tool that is correct
+however it is opened.
+
+`captureNode()` additionally awaits `document.fonts.load()` for all four faces
+it renders — Barlow 700 and Inter 400/600/700 — and then `document.fonts.ready`
+before every capture. Inter is a variable font, so each weight has to be
+requested individually; loading the family once does not guarantee the 600 and
+700 instances are ready.
 
 ## Exporting
 
@@ -120,6 +153,10 @@ past the top edge of the frame.
 
 ## Vendored dependencies
 
-`vendor/` is committed so the tool works offline and cannot break when a CDN
-moves. Tailwind still loads from its CDN — it is a dev-time convenience and
-the tool degrades to unstyled-but-working without it.
+`vendor/` holds html-to-image, JSZip and FileSaver, committed so the tool works
+offline and cannot break when a CDN moves. The two webfonts are inlined into
+the HTML instead, for the reason given above.
+
+Tailwind still loads from its CDN — it is a dev-time convenience and the tool
+degrades to unstyled-but-working without it. It is the one remaining reason the
+`file://` banner is worth heeding.
