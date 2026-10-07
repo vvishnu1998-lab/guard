@@ -17,12 +17,19 @@
  *   PGHOST=127.0.0.1 PGPORT=55482 PGUSER=tester PGDATABASE=cp_test \
  *     npx ts-node scripts/test-company-profile.ts          (from apps/api)
  *
+ * Images: a refusal that happens BEFORE the decode check (role, field, header,
+ * dimensions, size) is sent a header-only fixture (test-image-dimensions.ts);
+ * anything that reaches the decode check is sent a real image built in code
+ * (image-fixtures.ts), because a header-only file no longer decodes.
+ *
  * Checks never stop at the first failure; the exit code is the verdict.
  */
 import Module from 'node:module';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { jpegHeader, pngHeader } from './test-image-dimensions';
+import { jpegCorruptAfterHeader, jpegImage, jpegTruncated, pngCorruptAfterHeader, pngImage, pngPadded } from './image-fixtures';
+import { readImageDimensions } from '../src/services/imageDimensions';
 
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost']);
 const KEEP = process.argv.includes('--keep');
@@ -430,6 +437,19 @@ async function main(): Promise<void> {
       const r = await call('POST', '/logo', tPrimaryA, form(pad(pngHeader(512, 512), MAX + 1)));
       check(r.status === 413 && r.body?.code === 'LOGO_TOO_LARGE', `L8 2 MiB + 1 byte: 413 LOGO_TOO_LARGE (got ${r.status} ${show(r.body)})`);
     }
+    for (const [label, bytes, type] of [
+      ['PNG 512 × 512: valid IHDR, garbage image data (N167)', pngCorruptAfterHeader(512, 512), 'image/png'],
+      ['PNG 512 × 512: image data 10 rows short', pngImage(512, 512, { ctype: 2, shortRows: 10 }), 'image/png'],
+      ['JPEG 640 × 480: frame header, then garbage', jpegCorruptAfterHeader(640, 480), 'image/jpeg'],
+      ['JPEG 640 × 480: EOI cut off', jpegTruncated(640, 480), 'image/jpeg'],
+    ] as Array<[string, Buffer, string]>) {
+      // The header reader must accept the file, or the OLD check would be the one refusing it.
+      const dims = readImageDimensions(bytes);
+      const r = await call('POST', '/logo', tPrimaryA, form(bytes, { type }));
+      check(dims !== null && Math.max(dims.width, dims.height) >= 256 && r.status === 400 && r.body?.code === 'LOGO_UNREADABLE'
+        && r.body?.error === 'That image could not be read. Export it again as PNG or JPEG and retry.',
+        `L10 ${label}: the header passes (${dims ? `${dims.width}×${dims.height}` : 'NO HEADER'}), the body does not decode: 400 LOGO_UNREADABLE (got ${r.status} ${show(r.body)})`);
+    }
     {
       const row = await companyRow(companyA);
       check(s3.puts.length === 0 && s3.deletes.length === 0, `L9 no S3 call for any refusal (puts ${s3.puts.length}, deletes ${s3.deletes.length})`);
@@ -442,8 +462,8 @@ async function main(): Promise<void> {
     let url3 = '';
     {
       const before = await companyRow(companyA);
-      const r = await call('POST', '/logo', tPrimaryA, form(pad(pngHeader(256, 256), MAX), { type: 'application/octet-stream', filename: 'logo.bin' }));
-      check(r.status === 200, `U1 PNG 256 × 256 padded to exactly 2 MiB (both bounds inclusive), declared octet-stream: 200 (got ${r.status} ${r.body?.code ?? ''})`);
+      const r = await call('POST', '/logo', tPrimaryA, form(pngPadded(256, 256, MAX), { type: 'application/octet-stream', filename: 'logo.bin' }));
+      check(r.status === 200, `U1 a real PNG 256 × 256 padded (private ancillary chunk) to exactly 2 MiB (both bounds inclusive), declared octet-stream: 200 (got ${r.status} ${r.body?.code ?? ''})`);
       const put = s3.puts[0];
       check(s3.puts.length === 1 && new RegExp(`^company-logos/${companyA}/${UUID}\\.png$`).test(put?.key ?? ''), `U1 one PUT at company-logos/{company_id}/{uuid}.png (got ${show(put?.key)})`);
       check(put?.contentType === 'image/png' && put?.bytes === MAX, `U1 content type from the magic bytes, all ${MAX} bytes sent (got ${put?.contentType}, ${put?.bytes})`);
@@ -460,7 +480,7 @@ async function main(): Promise<void> {
     }
     {
       const before = await companyRow(companyA);
-      const r = await call('POST', '/logo', tPrimaryA, form(jpegHeader(2048, 1024), { type: 'image/jpeg', filename: 'logo.jpg' }));
+      const r = await call('POST', '/logo', tPrimaryA, form(jpegImage(2048, 1024), { type: 'image/jpeg', filename: 'logo.jpg' }));
       const put = s3.puts[1];
       url2 = put?.url ?? '';
       check(r.status === 200 && new RegExp(`^company-logos/${companyA}/${UUID}\\.jpg$`).test(put?.key ?? '') && put?.contentType === 'image/jpeg',
@@ -475,7 +495,7 @@ async function main(): Promise<void> {
     {
       s3.deleteOutcome = { status: 'failed', detail: 'stub: DeleteObject AccessDenied' };
       const sentryBefore = sentry.length;
-      const r = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512)));
+      const r = await call('POST', '/logo', tPrimaryA, form(pngImage(512, 512)));
       s3.deleteOutcome = { status: 'deleted' };
       url3 = s3.puts[2]?.url ?? '';
       check(r.status === 200 && (await companyRow(companyA)).logo_url === url3, `U3 previous-object delete FAILS: the request still succeeds (got ${r.status})`);
@@ -489,7 +509,7 @@ async function main(): Promise<void> {
       const auditBefore = (await logoAudit(companyA)).length;
       const sentryBefore = sentry.length;
       const deletesBefore = s3.deletes.length;
-      const r = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512)));
+      const r = await call('POST', '/logo', tPrimaryA, form(pngImage(512, 512)));
       s3.putFails = false;
       check(r.status === 502 && r.body?.code === 'LOGO_UPLOAD_FAILED', `U4 S3 PUT fails: 502 LOGO_UPLOAD_FAILED (got ${r.status} ${show(r.body)})`);
       check((await companyRow(companyA)).logo_url === url3 && (await logoAudit(companyA)).length === auditBefore && s3.deletes.length === deletesBefore,
@@ -504,7 +524,7 @@ async function main(): Promise<void> {
       await q('ALTER TABLE company_profile_audit RENAME TO company_profile_audit_off');
       let r: Reply;
       try {
-        r = await call('POST', '/logo', tPrimaryA, form(pngHeader(512, 512)));
+        r = await call('POST', '/logo', tPrimaryA, form(pngImage(512, 512)));
       } finally {
         await q('ALTER TABLE company_profile_audit_off RENAME TO company_profile_audit');
       }
@@ -515,7 +535,7 @@ async function main(): Promise<void> {
       check(del?.url === orphan && del?.referencedAtDelete === 0, 'U5 the just-uploaded object is deleted again; the live one is not');
     }
     {
-      const r = await call('POST', '/logo', tPrimaryB, form(pngHeader(300, 300)));
+      const r = await call('POST', '/logo', tPrimaryB, form(pngImage(300, 300)));
       const put = s3.puts[s3.puts.length - 1];
       check(r.status === 200 && put?.key.startsWith(`company-logos/${companyB}/`), `U6 company B's primary: key under B's id (got ${put?.key})`);
       check((await companyRow(companyA)).logo_url === url3, 'U6 A\'s logo untouched');

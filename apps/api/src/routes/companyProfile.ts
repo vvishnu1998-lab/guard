@@ -5,7 +5,8 @@
  *   PATCH  /       the PRIMARY admin only: contact_email, phone, address,
  *                  licence_number, website (services/companyProfile.ts)
  *   POST   /logo   the PRIMARY admin only: one PNG or JPEG in field `file`,
- *                  at most 2 MiB, longest side 256..2048 px
+ *                  at most 2 MiB, longest side 256..2048 px, and it must
+ *                  decode (services/imageDecode.ts), not just carry a header
  *   DELETE /logo   the PRIMARY admin only
  *
  * ── PRIMARY IS RE-READ FROM THE DATABASE ON EVERY WRITE ──────────────────
@@ -57,6 +58,7 @@ import { pool } from '../db/pool';
 import { deleteS3Object, uploadBufferToS3, urlOrPresign } from '../services/s3';
 import { Sentry } from '../services/sentry';
 import { detectImageKind, readImageDimensions } from '../services/imageDimensions';
+import { checkImageDecodes } from '../services/imageDecode';
 import {
   errorBody,
   parseProfilePatch,
@@ -74,6 +76,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: LOG
 
 const notPrimary = () =>
   errorBody('NOT_PRIMARY_ADMIN', 'Only the primary admin can change the company profile.');
+const unreadable = () =>
+  errorBody('LOGO_UNREADABLE', 'That image could not be read. Export it again as PNG or JPEG and retry.');
 
 interface CompanyRow {
   id: string;
@@ -289,7 +293,7 @@ router.post('/logo', requireAuth('company_admin'), refuseNonPrimary, receiveLogo
   const dims = readImageDimensions(buf);
   if (!dims) {
     return detectImageKind(buf)
-      ? res.status(400).json(errorBody('LOGO_UNREADABLE', 'That image could not be read. Export it again as PNG or JPEG and retry.'))
+      ? res.status(400).json(unreadable())
       : res.status(400).json(errorBody('LOGO_UNSUPPORTED_TYPE', 'The logo must be a PNG or JPEG image.'));
   }
   const longest = Math.max(dims.width, dims.height);
@@ -299,6 +303,15 @@ router.post('/logo', requireAuth('company_admin'), refuseNonPrimary, receiveLogo
       `The logo's longest side must be ${LOGO_MIN_SIDE} to ${LOGO_MAX_SIDE} pixels. This image is ${dims.width} × ${dims.height}.`,
       { width: dims.width, height: dims.height, min_side: LOGO_MIN_SIDE, max_side: LOGO_MAX_SIDE },
     ));
+  }
+  // A valid header over a body that does not decode. Refused here, before S3,
+  // because pdfkit decodes some PNGs on a later tick and throws where nothing
+  // can catch it (services/imageDecode.ts). The letterhead runs the same check
+  // at render time for logos stored before this one existed (N167).
+  const decoded = checkImageDecodes(buf);
+  if (!decoded.ok) {
+    console.warn('[companyProfile] logo refused: it does not decode', { company_id: companyId, reason: decoded.reason });
+    return res.status(400).json(unreadable());
   }
 
   const ext = dims.kind === 'png' ? 'png' : 'jpg';
