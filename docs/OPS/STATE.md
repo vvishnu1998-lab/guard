@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-06 — PR #94, Company Profile web Settings page (Phase A complete) — verified 2026-10-06 16:21 PT
+
+| thing | value |
+|---|---|
+| merge | PR #94 merged as `5def3a5` at **16:03:49 PT** by gate route **PROXY** (`scripts/ops/proxy-merge.sh --live`). Gating guard: GRD0024. Its `okhttp/4.12.0` was recalibrated on its 15:34:32 ping and was the only Android UA among the four open sessions, all STARNET; Vishnu excluded GRD0026. Boundary 16:00 PT; GRD0024 pinged at 16:03:38 and the merge ran at ping age 8 s. The merge tree equals the approved head's tree. |
+| Railway | `0b9f2a1b-1f7f-463d-93d3-994f5eb1e458` **SUCCESS** at 16:05:27 PT from `5def3a5`. A web-only merge still restarts Railway: no watch paths (N154). |
+| web | Vercel production on `5def3a5`: success at 16:05:25 PT, per its GitHub deployment record. |
+| health | `/health` commit `5def3a5`; `/health/crons` 20 jobs, `stale: []` (16:21 PT). |
+| switchover | 0 5xx and 0 499: the old deployment served 147 requests (its last at 16:05:25), the new one 139 by 16:21. Sentry, 16:04-16:21 PT: 0 issues on API and on mobile. |
+| restart window | From the merge (16:03:49) to the switchover (16:05:27): one STARNET write, GRD0024's report at 16:04:01, answered 201 by the old deployment. |
+| prod logo test | Run by Vishnu from Settings, logged in as Star Guard's primary admin. Upload: POST /logo 200 at 16:11:44, with an audit row from NULL to `company-logos/b7c7d32d-…/0317354a-….png`. Reload: GET 200, the preview came back. Remove: DELETE 200 at 16:12:13, with an audit row back to NULL. Both audit rows name the active primary admin, Star Guard has no logo again, and no delete-failure warning fired. Bucket versioning keeps the removed object as a noncurrent version. **PASSED.** |
+
+---
+
 ## Shipped 2026-10-06 — PR #93, Company Profile API (Phase A) — verified 2026-10-06 14:17 PT
 
 | thing | value |
