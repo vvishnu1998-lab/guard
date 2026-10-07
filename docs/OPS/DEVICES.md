@@ -22,8 +22,23 @@ IDs and badges only; no push-token values.
 | GRD0002 | Nandu | `NULL` | 2026-09-01T02:03Z | **UNKNOWN** — never sent a client header |
 | GRD0001, GRD0006, GRD0008, GRD0009 | Bhanu, vamshi krishna, Svineah, Naveen Yatakari | `NULL` | = claimed_at (never used since) | **UNKNOWN** |
 
-`client` is written only on `clock-in`, `handoff-clock-in`, `ping`, and
-`clock-in-verification`. A `NULL` means the device row was claimed at login but no
-qualifying write has happened since — not that the app is broken.
+`client` is written only by `claimDevice` (`apps/api/src/services/deviceRegistry.ts`), on
+guard login (only when the login carries a push token) and on
+`POST /api/auth/guard/fcm-token`, from the request's `X-NetraOps-Client` header
+(`COALESCE`: an absent header keeps the stored value). The mobile login request sends no
+such header (`store/authStore.ts` `_request`: Content-Type only), so a login stores `NULL`
+for a new push token and keeps the old value for a known one. The app posts its token
+through `apiClient`, which sends the header, on every signed-in launch
+(`app/_layout.tsx:123`); that is what fills `client`. `clock-in`, `handoff-clock-in`, `ping`
+and `clock-in-verification` only LOG the header (`[client.identity]`,
+`services/clientIdentity.ts`) and write nothing.
+A `NULL` means no token POST has landed since the claim: notification permission not
+granted, the token fetch failed, the guard is still at the forced password change
+(`app/_layout.tsx:117` skips the POST while `mustChangePassword`; the change then revokes
+the row with `password_change`), the bundle predates the header (runtime 1.0.14), or no
+signed-in launch since — not that the app is broken.
+*Corrected 2026-09-29;* this paragraph said the four guard write routes wrote `client`.
+The table above is a 2026-09-05 snapshot: STATE.md's channel section has the 2026-09-29
+counts.
 
 ---

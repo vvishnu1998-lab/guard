@@ -16,8 +16,8 @@
  * This helper exists so there is exactly ONE way to answer "what day of the
  * week was it, at this site?". It was lifted verbatim out of
  * routes/shifts.ts (the repeat_days expansion) when services/tasks.ts needed
- * the same answer; both call sites now share it rather than carrying a copy
- * each.
+ * the same answer. That expansion now builds its dates in SQL at the site
+ * (N160), so services/tasks.ts is the only caller.
  *
  * Semantics are deliberately unchanged from that original: a formatter that
  * yields an unrecognised weekday name falls back to the UTC `getDay()`. A

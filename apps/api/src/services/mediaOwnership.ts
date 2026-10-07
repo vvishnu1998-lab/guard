@@ -52,13 +52,17 @@ import { pool } from '../db/pool';
  * INHERIT_HOLD_COLUMNS sits beside its fragment in legalHold.ts: the
  * enumeration must live in exactly one place.
  *
- * THIS LIST HAS GROWN FOUR TIMES, ONCE BY FIVE COLUMNS IN A SINGLE
+ * THIS LIST HAS GROWN FIVE TIMES, ONCE BY FIVE COLUMNS IN A SINGLE
  * MIGRATION (schema_v48's vehicle-inspection slots). Do not assume it is
  * stable — assertPointerColumnsCurrent() below is what catches the next one.
  */
 export const POINTER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['clock_in_verifications', 'selfie_url'],
   ['clock_in_verifications', 'site_photo_url'],
+  // schema_v82. No purge step touches companies: the logo routes delete a
+  // replaced or removed logo themselves. Listed so the ownership check counts
+  // a logo as a live reference and the drift probe stays green.
+  ['companies',              'logo_url'],
   ['geofence_violations',    'photo_url'],
   ['location_pings',         'photo_url'],
   ['monthly_hours_reports',  's3_url'],

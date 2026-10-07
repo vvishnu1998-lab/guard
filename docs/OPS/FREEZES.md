@@ -26,7 +26,27 @@ confirmed; the reason the freeze was placed is not recorded anywhere readable.
 
 ---
 
-### F2 — Apple review surface
+*F2 (Apple review surface) lifted 2026-09-29 — see below.*
+
+---
+
+## Expired / lifted
+
+### F2 — Apple review surface — LIFTED 2026-09-29
+
+**Lifted because its expiry condition was met, confirmed by Vishnu 2026-09-29 from App
+Store Connect:** 1.0.17 (build 48) reads **"Pending Developer Release"** — the review
+APPROVED it, and it is NOT released on the App Store. Guards run build 48 through
+TestFlight (internal + Public Beta, 24 installs), and **that TestFlight build expires
+~2026-11-28** (60 days from 2026-09-29) — `OPEN-ITEMS.md` N153.
+- **Accommodations to revert:** none found. `companies`, `company_admins` and `guards`
+  have 0 rows matching an Apple/reviewer name, email or `AR-` badge (prod, read-only,
+  2026-09-29), consistent with C3's "never run".
+- **Not covered by F2:** Android vc26's Play production review (submitted 2026-09-18,
+  managed publishing ON, outcome UNVERIFIED — `STATE.md`).
+- **A new App Store submission starts a new freeze** under a new entry.
+
+The entry as it stood, kept as history:
 
 **Surface:** no writes to anything that could change what a reviewer sees, while
 any App Store review is pending. In practice: mobile behaviour, reviewer
@@ -57,9 +77,5 @@ on EAS means the binary compiled — it says nothing about submission or review.
 accounts or shifts) is frozen with this entry and carries its own revert task with
 the original values. See `OPEN-ITEMS.md` C3 for the reviewer seed script.
 
----
-
-## Expired / lifted
-
-*(none recorded yet — move entries here with the date and who confirmed the expiry
-condition, rather than deleting them)*
+*(Move entries here with the date and who confirmed the expiry condition, rather than
+deleting them.)*

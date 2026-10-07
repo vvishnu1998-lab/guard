@@ -60,7 +60,15 @@ export async function adminPost<T>(path: string, body: unknown): Promise<T> {
   const res = await adminFetch(path, { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error((err as any).error ?? `Request failed: ${res.status}`);
+    // ApiError, like adminPatch: POST /api/shifts answers a long shift with
+    // 409 LONG_SHIFT_CONFIRM_REQUIRED (U5), and the create modal needs the
+    // body's `code` and label to show the confirm step. `message` is the same
+    // string the plain Error carried, so every `e.message` caller is unchanged.
+    throw new ApiError(
+      (err as any).error ?? `Request failed: ${res.status}`,
+      res.status,
+      err as Record<string, unknown>,
+    );
   }
   return res.json() as Promise<T>;
 }

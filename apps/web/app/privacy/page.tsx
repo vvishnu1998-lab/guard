@@ -70,11 +70,11 @@ export default function PrivacyPolicy() {
 
           <section>
             <h2 className="text-2xl font-bold text-white mb-4">5. Data Retention</h2>
-            <p className="mb-4">We adhere to a strict data retention policy to minimize stored data:</p>
+            <p className="mb-4">We adhere to a strict data retention policy that matches what our customers must keep:</p>
             <ul className="list-disc pl-6 space-y-3">
-              <li><strong>Incident Reports & Photos:</strong> Accessible to clients for 90 days. From 90 to 150 days, they are accessible only to NetraOps administrators. They are permanently deleted at day 150.</li>
-              <li><strong>Location Ping Photos:</strong> Kept on a 7-day rolling deletion schedule.</li>
-              <li><strong>Time, Pay and Licensing Records:</strong> Clock-in and clock-out times, hours worked, break records, wage-relevant data, and guard-card or training records are kept for longer, and remain linked to a named employee. These are retained under the obligations of your employer &mdash; the security company that created your account &mdash; not as a choice of ours. California law requires employers to keep such records for a set period, commonly four years, and to keep them attributable to the individual employee.</li>
+              <li><strong>Operational records:</strong> Shift logs, clock-in and clock-out records, hours worked, break records, location check-ins, checkpoint scans, and incident, activity and maintenance reports with their photos are retained for as long as the security company that created your account needs them to meet its contractual, insurance and legal record-keeping obligations, and remain linked to a named employee for that period. Retention periods are set per record type and applied automatically.</li>
+              <li><strong>Location check-in photos:</strong> Kept briefly on a rolling deletion schedule. The verified check-in record itself is retained with the shift.</li>
+              <li><strong>Time, pay and licensing records:</strong> Retained under the obligations of your employer — the security company that created your account — not as a choice of ours, and kept attributable to the individual employee for the period the law requires.</li>
             </ul>
           </section>
 

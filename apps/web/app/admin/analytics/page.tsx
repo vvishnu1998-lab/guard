@@ -1,30 +1,39 @@
 'use client';
 /**
  * Admin — Analytics (/admin/analytics)
- * Summary stats: monthly hours, report breakdown, incident severity, guard leaderboard.
- * CSV / Excel export via ExportPanel.
+ * Summary stats: monthly payable hours, report breakdown, incident severity,
+ * guard leaderboard. CSV / Excel export via ExportPanel.
+ *
+ * The hours figures here are PAYABLE (D19): clocked-in time inside the
+ * scheduled window. Actual (raw clock-out − clock-in) is shown beside the
+ * month total. See lib/payableHours.ts for why a missing payable_hours
+ * renders '—' and never falls back to another figure.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { adminGet } from '../../../lib/adminApi';
 import ExportPanel from '../../../components/admin/ExportPanel';
 import { formatHoursHHMM, formatOffPostHours, formatScheduledHours } from '../../../lib/formatHours';
+import { monthlyPayable, payableOf } from '../../../lib/payableHours';
 
 interface ShiftHours {
   scheduled_hours: number;
   actual_hours:    number;
+  // Optional: an API deployed before D19 does not send it (Vercel and
+  // Railway deploy separately). Required here would also invite a `?? 0`.
+  payable_hours?:  number;
   break_hours:     number;
   violation_hours: number;
 }
 
 interface Analytics {
+  // Legacy scalars below (total_hours_this_month, top_guards[].total_hours,
+  // hours_legacy) are the STORED total_hours column — start-clamped, neither
+  // Actual nor Payable. Kept in the type because the API still sends them;
+  // nothing on this page reads them.
   total_hours_this_month: number;
-  // Phase 1 added the 4-field aggregate alongside the legacy scalar.
   totals_this_month?:     ShiftHours;
   reports_by_type:        { report_type: string; count: string }[];
   incidents_by_severity:  { severity: string; count: string }[];
-  // total_hours can be null when a guard's only sessions this window are still open
-  // (SUM(NULL) = NULL). Phase 2 prefers `hours.actual_hours` (numeric) when
-  // present; falls back to the scalar `total_hours` string.
   top_guards: {
     name:         string;
     badge_number: string;
@@ -32,21 +41,12 @@ interface Analytics {
     shift_count:  string;
     hours?:       ShiftHours;
   }[];
-  // Phase 1 restructured: the scalar `hours` string was renamed to
-  // `hours_legacy`; `hours` is now the 4-field object (Phase 2 reads it
-  // when populated, falling back to the legacy scalar).
   monthly_hours_by_site: {
     month:        string;
     site_name:    string;
     hours_legacy: string | null;
     hours?:       Partial<ShiftHours>;
   }[];
-}
-
-function parseHours(v: string | number | null | undefined): number {
-  if (v == null) return 0;
-  const n = typeof v === 'string' ? parseFloat(v) : v;
-  return Number.isFinite(n) ? n : 0;
 }
 
 const TYPE_COLOR: Record<string, string> = {
@@ -120,44 +120,33 @@ export default function AnalyticsPage() {
   const totalReports = data?.reports_by_type.reduce((s, r) => s + parseInt(r.count), 0) ?? 0;
   const maxSeverity  = Math.max(...(data?.incidents_by_severity.map((i) => parseInt(i.count)) ?? [1]));
 
-  // Monthly totals across all sites. Prefer the 4-field object's actual_hours
-  // when Phase 1 has shipped; fall back to `hours_legacy` (scalar string) so
-  // pre-Phase-1 API responses still render. Empty-window collapse: Math.max
-  // of an empty array is -Infinity — the || 1 fallback keeps bar widths sane.
-  const monthMap: Record<string, number> = {};
-  data?.monthly_hours_by_site.forEach(({ month, hours_legacy, hours }) => {
-    const v = hours?.actual_hours != null ? hours.actual_hours : parseHours(hours_legacy);
-    monthMap[month] = (monthMap[month] ?? 0) + v;
-  });
-  const months = Object.entries(monthMap).filter(([, h]) => Number.isFinite(h));
-  const maxMonthHours = Math.max(...months.map(([, h]) => h), 1);
-  const hasMonthlyData = months.some(([, h]) => h > 0);
+  // Monthly PAYABLE totals across all sites. A month whose payable is unknown
+  // (an API from before D19) keeps its row and shows '—'; the empty state
+  // keys on whether there are rows at all, so unknown never reads as
+  // "No completed shifts yet".
+  const monthly = monthlyPayable(data?.monthly_hours_by_site ?? []);
+  const hasMonthlyRows = monthly.months.length > 0;
 
-  // Phase 2 D4: aggregate rollups show actual (big) with the other three
-  // fields in a detail sub-line. Falls back to the pre-Phase-1 scalar when
-  // the 4-field object isn't present.
-  const monthTotals: ShiftHours = data?.totals_this_month ?? {
-    scheduled_hours: 0,
-    actual_hours:    data?.total_hours_this_month ?? 0,
-    break_hours:     0,
-    violation_hours: 0,
-  };
-  const monthKpiValue = formatHoursHHMM(monthTotals.actual_hours);
+  // D19: the month total headlines PAYABLE; Actual leads the sub-line so an
+  // admin sees both. No fallback object — if the API sends no breakdown,
+  // every figure reads '—' rather than a different number under its label.
+  const monthTotals = data?.totals_this_month;
+  const monthKpiValue = formatHoursHHMM(payableOf(monthTotals));
   const monthKpiSub = (
     <>
-      Scheduled: <span className="text-gray-500">{formatScheduledHours(monthTotals.scheduled_hours)}</span>
+      Actual: <span className="text-gray-500">{formatHoursHHMM(monthTotals?.actual_hours)}</span>
       {'  ·  '}
-      Break: <span className="text-gray-500">{formatHoursHHMM(monthTotals.break_hours)}</span>
+      Scheduled: <span className="text-gray-500">{formatScheduledHours(monthTotals?.scheduled_hours)}</span>
       {'  ·  '}
-      Geofence violation: <span className="text-gray-500">{formatOffPostHours(monthTotals.violation_hours)}</span>
+      Break: <span className="text-gray-500">{formatHoursHHMM(monthTotals?.break_hours)}</span>
+      {'  ·  '}
+      Geofence violation: <span className="text-gray-500">{formatOffPostHours(monthTotals?.violation_hours)}</span>
     </>
   );
 
-  // Top-guard KPI card: prefer the 4-field hours.actual_hours (numeric);
-  // fall back to legacy total_hours (string). null → "—" per D2.
-  const topGuardActual = data?.top_guards[0]
-    ? (data.top_guards[0].hours?.actual_hours ?? parseFloat(data.top_guards[0].total_hours ?? '') )
-    : null;
+  // Top-guard KPI card: the leaderboard's first row, by Payable. Its sub-line
+  // is the guard's name, so it carries no Actual figure.
+  const topGuardPayable = payableOf(data?.top_guards[0]?.hours);
 
   return (
     <div className="space-y-6">
@@ -170,7 +159,7 @@ export default function AnalyticsPage() {
 
       {/* KPI row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="HOURS THIS MONTH" value={monthKpiValue} sub={monthKpiSub} />
+        <StatCard label="PAYABLE THIS MONTH" value={monthKpiValue} sub={monthKpiSub} />
         <StatCard label="REPORTS (30 DAYS)" value={totalReports} sub="Activity + incident + maintenance" />
         <StatCard
           label="INCIDENTS (30 DAYS)"
@@ -178,27 +167,27 @@ export default function AnalyticsPage() {
           sub="Across all sites"
         />
         <StatCard
-          label="TOP GUARD HOURS"
-          value={formatHoursHHMM(topGuardActual != null && Number.isFinite(topGuardActual) ? topGuardActual : null)}
+          label="TOP GUARD · PAYABLE"
+          value={formatHoursHHMM(topGuardPayable)}
           sub={data?.top_guards[0]?.name ?? ''}
         />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Monthly hours */}
+        {/* Monthly payable hours */}
         <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
-          <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">MONTHLY HOURS (ALL SITES)</p>
-          {!hasMonthlyData ? (
+          <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">MONTHLY PAYABLE (ALL SITES)</p>
+          {!hasMonthlyRows ? (
             <p className="text-gray-600 text-xs text-center py-8">No completed shifts yet</p>
           ) : (
             <div className="space-y-3">
-              {months.map(([month, hours]) => (
+              {monthly.months.map(([month, hours]) => (
                 <BarRow
                   key={month}
                   label={month}
-                  value={hours}
+                  value={hours ?? 0}
                   valueLabel={formatHoursHHMM(hours)}
-                  max={maxMonthHours}
+                  max={monthly.max}
                   color="bg-amber-500"
                 />
               ))}
@@ -252,15 +241,13 @@ export default function AnalyticsPage() {
 
         {/* Guard leaderboard */}
         <div className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-6">
-          <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">GUARD HOURS LEADERBOARD (30 DAYS)</p>
+          <p className="text-amber-400 font-bold tracking-widest text-sm mb-4">GUARD PAYABLE HOURS (30 DAYS)</p>
           {(data?.top_guards.length ?? 0) === 0 ? (
             <p className="text-gray-600 text-xs text-center py-8">No completed shifts yet</p>
           ) : (
             <div className="space-y-2">
               {data?.top_guards.map((g, i) => {
-                const actual = g.hours?.actual_hours != null
-                  ? g.hours.actual_hours
-                  : parseFloat(g.total_hours ?? '');
+                const payable = payableOf(g.hours);
                 return (
                   <div key={g.badge_number} className="flex items-center gap-3">
                     <span className={`text-xs font-bold w-5 text-right ${i === 0 ? 'text-amber-400' : 'text-gray-600'}`}>
@@ -273,7 +260,7 @@ export default function AnalyticsPage() {
                       </p>
                     </div>
                     <span className="text-amber-400 text-sm font-bold tabular-nums">
-                      {formatHoursHHMM(Number.isFinite(actual) ? actual : null)}
+                      {formatHoursHHMM(payable)}
                     </span>
                   </div>
                 );

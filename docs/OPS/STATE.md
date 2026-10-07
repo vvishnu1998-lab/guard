@@ -16,8 +16,9 @@ Re-verify before acting. This file goes stale the moment something deploys.
 | `main` subject | `Merge pull request #23 from vvishnu1998-lab/feat/thread-ping-interval` |
 | last known good `main` sha | `996733c` (PR #19) — Railway `7579554d-4209-4b20-bd73-20208a4818fb` SUCCESS, `/health/crons` 200 with 19 jobs and `stale: []`, `/health` 200, and GitHub's combined status on the sha is `success` on **both** contexts (`adorable-courage - guard`, `Vercel`). Vercel alias confirmed by content-hash match between the apex and the Production deployment, not by trusting the dashboard. **NOT advanced to `dfdcc8c`**: PRs #18/#21/#22/#23 merged green, but "last known good" in this table means post-merge Railway + `/health/crons` + Vercel alias re-verified on the sha, and that pass has not been run since. Advance it only after re-running those four checks. |
 | working tree | clean (untracked only: `.playwright-mcp/`, `.vscode/`, `load test/`, `marketing/`, 4 loose PNGs) |
-| branch protection on `main` | **ENFORCED** — **two** required status checks: `Scan for hard-coded secrets` **and** `Ping window anchor (TS vs SQL)`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
-| CI | **three** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978) — all active. **Not advisory** — `gitleaks` and `window-anchor` supply the two required contexts, so either failing blocks the merge. |
+| branch protection on `main` | **ENFORCED** — **three** required status checks: `Scan for hard-coded secrets`, `Ping window anchor (TS vs SQL)` **and** `tsc (src + scripts) and the N78/N91 response-body floor`. **This row said "two" from 2026-09-08 until 2026-09-23**; the `typecheck` context was added to the protection after the row was written, and nothing updated it. Verified 2026-09-23 with `gh api repos/vvishnu1998-lab/guard/branches/main/protection --jq .required_status_checks.contexts`. `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`, `required_approving_review_count: 0`, `required_linear_history: false` |
+| CI | **four** workflows: `gitleaks` (266080625), `ops-triage` (350875238), `window-anchor` (353361978), `typecheck` (359257173) — all active. **This row said "three" until 2026-09-23**; `typecheck` (N97) landed after the row was last written and nothing updated it, so a PR author reading this file would not have known `check:types` runs on every PR. **Not advisory** — `gitleaks`, `window-anchor` **and `typecheck`** supply the three required contexts, so any one failing blocks the merge (`typecheck` confirmed required 2026-09-23; see the protection row above). |
+| `typecheck` steps | `npm --prefix apps/api run check:types` (= `tsc --noEmit` over **both** `tsconfig.json` and `tsconfig.scripts.json`), then the N78/N91 floor: `grep -rnE 'error:.*err\??\.(message|detail|hint|constraint|code)' apps/api/src/` with the sense INVERTED — a match FAILS the job. Run both locally before pushing. |
 
 **Worktrees** (`git worktree list`) — 6 exist under `.claude/worktrees/`; none pins
 `main`. The primary checkout at `/Users/vishnuvardhanreddy/guard` is on `main` @ `e7e868a`.
@@ -263,7 +264,37 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-06 — PR #93, Company Profile API (Phase A) — verified 2026-10-06 14:17 PT
+
+| thing | value |
+|---|---|
+| merge | PR #93 merged as `66ac758` at **14:00:20 PT** by gate route **OVERRIDE**. The 13:30 PROXY run aborted with no merge when its gating guard, GRD0026, went silent. Vishnu then waived the single-guard gate: merge within 60 s of the first STARNET 201 ping after 14:00:00 PT from any guard, and no merge if none landed by 14:10. The first was GRD0010's ping at 14:00:07.844 PT. Prechecks passed (head `e3cf4fb` CLEAN, main `deab5eb`, deployment `80e63900` SUCCESS). One `gh pr merge --match-head-commit` merged it 9 s after the ping. |
+| Railway | `b553eae1-1d34-4549-809b-9a0d8dbdcae6` **SUCCESS** at 14:01:46 PT from `66ac758`; the previous `80e63900` was removed. No DB step: v82 shipped with #92. |
+| health | `/health` commit `66ac758`; `/health/crons` 20 jobs, `stale: []` (14:17 PT). |
+| routes | Without a token: `GET /api/admin/company` went from 404 (13:05 PT) to **401** after the deploy. `POST /api/admin/company/logo` returns **401**. `GET /api/admin/company/logo` returns 404 because there is no GET handler, by design. |
+| restart window | From the merge (14:00:20) to the switchover (14:01:46): **0 STARNET writes** across the 25 event types checked (pings, sessions, reports, notifications, missed pings and reports, breaks, scans, violations, devices and others). After the merge the old deployment served only reads; its last request was at 14:01:25. |
+| switchover | 0 5xx: the old deployment served 32 requests from 13:58, the new one 232 by 14:17. Sentry, 14:00-14:17 PT: `netraops-api` 0 issues; `netraops-mobile` only the recurring MOBILE-13, 0 new. First STARNET writes on the new deployment: GRD0024's ping (14:05:34) and report (14:05:56), both 201, then GRD0026's ping (14:11:53) and GRD0013's report (14:17:28). |
+| still to run | The prod logo upload and remove on Star Guard. Vishnu runs it from the Settings page after the web PR ships (his call, 2026-10-06). |
+
+---
+
+## Shipped 2026-10-06 — PR #92, schema v82 (Company Profile, Phase A) — verified 2026-10-06 12:34 PT
+
+| thing | value |
+|---|---|
+| merge | PR #92 merged as `deab5eb` at **12:06:02 PT** by gate route **PROXY** (`scripts/ops/proxy-merge.sh --live`). Gating guard GRD0024 (`okhttp/4.12.0`, calibrated against its DB ping rows; GRD0010 was ineligible because GRD0013's open session shared its iOS UA). Boundary 12:00 PT; GRD0024's ping 12:05:47.159 PT; merged at ping age 12 s. CONDITION was unavailable (N166). |
+| v82 | **Applied by hand by Vishnu as `postgres` before the merge**: `scripts/ops/v82_company_profile.sql` (preview, ROLLBACK), then `v82_company_profile_COMMIT.sql`; summary row `14 \| t \| 4 \| t`. Verified via `postgres-readonly` at 11:49:58 PT: eight new `companies` columns with the v82 types, all NULLable, no DEFAULT; `company_profile_audit` present, FK `ON DELETE CASCADE`, readable by `claude_readonly`, 0 rows. |
+| Railway | `80e63900-c04d-4559-b709-3a6a3ee58663` **SUCCESS** at 12:08:44 PT from `deab5eb`; the previous `950665a1` was removed. |
+| health | `/health` commit `deab5eb`; `/health/crons` 20 jobs, `stale: []` (12:24 PT). |
+| switchover | 0 5xx: the old deployment served 45 requests during the build, the new one 89 by 12:24. Sentry `netraops-api` and `netraops-mobile`: 0 issues seen and 0 new, 12:08-12:24 PT. First STARNET writes on the new deployment: pings at 12:30:20, 12:30:23 and 12:31:47 PT, all 201. |
+| schema tip | **v82** applied in prod; `migrate.ts` ends `'schema_v82.sql'`. Read `migrate.ts` for the next free number, never this row. |
+| S3 IAM | `starguard-app` is allowed `s3:PutObject`, `s3:GetObject` and `s3:DeleteObject` on `guard-media-prod/company-logos/*`: `aws iam simulate-principal-policy`, run by Vishnu 2026-10-06. |
+
+---
+
 ## Schema — verified 2026-09-14 18:55 UTC (v69-v77 applied; v68 rows retained)
+
+The tip below is superseded: v82 is applied (section above). The rows stay as the record of v67-v77.
 
 | thing | value |
 |---|---|
@@ -333,14 +364,14 @@ objects, not read from a ledger — that is the only method available.
 
 ---
 
-## Mobile — verified 2026-09-05 08:32 UTC
+## Mobile — `app.json` re-read 2026-09-29 at `95a10a38`; builds table from Vishnu's build list and App Store Connect, 2026-09-29
 
 `apps/mobile/app.json` literal values:
 
 | field | value |
 |---|---|
-| `expo.version` | `1.0.17` |
-| `expo.runtimeVersion` | `{"policy": "appVersion"}` → resolves to **`1.0.17`** |
+| `expo.version` | `1.0.18` (bumped in `b0f3c85`, 2026-09-18). The 1.0.17 runtime's JS is published from `batch/mobile-18`'s `ddc6f0a` (D21) |
+| `expo.runtimeVersion` | `{"policy": "appVersion"}` → resolves to **`1.0.18`** on main |
 | `expo.ios.buildNumber` | `41` |
 | `expo.android.versionCode` | `17` |
 | `expo.updates.url` | `https://u.expo.dev/5fd28125-2461-4165-b9df-7f34ced8b194` |
@@ -350,20 +381,57 @@ objects, not read from a ledger — that is the only method available.
 **`buildNumber` and `versionCode` in `app.json` are ignored.** EAS remote
 versioning is source of truth. The real shipped numbers, from `eas build:list`:
 
-| platform | appVersion | build | commit | channel | status | created |
+| platform | appVersion | build | commit | profile / channel | status | created |
 |---|---|---|---|---|---|---|
-| IOS | 1.0.17 | **48** | `c932c09` | production | FINISHED | 2026-08-30T01:21:10Z |
-| ANDROID | 1.0.17 | **24** | `c932c09` | production | FINISHED | 2026-08-30T01:21:11Z |
+| IOS | 1.0.17 | **48** (`8d8ecd90`) | `c932c09` | production | FINISHED. App Store: **approved, "Pending Developer Release"** — not released on the App Store. Guards run it through **TestFlight** (internal + Public Beta, 24 installs); **that TestFlight build expires ~2026-11-28 (N153)** | 2026-08-30T01:21:10Z |
+| ANDROID | 1.0.17 | **24** (`fe3c1ff2`) | `c932c09` | production | FINISHED | 2026-08-30T01:21:11Z |
+| ANDROID | 1.0.18 | **25** (`53f0189b`) | `b0f3c85` | not given | not given | 2026-09-18 |
+| ANDROID | 1.0.18 | **26** (`7dc508bf`) | `7bff232` (API 36) | production | Play production review submitted 2026-09-18, managed publishing ON — **outcome UNVERIFIED**. Same fingerprint as vc27 | 2026-09-18 |
+| ANDROID | 1.0.18 | **27** (`b08cbf4c`) | `7bff232` | production | **CANCELED**, no artifact — **next production build is vc28** | 2026-09-18 |
+| ANDROID | 1.0.18 | **27** (`6113295c`) | `579ee12` | preview (APK) | FINISHED | 2026-09-27 |
 | ANDROID | 1.0.16 | 23 | `ef1e230` | smoke | FINISHED | 2026-08-23T19:29:21Z |
 | ANDROID | 1.0.16 | 23 | `4cd4956` | development | FINISHED | 2026-08-23T18:17:27Z |
+
+Rows vc24–vc27 and iOS 48's build id: Vishnu's `eas build:list`, 2026-09-29 (dates only;
+vc25's profile and status were not given). App Store status: Vishnu, from App Store
+Connect, 2026-09-29.
 
 `c932c09` = `feat(mobile): download hours summary as PDF from the profile screen`.
 
 ---
 
-## EAS channels + last update group — verified 2026-09-05 08:33 UTC
+## EAS channels + update groups — updated 2026-09-29 (groups from the publish record and Vishnu's `eas update:list`; adoption from `guard_devices.client`)
 
-Channels (`eas channel:list`): `production`, `preview`, `smoke`, `development`.
+Channels: `production`, `preview`, `smoke`, `development` (`eas channel:list`, last run
+2026-09-05). A binary polls only its own channel, and only its own runtime (policy
+`appVersion`). An update applies on the second launch after publish (`ON_LOAD`,
+`fallbackToCacheTimeout: 0`). How to publish: DECISIONS D21, release-ops §3b.
+
+| channel | runtime | current group | from | published (PT) | rollback target |
+|---|---|---|---|---|---|
+| production | 1.0.17 | `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` | `ddc6f0a` | 2026-09-29 11:33:06 | republish `9db401c9-6319-49b4-ab17-64cf559995a0` (`b3dcd55`, 2026-09-17 15:07) — **it has no Sentry DSN and the 30-min grace (N152, N138)**; before it `948d55c8-75da-44ea-8a2f-6847d87144a7` (batch-17) |
+| production | 1.0.18 | `ce679c72-2a37-4034-a29d-1be16afab7e3` — republished from preview `429943ab`, same bundles (android `01a0ef89-8f26-70b3-b186-8be6509ce2e2`, ios `01a0ef89-8f26-7be7-ada6-786f5d9d8a4e`), so vc26 no longer depends on its embedded `7bff232` JS | `f5a84c4` | 2026-09-29 16:39:24 | roll back to embedded (`7bff232` on vc26); no earlier 1.0.18 production group |
+| preview | 1.0.18 | `429943ab-8561-4766-b031-635587d0a6c3` | `f5a84c4` | 2026-09-29 08:39:30 | roll back to embedded (`579ee12` on vc27); no earlier 1.0.18 preview group |
+| preview | 1.0.17 | `ff99ee6f-f732-449c-9eae-38a0fe3f224c` | UNVERIFIED | 2026-09-02 | — |
+| smoke | 1.0.17 | `2e20d40d-ffb3-4689-a7a2-af5183b2995b` at 2026-09-05; **UNVERIFIED since** | — | — | — |
+| development | — | none at 2026-09-05; **UNVERIFIED since** | — | — | — |
+| (any) | 1.0.16 | last updates 2026-08-22 (iOS `01a02a71…`) and 2026-08-26 (Android `01a04071-040b…` 16:39:03, `01a04071-d36e…` 16:39:56, `01a04072…` 16:40:23 — likely one change on three channels); groups and channels UNVERIFIED | — | — | none planned (N115) |
+
+Earlier 1.0.17 production group: `9386a6d2` (2026-09-10; update ids `01a08a24…`, per
+netraops-invariants). Other 1.0.17 update ids seen on devices, channel UNVERIFIED:
+`01a096c1…` (2026-09-12, Android only), `01a09773…` (2026-09-12).
+
+**Preview reaches a paying customer.** STARNET guard GRD0024 (`94ab7696`) ran the vc27
+preview APK (Vishnu gave it to them; confirmed 2026-09-29), `guard_devices` rows on embedded
+`dc827710…` from 2026-09-28 04:52 to 2026-09-29 14:23 PT, when the guard signed in on an
+iPhone again (production, `01a0b168…`). The Android row never adopted `429943ab`.
+
+Non-revoked STARNET `guard_devices` rows at 2026-09-29 15:45 PT: 3 iPhones on `fe530a7a`
+(GRD0010, GRD0015, GRD0026), 7 on `9db401c9`'s `01a0b168…`; runtime 1.0.16: GRD0007 (iOS,
+last seen 09-03), GRD0005 (Android, 09-14), GRD0008 (Android, 09-27); 4 rows with no client
+string, last seen in August. N138 has the uuids.
+
+History, verified 2026-09-05 08:33 UTC (`eas channel:list`):
 
 | channel | last update group | message | runtime | platforms |
 |---|---|---|---|---|

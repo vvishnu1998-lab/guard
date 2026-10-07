@@ -44,7 +44,7 @@
 
 import ExcelJS from 'exceljs';
 import { effectiveEndDate } from './hoursExport';
-import type { HoursExportDataset, HoursAggregate } from './hoursExport';
+import type { HoursExportDataset, HoursAggregate, HoursExportRow } from './hoursExport';
 
 // Brand — apps/web and the marketing site use the same navy.
 const NAVY  = 'FF0B1526';
@@ -133,12 +133,14 @@ function totalRow(row: ExcelJS.Row): void {
 
 /**
  * Writes coverage as a REAL percentage: the cell holds pct/100 with an Excel
- * percent format, so it displays '100.6%' and still sorts, filters and charts
+ * percent format, so it displays '98.6%' and still sorts, filters and charts
  * as a number. A pre-formatted string would display the same and sort
  * lexicographically, which is worse in a spreadsheet. The /100 is unit
- * presentation, not arithmetic on the figure — the server decided 100.6.
+ * presentation, not arithmetic on the figure — the server decided 98.6.
  *
- * RAG: green >= 95, amber 80–95, red < 80. Null coverage is left blank and
+ * Coverage is Payable / Scheduled (D19), so it never exceeds 100 %.
+ * RAG: green >= 95, amber 80–95, red < 80 — the red edge is the SHORT
+ * threshold in services/hoursExport.ts. Null coverage is left blank and
  * unfilled.
  */
 function coverageCell(cell: ExcelJS.Cell, pct: number | null): void {
@@ -156,16 +158,16 @@ function coverageCell(cell: ExcelJS.Cell, pct: number | null): void {
 type AggShape = 'guard_site' | 'guard' | 'site';
 
 const AGG_HEADERS: Record<AggShape, string[]> = {
-  guard_site: ['Guard', 'Site', 'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
-  guard:      ['Guard',         'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
-  site:       ['Site',          'Shifts', 'Scheduled', 'Actual', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
+  guard_site: ['Guard', 'Site', 'Shifts', 'Scheduled', 'Actual', 'Payable', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
+  guard:      ['Guard',         'Shifts', 'Scheduled', 'Actual', 'Payable', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
+  site:       ['Site',          'Shifts', 'Scheduled', 'Actual', 'Payable', 'Variance', 'Coverage %', 'Break', 'Geofence violation', 'Flagged'],
 };
 
 /** Flagged is a COUNT of flagged shifts; zero is blank, not '0'. */
 const flaggedCell = (n: number): number | string => (n > 0 ? n : '');
 
 function aggValues(a: HoursAggregate, shape: AggShape): unknown[] {
-  const tail = [a.shifts, a.scheduled_hours, a.actual_hours, a.variance_hours,
+  const tail = [a.shifts, a.scheduled_hours, a.actual_hours, a.payable_hours, a.variance_hours,
                 null /* coverage — written by coverageCell */,
                 a.break_hours, a.offpost_hours, flaggedCell(a.flagged_count)];
   if (shape === 'guard_site') return [a.guard_name ?? '', a.site_name ?? '', ...tail];
@@ -173,8 +175,16 @@ function aggValues(a: HoursAggregate, shape: AggShape): unknown[] {
   return [a.site_name ?? '', ...tail];
 }
 
-/** 1-based index of the Coverage % column for each shape. */
-const COV_COL: Record<AggShape, number> = { guard_site: 7, guard: 6, site: 6 };
+/**
+ * 1-based index of the Coverage % column for each shape — derived from the
+ * headers, not typed, so inserting a column cannot leave the RAG fill on the
+ * wrong cell.
+ */
+const COV_COL: Record<AggShape, number> = {
+  guard_site: AGG_HEADERS.guard_site.indexOf('Coverage %') + 1,
+  guard:      AGG_HEADERS.guard.indexOf('Coverage %') + 1,
+  site:       AGG_HEADERS.site.indexOf('Coverage %') + 1,
+};
 
 function addAggTable(
   ws: ExcelJS.Worksheet, title: string, rows: HoursAggregate[],
@@ -210,24 +220,26 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
 
   // ══ Sheet 1 — SUMMARY ═══════════════════════════════════════════════════
   const s = wb.addWorksheet('SUMMARY');
-  // Indices 5 / 7 / 8 widened for the 'Geofence violation' rename: the three
-  // AGG_HEADERS shapes land that column at 8 (guard_site) or 7 (guard, site),
-  // and the KPI header row lands 'Geofence violation h' at 5. An 18-character
-  // label in an 11-wide column clips in Excel.
+  // 0-based indices 6 / 8 / 9 are wide for 'Geofence violation': the KPI
+  // header row lands 'Geofence violation h' at 6, and the AGG_HEADERS shapes
+  // land 'Geofence violation' at 8 (guard, site) or 9 (guard_site). An
+  // 18-character label in an 11-wide column clips in Excel. Index 5 took the
+  // Payable column (D19), which moved each of those one to the right.
   s.columns = [{ width: 26 }, { width: 26 }, { width: 10 }, { width: 12 }, { width: 12 },
-               { width: 21 }, { width: 12 }, { width: 20 }, { width: 20 }, { width: 22 }];
+               { width: 12 }, { width: 21 }, { width: 12 }, { width: 20 }, { width: 20 }, { width: 22 }];
   s.addRow(['NetraOps — Hours Report']).font = { bold: true, size: 16, color: { argb: NAVY } };
   s.addRow([`${data.company_name}   ·   Period ${period}`]).font = { italic: true, size: 11 };
   s.addRow([]);
 
-  headerRow(s, ['Shifts', 'Scheduled h', 'Actual h', 'Coverage %', 'Break h', 'Geofence violation h', 'Flagged', '', '', '']);
+  const KPI = ['Shifts', 'Scheduled h', 'Actual h', 'Payable h', 'Coverage %', 'Break h', 'Geofence violation h', 'Flagged', '', '', ''];
+  headerRow(s, KPI);
   const kpi = s.addRow([
     data.overall.shifts, data.overall.scheduled_hours, data.overall.actual_hours,
-    null, data.overall.break_hours, data.overall.offpost_hours,
+    data.overall.payable_hours, null, data.overall.break_hours, data.overall.offpost_hours,
     flagged.length, '', '', '',
   ]);
   kpi.font = { bold: true, size: 12 };
-  coverageCell(kpi.getCell(4), data.overall.coverage_pct);
+  coverageCell(kpi.getCell(KPI.indexOf('Coverage %') + 1), data.overall.coverage_pct);
   s.addRow([]);
 
   addAggTable(s, 'BY GUARD & SITE', data.by_guard_site, data.overall, 'guard_site');
@@ -247,26 +259,45 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   s.addRow(['Charts cannot be written by the export library; these blocks are the source ranges.'])
     .font = { italic: true, size: 10 };
   s.addRow([]);
-  headerRow(s, ['Guard', 'Scheduled', 'Actual', '', '', '', '', '', '', '']);
-  for (const a of data.by_guard) s.addRow([a.guard_name ?? '', a.scheduled_hours, a.actual_hours]);
+  // Scheduled-vs-Payable leads, so that pair is one contiguous range; Actual
+  // follows so the time outside the window stays visible.
+  headerRow(s, ['Guard', 'Scheduled', 'Payable', 'Actual', '', '', '', '', '', '', '']);
+  for (const a of data.by_guard) s.addRow([a.guard_name ?? '', a.scheduled_hours, a.payable_hours, a.actual_hours]);
   s.addRow([]);
-  headerRow(s, ['Site', 'Actual', '', '', '', '', '', '', '', '']);
-  for (const a of data.by_site) s.addRow([a.site_name ?? '', a.actual_hours]);
+  headerRow(s, ['Site', 'Payable', 'Actual', '', '', '', '', '', '', '', '']);
+  for (const a of data.by_site) s.addRow([a.site_name ?? '', a.payable_hours, a.actual_hours]);
 
   // ══ Sheet 2 — HOURS DETAIL ══════════════════════════════════════════════
   // Sched Start / Sched End sit next to Day, ahead of the actual times, so a
-  // row reads plan-then-outcome left to right. Coverage % is column 14 and
-  // Flag column 15 — every getCell() below is positional and the compiler
-  // cannot check any of them, so they move together with this array.
+  // row reads plan-then-outcome left to right. Payable sits beside Actual.
+  // The Coverage % and Flag positions are DERIVED from this array — every
+  // getCell() below is positional, and a literal index is the thing the
+  // compiler cannot check when a column is inserted.
   const DETAIL = ['Guard', 'Site', 'Date', 'Day', 'Sched Start', 'Sched End',
                   'Clock In', 'Clock Out', 'Scheduled',
-                  'Actual', 'Break', 'Geofence violation', 'Variance', 'Coverage %', 'Flag'];
+                  'Actual', 'Payable', 'Break', 'Geofence violation', 'Variance', 'Coverage %', 'Flag'];
+  const COV_DETAIL  = DETAIL.indexOf('Coverage %') + 1;
+  const FLAG_DETAIL = DETAIL.indexOf('Flag') + 1;
+  // One row builder for HOURS DETAIL and EXCEPTIONS; the two used to carry
+  // identical copies of this array.
+  const detailValues = (r: HoursExportRow): unknown[] => {
+    const v = [
+      r.guard_name, r.site_name, ddMmmYy(r.shift_date), r.day_of_week,
+      localTimeCell(r.sched_start_label, r.shift_date),
+      localTimeCell(r.sched_end_label, r.shift_date),
+      hhmm(r.clock_in_label), localTimeCell(r.clock_out_label, r.shift_date),
+      r.scheduled_hours, r.actual_hours, r.payable_hours, r.break_hours, r.offpost_hours,
+      r.variance_hours, null /* coverage — written by coverageCell */, r.flags.join(' '),
+    ];
+    if (v.length !== DETAIL.length) throw new Error('hours workbook: detail row does not match its header');
+    return v;
+  };
   const d = wb.addWorksheet('HOURS DETAIL');
-  // Index 12 is 'Geofence violation' (was 'Unverified') — widened to fit.
-  // Indices 5/6 hold 'dd-Mmm HH:MM' on an overnight, so 14 not 6.
+  // 1-based 13 is 'Geofence violation' (was 'Unverified') — widened to fit.
+  // 1-based 5/6 hold 'dd-Mmm HH:MM' on an overnight, so 14 not 6.
   d.columns = [{ width: 22 }, { width: 26 }, { width: 11 }, { width: 6 },
                { width: 14 }, { width: 14 }, { width: 21 },
-               { width: 21 }, { width: 11 }, { width: 10 }, { width: 9 }, { width: 20 },
+               { width: 21 }, { width: 11 }, { width: 10 }, { width: 10 }, { width: 9 }, { width: 20 },
                { width: 10 }, { width: 12 }, { width: 24 }];
   headerRow(d, DETAIL);
 
@@ -281,24 +312,17 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
     || a.clock_in_iso.localeCompare(b.clock_in_iso));
 
   for (const r of detailRows) {
-    const row = d.addRow([
-      r.guard_name, r.site_name, ddMmmYy(r.shift_date), r.day_of_week,
-      localTimeCell(r.sched_start_label, r.shift_date),
-      localTimeCell(r.sched_end_label, r.shift_date),
-      hhmm(r.clock_in_label), localTimeCell(r.clock_out_label, r.shift_date),
-      r.scheduled_hours, r.actual_hours, r.break_hours, r.offpost_hours,
-      r.variance_hours, null, r.flags.join(' '),
-    ]);
-    coverageCell(row.getCell(14), r.coverage_pct);
-    if (r.flags.length > 0) fill(row.getCell(15), RED);
+    const row = d.addRow(detailValues(r));
+    coverageCell(row.getCell(COV_DETAIL), r.coverage_pct);
+    if (r.flags.length > 0) fill(row.getCell(FLAG_DETAIL), RED);
   }
   // Seven blanks, not five: Site, Date, Day, Sched Start, Sched End, Clock In,
   // Clock Out. Scheduled must land on column 9.
   const dTotal = d.addRow(['TOTAL', '', '', '', '', '', '', '',
-    data.overall.scheduled_hours, data.overall.actual_hours, data.overall.break_hours,
-    data.overall.offpost_hours, data.overall.variance_hours,
+    data.overall.scheduled_hours, data.overall.actual_hours, data.overall.payable_hours,
+    data.overall.break_hours, data.overall.offpost_hours, data.overall.variance_hours,
     null, '' /* never a flag on a total */]);
-  coverageCell(dTotal.getCell(14), data.overall.coverage_pct);
+  coverageCell(dTotal.getCell(COV_DETAIL), data.overall.coverage_pct);
   totalRow(dTotal);
   d.views = [{ state: 'frozen', ySplit: 1 }];
   d.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: DETAIL.length } };
@@ -306,7 +330,7 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   // ══ Sheet 3 — EXCEPTIONS ════════════════════════════════════════════════
   const e = wb.addWorksheet('EXCEPTIONS');
   e.columns = d.columns;
-  e.addRow(['Most recent first.  Rules — SHORT: coverage < 80%  ·  OVER: coverage > 110%  ·  NO_SCHEDULE: shift has no scheduled window  ·  AUTO_CLOSED: guard never clocked out, closed by the cron  ·  OFFPOST_ANOMALY: geofence violation exceeds actual'])
+  e.addRow(['Most recent first.  Rules — SHORT: payable coverage < 80%  ·  OVER: actual > 110% of scheduled (coverage can read ≤ 100%)  ·  NO_SCHEDULE: shift has no scheduled window  ·  AUTO_CLOSED: guard never clocked out, closed by the cron  ·  OFFPOST_ANOMALY: geofence violation exceeds actual'])
     .font = { italic: true, size: 10 };
   e.addRow([]);
   headerRow(e, DETAIL);
@@ -314,16 +338,9 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
     e.addRow(['No flagged rows in this period.']).font = { italic: true };
   } else {
     for (const r of flagged) {
-      const row = e.addRow([
-        r.guard_name, r.site_name, ddMmmYy(r.shift_date), r.day_of_week,
-        localTimeCell(r.sched_start_label, r.shift_date),
-        localTimeCell(r.sched_end_label, r.shift_date),
-        hhmm(r.clock_in_label), localTimeCell(r.clock_out_label, r.shift_date),
-        r.scheduled_hours, r.actual_hours, r.break_hours, r.offpost_hours,
-        r.variance_hours, null, r.flags.join(' '),
-      ]);
-      coverageCell(row.getCell(14), r.coverage_pct);
-      fill(row.getCell(15), RED);
+      const row = e.addRow(detailValues(r));
+      coverageCell(row.getCell(COV_DETAIL), r.coverage_pct);
+      fill(row.getCell(FLAG_DETAIL), RED);
     }
   }
   e.views = [{ state: 'frozen', ySplit: 3 }];
@@ -338,27 +355,28 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   note('Tenant', `${data.company_name}  (${data.company_id})`);
   note('Generated from commit', sha ?? 'unavailable — no commit SHA in the runtime environment');
   note('', '');
-  note('CHARTS PENDING', 'The approved design includes a scheduled-vs-actual column chart by guard and an actual-by-site bar chart. Neither export library can write native charts, so they are not in this file. The CHART DATA block at the bottom of SUMMARY holds both source ranges — select one and use Insert → Chart.');
+  note('CHARTS PENDING', 'The approved design includes a scheduled-vs-payable column chart by guard and a payable-by-site bar chart. Neither export library can write native charts, so they are not in this file. The CHART DATA block at the bottom of SUMMARY holds both source ranges, each with Actual alongside — select one and use Insert → Chart.');
   note('', '');
-  note('Scheduled', 'The shift’s scheduled window. On a DETAIL row this is the whole shift. In aggregates a handoff shift is split across its sessions in proportion to actual hours, so aggregate scheduled totals do not equal the sum of the detail column.');
-  note('Actual', 'Clock-out minus clock-in, raw, no truncation.');
-  note('Break', 'Total break time bounded to the session window.');
+  note('Scheduled', 'The shift’s scheduled window. On a DETAIL row this is the whole shift, so each session of a handoff shift is measured against the whole window (and each reads SHORT). In aggregates a handoff shift is split across its sessions in proportion to payable hours (equally when the shift has no payable time), so aggregate scheduled totals do not equal the sum of the detail column.');
+  note('Actual', 'Clock-out minus clock-in, raw, no truncation. Includes time before the scheduled start and after the scheduled end. Used for the OVER and OFFPOST_ANOMALY flags; Variance, Coverage % and SHORT use Payable.');
+  note('Payable', 'Clocked-in time inside the scheduled window: from the later of clock-in and scheduled start, to the earlier of clock-out and scheduled end, never below zero. Breaks are not subtracted. Variance, Coverage %, SHORT and the aggregate Scheduled split are computed from it. It is not the legacy stored Total Hours, which clipped the start only.');
+  note('Break', 'Total break time bounded to the session window. Reported separately and not subtracted from Payable.');
   note('Geofence violation', 'Time the guard’s presence at the post could not be confirmed: ping windows spanned by an open boundary alert in which no location check-in was received. A guard who is at the post but does not check in accrues time in this column, so it is not a confirmed measure of time away from the post. Bounded to the session window.');
-  note('Variance', 'Actual minus scheduled.');
-  note('Coverage %', 'Actual as a percentage of scheduled, stored as a real percentage so it sorts and filters as a number. Blank where there is no schedule.');
+  note('Variance', 'Payable minus scheduled. Never positive when the schedule is valid, so it reads as the shortfall against the scheduled window; time outside the window shows in Actual, not here.');
+  note('Coverage %', 'Payable as a percentage of scheduled, stored as a real percentage so it sorts and filters as a number. At most 100%. Blank where there is no schedule.');
   note('Sched Start', 'When the shift was planned to begin. Site-local time, 24-hour, with a date prefix (e.g. 26-Aug 19:00) only when it falls on a different local day from the Date column — the same rule as Clock Out. Compare against Clock In to see lateness; the Scheduled column is the length of this window, not a separate figure.');
   note('Sched End', 'When the shift was planned to finish. Same format and date-prefix rule as Sched Start. On an overnight shift this is always the following day, so it is nearly always prefixed.');
   note('Clock In / Out', 'Site-local time, 24-hour. Clock Out carries a date prefix (e.g. 26-Aug 07:00) only when the shift ended on a later local day than it started.');
-  note('Flagged', 'On an aggregate row, the number of distinct shifts carrying at least one flag. Flag names stay on the detail rows — a flag is a per-shift judgement, so a total never carries one.');
-  note('RAG colours', 'Coverage cells: green ≥ 95%, amber 80–95%, red < 80%. Flagged rows carry a red flag cell.');
+  note('Flagged', 'On an aggregate row, the number of distinct shifts carrying at least one flag. Flag names stay on the detail rows — a flag is a per-row judgement, so a total never carries one. The SUMMARY KPI “Flagged” counts flagged DETAIL rows (sessions) instead, so a handoff shift with both sessions flagged counts twice there and once on an aggregate row.');
+  note('RAG colours', 'Coverage cells (payable coverage): green ≥ 95%, amber 80–95%, red < 80%. Flagged rows carry a red flag cell.');
   note('', '');
-  note('SHORT', 'Coverage below 80%.');
-  note('OVER', 'Coverage above 110%.');
-  note('NO_SCHEDULE', 'The shift carries no scheduled window.');
+  note('SHORT', 'Payable coverage below 80%.');
+  note('OVER', 'Actual above 110% of scheduled. Judged on Actual, so an OVER row can show Coverage at or below 100%: the window was covered and the guard stayed well beyond it.');
+  note('NO_SCHEDULE', 'The shift carries no scheduled window. Payable is 0 and Coverage is blank.');
   note('AUTO_CLOSED', 'The guard never clocked out; the session was closed by the auto-complete cron.');
   note('OFFPOST_ANOMALY', 'Geofence violation time exceeds actual hours — impossible, and a sign of bad data rather than guard behaviour. Retained under its original name so historical exports remain comparable; the flag key is not a display label.');
   note('', '');
-  note('Removed columns', 'Total Hours (legacy), Break (mins) and Status were dropped. The first contradicted Actual by design, the second duplicated Break in different units, the third described the shift rather than its hours.');
+  note('Removed columns', 'Total Hours (legacy), Break (mins) and Status were dropped. The first contradicted Actual by design, the second duplicated Break in different units, the third described the shift rather than its hours. Payable is a different figure from the dropped Total Hours: it is clipped to the scheduled window at both ends.');
   note('Times', 'All dates and times are rendered in each site’s own timezone, not UTC and not the server’s.');
 
   return wb;

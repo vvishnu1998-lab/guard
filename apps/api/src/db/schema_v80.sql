@@ -124,9 +124,15 @@ UPDATE clock_in_verifications c
 --
 -- Its three prerequisites are re-stated because two have moved: (2) the
 -- dry-run gate is being replaced by a per-step allowlist in this same PR,
--- and (1) a purge step is being written. (3) has NOT moved — the bucket
--- still has versioning on with no NoncurrentVersionExpiration rule, so a
--- delete here still only writes a delete marker.
+-- and (1) a purge step is being written. (3) was stated here as unmoved:
+-- versioning on with no NoncurrentVersionExpiration rule. Corrected
+-- 2026-09-26 (N123): the bucket has lifecycle rule "noncurrent-30d",
+-- NoncurrentVersionExpiration NoncurrentDays 60 (the id says 30), so a delete
+-- here writes a delete marker and the bytes expire 60 days later.
+--
+-- The COMMENT ON text below was corrected the same day. migrate.ts replays
+-- every file on every run, so the next db:migrate against a database rewrites
+-- that column comment; until then a database keeps the earlier text.
 COMMENT ON COLUMN shift_sessions.clock_out_photo_delete_at IS
   'When the clock-out photo becomes eligible for deletion: clocked_out_at + 90 days, '
   'the tier locked 2026-09-19 (schema_v79.sql:237). NULL when no photo was taken. '
@@ -135,10 +141,11 @@ COMMENT ON COLUMN shift_sessions.clock_out_photo_delete_at IS
   'BEFORE RELYING ON A PURGE THAT SCANS THIS COLUMN: (1) the step is being added in the '
   'retention part-2 PR and is dry-run until named in RETENTION_LIVE_STEPS. '
   '(2) enforcement is per-step via that allowlist; an absent or malformed variable leaves '
-  'every step in dry-run. (3) UNCHANGED AND STILL TRUE: S3 bucket guard-media-prod has '
-  'versioning ENABLED with no NoncurrentVersionExpiration rule, so even a live purge only '
-  'writes a delete marker — the object bytes remain, stay billed, and are still retrievable '
-  'via GetObjectVersion. Add an index on this column at the same time as the purge that scans it.';
+  'every step in dry-run. (3) S3 bucket guard-media-prod has versioning ENABLED, so a live '
+  'purge writes a delete marker and the bytes become a noncurrent version: billed and '
+  'retrievable via GetObjectVersion until lifecycle rule noncurrent-30d expires them '
+  '(NoncurrentVersionExpiration, NoncurrentDays 60; read 2026-09-26). '
+  'Add an index on this column at the same time as the purge that scans it.';
 
 -- ── 5. The two indexes the new steps will scan ──────────────────────────
 --

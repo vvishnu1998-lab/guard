@@ -2,8 +2,8 @@
  * Email service — all outbound emails via SendGrid.
  *
  * Flows implemented in this file:
- *  - Incident Alert          — to active client on incident report
- *  - Daily Shift Report      — 9:00 AM Pacific cron, to active client
+ *  - Incident Alert          — every active client linked to the site, on incident report
+ *  - Daily Shift Report      — 9:00 AM Pacific cron, every active client linked to the site (D24)
  *  - Missed Shift Alert      — all active company admins, T+10 and T+30 rungs
  *  - Geofence Breach Alert   — all active company admins, per fresh violation
  *  - Temporary Password      — forgot-password recipient's own email
@@ -132,6 +132,17 @@ export function __resetSendgridFailureState(): void {
 // through the sgMail catch sites; the test needs to drive it directly to assert
 // the emission policy without standing up a fake SendGrid.
 export const __reportSendgridFailureForTest = reportSendgridFailure;
+
+// Marks a render that threw inside a per-recipient fan-out, so the outcome loop
+// can tell it from a SendGrid rejection. A render failure says nothing about
+// SendGrid; sending it through reportSendgridFailure would flip the flow to
+// "failing" and emit sendgrid_failing for a bug in our own template code.
+class EmailRenderError extends Error {
+  constructor(readonly original: unknown) {
+    super('email render failed');
+    this.name = 'EmailRenderError';
+  }
+}
 
 // Recipient resolver for all admin-alert flows. Fans out to every active
 // admin on the tenant, ordered primary-first so log ordering matches the
@@ -353,7 +364,7 @@ const INCIDENT_SEVERITY_COLORS: Record<string, string> = {
 };
 
 export async function sendIncidentAlert(
-  report: { id: string; description: string; severity: string; reported_at: Date },
+  report: { id: string; description: string; severity: string | null; reported_at: Date },
   siteId: string,
 ) {
   // Fan out to EVERY active client linked to this site via the v36
@@ -388,35 +399,59 @@ export async function sendIncidentAlert(
   const { site_name, site_tz, company_name } = result.rows[0];
 
   // Render per-recipient (personalized greeting) and send in parallel. One bad
-  // recipient must not suppress the others, so we don't throw — each failure is
-  // Sentry-captured individually via reportSendgridFailure (sendToAdmins pattern).
+  // recipient must not suppress the others, so we don't throw — each send failure
+  // goes to reportSendgridFailure, which counts it and rate-limits its Sentry
+  // events (sendToAdmins pattern).
+  //
+  // The render happens INSIDE the async callback. It used to run synchronously
+  // in the .map that builds allSettled's argument, so a render that threw
+  // escaped before allSettled existed and suppressed every recipient
+  // (_incidentAlert.test.ts records the null-severity instance). A render
+  // failure is not a SendGrid failure either, so it is routed to Sentry under
+  // its own tag rather than through reportSendgridFailure.
   const outcomes = await Promise.allSettled(
-    result.rows.map((row) => {
-      const { subject, html } = renderIncidentAlert({
-        report_id:    report.id,
-        description:  report.description,
-        severity:     report.severity,
-        reported_at:  report.reported_at,
-        site_name,
-        site_tz,
-        client_name:  row.client_name,
-        company_name,
-      });
-      return sgMail.send({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    result.rows.map(async (row) => {
+      let rendered: { subject: string; html: string };
+      try {
+        rendered = renderIncidentAlert({
+          report_id:    report.id,
+          description:  report.description,
+          severity:     report.severity,
+          reported_at:  report.reported_at,
+          site_name,
+          site_tz,
+          client_name:  row.client_name,
+          company_name,
+        });
+      } catch (err) {
+        throw new EmailRenderError(err);
+      }
+      return sgMail.send({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject: rendered.subject, html: rendered.html });
     }),
   );
 
+  let renderError: unknown = null;
   outcomes.forEach((o, i) => {
     const email = result.rows[i].client_email;
     if (o.status === 'fulfilled') {
       console.log(`[email] sendIncidentAlert: SUCCESS — delivered to ${email} (report=${report.id})`);
       noteSendgridSuccess('incident_alert');
+    } else if (o.reason instanceof EmailRenderError) {
+      console.error(`[email] sendIncidentAlert: RENDER FAILED for ${email} (report=${report.id})`);
+      if (renderError === null) renderError = o.reason.original;
     } else {
       const err: any = o.reason;
       console.error(`[email] sendIncidentAlert: SENDGRID ERROR for ${email} — ${err?.message ?? err}`, err?.response?.body);
       reportSendgridFailure('incident_alert', err, { report_id: report.id, site_id: siteId, recipient: email });
     }
   });
+  // Once per call: the same input fails the same way for every recipient.
+  if (renderError !== null) {
+    Sentry.captureException(renderError, {
+      tags: { flow: 'incident_alert', stage: 'render' },
+      extra: { report_id: report.id, site_id: siteId },
+    });
+  }
 }
 
 /**
@@ -429,7 +464,7 @@ export async function sendIncidentAlert(
 export function renderIncidentAlert(data: {
   report_id:   string;
   description: string;
-  severity:    string;
+  severity:    string | null;
   reported_at: Date | string;
   site_name:   string;
   /** IANA tz string, e.g. 'America/Los_Angeles'. Falls back to Pacific if unset. */
@@ -440,8 +475,17 @@ export function renderIncidentAlert(data: {
   const tz         = data.site_tz ?? PACIFIC;
   const dateLabel  = fmtDateSite(data.reported_at, tz);
   const greetName  = firstName(data.client_name);
-  const sevColor   = INCIDENT_SEVERITY_COLORS[data.severity] ?? '#6B7280';
-  const sevLabel   = data.severity.toUpperCase();
+  // `reports.severity` is NULL-able and nothing writes it — every production
+  // row is NULL, so this is the ONLY path incident alerts have ever taken.
+  // Absent severity drops the badge outright rather than rendering a
+  // placeholder; the timestamp span beside it is kept either way.
+  //
+  // The trailing newline+indent lives INSIDE this fragment so that the
+  // non-null render stays byte-identical to the pre-fix output — asserted
+  // against a snapshot captured from main in _incidentAlert.test.ts.
+  const sevBadge = data.severity
+    ? `<span style="background:${INCIDENT_SEVERITY_COLORS[data.severity] ?? '#6B7280'};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;letter-spacing:1px">${data.severity.toUpperCase()}</span>\n        `
+    : '';
 
   // Per-report deep link — client lands on their portal home with
   // ?report=<id>, and the ActivityLogTable there scrolls the row into view
@@ -463,8 +507,7 @@ export function renderIncidentAlert(data: {
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
-        <span style="background:${sevColor};color:#fff;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:bold;letter-spacing:1px">${sevLabel}</span>
-        <span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
+        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
@@ -481,7 +524,9 @@ export function renderIncidentAlert(data: {
     </div>
   </div>`;
 
-  const subject = `Incident Reported — ${data.site_name} — ${sevLabel} — ${dateLabel}`;
+  const subject = data.severity
+    ? `Incident Reported — ${data.site_name} — ${data.severity.toUpperCase()} — ${dateLabel}`
+    : `Incident Reported — ${data.site_name} — ${dateLabel}`;
   return { subject, html };
 }
 
@@ -527,39 +572,92 @@ function firstName(fullName: string | null | undefined): string {
   return titleCase(fullName).split(' ')[0] || 'there';
 }
 
-export async function sendDailyShiftReport(shiftId: string) {
+/** Why a pending shift produced no email. Logged and counted, never flagged. */
+export type DailyReportSkipReason =
+  | 'not_pending'             // no row: already flagged, no such shift, or no guard
+  | 'company_inactive'
+  | 'client_access_disabled'  // the portal toggle, and site deactivation (routes/sites.ts)
+  | 'no_client';              // no active client linked to the site via client_sites
+
+/** What sendDailyShiftReport did with one shift; jobs/dailyShiftEmail.ts counts it. */
+export type DailyReportOutcome =
+  | { status: 'sent'; delivered: number; failed: number }
+  | { status: 'skipped'; reason: DailyReportSkipReason };
+
+/**
+ * Every recipient failed. The shift stays unflagged and the job counts it as
+ * failed; the next run inside the 36-hour window tries it again, if there is
+ * one (only shifts ending roughly 21:00–08:00 PT get a second run).
+ * `original` is the first underlying error (a SendGrid rejection or a render
+ * error). The job reports that one, once per shift, so the event keeps its
+ * stack and SendGrid status.
+ */
+export class DailyReportDeliveryError extends Error {
+  constructor(
+    readonly shiftId: string,
+    readonly attempted: number,
+    readonly stage: 'send' | 'render' | 'mixed',
+    readonly original: unknown,
+  ) {
+    super(`sendDailyShiftReport: all ${attempted} recipient(s) failed for shift ${shiftId} (${stage})`);
+    this.name = 'DailyReportDeliveryError';
+  }
+}
+
+export async function sendDailyShiftReport(shiftId: string): Promise<DailyReportOutcome> {
   // Reply-To is the shared support address — client replies route to
   // NetraOps support rather than the per-tenant primary admin.
   const shiftResult = await pool.query(
-    `SELECT sh.id, sh.scheduled_start, sh.scheduled_end,
-            si.name     AS site_name,
-            si.timezone AS site_tz,
-            g.name      AS guard_name,
+    `SELECT sh.id, sh.scheduled_start, sh.scheduled_end, sh.site_id,
+            si.name                      AS site_name,
+            si.timezone                  AS site_tz,
+            si.company_id,
+            si.client_access_disabled_at,
+            g.name                       AS guard_name,
             g.badge_number,
-            c.name      AS client_name,
-            c.email     AS client_email,
-            co.name     AS company_name
+            co.name                      AS company_name,
+            co.is_active                 AS company_active
      FROM shifts sh
      JOIN sites          si ON si.id = sh.site_id
      JOIN guards         g  ON g.id  = sh.guard_id
-     LEFT JOIN clients   c  ON c.site_id = si.id AND c.is_active = true
      JOIN companies      co ON co.id = si.company_id
      WHERE sh.id = $1 AND sh.daily_report_email_sent = false`,
     [shiftId],
   );
-  if (!shiftResult.rows[0]) return;
+  if (!shiftResult.rows[0]) return { status: 'skipped', reason: 'not_pending' };
   const sh = shiftResult.rows[0];
 
-  // No active client → nothing to send. Flag the row anyway so the cron does
-  // not retry this shift every morning forever.
-  if (!sh.client_email) {
-    console.log(`[email] sendDailyShiftReport: skipped — no active client for site "${sh.site_name}" (shift ${shiftId})`);
-    await pool.query(
-      'UPDATE shifts SET daily_report_email_sent = true, daily_report_email_sent_at = NOW() WHERE id = $1',
-      [shiftId],
-    );
-    return;
-  }
+  // A skip is NOT flagged (N161). Flagging it used to record a send that never
+  // happened, in the log and in daily_report_email_sent. It cannot "retry
+  // forever": the job's 36-hour window gives a shift at most two runs, and a
+  // client linked inside that window gets the report on the second run, if
+  // the shift has one (only shifts ending roughly 21:00–08:00 PT do).
+  const skip = (reason: DailyReportSkipReason, what: string): DailyReportOutcome => {
+    console.log(`[email] sendDailyShiftReport: skipped — ${what} for site "${sh.site_name}" (shift ${shiftId})`);
+    return { status: 'skipped', reason };
+  };
+  if (!sh.company_active) return skip('company_inactive', 'company inactive');
+  if (sh.client_access_disabled_at) return skip('client_access_disabled', 'client access disabled');
+
+  // Every active client linked to the site through client_sites, the source of
+  // truth since v36 (routes/clients.ts), in the site's own company. It is the
+  // junction the admin client list, client login and incident alerts read.
+  // clients.site_id is legacy and deliberately not read. Reading it as well
+  // would add nobody today (every client's primary site also has a client_sites
+  // row), but a client whose primary site an admin unlinked would keep getting
+  // that site's reports while appearing in none of those surfaces.
+  const recipientResult = await pool.query(
+    `SELECT c.id, c.name, c.email
+       FROM client_sites cs
+       JOIN clients c ON c.id = cs.client_id
+      WHERE cs.site_id = $1
+        AND c.is_active = true
+        AND c.company_id = $2
+      ORDER BY c.email`,
+    [sh.site_id, sh.company_id],
+  );
+  const recipients: Array<{ id: string; name: string; email: string }> = recipientResult.rows;
+  if (recipients.length === 0) return skip('no_client', 'no active client');
 
   const sessionResult = await pool.query(
     `SELECT ss.id, ss.clocked_in_at, ss.clocked_out_at,
@@ -679,13 +777,12 @@ export async function sendDailyShiftReport(shiftId: string) {
     `submitted, ${parseInt(missedResult.rows[0]?.unresolved ?? 0)} window(s) unresolved`,
   );
 
-  const { subject, html } = renderDailyShiftReport({
+  const report = {
     site_name:       sh.site_name,
     site_tz:         sh.site_tz,
     scheduled_start: sh.scheduled_start,
     guard_name:      sh.guard_name,
     badge_number:    sh.badge_number,
-    client_name:     sh.client_name,
     company_name:    sh.company_name,
     clocked_in_at:   session?.clocked_in_at ?? null,
     clocked_out_at:  session?.clocked_out_at ?? null,
@@ -703,29 +800,81 @@ export async function sendDailyShiftReport(shiftId: string) {
     tasks_total:     parseInt(taskTotalResult.rows[0]?.total ?? 0),
     pings_submitted: pingsSubmitted,
     pings_expected:  pingsExpected,
-  });
-
-  const sendOpts: sgMail.MailDataRequired = {
-    to:      sh.client_email,
-    from:    FROM,
-    replyTo: REPLY_TO,
-    subject,
-    html,
   };
 
-  try {
-    await sgMail.send(sendOpts);
-    noteSendgridSuccess('daily_shift_report');
-  } catch (err: any) {
-    console.error(`[email] sendDailyShiftReport: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
-    reportSendgridFailure('daily_shift_report', err, { shift_id: shiftId });
-    throw err;
+  // One message per recipient (the greeting is personalized), sent in
+  // parallel. The render runs inside the async callback so a throw rejects
+  // only that recipient's promise (see sendIncidentAlert).
+  const outcomes = await Promise.allSettled(
+    recipients.map(async (r) => {
+      let rendered: { subject: string; html: string };
+      try {
+        rendered = renderDailyShiftReport({ ...report, client_name: r.name });
+      } catch (err) {
+        throw new EmailRenderError(err);
+      }
+      const sendOpts: sgMail.MailDataRequired = {
+        to:      r.email,
+        from:    FROM,
+        replyTo: REPLY_TO,
+        subject: rendered.subject,
+        html:    rendered.html,
+      };
+      await sgMail.send(sendOpts);
+    }),
+  );
+
+  let delivered = 0;
+  let renderFailed = 0;
+  let sendFailed = 0;
+  let renderError: unknown = null;
+  let firstError: unknown = null;
+  outcomes.forEach((o, i) => {
+    const email = recipients[i].email;
+    if (o.status === 'fulfilled') {
+      delivered++;
+      noteSendgridSuccess('daily_shift_report');
+    } else if (o.reason instanceof EmailRenderError) {
+      renderFailed++;
+      console.error(`[email] sendDailyShiftReport: RENDER FAILED for ${email} (shift ${shiftId})`);
+      if (renderError === null) renderError = o.reason.original;
+      if (firstError === null) firstError = o.reason.original;
+    } else {
+      sendFailed++;
+      const err: any = o.reason;
+      console.error(`[email] sendDailyShiftReport: SENDGRID ERROR for ${email} — ${err?.message ?? err}`, err?.response?.body);
+      reportSendgridFailure('daily_shift_report', err, { shift_id: shiftId });
+      if (firstError === null) firstError = err;
+    }
+  });
+
+  // Every recipient failed: the job reports it, once, with the original error.
+  if (delivered === 0) {
+    throw new DailyReportDeliveryError(
+      shiftId,
+      recipients.length,
+      renderFailed === 0 ? 'send' : sendFailed === 0 ? 'render' : 'mixed',
+      firstError,
+    );
+  }
+  // Some delivered and a render failed for others: nothing is thrown, so report
+  // the render error here. Once per shift; the same template input fails the
+  // same way.
+  if (renderError !== null) {
+    Sentry.captureException(renderError, {
+      tags: { flow: 'daily_shift_report', stage: 'render' },
+      extra: { shift_id: shiftId },
+    });
   }
 
+  // At least one recipient has it, so flag it: a retry would send everyone a
+  // duplicate. A recipient whose send failed is not retried (Vishnu,
+  // 2026-09-30, D24); the failure is in the log and counted by the job.
   await pool.query(
     'UPDATE shifts SET daily_report_email_sent = true, daily_report_email_sent_at = NOW() WHERE id = $1',
     [shiftId],
   );
+  return { status: 'sent', delivered, failed: recipients.length - delivered };
 }
 
 /**

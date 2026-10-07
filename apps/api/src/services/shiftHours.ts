@@ -1,10 +1,17 @@
 /**
- * Canonical 4-field shift hours service.
+ * Canonical shift hours service — Scheduled, Actual, Payable, Break,
+ * Violation.
  *
  * A single source of truth for how per-shift hours are computed across
  * every read surface (mobile profile, admin dashboard, client portal,
  * billing XLSX, emails, PDFs). Replaces the four divergent formulas
- * cataloged in the 2026-07-17 audit.
+ * cataloged in the 2026-07-17 audit. Four hand-typed copies of the raw
+ * Actual arithmetic survive on surfaces that stay on Actual —
+ * routes/clientPortal.ts (hours_on_duty, and the client PDF's `hours`),
+ * services/email.ts (handoff FYI) and routes/shifts.ts
+ * (total_hours_worked). They compute the same raw figure; they are not
+ * billing numbers. ACTIVE SITES carried a fifth until U6 moved it onto the
+ * aggregate fragment below.
  *
  * That claim lapsed and was restored on 2026-08-25. Between them, routes/
  * admin.ts and routes/shifts.ts had accumulated SEVEN hand-inlined copies
@@ -19,14 +26,24 @@
  *   SHIFT_HOURS_AGG_SQL_FIELDS  — AGGREGATE. Wraps the same expressions in
  *                                 SUM() for a GROUP BY over sessions
  *                                 (per shift, per site, per guard, per month).
- * Both are built from BREAK_HOURS_ROW_SQL / VIOLATION_HOURS_ROW_SQL, which
- * are the actual definition and are exported for call sites whose join runs
- * the other way (see routes/admin.ts dashboard-sites, where the event table
- * drives and the session is joined in).
+ * Both are built from PAYABLE_HOURS_ROW_SQL / BREAK_HOURS_ROW_SQL /
+ * VIOLATION_HOURS_ROW_SQL, which are the actual definitions and are
+ * exported for call sites that need one figure in a different SQL shape.
  *
- * Contract (per Phase 1 lock-in, D1/D5/D6):
+ * PAYABLE IS OPT-IN (D19). Both fragments emit payable_hours only when the
+ * caller passes { payable: true }; without it their output is byte-for-byte
+ * what it was before Payable existed. The surfaces that bill — the hours
+ * export, admin analytics, ACTIVE SITES, the analytics export — opt in. The
+ * surfaces that stay on Actual — the daily client email, the client and
+ * guard PDFs, the client portal, mobile — do not, so no Payable figure ever
+ * reaches a client or guard payload by accident. PayableShiftHours is the
+ * matching type; ShiftHours stays the four Actual-surface fields.
+ *
+ * Contract (per Phase 1 lock-in, D1/D5/D6; payable per D19, 2026-09-26):
  *   scheduled_hours = shifts.scheduled_end − shifts.scheduled_start
  *   actual_hours    = COALESCE(clocked_out_at, NOW()) − clocked_in_at  (raw, no truncation)
+ *   payable_hours   = max(0, min(COALESCE(clocked_out_at, NOW()), scheduled_end)
+ *                            − max(clocked_in_at, scheduled_start))
  *   break_hours     = Σ max(0, min(break_end,   NOW(), clocked_out_at) − max(break_start,  clocked_in_at))
  *   violation_hours = Σ over violations of Σ over the ping windows the
  *                     violation spans that received NO ping (judged on
@@ -38,18 +55,30 @@
  *                     rather than time presence went unconfirmed. See
  *                     VIOLATION_HOURS_ROW_SQL for the full reasoning.
  *
- * All values are non-negative decimal hours rounded to 2 places.
+ * Values are decimal hours rounded to 2 places. All are non-negative except
+ * scheduled_hours, which has no clamp and goes negative on a row whose end
+ * precedes its start (payable_hours is 0 there).
  *
- * `actual_hours` uses RAW clocked_in_at per Vishnu's decision (matches the
- * mobile shift timer and the current client PDF). This diverges from the
- * stored shift_sessions.total_hours column, which truncates to
- * MAX(clocked_in, scheduled_start). Existing writers of that column stay
- * in place for rollback safety; new read paths ignore it.
+ * THREE DIFFERENT HOURS FIGURES — do not read one as another:
+ *   * actual_hours — RAW clock-out − clock-in, per Vishnu's decision (matches
+ *     the mobile shift timer and the client PDF). Every surface that stays
+ *     on Actual shows this, and OVER / OFFPOST_ANOMALY judge against it.
+ *   * payable_hours — the clocked-in time INSIDE the scheduled window,
+ *     clamped at BOTH ends. It drives totals and billing (D19). Breaks are
+ *     not subtracted; break_hours stays its own figure. payable ≤ actual
+ *     always, and payable ≤ scheduled whenever end ≥ start.
+ *   * shift_sessions.total_hours — the STORED legacy column, clamped at the
+ *     START only (MAX(clocked_in, scheduled_start)), and net of breaks on
+ *     rows written before 2026-08-29. It is neither of the above and is
+ *     never a fallback for either. Its writers stay for rollback safety;
+ *     new read paths ignore it.
  *
  * Live sessions (clocked_out_at IS NULL) and live intervals inside them
  * (open break_sessions, unresolved geofence_violations) are extended to
- * NOW() so that in-flight shifts show a running total across all four
- * fields — no partial states.
+ * NOW() so that in-flight shifts show a running total — no partial states.
+ * payable_hours takes the same NOW() and is then capped at scheduled_end, so
+ * a live session past its end stops accruing Payable while Actual keeps
+ * growing.
  *
  * break_hours and violation_hours are additionally BOUNDED TO THE SESSION
  * WINDOW and clamped PER ROW (2026-08-25). An unresolved geofence_violations
@@ -79,8 +108,23 @@ export interface ShiftHours {
   violation_hours: number;
 }
 
+/**
+ * The hours shape on the surfaces that bill (D19): ShiftHours plus
+ * payable_hours. A separate type, not a fifth ShiftHours field, so the
+ * compiler cannot push a Payable figure into the client portal, mobile or
+ * the daily email — surfaces that stay on Actual and build ShiftHours
+ * literals of their own.
+ */
+export interface PayableShiftHours extends ShiftHours {
+  payable_hours:   number;
+}
+
 export function emptyShiftHours(): ShiftHours {
   return { scheduled_hours: 0, actual_hours: 0, break_hours: 0, violation_hours: 0 };
+}
+
+export function emptyPayableShiftHours(): PayableShiftHours {
+  return { ...emptyShiftHours(), payable_hours: 0 };
 }
 
 /**
@@ -130,25 +174,12 @@ function round2(n: number): number {
 }
 
 /**
- * SQL fragment: four correlated expressions that produce the 4 hours
- * fields. Intended for embedding in existing SELECT lists next to the
- * session/shift columns they annotate.
- *
- *   const q = `SELECT ss.id, ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')} FROM shift_sessions ss JOIN shifts sh …`
- *
- * Fixed columns: expects `${sessionAlias}.clocked_in_at`,
- * `.clocked_out_at`, `.id`; `${shiftAlias}.scheduled_start`,
- * `.scheduled_end`. Aliases must be trusted identifiers (never user input).
- *
- * NULL-safe for shifts with no session (all four fields become 0 via
- * COALESCE at the caller's LATERAL/LEFT-JOIN boundary, not inside this
- * fragment).
- */
-/**
  * THE definition of a bounded, clamped sub-interval of a shift session.
- * Everything else in this file, and every aggregate call site, is built on
- * these three functions — a route needing a different SQL shape parameterises
- * the aliases instead of re-typing the arithmetic.
+ * Payable and break are built on it, and every call site reaches them
+ * through the exported row functions below — a route needing a different
+ * SQL shape parameterises the aliases instead of re-typing the arithmetic.
+ * (actual_hours is not an interval inside the session; it is the session,
+ * and its one-line expression lives in the two fragments.)
  *
  * `endExpr` must arrive already NULL-safe (callers wrap the open end in
  * COALESCE(..., NOW())). Postgres LEAST/GREATEST SKIP nulls rather than
@@ -161,6 +192,37 @@ function boundedIntervalHours(startExpr: string, endExpr: string, sessionAlias: 
              LEAST(${endExpr}, COALESCE(${sessionAlias}.clocked_out_at, NOW()))
            - GREATEST(${startExpr}, ${sessionAlias}.clocked_in_at)
          ))) / 3600.0`;
+}
+
+/**
+ * THE definition of Payable (D19): one session's clocked-in time inside its
+ * shift's scheduled window,
+ *
+ *   max(0, min(COALESCE(clocked_out_at, NOW()), scheduled_end)
+ *          − max(clocked_in_at, scheduled_start))
+ *
+ * which is exactly boundedIntervalHours with the schedule as the interval:
+ * the session bounded to its schedule is the same operation as a break
+ * bounded to its session. Per-session and aggregate fragments both call
+ * this; nothing re-types the arithmetic.
+ *
+ * NULL SAFETY RESTS ON THE JOIN. scheduled_start / scheduled_end are
+ * TIMESTAMPTZ NOT NULL (schema.sql), so this is NULL-safe for any caller
+ * that INNER-joins shifts. A caller that OUTER-joined shifts would hand
+ * LEAST/GREATEST a NULL bound, which they skip — Payable would silently
+ * equal Actual. Every caller inner-joins today; keep it that way.
+ *
+ * Zero or negative windows (end ≤ start) give 0 by construction, which is
+ * the NO_SCHEDULE rule — no special case is needed anywhere.
+ *
+ * Aliases must be trusted identifiers (never user input).
+ */
+export function PAYABLE_HOURS_ROW_SQL(sessionAlias: string, shiftAlias: string): string {
+  return boundedIntervalHours(
+    `${shiftAlias}.scheduled_start`,
+    `${shiftAlias}.scheduled_end`,
+    sessionAlias,
+  );
 }
 
 /**
@@ -316,12 +378,46 @@ export function VIOLATION_HOURS_ROW_SQL(
           AND lp.pinged_at <  w.ws + ${WIN}))`;
 }
 
-export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string): string {
+/** Options shared by both fragments. See "PAYABLE IS OPT-IN" in the header. */
+export interface HoursFragmentOptions {
+  /** Emit payable_hours (per session) / payable_hours|h_payable (aggregate). */
+  payable?: boolean;
+}
+
+/**
+ * SQL fragment — PER SESSION. Correlated expressions for scheduled, actual,
+ * [payable,] break and violation hours. Intended for embedding in existing
+ * SELECT lists next to the session/shift columns they annotate.
+ *
+ *   const q = `SELECT ss.id, ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')} FROM shift_sessions ss JOIN shifts sh …`
+ *
+ * Fixed columns: expects `${sessionAlias}.clocked_in_at`,
+ * `.clocked_out_at`, `.id`, `.ping_interval_minutes`;
+ * `${shiftAlias}.scheduled_start`, `.scheduled_end`. The shift must be
+ * INNER-joined (see PAYABLE_HOURS_ROW_SQL). Aliases must be trusted
+ * identifiers (never user input).
+ *
+ * With { payable: true }, payable_hours is emitted directly after
+ * actual_hours. Without it the output is unchanged from before D19 —
+ * scripts/test-payable-hours.ts asserts that byte-for-byte.
+ *
+ * NULL-safe for shifts with no session (every field becomes 0 via
+ * COALESCE at the caller's LATERAL/LEFT-JOIN boundary, not inside this
+ * fragment).
+ */
+export function SHIFT_HOURS_SQL_FIELDS(
+  sessionAlias: string, shiftAlias: string, opts: HoursFragmentOptions = {},
+): string {
   const s = sessionAlias;
   const sh = shiftAlias;
+  // Empty string when off, INCLUDING its line break, so the default output
+  // is the pre-D19 text exactly.
+  const payable = opts.payable
+    ? `\n    ROUND(CAST(${PAYABLE_HOURS_ROW_SQL(s, sh)} AS NUMERIC), 2) AS payable_hours,`
+    : '';
   return `
     ROUND(CAST(EXTRACT(EPOCH FROM (${sh}.scheduled_end - ${sh}.scheduled_start)) / 3600.0 AS NUMERIC), 2) AS scheduled_hours,
-    ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(${s}.clocked_out_at, NOW()) - ${s}.clocked_in_at)) / 3600.0) AS NUMERIC), 2) AS actual_hours,
+    ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(${s}.clocked_out_at, NOW()) - ${s}.clocked_in_at)) / 3600.0) AS NUMERIC), 2) AS actual_hours,${payable}
     ROUND(CAST(COALESCE((
       SELECT SUM(${BREAK_HOURS_ROW_SQL('bs', s)})
         FROM break_sessions bs
@@ -336,21 +432,27 @@ export function SHIFT_HOURS_SQL_FIELDS(sessionAlias: string, shiftAlias: string)
 }
 
 /**
- * SQL fragment — AGGREGATE shape. Same four-field contract as
- * SHIFT_HOURS_SQL_FIELDS, but every field is wrapped in SUM() for a query
- * that GROUPs BY something coarser than a session: per shift (handoffs
- * contribute several sessions), per site, per guard, per month.
+ * SQL fragment — AGGREGATE shape. The same actual, [payable,] break and
+ * violation expressions as SHIFT_HOURS_SQL_FIELDS, each wrapped in SUM() for
+ * a query that GROUPs BY something coarser than a session: per shift
+ * (handoffs contribute several sessions), per site, per guard, per month.
  *
  *   const q = `SELECT ss.shift_id, ${SHIFT_HOURS_AGG_SQL_FIELDS('ss')}
- *                FROM shift_sessions ss GROUP BY ss.shift_id`
+ *                FROM shift_sessions ss JOIN shifts sh … GROUP BY ss.shift_id`
  *
  * scheduled_hours is deliberately absent — it is a property of the SHIFT,
  * not of the sessions being aggregated, so summing it here would double-count
- * a handoff. Callers select it from the shift row themselves.
+ * a handoff. Callers select it from the shift row themselves. payable_hours
+ * is different: it is a per-SESSION figure and safe to sum. Sessions of one
+ * shift cannot overlap — a handoff closes A and opens B at one NOW() in one
+ * transaction (D19) — so a shift's summed Payable cannot exceed its window.
  *
  * `naming` picks the output column names, because the two conventions in
  * this codebase disagree: routes/shifts.ts consumes actual_hours/break_hours/
  * violation_hours, routes/admin.ts consumes h_actual/h_break/h_violation.
+ * With { payable: true } the payable column is payable_hours / h_payable,
+ * emitted directly after the actual column; without it the output is
+ * unchanged from before D19.
  *
  * The inner SUM returns NULL for a session with no breaks/violations; the
  * outer SUM skips those NULLs, and COALESCE(...,0) covers the all-NULL group.
@@ -360,14 +462,18 @@ export function SHIFT_HOURS_AGG_SQL_FIELDS(
   sessionAlias: string,
   naming: 'hours_suffix' | 'h_prefix' = 'hours_suffix',
   shiftAlias = 'sh',
+  opts: HoursFragmentOptions = {},
 ): string {
   const s = sessionAlias;
   const sh = shiftAlias;
   const col = naming === 'h_prefix'
-    ? { actual: 'h_actual',     brk: 'h_break',     viol: 'h_violation'     }
-    : { actual: 'actual_hours', brk: 'break_hours', viol: 'violation_hours' };
+    ? { actual: 'h_actual',     pay: 'h_payable',     brk: 'h_break',     viol: 'h_violation'     }
+    : { actual: 'actual_hours', pay: 'payable_hours', brk: 'break_hours', viol: 'violation_hours' };
+  const payable = opts.payable
+    ? `\n    ROUND(CAST(COALESCE(SUM(${PAYABLE_HOURS_ROW_SQL(s, sh)}), 0) AS NUMERIC), 2) AS ${col.pay},`
+    : '';
   return `
-    ROUND(CAST(COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(${s}.clocked_out_at, NOW()) - ${s}.clocked_in_at)) / 3600.0)), 0) AS NUMERIC), 2) AS ${col.actual},
+    ROUND(CAST(COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(${s}.clocked_out_at, NOW()) - ${s}.clocked_in_at)) / 3600.0)), 0) AS NUMERIC), 2) AS ${col.actual},${payable}
     ROUND(CAST(COALESCE(SUM((
       SELECT SUM(${BREAK_HOURS_ROW_SQL('bs', s)})
         FROM break_sessions bs
@@ -407,7 +513,9 @@ export interface ShiftHoursInput {
 }
 
 /**
- * Compute the 4-field hours object for one shift session.
+ * Compute the Actual-surface hours object (ShiftHours — no Payable) for one
+ * shift session. Its one caller is the mobile active-session payload, which
+ * stays on Actual (D19).
  *
  * Returns emptyShiftHours() if the session doesn't exist. Live intervals
  * (open session, open break, unresolved violation) are extended to NOW(),
@@ -463,26 +571,30 @@ export async function getShiftHoursForShifts(
 }
 
 /**
- * Sum an iterable of ShiftHours into a single aggregate.
+ * Sum an iterable of PayableShiftHours into a single aggregate. Totals are a
+ * Payable surface (D19), so this sums payable_hours alongside the rest.
  *
  * NOTE on scheduled_hours: this sums it too, which is correct when the
  * caller is aggregating DISTINCT shifts (each shift's scheduled window
  * counts once). If aggregating multiple sessions belonging to the SAME
  * shift (mid-shift handoff), the caller should collapse to one
  * scheduled_hours per shift BEFORE summing — otherwise scheduled time
- * would be double-counted.
+ * would be double-counted. payable_hours needs no such care: it is a
+ * per-session figure and sessions of one shift do not overlap.
  */
-export function sumShiftHours(items: Iterable<ShiftHours>): ShiftHours {
-  const total = emptyShiftHours();
+export function sumShiftHours(items: Iterable<PayableShiftHours>): PayableShiftHours {
+  const total = emptyPayableShiftHours();
   for (const h of items) {
     total.scheduled_hours += h.scheduled_hours;
     total.actual_hours    += h.actual_hours;
+    total.payable_hours   += h.payable_hours;
     total.break_hours     += h.break_hours;
     total.violation_hours += h.violation_hours;
   }
   return {
     scheduled_hours: round2(total.scheduled_hours),
     actual_hours:    round2(total.actual_hours),
+    payable_hours:   round2(total.payable_hours),
     break_hours:     round2(total.break_hours),
     violation_hours: round2(total.violation_hours),
   };

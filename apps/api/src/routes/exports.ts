@@ -74,8 +74,11 @@ async function fetchAnalyticsData(companyId: string | null, params: {
     return { args, cidPredicate, filter: clauses.join(' ') };
   }
 
-  // Guard hours by site — Phase 1 adds the 4-field breakdown alongside
-  // the legacy `total_hours` scalar. sh JOIN needed for scheduled_hours.
+  // Guard hours by site — the canonical breakdown alongside the legacy
+  // `total_hours` scalar. sh JOIN needed for scheduled_hours and Payable.
+  // payable_hours (D19) is emitted right after actual_hours, so the XLSX —
+  // json_to_sheet over these rows — gains it as the column after Actual with
+  // no change of its own; the CSV lists it explicitly below.
   const hq = buildArgs('ss.clocked_in_at', 'ss.clocked_in_at');
   const hours = await pool.query(`
     SELECT
@@ -88,7 +91,7 @@ async function fetchAnalyticsData(companyId: string | null, params: {
       -- Column type is unchanged - still a date; only the value moves.
       (ss.clocked_in_at AT TIME ZONE s.timezone)::date AS shift_date,
       ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
-      ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh')},
+      ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh', { payable: true })},
       -- Rendered site-local, in SQL rather than JS. This file's XLSX path is
       -- json_to_sheet(rows), which emits EVERY key as a column, so carrying a
       -- site_timezone helper the way routes/billing.ts does would silently add
@@ -188,17 +191,20 @@ router.get('/analytics/csv', requireAuth('company_admin', 'vishnu'), async (req:
   const sections: string[] = [];
 
   if (!type || type === 'hours') {
+    // Keys and labels are parallel arrays, and rowsToCsv silently reverts the
+    // WHOLE header row to raw keys if their lengths differ — add to both.
+    // The XLSX sheet carries raw keys as its headers (json_to_sheet), so only
+    // this CSV has friendly labels.
     sections.push('GUARD HOURS\n' + rowsToCsv(
       [
         'site_name','guard_name','badge_number','shift_date',
-        'total_hours','scheduled_hours','actual_hours','break_hours','violation_hours',
+        'total_hours','scheduled_hours','actual_hours','payable_hours','break_hours','violation_hours',
         'clocked_in_at','clocked_out_at',
       ],
       data.hours,
-      // Phase 2 D3 — Off-post header for label consistency with UI/XLSX.
       [
         'Site','Guard','Badge','Shift Date',
-        'Total Hours (legacy)','Scheduled Hours','Actual Hours','Break Hours','Geofence Violation Hours',
+        'Total Hours (legacy)','Scheduled Hours','Actual Hours','Payable Hours','Break Hours','Geofence Violation Hours',
         'Clocked In','Clocked Out',
       ],
     ));

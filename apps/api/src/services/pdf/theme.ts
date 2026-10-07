@@ -122,9 +122,20 @@ export function badge(
   color: string,
   textColor = WHITE,
 ) {
-  const w = label.length * 6 + 12;
+  // MEASURED, not estimated. This was `label.length * 6 + 12`, which bills
+  // every glyph the same 6pt: 'PING' got a 36pt box for 17.1pt of ink, and
+  // 'MISSED / ANSWERED LATE' got 144pt for ~94pt. In the activity log that
+  // badge starts at x=110 with the guard column at x=220, so the box ended
+  // at 254 and painted 34pt of navy over the guard's name — a filled rect
+  // carries no text, so pdftotext extracted the page as though nothing were
+  // wrong. The precedent for measuring is at clientPortal.ts:869.
+  //
+  // The font must be set BEFORE widthOfString: it measures in the CURRENT
+  // font, so measuring first would have returned Helvetica-at-12 widths.
+  doc.fontSize(7).font('Helvetica-Bold');
+  const w = doc.widthOfString(label) + 12;
   doc.rect(x, y, w, 14).fill(color);
-  doc.fontSize(7).fillColor(textColor).font('Helvetica-Bold').text(label, x + 6, y + 3.5, { lineBreak: false });
+  doc.fillColor(textColor).text(label, x + 6, y + 3.5, { lineBreak: false });
   return w;
 }
 

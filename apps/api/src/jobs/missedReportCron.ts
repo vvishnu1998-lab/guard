@@ -7,10 +7,17 @@
  *
  * Runs every 5 minutes. Walks every currently-open shift_session
  * (and sessions that clocked out within the last 15 min, to catch
- * the final window of a shift that autoCompleteShifts just closed),
- * computes the completed hourly windows anchored to the shift's
- * scheduled_start, and INSERTs a missed_reports row for any window
- * that has no report.
+ * the final window of a shift closed by a MANUAL or handoff
+ * clock-out), computes the completed hourly windows anchored to the
+ * shift's scheduled_start, and INSERTs a missed_reports row for any
+ * window that has no report.
+ *
+ * The 15-min tail does not serve AUTO-closed sessions, for the same
+ * reason as in missedPingCron.ts: the recorded clocked_out_at is the
+ * anchor, and a scheduled_end anchor is at least the auto-close grace (15
+ * min) in the past by the time the sweep commits (a grace-time clock-in
+ * may still match, but has no trackable window). Every tracked window
+ * ends by scheduled_end and is judged by the open arm during the grace.
  *
  * Window rules (matches missedPingCron):
  *   * Windows are 60 min slots starting at scheduled_start.
@@ -45,6 +52,7 @@ import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { breakOverlapsWindow } from '../services/pingWindows';
 import { expiresAtFor } from '../services/retention';
+import { missedWindowInsertSql } from '../services/missedWindowInsert';
 import { Sentry } from '../services/sentry';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
 
@@ -187,18 +195,16 @@ runJob('missedReportCron', '*/5 * * * *', async () => {
 
         const label = siteLocalLabel(w.windowStart, s.site_tz);
 
+        // Nothing back when the row exists already, or when the shift's
+        // CURRENT end no longer covers the window (services/missedWindowInsert.ts).
         const inserted = await pool.query<{ id: string }>(
-          `INSERT INTO missed_reports
-             (shift_session_id, site_id, guard_id,
-              window_start, window_end, window_label, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (shift_session_id, window_start) DO NOTHING
-           RETURNING id`,
+          missedWindowInsertSql('missed_reports'),
           [
             s.session_id, s.site_id, s.guard_id,
             w.windowStart, w.windowEnd, label,
             // Anchored on window_end, matching schema_v79. See missedPingCron.
             expiresAtFor('missed_report', w.windowEnd),
+            s.shift_id,
           ],
         );
         const mrId = inserted.rows[0]?.id;

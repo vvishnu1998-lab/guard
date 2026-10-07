@@ -33,6 +33,11 @@ import {
 
 const router = Router();
 
+/** Zone every date in the client-facing PDF is rendered in. See the note at
+ *  periodStr: Railway sets no TZ, so a bare toLocaleDateString renders UTC.
+ *  Five further bare formatters remain in this file — tracked in OPEN-ITEMS. */
+const SITE_TZ = 'America/Los_Angeles';
+
 // ── v36 multi-site: list this client's accessible sites ─────────────────────
 //
 // GET /api/client/sites — returns sites the current client is linked to and
@@ -512,7 +517,12 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // client's PDF. Verified by rasterising, not by pdftotext \u2014 a wrong glyph
   // and a right one both extract as text. An en dash is also the correct mark
   // for a date range and matches the guard PDF's time ranges.
-  const periodStr = `${from ? new Date(from).toLocaleDateString('en-GB') : 'All time'} \u2013 ${to ? new Date(to).toLocaleDateString('en-GB') : 'Today'}`;
+  // THE ZONE IS NOT OPTIONAL — same defect as the activity-log PDF. Without
+  // it these format in the PROCESS's zone, and Railway sets no TZ, so this
+  // client-facing report renders its period in UTC. The portal sends an
+  // inclusive end-of-local-day bound, which is 06:59Z the NEXT day in UTC,
+  // so the end date printed one day late.
+  const periodStr = `${from ? new Date(from).toLocaleDateString('en-GB', { timeZone: SITE_TZ }) : 'All time'} \u2013 ${to ? new Date(to).toLocaleDateString('en-GB', { timeZone: SITE_TZ }) : 'Today'}`;
 
   const TYPE_DOT_COLOR: Record<string, string> = { activity: BLUE, incident: RED, maintenance: AMBER };
   const TYPE_LABEL: Record<string, string>     = { activity: 'ACTIVITY', incident: 'INCIDENT', maintenance: 'MAINTENANCE' };
@@ -529,7 +539,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   y += 20;
 
   doc.fontSize(10).fillColor(MUTED).font('Helvetica')
-     .text(`Report Period: ${periodStr}  |  Generated: ${new Date().toLocaleDateString('en-GB')}`, ML, y);
+     .text(`Report Period: ${periodStr}  |  Generated: ${new Date().toLocaleDateString('en-GB', { timeZone: SITE_TZ })}`, ML, y);
   y += 30;
 
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(1).stroke();

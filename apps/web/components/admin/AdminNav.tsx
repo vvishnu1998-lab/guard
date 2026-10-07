@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { href: '/admin/clients',   label: 'CLIENT PORTALS' },
   { href: '/admin/billing',   label: 'BILLING'        },
   { href: '/admin/chat',      label: 'CHAT'           },
+  { href: '/admin/settings',  label: 'SETTINGS'       },
 ];
 
 const CHAT_POLL_MS = 15_000;

@@ -32,6 +32,7 @@ Deliberately not tested for validity — testing transmits it.
 verified: PARTIAL — `nightlyPurge.ts:53` is `cron.schedule('0 0 * * *', runNightlyPurge)` with no options arg; `grep -L timezone apps/api/src/jobs/*.ts` includes it. `nightlyPurge.ts:42`: `const DRY_RUN = process.env.RETENTION_DRY_RUN !== 'false'` → defaults **true**. **UNVERIFIED — the Railway env value of `RETENTION_DRY_RUN`** (would require reading service vars; not done in a read-only pass). If unset in prod, the purge has never deleted anything.
 
 **N3. UPDATED 2026-09-19 — Four crons have no top-level catch; nine catch to console only; `missedPingCron` has no Sentry import.**
+update 2026-09-26 (U4b): `missedPingCron`'s outer `try` (`jobs/missedPingCron.ts:99`, catch `:222`, console.error only) wraps the whole session loop — the only inner `try` (`:200`) covers just the FCM push — so a throw on one session drops every later session for that tick, `runJob` records `last_result='ok'`, and nothing alarms. With the 15-minute grace a shift's last ping window gets at least 3 open-session ticks (was at least 6) before the sweep closes it, so as few as three consecutive failing ticks can lose that window's flag without trace.
 update: `chatRetention`'s console-only catch was DELETED, so it leaves the console-only set (nine → eight) and joins the no-top-level-catch set (four → five) — but deliberately, and with the opposite consequence: its throw now reaches the `runJob` wrapper and produces console + Sentry + `cron_heartbeats.last_result='error'`. The `verified:` line below is the 2026-09-05 snapshot and is left as recorded. Two errors in it, found 2026-09-19 and NOT fixed here: `pingReminder`'s top-level catch is at `:505` not `:407`, and it imports Sentry nowhere rather than importing-without-calling; and `unstaffedPostWarning` (added 2026-09-11) is a tenth console-only catch missing from the list.
 verified: YES — no top-level catch: `dailyShiftEmail` (unwrapped `pool.query` `:24`), `missedShiftAlert` (`:25`), `monthlyHoursReport` (`:52`), `nightlyPurge` (deliberate, documented `:58-63`). Console-only top-level catch: `chatRetention`, `expireSwapRequests`, `handoffNudge`, `lateClockInReminder`, `locationIntegrityCron`, `missedPingCron`, `pingReminder` (`:407`, imports Sentry but does not call it), `preShiftReminder`, `shiftStartReminder`. `grep -c Sentry apps/api/src/jobs/missedPingCron.ts` → 0. Full table in `CRONS.md`.
 
@@ -296,6 +297,8 @@ the following 24h — its only issue was `NETRAOPS-MOBILE-9 startBackgroundLocat
 (2) the `environment` tag — two STARNET devices are on runtime **1.0.16**, not 1.0.17 (see **N7**), so
 the failing device may be running older JS entirely, (3) **flush on background** — React Native drops
 queued events if the app is backgrounded before the transport runs, (4) sample rate.
+*Update 2026-09-29:* (1) holds for any handset that was running an OTA — no OTA published before
+2026-09-29 carried the DSN (N152).
 **Test with a forced capture**: add a temporary dev-only button that calls
 `Sentry.captureException(new Error('n25-probe'))` and confirm the event arrives from a real device on
 the production channel. Until this resolves, **treat "no mobile Sentry events" as "no information",
@@ -1015,6 +1018,17 @@ Currently unobservable in production: all 23 sites are `America/Los_Angeles`.
 
 **Size S each. Tier 1.**
 
+**Updated 2026-10-01 (N160, D25).** Both defects are fixed on `fix/n160-repeat-days-dst`, not
+merged: repeat_days builds each window in SQL at the site's wall clock, and single and
+repeat_days refuse a deactivated site. Two statements above had gone wrong by then:
+- **The line numbers.** On `a83bae0` the window loop was at `routes/shifts.ts:462–490` (the
+  `setHours` at `:485`), the overlap checks at `:507–566`, and the INSERT at `:577–589`.
+- **"Currently unobservable" was false.** The server runs UTC, so the drift shows whenever a
+  series crosses a DST change at a site whose zone observes DST. Bethel AME Church's 2026-11-01
+  shift is the live case (N160).
+The coupling warning still holds, and the fix keeps it: the checks and the INSERT read the same
+windows.
+
 ---
 
 **N49. `repeat_days` runs N pre-loop overlap queries where one `unnest` would do.**
@@ -1385,6 +1399,7 @@ verified: PARTIAL — both lines exist and are the Pacific-anchor code: `:349-35
 
 **C3. `seed-apple-reviewer.ts` (commit `bda0524`) has a plaintext password; never run.**
 verified: YES for the plaintext — `apps/api/scripts/seed-apple-reviewer.ts:48` contains a hardcoded password string literal passed to `bcrypt.hash(...)`. Commit `bda0524` = `scripts: add seed script for Apple App Store reviewer credentials`. File exists, 4285 bytes. "Never run" — verified: NO, carried from chat memory (would need a DB check for an `Apple Reviewer Admin` / `AR-100` row).
+*Update 2026-09-29:* that check now reads 0 — no `companies`, `company_admins` or `guards` row matches an Apple/reviewer name, email or `AR-` badge (prod, read-only). F2 is lifted (`FREEZES.md`).
 
 **C4. GRD0002 `802a842f` (STARNET) on Build 44, unreachable by OTA.**
 verified: PARTIAL — the guard id is confirmed: `802a842f-da79-44a9-aa0e-f549a9420cef` = GRD0002, **STARNET SECURITY** (`27c4d404-8769-49ca-bfd6-93cb9b890067`). A device row exists with a live push token (claimed 2026-09-01T02:03Z, `revoked_at` NULL). **The build number is UNVERIFIED from the DB — `guard_devices.client` is NULL for this device**, meaning it has never made a `clock-in` / `handoff-clock-in` / `ping` / `clock-in-verification` write since claiming. `release-ops` SKILL.md:45 records "[name redacted] GRD0002 on `1.0.14+44`" from an earlier session; that specific version string is carried from chat memory, not re-confirmed. The *conclusion* (unreachable by OTA) holds for any runtime below 1.0.17.
@@ -3622,36 +3637,1684 @@ it is not a one-line change despite looking like one.
 
 ---
 
-**N101. `triage-raw.json` is never uploaded, so a failed run's own payload is only recoverable from the report banner that truncates it.**
-verified: YES — found while fixing the 09-19/09-20 triage failures at `84b012b`, and the
-verification for that fix is itself the evidence.
+**N101. CLOSED 2026-09-20 — the model's tool-call stream is now uploaded, filtered.**
+verified: YES — shipped in the same change that moved the pack to stdin.
 
-`scripts/ops/triage.sh` writes claude's full JSON payload to `${TRIAGE_RAW:-/tmp/triage-raw.json}`
-and the workflow uploads three artifacts — `triage-context`, `triage-cost`, `triage-report`. The
-raw payload is not among them. On a SUCCESS that costs nothing: `.result` is the report, so
-`report.md` is the same bytes. On a FAILURE it is the only copy of `num_turns`, `errors`,
-`permission_denials`, `usage` and `modelUsage`, and the banner quotes it only as far as the
-report's own truncation allows.
+Was: `scripts/ops/triage.sh` wrote claude's payload to `/tmp/triage-raw.json` and the workflow
+uploaded three artifacts, none of them that. On a SUCCESS that cost nothing — `.result` is the
+report. On a FAILURE it was the only copy of `num_turns`, `errors`, `permission_denials` and
+`usage`, recoverable only as far as the report banner's truncation.
 
-**What that cost, concretely.** Replaying the 09-20 failure through the fixed parse path needed
-the real payload, and it survived only because the failure banner happened to embed it. The
-matching SUCCESS replay had no such luck: the 09-18 green envelope had to be RECONSTRUCTED from
-`cost.json` (derived fields) and `report.md` (`.result`) because the original was gone. The shape
-was faithful; it was not the original bytes, and that limitation is stated in the PR.
+**What shipped is more than was filed.** The run now uses `--output-format stream-json --verbose`,
+so the artifact is the whole EVENT STREAM, not just the final envelope: every `tool_use` with its
+target and every `tool_result` with its size. `$RAW` is derived from it by selecting
+`type == "result"` — by type, never `tail -1`, because a `system/task_summary` event trails the
+result and would otherwise be handed downstream as the verdict.
 
-Fix shape: an eighth step mirroring the three existing uploads — roughly eight lines of YAML, not
-one. **Do not upload the file unfiltered.** `permission_denials[].tool_input.command` echoes
-whatever the model typed, which is the one field in the payload that is unconstrained model output
-rather than curated collector text, and uploading it archives that for the retention window. Drop
-the input and keep the shape:
+Uploaded as `triage-stream-<run_id>`, 30 days, filtered in `triage.sh` before upload:
 
+- `permission_denials[].tool_input` dropped — it echoes whatever the model typed, the one
+  unconstrained field in an otherwise curated payload. `tool_name` survives.
+- `tool_result` content cut to 2,000 characters, with the original length recorded first as
+  `orig_content_length`. Truncating without that would destroy the number the file exists to
+  provide: a 65,607-byte read and a 286-byte one must stay distinguishable.
+
+If the filter fails the file is deleted rather than falling back to the unfiltered stream, so the
+upload step's `if-no-files-found: warn` is the intended path.
+
+The gap this closes, concretely: run 35528838218 used 22 of 25 turns and nothing on the runner
+recorded why. Diagnosing it required a local replay, and the local harness did not reproduce the
+session — 11 turns at 35.7k cache-read per turn against CI's 22 at 91.9k.
+
+**N102. [VISHNU] `@anthropic-ai/claude-code` is pinned to 2.1.270 in ops-triage, and the pin needs a deliberate bump with a sentinel re-test.**
+verified: YES — pinned 2026-09-20 in the same change that moved the context pack to stdin.
+Recorded here because a pin nobody revisits becomes a stale pin, and this one guards something
+that fails QUIETLY.
+
+`.github/workflows/ops-triage.yml:92` installs `@anthropic-ai/claude-code@2.1.270`. `latest` was
+**2.1.278** on the day it was pinned, so the pin is already one patch behind by construction.
+
+**Why it is pinned at all.** The pack is no longer a path the model opens; it arrives on stdin as
+part of the first user message. That depends on two CLI behaviours — `-p` reading stdin, and
+`--input-format` defaulting to `text`. Both are documented and both were verified on 2.1.270 by
+piping a 226,023 B / 4,205-line pack with a unique sentinel on its last line, then again with one
+in the middle, and getting each back verbatim. If a future build changes either, the run does not
+error: it produces a confident brief written from no evidence.
+
+`scripts/ops/triage.sh` carries a floor check that catches that after the fact — it asserts the
+model reported at least `PACK_BYTES/4` input tokens — but a floor is a smoke alarm, not a lock.
+The pin is the lock.
+
+**When bumping:**
+1. Install the candidate version locally.
+2. Re-run the sentinel test — last line AND middle, a real pack, piped on stdin.
+3. Only then change the version in the workflow, in its own commit, quoting the result.
+
+Do not bump it incidentally inside an unrelated change.
+
+**Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema.
+
+---
+
+**N103. The pack's `OPEN-ITEMS.md` body is 68% of the context; a headings-only index would cut the pack ~65% — but it breaks the delivery floor.**
+verified: YES — measured 2026-09-20 on run 35528838218's pack while moving the pack to stdin.
+Deliberately NOT implemented in that change: the two halves must ship together and the second
+half is not designed.
+
+**The size.** The pack is 225,974 B and **~109,000 tokens** — measured, not estimated, from the
+`cache_creation` of a run that consumed it (2.07 B/token, because it is dense with tables, UUIDs
+and SQL). An earlier note in this file said ~56k by dividing bytes by four; that was wrong by 2x
+and the correction matters, because the pack is most of a triage session's context rather than
+half of it.
+
+`docs/OPS/OPEN-ITEMS.md` inside the pack is **154,559 B of that 225,974 — 68%** — already trimmed
+to open items only. 84 items, averaging 1,830 B each.
+
+**The proposal.** Replace the bodies with a headings-only index: one line per item, number plus
+heading. Measured: **7,766 B, 5.0% of the current section.** Pack goes 225,974 B -> 77,879 B, a
+**65% cut**, and roughly 109k tokens -> 38k.
+
+It is defensible on purpose, not just on size. What the model needs `OPEN-ITEMS` for is "do not
+re-report a known finding", and that needs the NUMBER and the HEADING, not 1,830 bytes of body.
+`triage-prompt.md` already carries the escape hatch: Grep one item's heading, Read only that range.
+
+**WHY IT CANNOT SHIP ALONE.** `scripts/ops/triage.sh` asserts the pack arrived by requiring the
+first assistant turn to report at least `PACK_BYTES/4` input tokens. Measured on the same day:
+
+    pack on stdin     turn-1 input 2 + cache_creation 120957
+    stdin /dev/null   turn-1 input 2 + cache_creation  28324
+
+A 77,879-byte pack gives a floor of **19,469**. The no-pack case creates **28,324** — so with the
+index in place **a run that received NO PACK AT ALL would clear the floor and report OK.** That is
+precisely the failure the turn-1 rework was written to remove, reintroduced by shrinking the thing
+being measured.
+
+Any implementation must therefore also rework the floor. Sketch, not a design: compare against a
+measured no-pack baseline rather than a ratio of pack size, or assert on a cheap structural
+property of the pack's content instead of on token volume. Both need their own measurement pass.
+
+**Size S** — the trim itself is small; the floor rework is the work. **Tier 1**, CI-only.
+
+---
+
+**N104. `reports.severity` is never written by any client; decide whether mobile/web should set it or the column goes.**
+verified: YES — production, 2026-09-22. `reports.severity` is `character varying(20)` NULL-able and
+**0 of 1096 rows have it set**, incidents included (**0 of 13**). The server side is fully built:
+`POST /api/reports` accepts and validates it against `ALLOWED_SEVERITIES`
+(`apps/api/src/routes/reports.ts:248-252`, CHECK `severity IN ('low','medium','high','critical')`
+per the comment at `:40`) and the INSERT writes `severity || null` (`:681`). Nothing ever supplies it:
+`apps/mobile` references `severity` in exactly one file, `app/(tabs)/reports.tsx`, and only to
+RENDER it (`:97-99`); there is no severity field on any submit path. `apps/web` likewise only
+displays it. So the column, its CHECK, its validation branch and the API contract all exist to
+carry a value no client has ever produced.
+
+This is the root cause of the incident-alert outage fixed in this PR — `renderIncidentAlert` typed
+it `string` and called `.toUpperCase()` on it, so **every** incident alert threw before its first
+send. The fix makes the renderer null-safe, which is correct regardless, but it does not answer
+whether a severity is supposed to exist. Worth noting that `apps/mobile` already types it
+`string | null` and guards the render (`reports.tsx:21`, `:97`) — the client had it right and the
+server renderer did not.
+
+Two directions, both real; this item is the decision, not the work:
+* **Set it** — add a severity picker to the mobile incident flow. The whole server path is already
+  there, and the client-facing email regains a signal it was designed around (the alert's colour
+  band and subject segment both key on it).
+* **Drop it** — remove the column, the CHECK, the validation branch and the three read sites. The
+  incident alert already renders correctly without it, and a field nothing writes is a field that
+  will keep growing null-handling around itself.
+
+Do not resolve this by backfilling a default. `clientPortal.ts:766` already coerces
+`(r.severity ?? 'low')` for the PDF badge, which means the PDF has been asserting **LOW** on 13
+incidents whose severity was never assessed — a fabricated value in a client-facing document. That
+coercion should be revisited with whichever direction is chosen. **Size S/M, Tier 1.**
+
+**Second, unrelated to severity and deliberately NOT in this PR:** the breach-alert email send
+failure is console-only at `apps/api/src/routes/locations.ts:193`
+(`.catch((err) => console.error('[email] breach alert failed:', err))`). It is the same
+console-only-catch class as the two upgraded to Sentry in this PR
+(`routes/reports.ts:801` and `:847`) and is invisible to Sentry for the same reason. Left out to
+keep this PR to one file family. **Size S, Tier 1.**
+
+---
+
+## New from the activity-log PDF fixes (2026-09-23)
+
+Five items, all found while fixing the activity-log PDF export (PR: `fix/activity-pdf`).
+None is in that PR: N105 and N106 are client-facing changes with no way to verify
+them yet, N107 and N109 are hygiene, N108 is a builder change that needs a product
+decision first.
+
+### N105 — the client-facing site-security PDF renders every date in UTC
+
+`clientPortal.ts` has **seven** bare `toLocale*` calls. Two were fixed in
+`fix/activity-pdf` (`periodStr` and `Generated`). **Five remain, and they are the
+ones inside the document body:**
+
+| line | call | what it formats |
+|---|---|---|
+| **502** | `toLocaleDateString('en-GB', {day,month,year})` | **the key the report timeline is GROUPED by** |
+| 660 | `toLocaleTimeString('en-GB', {hour,minute})` | timeline entry time |
+| 778 | `toLocaleString('en-GB', {...})` | incident date + time |
+| 847 | `dt.toLocaleDateString('en-GB', {...})` | incident table, date cell |
+| 848 | `dt.toLocaleTimeString('en-GB', {...})` | incident table, time cell |
+
+Railway sets no `TZ`, so all five render in **UTC**. **502 is the one that matters**:
+it is the grouping key, not a label, so a report filed at 17:00 PT or later (00:00Z
+onward) is filed under the **NEXT DATE** in a document a client reads. That is not a
+cosmetic off-by-one — it moves evidence between days. STARNET's Bethel shifts run to
+23:00 PT, so this hits the tail of every evening shift.
+
+**Not fixed in that PR, deliberately.** The generator is built inline against `res`
+(`clientPortal.ts:503` pipes straight to the response), so it cannot be called
+without an Express request and there is no way to render it into a buffer and assert
+on it. Changing what a client-facing document groups by, with no way to see the
+result, is how an unverified fix ships.
+
+**NEXT PR, in this order:** extract the renderer using the Commit-0 pattern from
+`fix/activity-pdf` (`services/pdf/activityLog.ts` — pure move, proven byte-identical
+by rendering a fixture through both paths and comparing md5), add a fixture, THEN fix
+all five. The extraction is the work; the fix is five one-line edits.
+
+Related and already recorded above: `clientPortal.ts:766` coerces
+`(r.severity ?? 'low')`, so that PDF asserts **LOW** on 13 incidents whose severity
+was never assessed. Same document, same pass. **Size M, Tier 1.**
+
+### N106 — SITE_TZ is hardcoded in both PDF renderers
+
+`America/Los_Angeles` is a literal in `services/pdf/activityLog.ts` and (as of
+`fix/activity-pdf`) in `routes/clientPortal.ts`. It is named `SITE_TZ` in both rather
+than inlined, so `grep SITE_TZ` finds every place that has to change — but it is
+still a constant standing in for data.
+
+**`sites.timezone` exists and no PDF reads it.** The activity builder already threads
+it per row (`ActivityRow.timezone`, populated for patrol rounds, and `si.timezone`
+selected in the sessions query) precisely because the admin feed spans sites and
+there is no single zone the document can assume.
+
+Harmless today: all 23 production sites read `America/Los_Angeles`, verified. It
+stops being harmless the first time a site does not, and the failure is silent — the
+document renders, with the wrong times. **Size S, Tier 1.**
+
+### N107 — a PDF service imports from a route module
+
+`services/pdf/activityLog.ts` imports `ACTIVITY_PDF_ROW_CAP` — a **value**, not a
+type — from `routes/activityLog.ts`. Importing it pulls the whole route module into
+the renderer's graph: `express`, `pg` (`db/pool`), the S3 client, `requireAuth`.
+
+Pre-existing; `routes/admin.ts` had the same import before the extraction, so the
+move inherited it rather than introducing it. It is why `_activityLog.test.ts` boots
+the aws-sdk v2 deprecation warning to render a PDF, and it means the renderer cannot
+be exercised anywhere the database module will not load.
+
+Fix is small: move `PDF_ROW_CAP` (and `ActivityRow` / `StatusKind` with it) into a
+`services/activityRow.ts` or similar that both the route and the renderer import.
+Types alone would not need this — `import type` is erased — but the cap is a value.
+**Size S, Tier 0.**
+
+### N108 — the activity feed never emits a clocked-out row
+
+`fetchActivityRows` reads `clocked_out_at` only as a range predicate
+(`routes/activityLog.ts:409`) and as `sessionEndMs` (`:647`). **No row is ever pushed
+for a clock-out**, and `StatusKind` has `clocked_in_on_time`, `clocked_in_late` and
+`missed_clock_in` but no clock-out member. Across 30 days of STARNET Bethel exports,
+zero CLOCKED OUT rows appear — every shift in the document begins and never ends.
+
+**Builder-level, so it is NOT a PDF bug**: the admin web view and the client portal
+are both missing it too. `ActivityLogTable.tsx:272` touches `clocked_out_at` only to
+label the SHIFT dropdown `active`/`ended`.
+
+**Blocked on a product decision, which is why it is deferred and not just unbuilt.**
+75% of all sessions since 2026-07-01 auto-closed (45/60; 78% for STARNET, 14/18), and
+no manual clock-out has ever landed within 20 minutes of `scheduled_end`. So most
+rows this would emit are a sweep closing a session, not a guard clocking out, and
+rendering those as "Clocked Out" in a client-facing document would assert something
+that did not happen. Needs wording that distinguishes the two — and `shift_sessions`
+must be checked for whether it even records which one occurred — before any row is
+emitted. **Size M, Tier 1.**
+
+### N109 — SEARCH GUARDS never reaches the PDF
+
+`ActivityLogTable.tsx` filters by guard name **client-side, on the current page
+only** (`:540-546`, with the comment "Full-corpus search would need a server-side
+name filter; MVP scope"). `downloadPdf()` (`:602-620`) sends `site_id` and
+`session_id` and nothing else.
+
+So an admin who types a name, sees the list narrow, and clicks DOWNLOAD PDF gets the
+**unsearched corpus** — and `hasFilters` (`:600`) counts `search`, so the UI is
+simultaneously telling them a filter is active. Same class as D1, which
+`fix/activity-pdf` fixed for `session_id`: a document whose contents do not match the
+filter state the user is looking at.
+
+Two directions: make the search server-side and thread it into the PDF body, or
+disable/qualify the button while a search is active. The first is the real fix; the
+second is honest and costs nothing. **Size S/M, Tier 1.**
+
+---
+
+## New from the Bethel 18-hour shift incident (2026-09-26)
+
+Twelve items, from the read-only audit of shift `c3574592` and the U4a review that
+followed (`INCIDENTS/2026-09-26-bethel-18h-shift.md`). **None is fixed by U4a**
+(`92e5fbc`, `fix/autoclose-anchor-scheduled-end`). Every `verified:` line was read
+on 2026-09-26 — prod through postgres-readonly, code at `origin/main` `8de7a94`
+unless it names U4a. Guard data is uuid + badge + tenant only.
+
+### N110 — `geofence_violations.notification_sent` is never written, yet exported
+
+verified: `git grep -n notification_sent -- apps/api/src` finds only the analytics
+export — the SELECT at `routes/exports.ts:146` and the CSV header at `:214`. No
+INSERT or UPDATE sets it, so it is `false` on every row: **0 of 47** in prod. The
+export presents it as if it recorded whether the breach alert went out; it records
+nothing. Breach-alert delivery is not stored anywhere (`sendToAdmins` logs failures
+only), which is why the 2026-09-26 incident could not confirm whether the 18:05
+admin email was sent.
+
+Either write it where `fireBreachAlerts` actually sends (`routes/locations.ts`), or
+drop it from the export. **Size S, Tier 1.**
+
+### N111 — reports, checkpoint scans and inspections answer a closed session with 403, not `SESSION_CLOSED`
+
+verified: after a session closes, `POST /api/reports` returns 403 `Active session
+not found` (`routes/reports.ts:337`), checkpoints do the same (`routes/checkpoints.ts:381`,
+`:416`, `:506`), and inspections return 403 (`routes/inspections.ts:167`) or a 409
+with prose in `error` (`:147`). Only the ping, violation and clock-in-verification
+routes (`routes/locations.ts`) and task completion (`routes/tasks.ts`) send the
+`SESSION_CLOSED` code. Mobile reconciles and shows "Shift Ended" only on that code
+(`apps/mobile/lib/sessionClosed.ts:49`), so a guard who files a report or scans
+after an auto-close gets a generic failure and a stale store.
+
+Use the `SESSION_CLOSED` shape (status + code) on all three, and check the mobile
+callers in the same dispatch. **Size M (API + mobile batch), Tier 1.**
+
+*Update 2026-09-29:* clock-out now sends it too (N138), with its own message. The four
+existing `SESSION_CLOSED` bodies (`routes/locations.ts:363`, `:716`, `:916`;
+`routes/tasks.ts:146`) all open "This shift has already ended.", which is false after a
+handoff: the outgoing guard's session is closed while the shift carries on under the
+incoming guard. Reword them in the same dispatch.
+
+### N112 — `STATE.md` says the schema tip is v77 (v78 free); v80 is on disk and appears applied
+
+verified: `apps/api/src/db/migrate.ts` lists 81 files ending `schema_v80.sql`;
+`ls schema_v*.sql | sort -V | tail -1` → `schema_v80.sql`. `STATE.md`'s Schema
+section (verified 2026-09-14) still records v77 applied and v78 FREE. Prod catalog
+shows v78's `legal_hold_at` columns (`shifts`, `shift_sessions`, `reports`,
+`clock_in_verifications`) and v80's change (`clock_in_verifications.selfie_url`
+nullable). v79 is data-only and cannot be confirmed from DDL.
+
+Update the table from schema objects, the only method there is (no ledger).
+`scripts/ops/triage.sh` embeds `STATE.md`, so a stale row feeds the daily brief.
+**Size S, Tier 1.**
+
+### N113 — CLOSED 2026-09-26 — invariants skill: "no manual clock-out has EVER landed within 20 minutes of `scheduled_end`" is false
+
+**Closed by** U4b's docs commit: the skill's "Clock-out reality" section now states
+91 of 113 within ±20 min and gives the grace as the constant (15 from U4b, 30
+before) — in the repo copy (`.claude/skills/netraops-invariants/SKILL.md`) and the
+plugin copy, kept byte-identical. The claude.ai copy is Vishnu's to update.
+
+Original finding, retained:
+
+verified: `.claude/skills/netraops-invariants/SKILL.md:97`. Prod, clock-ins since
+2026-08-25, reasons `manual` / `manual_no_photo`: **91 of 113** landed within ±20
+min of `scheduled_end`; the closest was 0.1 min. (The U4a Phase 0 report quoted
+"76 of 113" — that was the −15 … +5 min band, mislabelled. 91 is the ±20 figure.)
+The claim was true when written (2026-08-24), before the +30 grace deployed; once
+guards had a window after the end, they used it.
+
+Correct the section in both skill copies (repo and plugin). Not in the U4a PR,
+which leaves the skill untouched. **Size S.**
+
+### N114 — [VISHNU] 2026-09-25 16:07 PT deploy `d2f7f870` landed with 3 STARNET sessions open; gate route unrecorded
+
+verified: `railway deployment list` → `d2f7f870-fcd9-47db-bfee-0c1f3297077b`
+SUCCESS 2026-09-25 16:07:02 −07:00; `gh api …/commits/8de7a94…/status` links it to
+`8de7a94` (PR #78). At 16:07:02 PT **3** STARNET sessions were open
+(`cc1cf358`, `0cae3d1f`, `8dcd7bcc`), and the last STARNET ping before it was
+15:30:23 PT, 36.6 min earlier. So the CONDITION route was false and the PROXY
+route impossible; it went out on OVERRIDE or ungated, and nothing records which.
+`POLICY.md` requires naming the route every time.
+
+Vishnu records the route used and what landed in the window. **Tier: docs.**
+
+### N115 — [VISHNU] GRD0005 (`4a71d17d`, STARNET `27c4d404`) is on runtime 1.0.16 and has sent zero pings since 2026-09-04
+
+verified: its active `guard_devices` row reports `platform/android; version/1.0.16;
+build/17; runtime/1.0.16` (last seen 2026-09-14 12:02 PT). Since 2026-09-04:
+**13 sessions, 0 location pings, 132 `missed_pings` rows**, 56 reports. Last ping
+2026-09-03 16:32 PT. Every OTA channel publishes at runtime 1.0.17, so this handset
+cannot take any update (same class as N7); a JS-only fix — including the mobile
+refetch in D20 — cannot reach it.
+
+Needs a store install of the current build. Vishnu arranges it with STARNET.
+**Tier: ops.**
+
+### N116 — handoff clock-in and the auto-complete sweep lock in opposite orders (deadlock risk)
+
+verified: handoff clock-in locks the shift row first (`FOR UPDATE OF ssr, sh`,
+`routes/shifts.ts:2846`), then updates the outgoing session (`:2967`). The sweep
+locks sessions first (step 2, `jobs/autoCompleteShifts.ts:210` in U4a) and shift
+rows second (step 3, `:316`). A handoff during the grace — the shift is still
+`active`, which is all `:2855` checks — can deadlock with the sweep, and Postgres
+aborts one of them. Pre-dates U4a. Not observed; Sentry was not searched for it.
+
+Take locks in one order in both paths (shift, then session). **Size M, Tier 1.**
+
+**Evidence 2026-09-28 (U2 Phase 1) — the missing shift lock, reproduced.** The
+sweep takes no lock on the shift row: step 2 is `UPDATE shift_sessions … FROM
+shifts`, and when it has to wait for a session row it re-checks that row against
+the shift row it read BEFORE waiting. `apps/api/scripts/test-active-shift-end-edit.ts`
+(section HAZARD) holds a transaction that locks a due shift and its session and
+EXTENDS the end, starts a sweep tick, then commits: the tick closed the session at
+the OLD end (`'auto'`), and step 3 — a fresh statement — saw the new end and
+skipped the shift, leaving it `active` with no open session. Reproduced in all 7
+runs (5 on the U2 branch, 2 on `579ee12`). The U2 end edit keeps clear of it by
+refusing to keep a session open within a minute of the auto clock-out (D20), and
+the clock-out reminder's claim — the same `UPDATE … FROM shifts` shape — now
+re-reads the shift under `FOR SHARE`. The sweep itself is unchanged. Doing this
+item in the sweep — lock the due shift rows first (`FOR UPDATE SKIP LOCKED`) and
+restrict steps 1–3 to them — removes the class, and closes N117 with it. Manual
+clock-out and the legal-hold cascade take the same session-first order (N144).
+
+### N117 — the sweep can orphan a session between its session step and its status flip
+
+verified: `autoCompleteShifts` closes open sessions in step 2 and flips shift status
+in step 3, in one transaction under READ COMMITTED. A clock-in (`routes/shifts.ts:4248`,
+which needs status `scheduled`) or a handoff clock-in that commits after step 2's
+snapshot but before step 3 leaves an open session under a shift step 3 marks
+`completed`. `jobs/orphanedSessionCheck.ts:94` detects that state hourly and alerts
+through Sentry. Pre-dates U4a.
+
+Either lock the shift rows first, or have step 3 skip shifts that still have an open
+session. **Size S/M, Tier 1.**
+
+See N116's 2026-09-28 evidence: the same missing shift lock, reproduced, with the
+roles reversed (there the session is closed against a stale end and the shift is
+left `active`). Locking the due shifts first fixes both.
+
+### N118 — the daily client email reads only the latest session of a handoff shift
+
+verified: `services/email.ts:587` — `ORDER BY ss.clocked_in_at DESC LIMIT 1`. The
+hours, clock-in/out and ping ratio a client receives for a handoff shift describe
+the incoming guard only; the outgoing guard's time is absent. Prod has one
+multi-session shift to date (`d9ac9565`).
+
+Decide the intended content before U6 touches this path (D19 keeps the email on
+Actual). **Size S.**
+
+### N119 — violations resolved during the grace by other writers keep grace time in `duration_minutes`; list surfaces don't clamp
+
+verified: while a session is still open during the grace, three writers resolve
+violations at `NOW()`: the on-site ping auto-resolve (`routes/locations.ts:610`), the
+guard's PATCH (`:831`) and the admin resolve route's `NOW()` arm (`routes/admin.ts:734`).
+With U4a the recorded `clocked_out_at` is the scheduled end, so these rows carry
+minutes past it. Hours reads clamp them (`services/shiftHours.ts:300`); the stored
+`duration_minutes` is shown raw on the client security-events page
+(`routes/clientPortal.ts:286`), the admin violations list (`routes/admin.ts:1316`),
+admin live-status (`apps/web/app/admin/live-status/page.tsx:743`), the guard's
+mobile `/violations` (`routes/locations.ts:215`) and the analytics export
+(`routes/exports.ts:144`, `:214`).
+
+Clamp at read on those surfaces, or at write. **Size S/M, Tier 1.**
+
+### N120 — CLOSED 2026-09-28 — `clock_out_reason = 'admin_corrected'` exists in prod with no code path
+
+**Closed by** U2 (D20, decision 1a): an admin who sets an active shift's end at or
+before now closes the session with `clock_out_reason = 'admin_corrected'`
+(`editActiveShiftEnd`, `routes/shifts.ts`), so the value has a writer. Filed
+separately: the hours export still flags only `'auto'` (N148), and the reason
+vocabulary comments do not list the value (N150).
+
+Original finding, retained:
+
+verified: prod has **1** such row — session `cc1cf358`, written by the 2026-09-26 Q11
+correction. `git grep admin_corrected` finds no code. The column has no CHECK by
+design (`db/schema_v55.sql:94`). Effect today: the hours export flags `AUTO_CLOSED`
+only on `'auto'` (`services/hoursExport.ts:321`), so this row carries no flag.
+
+Add it to the documented vocabulary (`schema_v55.sql` comment, the clock-out
+comment in `routes/shifts.ts`), or give it a real writer when U2 builds the admin
+close. **Size S.**
+
+### N121 — the activity log can hide grace-time pings and task completions for shifts ending near local midnight
+
+verified: sessions enter the activity log by overlap —
+`clocked_in_at < to AND COALESCE(clocked_out_at, NOW()) > from`
+(`routes/activityLog.ts:416-417`; the same at `routes/admin.ts:1873`). Pings
+(`:443`), missed pings (`:458`), clock-in verifications (`:476`) and task
+completions (`:492`) are fetched only for included sessions. With U4a an
+auto-closed session's `clocked_out_at` is the anchor, so a range whose `from` falls
+between the anchor and the real close — the web sends `from` as browser-local
+midnight (`apps/web/components/ActivityLogTable.tsx:248`) — drops the session,
+and its grace-time pings and task completions vanish from the next-day view and
+PDF. Reports (`:523`) and patrol scans are fetched independently and still render.
+Exposure so far: 0 grace-time pings or task completions since 2026-08-25; 1
+auto-closed session (test tenant) ended within 35 min before local midnight.
+
+No read-path change in U4a, by decision. Fix: include a session when any of its
+events falls in range, or compare against the real close. **Size S, Tier 1.**
+
+---
+
+## New from the U6 Payable build (2026-09-26)
+
+Ten items, from U6's read-only Phase 0 audit and its build (D19,
+`feat/payable-hours`, `43d77c0`…`a0d6846`). **None is changed by U6** unless the
+item says so. Every `verified:` line was read on 2026-09-26 against that branch
+(line numbers at its head) or prod through postgres-readonly. Guard data is uuid +
+badge + tenant only.
+
+### N122 — the hours-export snapshot fixture commits 94 guard names
+
+verified: `apps/api/scripts/__snapshots__/hours-export.2026-07-01_2026-08-23.json`
+carries a filled `guard_name` on **94** objects — 60 rows, 14 `by_guard` and 20
+`by_guard_site` aggregates across the two tenants — because it snapshots
+`buildHoursExport` whole (`hoursExport.ts` selects `g.name AS guard_name`).
+`POLICY.md` says guard data leaves the DB as `guard_id`, `company_id`, badge and
+counts only. The fixture predates U6; U6 regenerated it (route F1) without
+touching the names, by decision. A `--check` DRIFT also prints fixture lines, names
+included, to the terminal.
+
+Replace `guard_name` with the badge in the snapshot (the script can map before
+writing and comparing), then rewrite the fixture once. **Size S, Tier 1.**
+
+### N123 — CLOSED 2026-09-26 — the regenerate route writes a different S3 object from the monthly job
+
+**Closed by** `ad1948e` and `3ee957f` on `fix/monthly-report-key` (base `4a577e6`;
+the PR is opened in N123 Phase 3 — this entry closes on `main` when that merges).
+`services/monthlyReport.ts` is the one builder, key, upload and upsert; the cron
+(`jobs/monthlyHoursReport.ts`) and the route both call `generateMonthlyReport`.
+The cron's slugged key is canonical (`monthlyReportKey`); an empty slug becomes
+`company`; the key uses the company id the database returns. Before any upload
+it refuses a non-integer or out-of-range month/year, an unknown company and an
+`is_test` company; any other failure goes to Sentry tagged `company_id` +
+`report_month` (no names). The route is now `requireAuth('vishnu')`, requires
+`company_id`, `year` and `month` (400 `INVALID_COMPANY_ID` / `PERIOD_REQUIRED` /
+`INVALID_MONTH`), refuses a month not yet closed at 12:00 UTC on the 1st or in
+the future (409 `MONTH_NOT_ENDED`), an unknown company (404) and a test company
+(409 `TEST_COMPANY`), writes `logEvent('monthly_report_regenerated')` plus a
+`[monthly-hours.regenerated]` log line, and returns a presigned URL. The unused
+`fileName` and the stale "Also called by the cron job." are gone.
+
+Proof: `apps/api/scripts/test-monthly-report-key.ts` (S3, pool, Sentry stubbed;
+nothing leaves the machine) — route key === cron key === a hand-written key for
+12 company names; **108/0** on `3ee957f`, **19/63** on `4a577e6` (negative
+control), **104/4** on `ad1948e` (the four missing-period cases). The generator
+also ran end to end on a throwaway local Postgres (real builder, ExcelJS and
+upsert; S3 stubbed).
+
+**Not closed by this:** a regeneration still orphans the old object when the
+stored key differs from the one it computes — every July 2026 row (pre-`201fecc`
+key), or after a company rename (N133). The August regeneration itself is D19's
+and needs Vishnu's explicit approval.
+
+Original finding, retained (line numbers at `4a577e6`):
+
+verified: `POST /api/billing/hours-export/schedule` (`routes/billing.ts:69`) writes
+`monthly-reports/${companyId}/${YYYY-MM}.xlsx` (`:89`); the cron writes
+`monthly-reports/${companyId}/netraops-hours-${slug}-${YYYY-MM}.xlsx`
+(`jobs/monthlyHoursReport.ts:73`). Both upsert the one `monthly_hours_reports` row
+(`billing.ts:95` `ON CONFLICT … DO UPDATE SET s3_url = …, generated_at = NOW()`).
+So a regeneration through the route — the only way to redo one tenant-month; the
+cron builds only the previous month and the web has no regenerate button — writes a
+**second** object, repoints the row at it, and leaves the cron's object referenced by
+nothing (the bucket is versioned; nothing deletes it). It also brings back the
+un-slugged `2026-08.xlsx` filename the slug fixed, and resets `generated_at`, which
+restarts the row's 1460-day purge clock (`jobs/nightlyPurge.ts:148`, `:472`). Prod:
+STARNET's August row points at the cron's
+`…/netraops-hours-starnet-security-2026-08.xlsx`. Also: any `company_admin` of the
+tenant may call the route (`:69`), and `fileName` at `:86` is unused.
+
+Extract one `generateMonthlyReport(companyId, year, month)` with one key template,
+used by the cron and the route. **Must land before any August regeneration (D19).**
+**Size S, Tier 1.**
+
+### N124 — each row of a handoff shift is judged against the whole window; a guard filter gives one side the whole schedule
+
+verified: a DETAIL row's `scheduled_hours` is the shift's FULL window
+(`services/hoursExport.ts` header, "The per-ROW scheduled_hours field…"), and
+coverage / SHORT are computed per row against it — so every session of a handoff
+shift reads SHORT (both did before D19 on Actual; both still do on Payable).
+Separately, the payable-weighted share is computed over the rows that survived the
+filter (`hoursExport.ts:380-388`): the PER GUARD export (`apps/web/app/admin/billing/
+page.tsx:90`, `params.set('guard_id', …)`) — or a handoff straddling a month edge —
+leaves one session with no sibling, so it takes the full scheduled value
+(`:388` `if (siblings === 1) return total;`). Prod has one multi-session shift
+(`d9ac9565`).
+
+Decide whether a row's coverage uses its share, and compute shares before
+filtering. **Size S/M, Tier 1.**
+
+### N125 — the SUMMARY "Flagged" KPI counts sessions; the aggregate "Flagged" counts shifts
+
+verified: `services/hoursWorkbook.ts:219` `const flagged = data.rows.filter(…)` feeds
+the KPI (`:239` `flagged.length`) — flagged DETAIL rows, i.e. sessions. Aggregate
+rows use `flagged_count`, distinct shifts (`hoursExport.ts`). A handoff shift with
+both sessions flagged counts 2 in the KPI and 1 on every aggregate row, including
+the TOTAL. U6 made the NOTES "Flagged" row say so; the numbers still disagree.
+
+Use `data.overall.flagged_count` for the KPI, or relabel it "Flagged rows".
+**Size S.**
+
+### N126 — analytics month totals and the billing export for the same month differ, by design
+
+Documenting, not a defect. For "this month":
+
+| | admin analytics month KPI (`routes/admin.ts:1698`) | billing / monthly hours export (`services/hoursExport.ts`) |
+|---|---|---|
+| month boundary | Pacific literal (`PACIFIC_TZ_SQL`) | each site's own `sites.timezone` (`:288-289`) |
+| open sessions | included, Payable running to NOW() | excluded (`:333`) |
+| test tenants | not filtered (company-scoped only) | excluded (`:332` `c.is_test = false`) |
+
+The leaderboard is a rolling 30 days (`admin.ts:1737`), not a calendar month. Today
+every site is Pacific, so for a customer tenant the live difference is the open
+sessions (a tenant flagged `is_test` gets analytics but an empty export). An admin
+comparing the KPI with the XLSX mid-month will see different totals.
+
+Say so on the analytics page (the KPI sub-line or a tooltip), or leave as recorded
+here. **Size XS.**
+
+### N127 — the handoff FYI email says "worked 0.00h" when its session join misses
+
+verified: `services/email.ts:1672-1673` —
+`COALESCE(ROUND(CAST(GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(fs.clocked_out_at,
+NOW()) - fs.clocked_in_at))/3600.0) AS NUMERIC), 2), fs.total_hours)`. If the
+LEFT JOIN finds no outgoing session, every `fs.*` is NULL; `GREATEST(0, NULL)` is
+0 (GREATEST skips NULLs), so the first argument is 0.00, never NULL, and the email
+renders "worked 0.00h" (`:1719`) instead of '—'. The comment at `:1664` ("Falls back
+to stored total_hours only when the join misses") is therefore false, and the
+fallback can never fire. Stays on Actual (D19); not touched by U6.
+
+Move the GREATEST inside a CASE on `fs.id IS NULL`, and drop the dead fallback.
+**Size XS.**
+
+### N128 — `_clockInVerification.test.ts` claims it never reads `.env`; it does
+
+verified: its header, `apps/api/src/services/_clockInVerification.test.ts:7`, says
+"It never reads .env". Its import of `../routes/locations` (`:32`) loads
+`middleware/auth.ts` (`routes/locations.ts:2`), which imports `services/sentry`
+(`auth.ts:4`), whose first line is `import 'dotenv/config'` (`sentry.ts:22`) — the
+cwd `.env` is read, and a `SENTRY_DSN` in it would start Sentry. `locations.ts:8`
+also imports `services/email`, which throws at load without `SENDGRID_FROM_EMAIL`
+(`email.ts:179-182`) — so the test depends on the `.env` it says it never reads.
+`scripts/test-payable-hours.ts` avoids both by stubbing sentry, auth, email and S3
+in `require.cache` first (the `routes/_aiEnhance.test.ts` pattern).
+
+Stub sentry and email the same way, and correct the header. **Size XS.**
+
+### N129 — three hard-coded `shiftHours.ts` line pointers are stale
+
+verified: `.github/workflows/window-anchor.yml:12` cites `shiftHours.ts:223` (the
+"WINDOW ANCHOR IS DEFINED TWICE" note, now `:280`); `routes/shifts.ts:3999` cites
+`services/shiftHours.ts:278-281` (the `getShiftHours` join); `services/pdf/
+guardHours.ts:31` cites `services/shiftHours.ts:209` for the scheduled
+double-count hazard (`:209` was "CALLERS MUST STILL SUM OVER VIOLATIONS", now
+`:271`; the hazard note sits in the `sumShiftHours` docblock). U6 grew the file's
+header, moving every line again.
+
+Cite symbols or section headings, not line numbers. **Size XS.**
+
+### N130 — the analytics export's own copy and docs are wrong in two places
+
+verified: `apps/web/components/admin/ExportPanel.tsx:101` tells admins "Max 5,000
+rows per sheet. Scoped to your company." — the violations sheet is capped at
+**2,000** (`routes/exports.ts:156`), and the vishnu role gets **every** company
+(`:47` `cidPredicate = 'true'`). And `exports.ts:16` documents
+`type = … 'incidents' …`, but the CSV route has no incidents branch: a
+`type=incidents` CSV is just the BOM.
+
+Fix the copy; drop `incidents` from the docblock or add the section.
+**Size XS.**
+
+### N131 — the Payable route tests depend on where "now" falls in the site-local week and month
+
+verified: `apps/api/scripts/test-payable-hours.ts:523-524` reads the site-local week
+and month starts from the DB clock, and the ACTIVE SITES / analytics expectations
+count only the seeded sessions clocked in since then (`:543`, `:559`). The seed sits
+up to 12 h before NOW(), so a run within ~12 h after a Monday or a 1st (Pacific)
+covers fewer sessions — down to none just after midnight — and those checks
+weaken to comparing zeros. The test prints how many sessions it used ("14 of 14"
+on 2026-09-26) but does not fail on a thin window.
+
+Fail — or skip loudly — below a minimum count, or seed the route cases at fixed
+offsets from the week/month start. **Size XS.**
+
+## New from N123 — one monthly report key (2026-09-26)
+
+Six items: N132–N135 from N123's read-only Phase 0 audit, N136–N137 from its
+Phase 2 review. **None is changed by N123** unless
+the item says so. Every `verified:` line was read on 2026-09-26: code at
+`fix/monthly-report-key` (line numbers at `3ee957f` plus the Phase 2 docs commit),
+prod through postgres-readonly, the bucket through `aws s3api` (read-only).
+
+### N132 — [VISHNU] lifecycle rule `noncurrent-30d` expires noncurrent versions after 60 days, not 30
+
+verified: `aws s3api get-bucket-lifecycle-configuration --bucket guard-media-prod`
+returns two Enabled rules: `ping-7d` (prefix `ping/`, `Expiration: Days 7`) and
+`noncurrent-30d` (`Filter: {}` — every object — `NoncurrentVersionExpiration:
+NoncurrentDays 60`, `Expiration: ExpiredObjectDeleteMarker true`,
+`AbortIncompleteMultipartUpload: DaysAfterInitiation 7`). The id says 30 and the
+value is 60, so anything that quotes the rule by name states the wrong window.
+Nothing in the repo defines either rule. N123 Phase 2 rewrote the five places that
+said there was no such rule to quote the value (`jobs/monthlyHoursReport.ts:52`,
+`schema_v55.sql:88`, `schema_v80.sql:129`, `:146`, `EXPIRIES.md` E14); the value
+is also quoted in `services/monthlyReport.ts:28` and `DECISIONS.md` D19.
+
+Vishnu decides which number is meant — an AWS change, not code — then the places
+above follow. The two choices are not alike. Renaming the id changes a label.
+Lowering `NoncurrentDays` below 60 is irreversible: the rule covers every object
+in the bucket (`Filter: {}`), so the next lifecycle run permanently deletes every
+noncurrent version older than the new value, STARNET's included, and it shortens
+the window D19 records as accepted (B11) for the August version
+`Fk9p_3JF1RK8e46Z93vafVVLZlrCg4Qf`. Updating D19 afterwards is itself a
+`DECISIONS.md` change. **Renaming the id: Tier 1. Changing the value: Tier 2.**
+
+### N133 — `monthly-reports/` objects no row points at: 8 today, plus one per regeneration whose stored key differs
+
+verified: `aws s3api list-object-versions --prefix monthly-reports/` → **14
+versions, all current, 0 noncurrent, 0 delete markers.** 6 are the objects of the
+6 `monthly_hours_reports` rows. The other **8** belong to 6 company ids with no
+`companies` row and no report row — `16acb562-2c1b-42bb-935b-67dcc684beee`
+(2026-05, 2026-06), `be771973-ba6a-48b3-b00c-e9171e2968b0` (2026-05, 2026-06),
+`46bc9ae8-2c66-48f7-a8f7-53efd4eea555`, `5e61ddd1-5159-4d4e-b23a-4950d41ee983`,
+`bccd0a67-5947-4818-bac9-3bb376baec46`, `c47181f0-41a2-404c-9652-13611887df5a`
+(2026-06 each) — 16,122–18,846 bytes each, written 2026-06-01 and 2026-07-01
+02:00 UTC by the monthly job. Their rows went with the companies (the FK is
+`ON DELETE CASCADE`); nothing deletes the objects. `nightlyPurge` sweeps only the
+`s3_url` of rows it deletes (`jobs/nightlyPurge.ts:470-483`), and the only bucket
+lister, `scripts/audit-s3-bucket.ts`, lists current versions and flags
+`monthly-reports/` as an unknown prefix (`:27`, `:126`) without comparing it to
+rows. They are current versions, so `noncurrent-30d` (N132) never expires them.
+Same row-keyed-cleanup shape as N30.
+
+**Regeneration adds to it (folded in from N123).** A regeneration overwrites the
+stored object only when the row already holds the key it computes
+(`services/monthlyReport.ts` header). Otherwise it re-points the row and leaves
+the old object unreferenced:
+- **every July 2026 row holds a pre-`201fecc` key** — `monthly-reports/{id}/2026-07.xlsx`,
+  written 2026-08-01 02:00 UTC by the monthly job before its key gained the slug.
+  Of the four, Star Guard (`b7c7d32d`) and STARNET SECURITY (`27c4d404`) can be
+  regenerated; `starnet` (`1bba063e`) and `test company` (`7637ef73`) are
+  `is_test` and are refused;
+- a company renamed since its row was written (`PATCH /api/admin/companies/:id`,
+  `routes/admin.ts:136`) — the slug follows the current name;
+- a row holding the old empty-slug key `netraops-hours--{YYYY-MM}.xlsx` (none in
+  prod today; the empty slug is now `company`).
+
+Reconcile `monthly-reports/` keys against `monthly_hours_reports.s3_url` and
+delete the unreferenced ones by version id through the `mediaOwnership.ts`
+ownership check; for regeneration, capture the old `s3_url` before the upsert and
+delete it after. Until then, regenerating a July row leaves its July object
+behind. **Counting is Tier 0; deleting anything from the bucket is Tier 2.**
+**Size S.**
+
+### N134 — the monthly job's heartbeat reads `ok` when every company fails
+
+verified: `jobs/monthlyHoursReport.ts:60-74` catches each company's error, logs
+it and moves on, so no per-company failure reaches `runJob` (only a failure of
+the companies query at `:56-58`, outside the loop, does); `runJob` then records
+`last_result = 'ok'` (`jobs/_run.ts:330`, `:338`, `:358`) and `/health/crons`
+shows a fresh, healthy heartbeat. The job runs with `sentryMonitor: false`
+(`monthlyHoursReport.ts:77`), so there is no Sentry cron check-in either. Since
+N123 each per-company failure is a Sentry event (`services/monthlyReport.ts:198`,
+tagged `company_id` + `report_month`) — visible, but nothing marks the run as
+failed. The next run is 2026-10-01 12:00 UTC, the day after E14's date.
+
+After the loop, throw (or record `error`) when every company failed — or when any
+did; decide which — so the heartbeat reads `error`. **Size XS, Tier 1.**
+
+### N135 — two design docs still call `monthly_hours_reports` a table with no migration
+
+verified: `docs/05-BACKEND-SCHEMA.md:476` "Has no corresponding migration file."
+(under the heading "`monthly_hours_reports` *(orphan — see disclaimer)*", `:474`)
+and `docs/02-TRD.md:360` lists it among "3 live-orphan tables (urgent —
+disaster-recovery blocker)". Both are contradicted by
+`apps/api/src/db/schema_v45.sql:25` `CREATE TABLE IF NOT EXISTS
+monthly_hours_reports (`, which is in the `migrate.ts` chain. Both also name only
+the monthly job as a user of the table; since N123 the regenerate route writes it
+through the same generator. The other two tables in the TRD sentence
+(`chat_rooms`, `chat_messages`) were not checked.
+
+Correct both. **Size XS. Tier: docs.**
+
+### N136 — `triage.sh` only recognises bold `**Nnnn.**` item headings; every `###` item is invisible to its collectors
+
+verified: every item since N105 has a `### Nnnn — …` heading (33 of them, N105–N137);
+the collectors match only the bold form.
+- **WAITING.** `scripts/ops/triage.sh:856` collects `[VISHNU]` items with
+  `grep -oE '^\*\*(N[0-9]+)\. \[VISHNU\][^*]*'`. Run on this file it returns N1,
+  N23, N24 and N102 only — **N114, N115 and N132 never reach the waiting line.**
+- **CLOSED trim.** `:953` starts a block only at `/^\*\*[NC][0-9]+\./` and skips it
+  when that line says CLOSED. A `### … CLOSED` heading is not a block start, so
+  N123's CLOSED block stays in the pack (both awk stages simulated on this file).
+- **Silent loss.** `skip` carries across `###` blocks, so every `###` item is in the
+  pack only because the last bold item, N104 (`OPEN-ITEMS.md:3725`), is open.
+  Closing N104 in the bold form would drop all 33 from the pack, with nothing
+  printed to say so.
+
+Treat `^### [NC][0-9]+ ` as an item start in both collectors (and `^## ` as a block
+boundary), keep the bold form working, and prove it with before/after pack runs —
+including a copy with N104 marked CLOSED. **Size S, Tier 1** (merging restarts
+Railway).
+
+### N137 — three more stale S3 lifecycle claims, outside the five N123 corrected
+
+verified against the lifecycle read 2026-09-26 (N132: `ping-7d`, prefix `ping/`,
+`Expiration: Days 7`; `noncurrent-30d`, every object, `NoncurrentDays 60` +
+`ExpiredObjectDeleteMarker`; no 180-day rule; versioning Enabled):
+- `apps/api/src/services/retention.ts:76-79` says `ping-7d` "is the one that
+  removes the bytes". On a versioned bucket its Expiration writes a delete marker;
+  the bytes become a noncurrent version that `noncurrent-30d` deletes 60 days later.
+- `apps/api/src/services/imageMagic.ts:17-18` says a quarantined orphan "survives
+  until the bucket lifecycle deletes it (180 days)". No 180-day rule exists; outside
+  `ping/` such an object is a current version that neither rule expires.
+- `docs/02-TRD.md:242` says the lifecycle "is intended to delete it at 180 days but
+  is unverified" — the same missing rule.
+
+Correct the three to what the rules do, dated. **Size XS, Tier 1.**
+
+## New from U4b — auto clock-out grace 15 (2026-09-26)
+
+Four items from U4b's Phase 0 audit and build (`761d7f5`). **None is changed by
+U4b** unless the item says so. API lines are read at `761d7f5`; mobile lines at
+`6638018`, and `batch/mobile-17` (3 commits ahead of main) does not touch them.
+
+### N138 — mobile grace 30 → 15 and the clock-out 409 (published by OTA 2026-09-29; API shipped in #85; device checks pending)
+
+**Update 2026-09-29 (as of 19:32 PT) — the API half SHIPPED; open until the device checks
+pass.** PR #85 merged as `a8ba597a` at 19:00:51 PT by gate route PROXY, about 12.7 s after
+GRD0015's (`68f76ea9`, session `16bc307d`) 19:00-window ping (DB `pinged_at` 19:00:38.253;
+Railway's 201 at 19:00:38.283; GitHub's `mergedAt` 19:00:51 is to the second). Railway
+deployment `ecc4c4af` was SUCCESS on that commit by 19:02:10 (container up 71 s after the
+merge; the old `157494b0` stopped at 88 s). `/health` reports `a8ba597a`, and
+`/health/crons` 20 jobs, 0 stale. 0 4xx/5xx on either deployment from 19:00:45 to 19:04 PT.
+The three reports filed at 19:00:18, :40 and :47 — before the merge, on `157494b0` — all
+have rows, and no write reached either deployment from the merge until 19:30:27. 0
+`netraops-api` Sentry events after the merge (checked 19:04), and the 19:30 pings (GRD0015
+`68f76ea9` 19:30:28, GRD0024 `94ab7696` 19:31:54) landed as 201s on the new deployment. Not
+yet exercised in production: the 409 itself, which needs a real clock-out on a closed
+session — device check 5b on the iPhone run, still pending with 4, 6 and 7. Rollback
+target: `157494b0` (Railway dashboard, within 72 h of the switchover). The merge ran as the
+session's `proxy_merge85.sh` (not committed; sha256 `604423dc…`); `scripts/ops/proxy-merge.sh`
+is that script rebuilt byte for byte and generalized, and has not yet run with `--live`.
+
+**Update 2026-09-29 — PUBLISHED by OTA, and the API half is CLOSED by PR #85; open until
+the device checks pass.** The grace is 15 on `batch/mobile-18` (`4558ae9`;
+`lib/shiftExpiry.ts:61` at `ddc6f0a`). A clock-out after a close reads "Shift Ended / You
+are already clocked out of this shift." (`c5f4a63`): `lib/clockOutOutcome.ts:41` takes 409
+`SESSION_CLOSED` as proof, and on a 404 refreshes, then decides.
+Published 2026-09-29 (group ids from the publish record; STATE.md has the channel table):
+- production runtime 1.0.17: group `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` from `ddc6f0a`,
+  11:33:06 PT — reaches iOS 48 and Android vc24;
+- preview runtime 1.0.18: group `429943ab-8561-4766-b031-635587d0a6c3` from `f5a84c4`,
+  08:39:30 PT — reaches the vc27 preview APK;
+- production runtime 1.0.18 (vc26): group `ce679c72-2a37-4034-a29d-1be16afab7e3`,
+  republished from `429943ab` (same bundles, `f5a84c4`), 16:39:24 PT — so vc26 takes the
+  new JS if Play releases it.
+PR #84 (`batch/mobile-18` → main) is open and merges after a TestFlight build from it ships;
+#50 is closed unmerged, and its three commits are in #84.
+The API half: `POST /api/shifts/:id/clock-out` answers 409 `SESSION_CLOSED` with
+`clocked_out_at` when a closed session exists for that shift and guard and none is open
+(sweep, admin close, handoff, the guard's own lost response, a concurrent close); the 404
+is byte-identical otherwise. Message: "You are already clocked out of this shift. Go back
+to the home screen to refresh.", plus "Your handover notes may not have been saved. Give
+them to your supervisor." when the request carried notes. A rejected photo on a closed
+session gets the same 409. Proven by `apps/api/scripts/test-clock-out-session-closed.ts`
+(PR #85).
+Device checks, numbered as in the batch-18 test plan:
+1. clock-in: a "geofence registered" Sentry event on the new update id (proves the update
+   and the DSN);
+2. extend with the app open on Home: the banner, and Time Left / SCHEDULED END change within
+   about 5 s, with no restart;
+3. extend while the app is backgrounded, reopen from the icon: SCHEDULED END shows the new end;
+4. shorten with the app open: "Shift end changed… Clock out at that time." and the new end
+   on screen;
+5a. admin close in the past with the clock-out screen open: "Shift ended…", then "No active
+   shift to clock out of.";
+5b. clock-out after the sweep closed the session (offline across the close): "Shift Ended /
+   You are already clocked out of this shift." with the notes sentence;
+6. the 15-minute grace: an exit before end+15 raises the alert and a violation row; a
+   re-entry after end+15 raises no "Back on post";
+7. T6a (N146): phone locked, stored end expired, shift extended on the server: the exit alert
+   still fires on the lock screen.
+Android (vc27 + `429943ab`, Star Guard GRD0001 `9a92092e`, shift `0d1817ab` at Mosser
+Towers, 2026-09-29): 1, 2 and 3 passed; 5a passed server-side (`admin_corrected`, 10:45:00,
+1.25 h; the screen was not observed). 4 and 7 were not exercised: the app was backgrounded
+from 09:42:31, so it missed the shorten, and the 10:41:51 exit went by the normal path
+(stored end 10:30, still inside the grace). 5b and 6 were not run. The iPhone run (TestFlight
+48 + `fe530a7a`) of 4, 5b, 6 and 7 is scheduled after PR #85 deploys, so 5b exercises the 409.
+Still open: handsets that have not adopted either group, and every runtime-1.0.16 handset
+(N115), keep the 30-minute gate; from PR #85 on they show the 409 message under "Clock-Out
+Failed" instead of "Active session not found".
+Adoption at 15:45 PT (non-revoked STARNET `guard_devices` rows): 3 of 10 runtime-1.0.17
+iPhone rows on `fe530a7a` (GRD0010 `c4c9b7f7`, GRD0015 `68f76ea9`, GRD0026 `610755ca`), 7
+still on `9db401c9`'s `01a0b168…`; runtime 1.0.16: GRD0007 `36478eb1` (iOS, last seen 09-03),
+GRD0005 `4a71d17d` (Android, 09-14), GRD0008 `6b1402ba` (Android, 09-27); 4 rows with no
+client string, last seen in August. No non-revoked STARNET row is on Android 1.0.18.
+
+verified: `apps/mobile/lib/shiftExpiry.ts:35` `export const SHIFT_EXPIRY_GRACE_MS =
+30 * 60 * 1000;` — the local expiry gate the background location task applies
+(`tasks/locationBackground.ts:160`, `:179`). The server closes sessions at
+`scheduled_end + 15` since U4b (`AUTO_CLOSE_GRACE_MINUTES`). Accepted until the OTA
+ships (U4b, 2026-09-26):
+- between end+15 and end+30 an exit from the fence raises the local "Outside post
+  boundary" alert; the server answers 409 `SESSION_CLOSED` and cannot retract it;
+- a clock-out in the same band gets 404 `Active session not found`
+  (`POST /api/shifts/:id/clock-out` in `apps/api/src/routes/shifts.ts`, cited by route because
+  the line moves — `:4500` at `761d7f5`), and the app shows "Clock-Out Failed" with
+  that raw server text and one OK button (`app/clock-out/index.tsx:171`;
+  `guardMessage` returns `ApiError.message`, `lib/errorCopy.ts:53`; only 400
+  `PHOTO_REJECTED` is special-cased, `:151`). It should say the shift has already
+  ended and refresh.
+
+GRD0005 (`4a71d17d`, STARNET) is on runtime 1.0.16 and cannot take any OTA (N115),
+so it keeps the 30-minute gate until a store install.
+
+Set the constant to 15 in the next mobile batch, and treat the clock-out 404 as
+"shift already ended" (a `SESSION_CLOSED` code on that route, N111's shape, would
+make it unambiguous). **Size S (mobile batch, small API change), Tier 1.**
+
+### N139 — a handoff requested near the end can stay `pending` after the sweep has closed the shift
+
+verified: a handoff's deadline is `requested_at + HANDOFF_EXPIRY_MINUTES` (30;
+`jobs/expireSwapRequests.ts:73`, `:93`) whatever the shift's status, and accept
+refuses a shift that is no longer active with 409 `SHIFT_NOT_ACTIVE`
+(`routes/shifts.ts:2682`). With the 15-minute grace a handoff requested from about
+end−15 until the sweep outlives its shift: B still sees it, accept returns 409,
+and A later gets an "expired" push for a shift that was auto-closed. Under 30, a
+request made before the end expired while the shift was still active. Related and
+pre-existing: `handoffNudge` keeps nudging accepted handoffs with no arrival
+(`jobs/handoffNudge.ts:54-65` has no shift-status condition), so its pushes and
+admin email can land after the shift has closed.
+
+Expire (or cancel) open handoffs when the sweep closes their shift, or give the
+expiry and the nudge a shift-status predicate; check the mobile Alerts copy in
+the same dispatch. Filed, not fixed, per the U4b decision. **Size S, Tier 1.**
+
+### N140 — offline-queued reports and scans that flush after a close are dead-lettered; no report or scan row is ever written (links N111)
+
+verified: `apps/mobile/lib/offlineQueue.ts` moves an item the server refuses with a
+4xx straight to the dead-letter bucket, no retry (`:345`, reason `permanent_4xx`,
+`:70`); the guard is shown a banner (header `:18-22`). After a session closes, a
+queued report gets 403 `Active session not found` (`apps/api/src/routes/reports.ts:337`)
+and a checkpoint scan the same (`routes/checkpoints.ts:506`), so both are
+dead-lettered and no `reports` / `checkpoint_scans` row is ever written. The
+payload is not lost outright: the app escalates it to
+`POST /offline/dead-letter` (`offlineQueue.ts:401-411`), which stores it in
+`offline_dead_letters` (capped at 32 KB, `apps/api/src/routes/offlineDeadLetter.ts:119`)
+for admins to list, and keeps it on the handset until reported. Nothing turns
+that row back into a report. Pre-existing; U4b moves the start of the band from
+end+30 to end+15.
+
+Accept a late report or scan for a session closed within a bounded window, or
+replay the dead-letter row as the report or scan it was, and return
+`SESSION_CLOSED` (N111). **Size M (API + mobile batch), Tier 1.**
+
+### N141 — `backfill-stale-shifts.ts` stops EVERY node-cron task, not just the sweep's
+
+verified: `apps/api/scripts/backfill-stale-shifts.ts:74` `for (const task of
+cron.getTasks().values()) task.stop();` (U4b). Today the job module is the only
+import that registers a cron, so this is exactly right and is what lets the script
+exit. If a future import registers another job, or the script runs inside a
+longer-lived process, that job is stopped too, silently. Revisit then: stop only
+the autoCompleteShifts task, or move the worker into a module that does not call
+`runJob`. **Size XS.**
+
+### N142 — reassign can leave an active shift `scheduled` over the old guard's open session
+
+verified: `PATCH /api/shifts/:id/reassign` (`routes/shifts.ts:977`) refuses only
+`completed` and `missed` (`:1042`), so it admits `active` — deliberately (`:1316`) —
+and writes `guard_id = <new guard>, status = 'scheduled'` (`:1119`) with no session
+check. The old guard's session stays open under a `scheduled` shift assigned to
+someone else, and the new guard can then clock in: a second open session on one
+shift (the only open-session uniqueness is per guard, `db/schema_v9.sql:17`). The
+U2 end edit refuses that state (`SESSION_STATE_CONFLICT`). Prod 2026-09-28: 0 open
+sessions under a non-active shift, 0 shifts with two open sessions, 0 open sessions
+whose guard is not the shift's. Found in the U2 Phase 0 audit.
+
+Decide what reassigning an in-progress shift means — a handoff (close the old
+session, open the new) or a refusal — and make the route do that. **Size M, Tier 1.**
+
+### N143 — guard deactivation can leave an `unassigned`, guard-less shift over an open session
+
+verified: deactivation locks the guard's `scheduled`/`active` shifts
+(`routes/guards.ts:788-794`), re-checks only the deactivated guard's OWN open
+session (`:800`; `services/openSession.ts:73` filters by guard) and writes
+`status = 'unassigned', guard_id = NULL` (`:847`). In N142's state — another guard's
+session under the shift — deactivating the newly assigned guard leaves that session
+open under an `unassigned` shift with no guard. The sweep never closes a session
+there (`jobs/autoCompleteShifts.ts:221` admits `active`/`scheduled` only); only
+`orphanedSessionCheck` would notice. Prod 2026-09-28: 0. Reachable only through
+N142; fixing N142 removes it. **Size S, Tier 1.**
+
+### N144 — manual clock-out and the legal-hold cascade lock the session before the shift (links N116)
+
+verified: the guard's clock-out updates its session first (`routes/shifts.ts:5103`,
+`UPDATE shift_sessions … WHERE … clocked_out_at IS NULL`), then its breaks, then the
+shift (`:5275`, `status = 'completed'`). The legal-hold cascade updates
+`shift_sessions` (`routes/admin.ts:428`) before `shifts` (`:451`). Handoff clock-in
+(`routes/shifts.ts:3446`, `FOR UPDATE OF ssr, sh`), PATCH and the other admin shift
+routes take the shift first. So clock-out against a handoff, and the cascade against
+any shift-first writer, can deadlock, and Postgres aborts one side. The U2 end edit
+waits at most 500 ms for anything after the shift (below the 1 s
+`deadlock_timeout`), so it yields rather than making a guard's clock-out the
+victim. Not observed; Sentry not searched. Found in the U2 Phase 0 audit.
+
+Take the shift lock first in both (a `SELECT … FOR UPDATE` on the shift before the
+session write), alongside N116. **Size S/M, Tier 1.**
+
+### N145 — CLOSED 2026-09-28 — the create modal put an overnight end on the wrong day across the autumn DST change
+
+**Closed by** `2c0e8a7` (D20 build, decision 3a). Single and repeat-days modes built
+an overnight end as local midnight + 86 400 000 ms; the autumn DST day is 25 hours
+long, so that lands on the SAME date, and a 19:00 → 07:00 shift starting 2026-11-01
+ended before it started — written as an inverted row before U5, refused with a 422
+since. The end is now the next calendar day (`apps/web/lib/shiftWindow.ts`);
+`apps/web/scripts/check-date-format.ts` pins 2026-10-31 → 11-01 (13 h) and
+2026-11-01 → 11-02 (12 h) in America/Los_Angeles and fails against the old roll.
+Found in the U2 Phase 0 audit.
+
+Unchanged: those two modes still build instants in the BROWSER's zone (specific
+dates resolve at the site). `apps/web/lib/shiftFormat.ts` documents why that is
+wrong for an admin outside the site's zone; every site is Pacific today.
+
+### N146 — U3: the app must re-read an active shift's end after an admin edit; until then an extension disarms the geofence 30 min after the OLD end
+
+**Update 2026-09-29 — PUBLISHED by OTA with N138; open until the device checks pass.**
+U3 is `f536620` on `batch/mobile-18`:
+- it re-reads on the edit push, on foreground and on home focus;
+- it rewrites only `scheduled_start`/`scheduled_end`, one queue writes `active_shift_end`,
+  and the region is re-armed only if the old end had run out;
+- a close in the past clears the session.
+With it ships T6a (`ddc6f0a`): before suppressing an event past the stored end, the
+background task asks the server once, by raw XHR (see N151). Same groups, device checks and
+results as N138: the push and foreground re-reads (checks 2, 3) passed on Android; the
+shorten (4) and T6a (7) are still unproven on a device. Until a handset adopts, the text
+below still describes it. The extend push keeps its "Fully close and reopen NetraOps" copy
+until adoption is broad.
+
+verified (code; `origin/main` is what the shipped app runs): the app caches
+`activeShift.scheduled_end` at clock-in, and `refreshFromServer` never rewrites it —
+it only clears a session the server reports gone (`apps/mobile/store/shiftStore.ts:186-196`).
+The background geofence task reads a SecureStore mirror, `active_shift_end`
+(written at `app/_layout.tsx:386`), and stops alerting and posting violations once
+it is past that + `SHIFT_EXPIRY_GRACE_MS` (30 min; `lib/shiftExpiry.ts:35`, `:57`;
+`tasks/locationBackground.ts:172`). So after an admin EXTENDS an active shift (D20),
+a warm app stops reporting breaches 30 min after the OLD end while the server still
+has the guard on shift, until a cold start — which the extend push asks for ("Fully
+close and reopen NetraOps to update your screen"). Also stale until then: home's
+Time Left, and the active-shift screen's SCHEDULED END and PING NOW tile ("Shift
+ending" after the old end). The Schedule tab and shift detail fetch fresh and show
+the new end. A shorten or close is picked up on the next foreground, from the
+server's session state. The `shift_schedule_edited` push is received but not acted
+on: no handler, and on the shipped build the tap routes nowhere.
+
+U3: on that push, and on foreground, re-read the active shift and rewrite
+`activeShift` and `active_shift_end`. The reason given in shiftStore for never
+rewriting it is stale — `/shifts/active-session` does return the geofence
+(`routes/shifts.ts:3986`; `apps/mobile/lib/openSession.ts:28` says so). Handsets
+below the published runtime cannot take it (N115). Ship with N138. **Size M
+(mobile OTA), Tier 1.**
+
+### N147 — assign-slots creates shifts up to 24 h with no 12-hour confirm (U5 scope, decision 12a)
+
+verified: `POST /api/scheduling/site/:siteId/assign-slots` (`routes/scheduling.ts:721`,
+company_admin and vishnu) inserts shifts (`:976`) whose length comes from the site's
+profile template, limited only to 0–24 h (`db/schema_v32.sql:27`). U5 left it out by
+decision. Prod 2026-09-28: 0 shifts ever created this way (`source = 'profile'`);
+templates exist only for Star Guard (25 rows, 5 over 12 h, none active).
+
+Ask when a template over 12 h is saved (the profile editor,
+`apps/web/app/admin/sites/page.tsx`), not per assignment. **Size S.**
+
+### N148 — the hours export gives an admin close no flag
+
+verified: `services/hoursExport.ts:371` sets `AUTO_CLOSED` only for
+`clock_out_reason = 'auto'`, and the workbook explains it as "closed by the
+auto-complete cron" (`services/hoursWorkbook.ts:376`). A session an admin closed
+with the U2 end edit (`'admin_corrected'`) — whose clock-out time the admin chose,
+not the guard — carries no flag, as the one Q11 row does today.
+
+Decide whether billing review needs an `ADMIN_CLOSED` flag and a workbook note. **Size S.**
+
+### N149 — the incoming guard on a handoff shift never gets the clock-out reminder
+
+verified: the reminder's claim excludes every session on either side of a handoff
+(`jobs/clockOutReminder.ts:145-150`: `NOT EXISTS … ssr.from_session_id = ss.id OR
+ssr.to_session_id = ss.id`). The outgoing guard is already clocked out; the
+incoming guard works to the scheduled end and is never reminded, so their close
+falls to the sweep. Pre-dates U2; found in its audit. **Size S.**
+
+### N150 — stale comments found during U2
+
+verified, each against the code at `2c0e8a7`:
+- `apps/mobile/lib/notificationTray.ts:52-54` says `shift_schedule_edited` writes no
+  notifications row; PATCH has written one since v58 (`insertNotification` in
+  `routes/shifts.ts`).
+- `apps/mobile/store/shiftStore.ts:188-195` says `/shifts/active-session` returns no
+  site geofence; it does (N146).
+- `apps/api/src/db/schema_v71.sql:21` and `:33` say every shift INSERT lives in
+  `routes/shifts.ts` and that `routes/scheduling.ts` has none; `routes/scheduling.ts:976`
+  inserts.
+- `apps/web/app/admin/shifts/[shiftId]/page.tsx:319` says the edit form uses "the
+  same clock the panel above the button shows"; the panel is hardcoded Pacific, the
+  form uses the site's zone.
+- The `clock_out_reason` vocabulary (`apps/api/src/db/schema_v55.sql:94-98`) lists
+  neither `'admin_corrected'` (N120) nor the handoff's `'handed_off_to_<id>'`.
+- `docs/OPS/INCIDENTS/2026-09-26-bethel-18h-shift/q11_bethel_c3574592_correction_COMMIT.sql:25-27`
+  cites sweep line numbers from before U4a.
+
+Comment-only; fold into the next change to each file. **Size XS.**
+
+*Added 2026-09-29* (mobile lines at `ddc6f0a`; `f5a84c4` does not touch them):
+- `apps/mobile/lib/clockOutOutcome.ts:5-21` says the route answers with "one 404 carrying
+  prose only" and that a 409 is "planned (the follow-up API PR)"; the route has sent the
+  409 since N138's API half.
+- `apps/mobile/scripts/check-clockout-copy.ts:56` labels the sweep / admin close / handoff /
+  lost-response case a 404; those are 409 now. The 404 stays a valid input (an older or
+  rolled-back API), so keep the case and relabel it.
+- `apps/mobile/lib/apiClient.ts:52-55`: the comment is right, but the fallback label
+  `'embedded'` is not — a store build's embedded bundle reports a random v4 id, and
+  `update/embedded` means expo-updates is off. `Updates.runtimeVersion ?? 'unknown'` also
+  lets an empty string through (`runtime/;` in production rows).
+- `apps/api/src/routes/auth.ts:220-222` says `update/embedded` means "running the binary's
+  baked-in bundle"; see the line above. It is on the login path, so fold it into the next
+  auth change.
+
+## New from mobile batch 18 and its OTA publish (2026-09-29)
+
+Two items from the batch-18 build and publish (PR #84). Mobile lines are read at `ddc6f0a`;
+`f5a84c4` does not touch them.
+
+### N151 — Android: the background geofence task handles the violation POST's response only at the next resume
+
+verified (source, not on a device; mobile ref `batch/mobile-18` @ `ddc6f0a`; react-native
+0.81.5, whatwg-fetch 3.6.20, expo-task-manager 14.0.9, expo-location 19.0.8, per the
+lockfile): on Android, JS timers do not run while the app is backgrounded or started
+headless. `JavaTimerManager.kt:53` starts `isPaused = AtomicBoolean(true)`, only
+`onHostResume` clears it (`:83`), and the frame callback returns early
+`if (isPaused.get() && !isRunningTasks.get())` (`:276`). `isRunningTasks` is set only by
+`onHeadlessJsTaskStart` (`:91`), and neither expo-task-manager nor expo-location starts a
+HeadlessJsTask. React Native's `fetch` is whatwg-fetch (`Libraries/Network/fetch.js:15`),
+which settles only through `setTimeout(function() { … }, 0)` (`fetch.umd.js:560`–`:578`).
+
+This holds on the New Architecture (bridgeless), which the app runs by default — Expo SDK 54,
+and `app.json` sets no `newArchEnabled` (UNVERIFIED against a built binary; check a
+prebuild's `android/gradle.properties`, or the APK). There `setTimeout` goes through the C++
+`TimerManager` to `JavaTimerRegistry.cpp:17` → `JavaTimerManager.createTimer`, which queues
+even a 0 ms timer for the next frame (`:161-162`). On the legacy bridge it would not stall:
+`TimingModule.createTimer` → `createAndMaybeCallTimer` fires a 0 ms one-shot at once (`:210`).
+The same caveat applies to T6a's reason for using XHR.
+
+So in `apps/mobile/tasks/locationBackground.ts` the violation request itself is SENT at once
+(`:327`, `const res = await fetch(\`${apiUrl}/api/locations/violation\`, {`) — the local alert has
+already fired (`:313`) and `geofence_state` is already `outside`/unreported (`:303`) — but nothing
+after the `await` runs until the guard next opens the app:
+- the 409 teardown (`:360`, `if (res.status === 409) {`) does not disarm the region in the
+  background, so a closed session's region keeps waking the task;
+- `persistGeofenceState(sessionId, 'outside', true)` (`:384`) is not written, so a duplicate exit
+  from a re-registration re-POSTs instead of being suppressed.
+
+Not new in batch 18. Every shipped tree checked has the same `await fetch`: `579ee12`
+(embedded 1.0.18) and `b3dcd55` (production OTA `9db401c9`) at `:241` / `:265` / `:289`;
+`c932c09` (embedded 1.0.17) at `:162` / `:186`, without the reported flag; `146387b`
+(1.0.16) at `:143`. iOS keeps firing JS timers in the background — `RCTTiming` swaps its
+display link for an `NSTimer` (`RCTTiming.mm:180-188`, `:300-302`) — so this is Android-only.
+
+T6a's re-check (`getActiveSession`, `:123`, same file) already avoids this: a raw
+`XMLHttpRequest` (`:132`) whose load/timeout events come from native network events and whose
+`xhr.timeout` is native (`:135`), plus a late-answer guard (`lib/pastExpiryRecheck.ts:46`,
+`RECHECK_LATE_AFTER_MS`). The violation POST can take the same shape. Device-verify both on an
+Android handset with the screen locked before relying on either: the 2026-09-29 Android run
+did not exercise T6a (N138, check 7). **Size S (mobile OTA), Tier 1.** Links: N146 (U3), N138.
+
+### N152 — every OTA before 2026-09-29 ran with Sentry off: no `EXPO_PUBLIC_SENTRY_DSN` in the bundle (fixed for new publishes; open until adoption)
+
+verified (repo and eas-cli; the Sentry counts were read in the batch-18 session, not
+re-read here): `initSentry` returns before `Sentry.init` when the DSN is absent
+(`apps/mobile/lib/sentry.ts:64`, `if (!dsn()) return;`), and `dsn()` reads only
+`process.env.EXPO_PUBLIC_SENTRY_DSN`. Store builds get the DSN from an EAS secret at build
+time (`:5-6`). `apps/mobile/eas.json` sets only `EXPO_PUBLIC_API_URL` and
+`EXPO_PUBLIC_SENTRY_ENV` per build profile (`:65`), and `eas update` applies no build-profile
+`env`: eas-cli 18.5.0 `build/commands/update/index.js:190-195` merges only server-side
+variables, and only with `--environment`. What each earlier publish's shell or `.env` held
+is UNVERIFIED; the result is not.
+- In the 90 days to 2026-09-29, `netraops-mobile` had 204 error events, all from embedded
+  bundles and none carrying an OTA update id (Sentry, read in the batch-18 session).
+- Meanwhile most handsets sat on OTA ids for weeks: on the morning of 2026-09-29 every
+  non-revoked STARNET runtime-1.0.17 iPhone row was on `01a0b168…` (group `9db401c9`,
+  2026-09-17).
+- This is N25's hypothesis (1).
+
+Fixed for new publishes: `fe530a7a` and `429943ab` (republished to production 1.0.18 as
+`ce679c72`) were exported with the DSN and gated —
+the exact DSN and exactly one Sentry public key in both Hermes bundles — and events from the
+new update ids arrived the same day. Procedure: DECISIONS D21, release-ops §3b,
+`scripts/ops/ota-export-and-gate.sh`. Both groups report `environment: production`,
+including the preview one (D21); read the channel from `contexts.ota_updates`.
+
+Still dark: every handset whose current update id is an OTA published before 2026-09-29 (a
+UUIDv7 id older than `01a0edd2…`), including every runtime-1.0.16 handset on an OTA, which can
+never adopt a new one (N115). A store build's embedded launch is not dark: it reports through
+the DSN inlined at build time (the 204 events). At 15:45 PT, 7 non-revoked STARNET
+iPhone rows on `01a0b168…`, plus GRD0005 `4a71d17d`, GRD0008 `6b1402ba` and GRD0007
+`36478eb1` on 1.0.16 (N138 has the list). From these handsets, "no mobile Sentry events"
+means "no information". Rolling back to a group published before 2026-09-29 turns Sentry
+off again. **Size XS remaining (watch adoption), Tier 1.**
+
+## New from the App Store status check (2026-09-29)
+
+### N153 — DEADLINE ~2026-11-28: the TestFlight build every guard iPhone runs (1.0.17, build 48) expires
+
+verified (Vishnu, App Store Connect, 2026-09-29): 1.0.17 build 48 (`c932c09`, EAS
+`8d8ecd90`) is approved and **"Pending Developer Release"** — not released on the App Store.
+Guards install it through **TestFlight** (internal + Public Beta, 24 installs), and that
+TestFlight build **expires in 60 days, ~2026-11-28**. An expired TestFlight build no longer
+launches, so every guard iPhone on it loses the app on that date unless it has moved to a
+replacement first. OTAs do not help: they ride on the installed binary.
+Exposure (prod, read-only, 2026-09-29): 10 non-revoked STARNET iPhone rows report
+`version/1.0.17` (last seen up to 15:30 PT today), plus one `version/1.0.16` row (GRD0007
+`36478eb1`, last seen 09-03, an older binary). **Count them by `version/`, not `build/`:**
+the header's `build/` field is app.json's stale literal, and all 10 read `build/41` (D17).
+
+Before the deadline, with time for guards to install:
+- **either** release build 48 on the App Store and move the guards to the store install
+  (a TestFlight install does not switch to the store build by itself), **or** ship a new
+  build through TestFlight (EAS build + review, Tier 2) and have guards update;
+- tell STARNET which one, and when (Tier 2: anything sent to Nataniel/Sai/guards);
+- watch `guard_devices.client` for iPhone rows still on `version/1.0.17` after the
+  replacement ships; if the replacement is build 48 from the App Store, the version will not
+  change, so confirm the moves another way (TestFlight's install list).
+
+Suggested act-by date: **2026-11-14**, two weeks ahead, since each guard has to act on their
+own phone. Unrelated to F2, which is lifted (`FREEZES.md`). **Size S, Tier 2.**
+
+## New from the Railway deploy-trigger and build review (2026-09-29)
+
+Read-only: `railway environment config --json`, `railway deployment list --json`,
+`railway logs --build`, `apps/api/railway.json` at `a8ba597a`, and Railway's docs.
+
+### N154 — Railway Watch Paths: NOT adopted (Vishnu, 2026-09-29); docs- and scripts-only changes keep riding with the next code PR
+
+verified: the API service `guard` (project adorable-courage; `production` is the only
+environment) deploys from `vvishnu1998-lab/guard` `main` with Root Directory `/apps/api` and
+config file `/apps/api/railway.json`. No watch patterns are set in the dashboard or the file
+(`watchPatterns: []` on all of the last 200 deployments), and Wait for CI is off. So every
+push to main deploys 2–3 s after it lands: since 2026-07-19, 62 of 199 deploys came from
+pushes that changed nothing under `apps/api` (24 of 93 in September). The dashboard's own
+build settings (Railpack, `npm run build`, `npm run start`) disagree with `railway.json`
+(Nixpacks, `npm install && npm run build`, `node dist/index.js`); the file wins, so moving
+or renaming it would silently switch builders.
+
+Mechanically one pattern would do it, `/apps/api/**`: patterns match from the repo root even
+with a Root Directory, a push that matches nothing creates no deployment, and apps/api
+imports nothing outside apps/api. Not adopted, because:
+- Railway does not document whether it matches the head commit or the whole push. PRs #58
+  and #61 were rebase-merged with the API change under a web/docs-only head commit, and
+  rebase merging is still allowed; head-only matching would have skipped both.
+- The tooling and docs assume a deploy per merge. `scripts/ops/triage.sh` on main reports a
+  MISMATCH when `/health` lags main; `scripts/ops/proxy-merge.sh` refuses unless the newest
+  deployment is the live one (a SKIPPED row, if Railway lists them, would block it, failing
+  closed); POLICY.md ("merge to main (= Railway restart)"), DISPATCH-TEMPLATE, the invariants
+  skill and STATE.md would all need rewriting.
+- Silent failure modes: a wrong pattern freezes API deploys; dashboard patterns have been
+  reported to vanish (so they belong in `railway.json`); empty commits stop redeploying; an
+  unresolved Railway Help Station report (2025-11) describes skips on pushes that mix watched
+  and unwatched files, which is what our code PRs do.
+- Turning it on changes `apps/api/railway.json`, which is itself a gated deploy.
+Before revisiting: disallow rebase merges; check whether skipped pushes appear as SKIPPED rows
+in `railway deployment list --json`; test head-commit vs whole-push matching with one held
+two-commit push. Until then, docs- and scripts-only work rides with the next API code PR
+(PR #86 is the first). **Size S when revisited, Tier 1.**
+
+### N155 — apps/api has no lockfile: every Railway build resolves dependencies afresh (non-reproducible)
+
+verified: the only `package-lock.json` is at the repo root, and Root Directory `/apps/api`
+uploads only that folder, so Nixpacks plans `install │ npm i` and resolves from the registry
+on every build. Proof of drift with identical dependency blocks: build `dcdbcb3f`
+(2026-09-11, `2f6b640`) logged "added 572 packages" and 37 vulnerabilities; live `ecc4c4af`
+logged 571 and 35; re-resolving with `--before=2026-09-11T21:03Z` gives 13 version differences
+from the live tree (express 4.22.2 → 4.22.3, qs 6.15.3 → 6.16.0, @grpc/grpc-js, fast-xml-parser
+and others). Separately, 10 builds between 09-17 and 09-23 installed 515 packages: the
+production-only tree (devDependencies omitted; Nixpacks' `NPM_CONFIG_PRODUCTION=false`/`CI=true`
+were not in effect, cause on Railway's side unknown); `dist/` is byte-identical either way.
+Three different trees exist: CI and local dev test the root lock (6 direct dependencies differ
+from prod: pg 8.20.0 vs 8.23.0, express 4.22.2 vs 4.22.3, …), and prod resolves its own.
+
+Also a security control: the repo is public, Dependabot alerts are disabled, and every build
+runs install scripts (aws-sdk, bcrypt, protobufjs) with the service's variables, secrets
+included, passed in as Docker build ARG/ENV — so a malicious in-range release would run at
+build time with them. And the service has no healthcheck (`healthcheckPath` null): a build
+that succeeds but crashes at boot replaces the live deployment.
+
+Plan (Phase 0 2026-09-29; the next API code PR): a standalone `apps/api/package-lock.json`
+generated with `--workspaces=false --before=<live deployment createdAt>` from a clean export
+(no `apps/api/node_modules`), pinning exactly the live tree (0 version changes in scratch);
+`railway.json` buildCommand `npm run build` (never `npm ci && …`: the build phase's cache
+mount makes it fail with EBUSY); a CI job that runs a standalone `npm ci` in apps/api; and,
+because a lock ends the in-range auto-patching today's builds get, Dependabot (npm, `/apps/api`)
+or a scheduled lock refresh. **Size M, Tier 1 (+ a gated deploy).**
+
+### N156 — the API runs Node 18.20.5, end-of-life since 2025-04-30
+
+verified: apps/api/package.json has no `engines`, so Nixpacks uses its default, `nodejs_18`
+(18.20.5, which also misses the 18.20.6 security release); the root `engines` (>=20) is never
+seen through the Root Directory. The npm that runs is Node's bundled one (≥10.6, from the log's
+lowercase `npm warn`), not the `npm-9_x` the setup line prints. CI runs Node 22
+(`typecheck.yml:42`, `window-anchor.yml:78`), so CI and prod differ; `ops-triage.yml` runs
+Node 20 (EOL 2026-04-30). Schedule on 2026-09-29: 22 is Maintenance LTS (EOL 2027-04-30); 24
+is Active LTS (Maintenance from 2026-10-20, EOL 2028-04-30); 26 becomes LTS on 2026-10-28.
+Nixpacks is in maintenance mode and serves one frozen patch per major (24 → 24.10.0, which
+misses 4 security releases; 22 → 22.14.0, 6); an odd or unknown major silently falls back to
+18. `NIXPACKS_NODE_VERSION` is not a safe override (it changes the package name but not the
+nixpkgs archive, so 18 then fails the build).
+
+Plan: `"engines": {"node": "24.x"}` in apps/api/package.json only (not root, not `.nvmrc`),
+CI `node-version-file: apps/api/package.json`, and a build/boot log line that prints the
+Node, npm and OpenSSL versions. In scratch on 22 and 24: the same resolved tree, byte-identical
+`dist/`, both type-checks, a 17-dependency smoke test and the 16 DB-free unit tests all pass.
+Staying patched needs a builder change (Railpack with an exact version and `npm ci`, or a
+digest-pinned `node:24` Dockerfile) as its own later stage. **Size S (pin) / M (builder),
+Tier 1 (+ a gated deploy).**
+
+### N157 — npm audit: 35 flagged packages (1 critical, 3 high) in prod, plus multer, which audit misses
+
+verified (build `ecc4c4af`, 2026-09-29): "35 vulnerabilities (31 moderate, 3 high, 1
+critical)", all production dependencies. They are package names, from 18 distinct advisories
+(1 critical, 10 high, 6 moderate, 1 low) in 6 root causes: tar (via bcrypt 5's binary
+download; install-time only), xlsx (no npm fix), @anthropic-ai/sdk, @opentelemetry/core (via
+@sentry/node 8), uuid and aws-sdk. On the runtime paths checked none is reachable (tar never
+loads at runtime; xlsx is write-only here; uuid only `v4()`; Sentry's propagator replaces the
+vulnerable baggage parsing; the SDK's memory tool is unused; aws-sdk's region comes from env).
+The count moves without a manifest change (37 on 09-11) and with the npm major (npm 11 reports
+34 on the same tree), so it is not a proof of anything by itself. **npm audit misses
+`multer@1.4.5-lts.2`** (a prerelease version, which audit's range check skips): 11 GitHub
+advisories (10 high DoS, 1 low), and it is reachable by an authenticated company_admin upload
+(`POST /sites/:id/instructions`).
+
+Plan, one PR per stage and none inside the lockfile PR (which must not change versions):
+multer ^2.4.0 first (same API; staged upload test), then bcrypt ^6 (clears the critical and
+two highs, drops the GitHub binary download; hashes compatible both ways in scratch), uuid ^11
+with an override (it has to be in the root package.json too — overrides in apps/api are
+ignored by the root workspace install), @anthropic-ai/sdk, xlsx → exceljs
+(`scripts/test-payable-hours.ts` reads with `XLSX.read`), @sentry/node 10 (two majors), aws-sdk
+v3 (post-launch). **Size M total, Tier 1 each (+ gated deploys).**
+
+### N158 — Railway Postgres auto-updates: security patches restart the prod database on a weekend window, outside the deploy gate
+
+verified (`railway environment config --json`, read-only): the Postgres service (`2ccaf6bf`,
+image `ghcr.io/railwayapp-templates/postgres-ssl:18`, PostgreSQL 18.6; Hobby plan until the
+upgrade to Pro on 2026-09-29 ~22:29 PT) has
+`source.autoUpdates = {type: "vuln", schedule: Sat 10:00–Sun 18:00 UTC}` (Sat 03:00–Sun 11:00
+PDT), Railway's default window. History: two "vuln-remediation" redeploys on Mon 2026-08-10
+(18.3 → 18.4, outside the window; trigger unknown) and one "autoupdate" on Sat 2026-08-22 04:52
+PDT (18.4 → 18.6) with 2 STARNET sessions open: a production DB restart that bypassed the deploy
+gate; one of those sessions' missed ping window contains it. The DB has run since
+2026-08-22 11:53:56Z, and its stats reset times suggest that stop was not clean.
+- `vuln` is described only in an unmerged Railway docs PR (CVE-matched patches only, never a
+  major; urgent patches apply regardless). Official docs: an update redeploys the service
+  (typically under 2 minutes of downtime with a volume), and Railway-initiated host migrations
+  (security or fault) are mandatory and cannot be opted out of — so the DB can restart whatever
+  this setting says. (The pre-emptive host moves the docs describe are for Hobby services.)
+- On the API side (from the pg 8.23 / pg-pool 3.14 source, not observed): a client checked out
+  with `pool.connect()` when Postgres goes down emits an unhandled `'error'` and crashes the
+  process (35 call sites in 12 files); Railway then restarts it. Fix: an error listener on every
+  pool client (`pool.on('connect', …)`), a small API change.
+  **Updated 2026-09-30 (pool-fix Phase 0):** the crash happens whether or not a query is in
+  flight, at any of the 35 `pool.connect()` call sites in the API process (36 counting
+  `db/migrate.ts`); `pool.query()` and idle clients were already safe. One replica, so a crash is a full outage until ON_FAILURE restarts it. Not
+  observed in production: none of the 28 issues Sentry still holds matches; Sentry recorded
+  zero error events in the 2026-08-10 and 2026-08-22 restart windows (checked against a known
+  event on 2026-08-01); and every API deployment that booted since 2026-09-02 booted exactly
+  once (Railway deploy logs, which are kept about 30 days, not 7). The fix is D22: a listener
+  added on pool `acquire` and removed on `release`, not `connect`, which would log every
+  idle-client error twice.
+- **Backups — updated 2026-09-29 ~22:30 PT (Vishnu):** Railway upgraded to **Pro** (~22:29 PT).
+  Postgres volume backups are now scheduled: **daily (kept 6 days), weekly (27 days), monthly
+  (89 days)**. A manual Railway backup was taken at 22:32 PT (145 MB, locked), and a local
+  `pg_dump` at 22:15 PT (50 tables, verified). **Point-in-time recovery is NOT enabled** (WAL
+  archiving is off): Railway says enabling it redeploys Postgres once, so it is planned for a
+  quiet window **after the pool error-listener fix ships**, since that fix is what lets the API
+  ride through a DB restart. Before these, no backup was known to exist. The repo's older
+  "daily backups by default" text (`docs/02-TRD.md`, `docs/05-BACKEND-SCHEMA.md`) is corrected
+  in the same change.
+- The Postgres service also carries `CLIENT_JWT_SECRET` and `VISHNU_JWT_SECRET` variables
+  (names only): API secrets on the DB service.
+Turning updates off (`disabled`) makes patching manual and does not stop Railway-initiated
+restarts. The Phase 0 recommendation is to keep `vuln` but move the window. No idle window
+exists (STARNET is scheduled around the clock until at least 2026-10-27), so choose the
+least-busy hours (14:00–16:00 or 03:00–06:00 UTC), save it with Alt+Deploy so the database is
+not redeployed, and move it by an hour when DST ends on 2026-11-01. Then, after the pool fix
+ships, enable point-in-time recovery in a quiet window (one Postgres redeploy).
+**Superseded 2026-09-30 by the decision below** (the hours above predate the 2026-09-27 roster
+change).
+
+**DECIDED 2026-09-30 (Vishnu): keep `vuln`; Window A, Saturday 18:00–20:00 UTC.** The value is
+`source.autoUpdates = {"type":"vuln","schedule":[{"day":6,"startHour":18,"endHour":20}]}` on
+`2ccaf6bf`. Railway evaluates schedules in UTC, so this is Sat 11:00–13:00 PDT until
+2026-11-01 and Sat 10:00–12:00 PST after; it stays clean in both, so no edit is needed at DST.
+Site `ab450901` has been staffed 24/7 since 2026-09-27, so there is no idle window; A has the
+fewest guards on post with no handovers. On the forward STARNET roster (Oct 3–24) it has exactly
+1 guard on post (the `ab450901` day post; that site has no active client) and 0 shift starts
+or ends within ±30 min, in both DST states. Over the past 8 weeks it averaged 0.38 on post.
+The current window averages 1.66 on post and 11.5 handovers a week on the same roster. On that
+forward roster A is not uniquely clean (the other Saturday daytime 2-hour starts are too); it
+was picked for weekend daytime PT and clearance from the 09:00 PT daily report email.
+- **When:** after D22 (the pool fix) ships, in the **same gated slot as enabling
+  point-in-time recovery**. Both may restart Postgres once: `railway environment edit` commits
+  by default, and Railway documents auto-update settings as dashboard-only. After D22 the API
+  rides through a DB restart.
+- **Deadline this sets for D22:** the CURRENT window next opens **Sat 2026-10-03 10:00 UTC
+  (03:00 PDT)**, with about 3 STARNET guards on post and nobody watching. So D22 merges Thu
+  2026-10-01 or Fri 2026-10-02.
+- **Before applying:** re-run the Saturday 09:30–13:30 PT boundary query. The roster changed on
+  09-27 and 09-29, and on 09-26 `ab450901` had a 10:00 PT start. **After applying:** watch the
+  first update. Railway documents no minimum window and no catch-up, and the only data point
+  (2026-08-22) landed 1 h 53 min after the window opened. If 2 hours proves too narrow, use
+  **Window B, 18:00–21:00 UTC**, and never go past 21:00 UTC: past Saturdays (Sep 12, 19 and 26)
+  had 14:00 PDT starts and handovers, even though the forward roster has none.
+- **What no window bounds:** the two 2026-08-10 `vuln-remediation` deployments carry no
+  `patchId`, which manual deploys and redeploys do, and the same image digest (`0c72a05e`). That
+  weakly suggests Railway started them outside any schedule. Host moves can restart Postgres at
+  any time. Postgres has not restarted since 2026-08-22 11:53:56Z (`pg_postmaster_start_time()`,
+  read 2026-09-30).
+**Size S, Tier 2 (dashboard changes that can restart the prod DB).**
+
+## New from the pool error-listener fix (2026-09-30)
+
+Read-only: `git grep` / `git show` at `a8ba597`, and the `postgres-readonly` MCP on
+2026-09-30 about 00:10–00:40 PT.
+
+### N159 — seven bare `ROLLBACK`s in catch blocks: after D22, a dead DB turns clock-out's JSON 500 into Express's HTML 500
+
+verified at `a8ba597`: 27 catch-block `ROLLBACK`s are already guarded (25 ×
+`.catch(() => {})`, 2 with a comment inside the braces); these seven are not:
+
+| Site | Handler | What follows the `ROLLBACK` |
+|---|---|---|
+| `jobs/autoCompleteShifts.ts:356` | `autoCompleteOverdueShifts` (the 5-minute sweep) | `throw err;` |
+| `routes/admin.ts:1034` | `PATCH /companies/:company_id/primary-admin/:admin_id` | `throw err;` |
+| `routes/locations.ts:619` | `POST /ping` | `throw err;` |
+| `routes/shifts.ts:4999` | clock-in | the 23505 branch (`:5001`), then `throw err;` (`:5004`) |
+| `routes/shifts.ts:5407` | clock-out | `console.error('clock-out error:', err);`, then `res.status(500).json({ error: 'Failed to clock out' })` (`:5413`) |
+| `routes/sites.ts:160` | `POST /` (create site) | `throw err;` |
+| `routes/tasks.ts:203` | `POST /instances/:id/complete` | `throw err;` |
+
+Each is `await client.query('ROLLBACK');` on a client whose backend may be gone. Once pg has
+marked the client not queryable, that `ROLLBACK` rejects, and the rejection leaves the catch
+block. Before D22 the process crashed first, so this never showed. After D22:
+- **Clock-out** skips its own log line and its JSON 500. The guard app gets Express's default
+  text/html 500 with no `body.error`, and mobile reads `body.error`. This is the one
+  customer-visible change.
+- **The other six already rethrow** (clock-in too: a dead backend is never its 23505). Their
+  response does not change, but the `ROLLBACK`'s error replaces the original (57P01 /
+  "Connection terminated unexpectedly") in the logs and in Sentry.
+- The 5-minute sweep's tick fails either way; `runJob` logs and reports it.
+Fix: the existing idiom, `await client.query('ROLLBACK').catch(() => {});`, at all seven. It is
+a follow-up PR after D22 (Vishnu, 2026-09-30: D22 stays `pool.ts` only). Its proof can reuse
+D22's harness (`apps/api/scripts/test-pool-client-error.ts`), where the clock-out case could
+then pin the exact JSON body. **Size S, Tier 1 (API code; gated merge).**
+
+### N160 — DEADLINE 2026-11-01: fix the N48 root cause and correct every drifted shift before DST ends (one live shift already sits an hour early)
+
+verified: `routes/shifts.ts:485` (N48's defect 2; N48 still cites its older line number) sets
+each repeated shift's time of day with `shiftStart.setHours(baseStart.getHours(), …)`. That is
+server-local time, which is UTC on Railway, so every shift in a series keeps the same **UTC**
+time and moves an hour in local time when DST changes. The series runs from `baseStart` to
+`baseStart + 28 days` (`:468–469`), so **any series whose first shift falls within 28 days
+before a DST change crosses it.** The next changes are 2026-11-01 and 2027-03-14.
+
+**The live occurrence** (read 2026-09-30 ~00:10 PT): shift
+`4cf22350-40e1-4887-ba1a-fbc9a423f65e`, site Bethel AME Church
+(`53c71c64-1973-4f82-be9c-98e4800beece`), guard `610755ca` GRD0026, **Sun 2026-11-01, scheduled
+08:00–14:00 PST (16:00–22:00 UTC).** Its series is four more Sunday shifts, Oct 4–25, all
+09:00–15:00 PDT, all created 2026-09-29 17:20:47Z. The correct time is **09:00–15:00 PST
+(17:00–23:00 UTC)**. It was still 16:00 UTC at 07:27 PT on 2026-09-30. This was the only
+scheduled or unassigned shift after the DST change in any tenant on 2026-09-30. **Vishnu,
+2026-09-30 07:30 PT: it will NOT be edited in admin; N160 corrects it.** (The admin form would
+have been correct: `zonedInputsToISO` at `apps/web/lib/shiftFormat.ts:180` converts 2026-11-01
+09:00 and 15:00 America/Los_Angeles to 17:00 and 23:00 UTC; run 2026-09-30.)
+
+**Scope (Vishnu, 2026-09-30).** Both parts are due before 2026-11-01. Phase 0 starts after D22
+merges.
+1. **The code fix**, so that no new series drifts.
+2. **A data correction for every existing drifted shift**, the Bethel Nov 1 shift included.
+   The set is whatever the detector below returns at correction time, not just the one shift
+   listed here: every series created before the fix whose first shift falls within 28 days
+   before 2026-11-01 can add more. Apply it as a gated production data fix: a predicate proven
+   to match exactly the detector's rows, counts asserted inside the transaction, and the
+   before-values kept so it can be reversed. After it, the detector must return zero rows.
+   Open questions for Phase 0: whether the assigned guard is told (a direct correction sends no
+   notification, while an admin edit does, per D20), and whether a `shift_schedule_audit` row
+   is written for each corrected shift.
+
+Until the fix ships, run this detector after any repeat-series creation near a DST change. It
+flags batches whose UTC start is fixed while the local start moves (the N48 signature). On
+2026-09-30 it returned exactly the Bethel series above (5 shifts, local 08:00 and 09:00), which
+is its positive control:
+```sql
+SELECT left(s.site_id::text, 8) AS site, left(coalesce(s.guard_id::text, '-'), 8) AS guard,
+       to_char(date_trunc('minute', s.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS batch_utc,
+       to_char(s.scheduled_start AT TIME ZONE 'UTC', 'HH24:MI') AS utc_start,
+       string_agg(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:MI'), ',') AS local_starts,
+       count(*) AS future_shifts
+FROM shifts s JOIN sites si ON si.id = s.site_id
+WHERE s.status IN ('scheduled', 'unassigned') AND s.scheduled_start > now()
+GROUP BY s.site_id, s.guard_id, date_trunc('minute', s.created_at), to_char(s.scheduled_start AT TIME ZONE 'UTC', 'HH24:MI')
+HAVING count(DISTINCT to_char(s.scheduled_start AT TIME ZONE si.timezone, 'HH24:MI')) > 1;
 ```
-jq 'if has("permission_denials") then .permission_denials |= map(del(.tool_input)) else . end' \
-  "$RAW" > triage-raw.json
-```
+(Grouping by creation minute alone is not enough: one minute can hold several series with
+different start times on purpose.) Fix: compute each shift's start as the base's wall-clock
+time on that date in the site's timezone (the `dowInTimeZone` / `services/siteTime.ts`
+approach already used for the day of week), plus a test that creates a series across
+2026-11-01 and 2027-03-14. The code fix does not touch existing shifts; part 2 above does, after
+the code fix ships, so that no new drifted series appears after the correction.
+**Size S (code) + S (data correction). Tier 1 for the code (gated merge); Tier 2 for the data
+correction (a production write, Vishnu present). Due before 2026-11-01.**
 
-That keeps `tool_name` — which is what says a denial happened and which tool it was, the thing
-worth having — and discards the free text. The two turns lost to denials on 09-19 would still be
-diagnosable from it.
+**Updated 2026-10-01 — BUILT (D25)** on `fix/n160-repeat-days-dst`, not merged or deployed.
+- **The code fix:** repeat_days windows at the site's wall clock; single and repeat_days refuse
+  a deactivated site (D25, decisions 1–3).
+- **The correction:** `src/ops/n160DstCorrection.ts` (D25, decision 4).
+- **The detector above is superseded.** It reads only future scheduled rows, so it went blind
+  once October's Sundays completed; the harness shows it returning nothing for the Bethel shape.
+  The script instead:
+  - reads each series' first unedited shift, whatever its status;
+  - compares start AND end;
+  - groups a series by insert gap, not by creation minute;
+  - refuses a shift whose date the old loop also moved, or that an admin edited.
+- **Production plan, read-only, 2026-10-01 about 10:15 PT, and the same at 10:55 PT after the
+  review's fixes:**
+  - 1 correction: Bethel `4cf22350` to 09:00–15:00 PST;
+  - 1 refusal: a 375 Shopping Complex shift an admin edited;
+  - 0 suspects.
+- **Runbook** (Tier 2, Vishnu present; after the deploy is verified; not 08:55–09:05 PT):
+  1. Locate the build: `railway ssh -s guard -e production -- sh -c 'pwd; ls dist/ops'`.
+  2. The dry run: `railway ssh -s guard -e production -- node dist/ops/n160DstCorrection.js`.
+     Read every line: corrections, refusals, suspects.
+  3. Apply: `railway ssh -s guard -e production -- node dist/ops/n160DstCorrection.js --apply --expect=N`,
+     with N from the dry run. Add `--confirm-long` only if the dry run marked a shift over
+     12 h.
+  4. Run the dry run again: it should plan 0. Then read the audit rows and the guard's
+     notification row through the read-only connection.
+  Refused and suspect shifts are fixed by hand in admin, after Vishnu reads them.
+  5. After the run, remove `src/ops/n160DstCorrection.ts` and the harness's C section in the next
+     code PR. The fixed route makes no new drift, so nothing is left for the script to find.
+- **Left:** the deploy (gated), then the correction, both before 2026-11-01.
 
-**Size XS. Tier 1** — CI-only, no guard-facing behaviour, no schema, no secret in the payload.
+### N161 — the daily report email counts skips as "sent", in the log and in the database
+
+verified at `a8ba597`: `jobs/dailyShiftEmail.ts:35–38` does `await sendDailyShiftReport(shift.id);
+sent++;` for every row, and `:49` logs `Done — sent: ${sent}, failed: ${failed}`. But
+`sendDailyShiftReport` (`services/email.ts:540`) returns without sending in two cases:
+- no row (`:560`);
+- no active client (`:565–571`). This case also runs `UPDATE shifts SET
+  daily_report_email_sent = true, daily_report_email_sent_at = NOW()`, so that the cron does not
+  retry forever.
+So the log line **and** the `daily_report_email_sent` / `_sent_at` columns record a send that
+never happened. Evidence: the 2026-09-29 16:00Z run on deployment `157494b0` logged "sent: 7,
+failed: 0", and all 7 were "no active client" skips (Phase 0 window verifier, from Railway
+logs).
+
+Scale (DB, 2026-09-30, STARNET, shifts completed in the last 30 days): 127 are flagged sent. Only
+Bethel AME Church (`53c71c64`, 44 flagged) and 23000 Cristo Rey Los Altos (`fea19254`, 1) have
+an active client. The other 82 flagged shifts (Jasper 34, 375 Shopping Complex `ab450901` 29,
+CCDC Folsom 17, 88 S 4th St 2) had no client, so no email was sent. `ab450901` is the
+24/7 post.
+
+Also to check (not verified as a bug): the report finds its client only through
+`clients.site_id` (`email.ts:555`, `LEFT JOIN clients c ON c.site_id = si.id AND c.is_active`),
+never through `client_sites`. Bethel has 1 active client by `site_id` and 2 by `client_sites`.
+The second is linked to Bethel only through `client_sites` (since 2026-08-21); its own
+`site_id` is Cristo Rey (`fea19254`). So it gets Cristo Rey's daily report but not Bethel's, and
+if a site's clients are all linked through `client_sites`, its shifts are flagged sent with no
+email at all. Is that intended? (Vishnu is deciding for Bethel, 2026-09-30.)
+Fix: count `sent`, `skipped_no_client` and `failed` separately, and record the skip as a skip
+(for example `daily_report_email_skipped_at`, or a reason column) rather than as a send. Check
+every reader of `daily_report_email_sent` before changing it. **Size S, Tier 1.**
+
+**Updated 2026-09-30 — Phase 0 answered "is that intended?": no, it is a bug. BUILT as D24**, on
+`fix/daily-report-recipients`, not merged.
+- **Why it's a bug:** since v36 `client_sites` is the source of truth (`routes/clients.ts:63`),
+  and the incident alert already fans out through it. The daily report was the only
+  client-facing email still reading `clients.site_id`.
+- **The STARNET client** (primary site Cristo Rey, linked to Bethel through `client_sites` on
+  2026-08-21) has received **none** of Bethel's 65 daily reports. 54 were no-client skips
+  flagged as sent; 11 went to a test client that was Bethel's only primary-site client from
+  2026-09-22 until it was deactivated on 2026-09-30. Cristo Rey itself was deactivated on
+  2026-09-30 00:35 PT.
+- **Elsewhere:** six Star Guard (test tenant) sites reach a client only through `client_sites`,
+  and one `starnet` site has two primary clients, of which the old code emailed one.
+- **Another reader of the flag:** `scripts/ops/triage.sh` used `daily_report_email_sent_at` as
+  its email-liveness signal; it now counts reports due by D24's rule.
+- **Tier 2 for the merge, not the "Tier 1" above:** it starts a new email stream to STARNET's
+  client (POLICY.md Tier 2). Decisions, proof and gate are in D24.
+- **The durable skip record** is split out as N163; the reason is logged and counted, not
+  stored.
+
+**Updated 2026-10-01 — SHIPPED (D24):** PR #88, `a83bae0b`, 2026-09-30 21:04:22 PT. The
+2026-10-01 09:00 PT run sent Bethel's 2026-09-30 report to STARNET's client and left the 8
+no-client skips unflagged; details in D24.
+
+## New from the D22 merge and N161 (2026-09-30)
+
+### N162 — self-host the web fonts (`next/font/local`) so a Google Fonts outage cannot fail a web build, or block an API merge
+
+verified: `apps/web/app/layout.tsx:2` is the only Google font load (`import { Inter,
+Barlow_Condensed, DM_Sans } from 'next/font/google'`).
+- **What happened:** on 2026-09-30 PR #87's Vercel preview for `46cfe13` failed at 14:34:04Z,
+  44 s after Vercel marked the commit pending (14:33:20Z). Vercel inspect showed a `next/font`
+  Google Fonts fetch failure (a TypeError reading '1' in the google loader). The preview for `0a55bd3`, with identical web
+  code, had passed at 14:13Z.
+- **Why it mattered:** the failed commit status made #87 `UNSTABLE`, and
+  `scripts/ops/proxy-merge.sh` merges only when `CLEAN`. So a web-font outage blocked an API
+  merge until Vishnu redeployed the preview.
+- **Fix:** vendor the woff2 files for the three families, and only the weights used, under
+  `apps/web` (all OFL-licensed). Switch to `next/font/local` with the same CSS variables. Prove
+  it with a build that has no network access. Downloading the font files needs Vishnu's go
+  (file names and sizes stated first).
+- **Size S. Tier 1** (web code; a merge to main also restarts Railway, so it rides with an API
+  PR or is gated).
+
+### N163 — follow-up to D24: a durable record of why a daily report was not sent
+
+Vishnu, 2026-09-30: logs and counters now; the durable skip column as a follow-up.
+- **The gap:** since D24 a skipped shift (no client, client access disabled, company inactive)
+  stays `daily_report_email_sent = false`, and its reason exists only in the Railway log line
+  `[email] sendDailyShiftReport: skipped — <reason> for site "<site>" (shift <id>)` and the job's
+  counters. Railway keeps logs for about 30 days. After that, "skipped", "failed in both runs" and
+  "the job never ran" cannot be told apart for a shift.
+- **Proposal:** an expand-only migration (its own step, column first) adding
+  `daily_report_skipped_at` and `daily_report_skip_reason`. Write them on every skip, without
+  touching `daily_report_email_sent`. Exclude both from `LATCH_COLUMNS` and say so in the
+  `services/shiftLatches.ts` docblock. Teach `scripts/ops/triage.sh` to report skip counts.
+- **Size S. Tier 1** (migration plus a code change, gated merges).
+
+## New from N160 (2026-10-01)
+
+### N164 — assign-slots creates shifts at a deactivated site
+
+verified: `routes/scheduling.ts:751` reads `SELECT company_id, timezone FROM sites WHERE id = $1`
+and never checks `sites.is_active`. specific_dates always refused a deactivated site; single and
+repeat_days refuse one since N160 (D25, decision 3). Vishnu, 2026-10-01: slot assignment is filed
+for later. STARNET has 2 inactive sites, so this is reachable.
+- **Fix:** select `is_active` and answer the same 409 before any write. Check that the web's
+  assign-slots caller shows the message.
+- **Size XS. Tier 1.**
+
+### N165 — the create modal's repeat base is built in the browser's zone, and one comment is now wrong
+
+verified: `apps/web/components/admin/ScheduleShiftModal.tsx` builds the single and repeat_days
+base instants with `lib/shiftWindow.ts` `localShiftWindow`, the wall clock in the BROWSER's zone
+(only specific_dates resolves at the site). The server fix (N160) reads that base at the site,
+so the result is right only while the admin's browser is in the site's zone, which holds today
+(every site and admin is Pacific). The comment at `:291`, "Every day of the series has this
+duration: the server copies it", has been false since N160: windows on a DST night are an hour
+longer or shorter. The web still shows the server's 409 label for the night it did not measure,
+so nothing breaks.
+- **Fix:** build the base with `zonedInputsToISO` at the site, as specific_dates' check does, and
+  correct the comment. Ships with the next web change.
+- **Size XS. Tier 1.**
+
+## New from Company Profile, Phase A (2026-10-06)
+
+**Status 2026-10-06 — PR #92 and PR #93 SHIPPED.**
+- **PR #92:** schema_v82, the `POINTER_COLUMNS` entry, the v82 hand-apply scripts and the triage
+  map line. Vishnu hand-applied v82 before the merge. Merged as `deab5eb` at 12:06:02 PT by PROXY
+  (gating guard GRD0024). Railway `80e63900` SUCCESS.
+- **PR #93:** the API routes. Merged as `66ac758` at 14:00:20 PT by **OVERRIDE**: Vishnu waived the
+  gate after the 13:30 PROXY run aborted on a silent gating guard. Railway `b553eae1` SUCCESS, and
+  0 STARNET writes landed in the restart window.
+
+Details are in STATE.md, "Shipped 2026-10-06". The Settings page (this PR) comes next; the Star
+Guard prod logo test runs from that page once it ships.
+
+### N166 — POLICY.md: the deploy gate's CONDITION route cannot be met while STARNET staffs a post around the clock
+
+verified 2026-10-06 ~07:10 PT, read-only: STARNET has zero free intervals in the next 14 days
+(each shift padded 30 min before its start and 20 min after its end, for early clock-in and the
+auto-close sweep). 88 S 4th St and 375 Shopping Complex are staffed back to back around the
+clock; 120 future shifts run through Mon 11-02. The same query on Bethel AME Church alone returns
+its overnight gaps, so the empty company-wide result is real, not a broken query.
+- **The gap:** `docs/OPS/POLICY.md` "Notes on applying the tiers" lists three routes. CONDITION
+  (zero active STARNET shifts and zero open STARNET sessions) cannot occur while any STARNET site
+  is staffed 24/7, so PROXY (`scripts/ops/proxy-merge.sh`, one calibrated guard, D23) is the only
+  route short of OVERRIDE. A plan that waits for a CONDITION window waits indefinitely.
+- **Fix:** a note under the three routes: CONDITION is unavailable while 24/7 coverage holds;
+  check the schedule (the gap query, with a one-site control) before planning on it. Vishnu,
+  2026-10-06: record it here; do not edit POLICY.md now.
+- **Size XS. Tier 1** (docs/OPS).
+
+### N167 — Phase B letterhead: a logo that passes the upload checks but will not decode falls back to the company name
+
+verified: `apps/api/src/services/imageDimensions.ts` reads only the PNG IHDR chunk or the first
+JPEG frame header, and `apps/api/scripts/test-image-dimensions.ts` asserts that a valid header
+followed by garbage is ACCEPTED. So `POST /api/admin/company/logo` can store an object that
+pdfkit, exceljs or a mail client cannot draw.
+- **Requirement (Vishnu, 2026-10-06):** every letterhead surface renders with such a logo by
+  falling back to the company name. A logo never fails a document.
+- **Test:** a header-valid, garbage-body PNG and JPEG through each renderer (PDF, XLSX, email):
+  the document is produced and the company name stands where the logo would be.
+- **Size: part of Phase B. Tier 1.**
+
+## New from the PR #93 post-deploy check (2026-10-06)
+
+### N168 — a STARNET guard's reports reach prod, but it has sent no pings since 2026-09-30
+
+verified 2026-10-06 ~14:25 PT, read-only (`postgres-readonly`). The guard is GRD0013 on
+**STARNET SECURITY** (`95505419-123e-4f70-abf1-88c7f8742d54`). Its open session
+`3884abbf-2506-43fc-957b-945bf292f62c` at Jasper clocked in at 06:02 PT and is scheduled to end
+at 22:00 PT.
+- **What the session holds:** 0 pings and 15 `missed_pings` rows, but 8 reports (07:04 to 14:17
+  PT). So the device does reach the API.
+- **History:** this guard's last ping on any session was at **2026-09-30 21:31 PT**. Its 12
+  other sessions in the last 14 days hold 44 pings between them.
+- **Hypothesis (Vishnu, unverified):** the same root as Sentry `NETRAOPS-MOBILE-13`, "Background
+  location permission denied". That issue was first seen 2026-09-29 13:55 PT and was still firing
+  at 2026-10-06 14:16 PT. Not yet checked: whether MOBILE-13's events come from this device.
+- **First step:** match MOBILE-13's events to this guard by their user or device tags. Then read
+  how the ping path handles permissions on the build this device runs (UA `NetraOps/48 …`).
+  - Do not attribute traffic by UA: GRD0010 and GRD0013 share
+    `NetraOps/48 CFNetwork/3860.700.1 Darwin/25.6.0`.
+  - A side effect: while GRD0013's session is open, GRD0010 cannot gate a PROXY merge.
+- Vishnu, 2026-10-06: log it; do not act yet.
+- **Size S, Tier 0** (read-only investigation).
