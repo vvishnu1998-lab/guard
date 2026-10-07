@@ -75,6 +75,16 @@ function stubModule(name: string, members: Record<string, unknown> = {}): unknow
 
 let failures = 0;
 let passes = 0;
+
+// A harness that stops before its last check must not pass: an await that never
+// settles drains the event loop, and Node would then exit 0 having printed nothing.
+let finished = false;
+process.on('beforeExit', () => {
+  if (!finished) {
+    console.log('  ✗ FAIL: the harness stopped before its last check (a promise never settled)');
+    process.exitCode = 1;
+  }
+});
 function check(cond: boolean, msg: string): void {
   if (cond) { passes += 1; console.log(`  ✓ ${msg}`); }
   else      { failures += 1; console.log(`  ✗ FAIL: ${msg}`); }
@@ -598,6 +608,7 @@ async function main(): Promise<void> {
     await pool.end();
   }
 
+  finished = true;
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures === 0 ? 0 : 1);
 }

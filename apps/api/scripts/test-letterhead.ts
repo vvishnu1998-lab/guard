@@ -47,6 +47,16 @@ function inject(request: string, exports: unknown): void {
 
 let failures = 0;
 let passes = 0;
+
+// A harness that stops before its last check must not pass: an await that never
+// settles drains the event loop, and Node would then exit 0 having printed nothing.
+let finished = false;
+process.on('beforeExit', () => {
+  if (!finished) {
+    console.log('  ✗ FAIL: the harness stopped before its last check (a promise never settled)');
+    process.exitCode = 1;
+  }
+});
 function check(cond: boolean, msg: string): void {
   if (cond) { passes += 1; console.log(`  ✓ ${msg}`); }
   else      { failures += 1; console.log(`  ✗ FAIL: ${msg}`); }
@@ -130,11 +140,13 @@ async function main(): Promise<void> {
       await c.get('big', load(Buffer.alloc(11))); await c.get('big', load(Buffer.alloc(11)));
       check(loads === 4 && c.stats().bytes === 6, 'K6 a value larger than the whole cache is returned but never stored');
       c.clear(); loads = 0;
-      let release: () => void = () => undefined;
-      const slow = () => new Promise<Buffer | null>((r) => { loads += 1; release = () => r(a); });
+      // Every load started is released, so a cache that stopped sharing loads
+      // fails here on the count instead of leaving promises that never settle.
+      const releases: Array<() => void> = [];
+      const slow = () => new Promise<Buffer | null>((r) => { loads += 1; releases.push(() => r(a)); });
       const ps = [c.get('x', slow), c.get('x', slow), c.get('x', slow)];
-      check(c.stats().loading === 1, 'K7 three concurrent misses share one load');
-      release();
+      check(loads === 1 && c.stats().loading === 1, `K7 three concurrent misses share one load (loads started: ${loads})`);
+      releases.forEach((release) => release());
       const got = await Promise.all(ps);
       check(loads === 1 && got.every((g) => g === a) && c.stats().loading === 0, 'K7b all three get its result; nothing left loading');
     }
@@ -290,6 +302,7 @@ async function main(): Promise<void> {
     await pool.end();
   }
 
+  finished = true;
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures === 0 ? 0 : 1);
 }

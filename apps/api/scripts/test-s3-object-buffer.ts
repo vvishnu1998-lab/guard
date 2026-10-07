@@ -9,6 +9,16 @@ process.env.AWS_REGION = 'us-east-1';
 
 let failures = 0;
 let passes = 0;
+
+// A harness that stops before its last check must not pass: an await that never
+// settles drains the event loop, and Node would then exit 0 having printed nothing.
+let finished = false;
+process.on('beforeExit', () => {
+  if (!finished) {
+    console.log('  ✗ FAIL: the harness stopped before its last check (a promise never settled)');
+    process.exitCode = 1;
+  }
+});
 function check(cond: boolean, msg: string): void {
   if (cond) { passes += 1; console.log(`  ✓ ${msg}`); }
   else      { failures += 1; console.log(`  ✗ FAIL: ${msg}`); }
@@ -95,6 +105,7 @@ async function main(): Promise<void> {
     check(err instanceof Error && /no buffered body/.test((err as Error).message), 'S7 no body: an error, never an empty logo');
   }
 
+  finished = true;
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures === 0 ? 0 : 1);
 }
