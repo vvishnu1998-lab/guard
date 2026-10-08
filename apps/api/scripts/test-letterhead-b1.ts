@@ -18,6 +18,8 @@
  *
  *   T  contactLines() moved from letterhead/pdf.ts to letterhead/text.ts
  *   A  #1 Activity Logs PDF (services/pdf/activityLog.ts, POST /api/admin/activity-log/pdf)
+ *   B  #4 billing hours XLSX and #5 the monthly archive (services/hoursWorkbook.ts,
+ *      GET /api/billing/hours-export, generateMonthlyReport)
  *
  * Then what each surface does WITH a letterhead: the tenant's own (never
  * another's), every line of it, and nothing else on the page moved.
@@ -31,7 +33,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import ts from 'typescript';
-import { pngImage } from './image-fixtures';
+import { pngImage, pngCorruptAfterHeader, jpegCorruptAfterHeader } from './image-fixtures';
 
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost']);
 /** main before B1: PR #95's merge. Every "before" is read from here. */
@@ -43,7 +45,10 @@ const NO_SUCH_COMPANY = '00000000-0000-4000-8000-00000000b1b1';
 const JWT_SECRET = 'test-only-letterhead-b1';
 const S3_HOST = 'test-bucket.s3.us-east-1.amazonaws.com';
 
+const VISHNU_SECRET = 'test-only-letterhead-b1-vishnu';
+
 process.env.JWT_SECRET = JWT_SECRET;
+process.env.VISHNU_JWT_SECRET = VISHNU_SECRET;
 
 process.env.S3_BUCKET = 'test-bucket';
 process.env.AWS_REGION = 'us-east-1';
@@ -146,6 +151,47 @@ const LONG = {
   licenceNumber: 'PPO 120456 / ALARM ACO 7781 / PI 29981', website: 'https://www.starguard-protective-services.example/locations', logo: LOGO,
 };
 
+/** A deterministic HoursExportDataset: `days` days from `start`, three guards on two sites. */
+function hoursFixture(start: string, days: number): any {
+  const guards = [['g1', 'Fixture Guard A', 'GRD9801'], ['g2', 'Fixture Guard B', 'GRD9802'], ['g3', 'Fixture Guard C', 'GRD9803']];
+  const sites = [['s1', 'North Gate'], ['s2', 'South Lot']];
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const label = (ms: number) => { const d = new RealDate(ms - 7 * 3600e3); return `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`; };
+  const rows: any[] = [];
+  const t0 = RealDate.parse(`${start}T15:00:00Z`);
+  for (let d = 0; d < days; d++) guards.forEach(([gid, gname, badge], gi) => {
+    const [sid, sname] = sites[gi % 2];
+    const ss = t0 + d * 86400e3 + gi * 3600e3;
+    const se = ss + 8 * 3600e3;
+    const late = gi === 1 && d % 3 === 0 ? 50 : 0;
+    const ci = ss + late * 60e3;
+    const co = se - (gi === 0 && d % 4 === 0 ? 120 : 0) * 60e3;
+    const hours = (co - ci) / 3600e3;
+    const cov = Math.round(hours / 8 * 1000) / 10;
+    const date = new RealDate(ci - 7 * 3600e3).toISOString().slice(0, 10);
+    rows.push({ guard_id: gid, guard_name: gname, badge_number: badge, site_id: sid, site_name: sname, site_timezone: 'America/Los_Angeles',
+      shift_id: `sh-${d}-${gi}`, session_id: `ss-${d}-${gi}`, shift_date: date, shift_date_label: label(ci).split(', ')[0], day_of_week: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new RealDate(ci - 7 * 3600e3).getUTCDay()],
+      sched_start_iso: new RealDate(ss).toISOString(), sched_start_label: label(ss), sched_end_iso: new RealDate(se).toISOString(), sched_end_label: label(se),
+      clock_in_iso: new RealDate(ci).toISOString(), clock_in_label: label(ci), clock_out_iso: new RealDate(co).toISOString(), clock_out_label: label(co),
+      scheduled_hours: 8, actual_hours: +hours.toFixed(2), payable_hours: +hours.toFixed(2), break_hours: 0.5, offpost_hours: 0,
+      variance_hours: +(hours - 8).toFixed(2), coverage_pct: cov, flags: cov < 80 ? ['SHORT'] : [] });
+  });
+  const agg = (sel: any[], g?: string[], st?: string[]) => {
+    const sum = (k: string) => +sel.reduce((a, r) => a + r[k], 0).toFixed(2);
+    const sch = sum('scheduled_hours'); const pay = sum('payable_hours');
+    return { guard_id: g?.[0] ?? null, guard_name: g?.[1] ?? null, badge_number: g?.[2] ?? null, site_id: st?.[0] ?? null, site_name: st?.[1] ?? null,
+      label: 'x', sessions: sel.length, shifts: sel.length, scheduled_hours: sch, actual_hours: sum('actual_hours'), payable_hours: pay,
+      break_hours: sum('break_hours'), offpost_hours: 0, variance_hours: +(pay - sch).toFixed(2), coverage_pct: sch ? Math.round(pay / sch * 1000) / 10 : null,
+      auto_closed_sessions: 0, flagged_count: sel.filter((r) => r.flags.length).length };
+  };
+  const end = new RealDate(RealDate.parse(`${start}T12:00:00Z`) + 6 * 86400e3).toISOString().slice(0, 10);
+  return { company_id: STAR_GUARD, company_name: 'Star Guard', company_slug: 'star-guard', start_date: start, end_date: end, rows,
+    by_guard: guards.map((g) => agg(rows.filter((r) => r.guard_id === g[0]), g)),
+    by_site: sites.map((st) => agg(rows.filter((r) => r.site_id === st[0]), undefined, st)),
+    by_guard_site: guards.map((g, gi) => agg(rows.filter((r) => r.guard_id === g[0]), g, sites[gi % 2])),
+    overall: agg(rows) };
+}
+
 async function main(): Promise<void> {
   refuseUnlessLocal();
   if (spawnSync('pdftotext', ['-v']).status !== 0 || spawnSync('pdfimages', ['-v']).status !== 0) {
@@ -166,6 +212,7 @@ async function main(): Promise<void> {
   class S3ObjectTooLargeError extends Error {}
   const s3Objects = new Map<string, Buffer>();
   const s3Fetches: string[] = [];
+  const s3Uploads: Array<{ key: string; buf: Buffer; mime: string }> = [];
   inject('../src/services/s3', stubModule('s3', {
     S3ObjectTooLargeError,
     s3KeyFromPublicUrl: (url: string): string | null => {
@@ -175,6 +222,10 @@ async function main(): Promise<void> {
         const key = u.pathname.replace(/^\//, '');
         return key.length > 0 ? key : null;
       } catch { return null; }
+    },
+    uploadBufferToS3: async (key: string, buf: Buffer, mime: string) => {
+      s3Uploads.push({ key, buf, mime });
+      return `https://${S3_HOST}/${key}`;
     },
     getS3ObjectBuffer: async (key: string) => {
       s3Fetches.push(key);
@@ -293,14 +344,18 @@ async function main(): Promise<void> {
   await ins('reports', `INSERT INTO reports (shift_session_id, site_id, report_type, description, reported_at)
     VALUES ($1, $2, 'activity', 'Perimeter checked, gate secured, lobby clear.', $3) RETURNING id`, [sess, site, at(130)]);
 
+  const hadMonthlyRow = (await q('SELECT 1 FROM monthly_hours_reports WHERE company_id = $1 AND year = 2026 AND month = 9', [STAR_GUARD])).rowCount > 0;
+
   // ══ the real routers over HTTP ══
   const app = express();
   app.use(express.json());
   app.use('/api/admin', (await import('../src/routes/admin')).default);
+  app.use('/api/billing', (await import('../src/routes/billing')).default);
   const server: Server = await new Promise((resolve) => { const sv = app.listen(0, '127.0.0.1', () => resolve(sv)); });
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const adminToken = (sub: string, companyId: string) =>
     jwt.sign({ sub, role: 'company_admin', company_id: companyId, is_primary: true }, JWT_SECRET, { expiresIn: '1h' });
+  const vishnuToken = jwt.sign({ sub: 'vishnu-fixture', role: 'vishnu' }, VISHNU_SECRET, { expiresIn: '1h' });
   async function call(method: string, pathname: string, token: string, body?: unknown) {
     const r = await fetch(`${origin}${pathname}`, {
       method, headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
@@ -413,9 +468,125 @@ async function main(): Promise<void> {
         `A10 a company with no row: the lookup returns null and the route's PDF is the base renderer's, byte for byte (${sha(r.body)} = ${sha(expected)})`);
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    section(`B  #4/#5 hours XLSX — no letterhead: the same bytes as at ${BASE.slice(0, 7)}; with one: the block, the print chrome, nothing else moved`);
+    const ExcelJS = (await import('exceljs')).default;
+    const loadXlsx = async (buf: Buffer) => { const wb = new ExcelJS.Workbook(); await wb.xlsx.load(buf as never); return wb; };
+    const baseWB = loadBase('src/services/hoursWorkbook.ts');
+    const curWB = require('../src/services/hoursWorkbook');
+    const xlsx = (mod: any, data: unknown, ...lh: unknown[]) => frozen<Buffer>(() => mod.workbookToBuffer(mod.buildHoursWorkbook(data, ...lh)));
+    const week = hoursFixture('2026-09-14', 7);
+    const empty = { ...hoursFixture('2026-09-14', 0), end_date: '2026-09-20' };
+    check(!String(baseWB.buildHoursWorkbook).includes('writeLetterheadBlock') && String(curWB.buildHoursWorkbook).includes('writeLetterheadBlock'),
+      'B0 the base workbook predates the letterhead; the current one writes it');
+    for (const [label, data] of [['a week, three guards, two sites', week], ['no rows', empty]] as const) {
+      const before = await xlsx(baseWB, data);
+      const absent = await xlsx(curWB, data);
+      const nul = await xlsx(curWB, data, null);
+      check(before.equals(absent) && before.equals(nul), `B1 ${label}: base ${sha(before)} = lh absent ${sha(absent)} = lh null ${sha(nul)} (${nul.length} bytes)`);
+    }
+    {
+      const mutant = loadBase('src/services/hoursWorkbook.ts', (src) => src.replace("s.addRow(['NetraOps — Hours Report']).font = { bold: true, size: 16,", "s.addRow(['NetraOps — Hours Report']).font = { bold: true, size: 15,"));
+      check(!(await xlsx(mutant, week)).equals(await xlsx(curWB, week)), 'B2 control: the base with its title one point smaller DIFFERS');
+    }
+    const wbNull = await loadXlsx(await xlsx(curWB, week, null));
+    const wbFull = await loadXlsx(await xlsx(curWB, week, FULL));
+    const S = wbFull.getWorksheet('SUMMARY')!;
+    const cell = (ws: any, addr: string) => ws.getCell(addr).value;
+    check(cell(S, 'A1') === null && cell(S, 'B1') === 'Star Guard' && cell(S, 'B2') === '1200 Example Avenue, Suite 300, San Jose, CA 95110'
+      && cell(S, 'B3') === '(408) 555-0142  ·  dispatch@starguard.example  ·  www.starguard.example' && cell(S, 'B4') === 'License No. PPO 120456'
+      && (S.getCell('B1').font as any)?.bold === true && (S.getCell('B1').font as any)?.size === 16,
+      'B3 SUMMARY rows 1-4: column A left to the logo; the name (bold 16) and the three contact lines in column B');
+    check(String(cell(S, 'A5')) === 'Hours Report   ·   Period 14-Sep-26 to 20-Sep-26' && cell(S, 'K5') === 'Powered by NetraOps'
+      && cell(S, 'A6') === null && cell(S, 'A7') === 'Shifts',
+      `B4 row 5 "Hours Report · Period …" with "Powered by NetraOps" at K5; the KPI header at row 7 (A5 ${JSON.stringify(cell(S, 'A5'))})`);
+    const rowsFrom = (ws: any, first: number) => { const out: string[] = []; ws.eachRow({ includeEmpty: true }, (row: any, n: number) => { if (n >= first) out.push(JSON.stringify(row.values)); }); return out; };
+    {
+      const a = rowsFrom(S, 7);
+      const b = rowsFrom(wbNull.getWorksheet('SUMMARY'), 4);
+      check(a.length > 20 && a.join('\n') === b.join('\n'), `B5 SUMMARY from the KPI row down is the null workbook's, three rows lower (${a.length} rows)`);
+      for (const name of ['HOURS DETAIL', 'EXCEPTIONS', 'NOTES']) {
+        const x = rowsFrom(wbFull.getWorksheet(name), 1);
+        check(x.length > 1 && x.join('\n') === rowsFrom(wbNull.getWorksheet(name), 1).join('\n'), `B6 ${name}: every row the same as without the letterhead (${x.length} rows)`);
+      }
+    }
+    {
+      const media = (wbFull as any).model.media as Array<{ extension: string }>;
+      const pics = S.getImages();
+      const r = pics[0]?.range as any;
+      const w = r?.ext?.width; const h = r?.ext?.height;
+      check(media.length === 1 && media[0].extension === 'png' && pics.length === 1 && r.tl.nativeCol === 0 && r.tl.nativeRow === 0
+        && w <= 147 && h <= 61 && Math.abs(w / h - 400 / 160) < 0.05,
+        `B7 one picture, the logo, anchored in A1 inside the 147 x 61 px box with its aspect kept (${media.length} media, ${w} x ${h} px)`);
+    }
+    {
+      const heads: string[] = [];
+      let ok = 0;
+      wbFull.eachSheet((ws: any) => {
+        heads.push(ws.name);
+        if (ws.headerFooter.oddHeader === '&L&BStar Guard&RHours Report'
+          && ws.headerFooter.oddFooter === '&L&8Confidential — Star Guard&C&8Page &P of &N&R&8Powered by NetraOps') ok += 1;
+      });
+      let none = 0;
+      wbNull.eachSheet((ws: any) => { if (!ws.headerFooter?.oddHeader && !ws.headerFooter?.oddFooter) none += 1; });
+      check(ok === 4 && none === 4, `B8 all 4 sheets print with "Star Guard | Hours Report" and "Confidential — Star Guard | Page n of N | Powered by NetraOps"; none without a letterhead (${heads.join(', ')})`);
+      check(wbFull.company === 'Star Guard' && !wbNull.company, `B8b the file's Company property is the company, and blank without a letterhead (${JSON.stringify(wbNull.company)})`);
+    }
+    {
+      const noLogo = await loadXlsx(await xlsx(curWB, week, { ...FULL, logo: null }));
+      const s1 = noLogo.getWorksheet('SUMMARY')!;
+      check(cell(s1, 'A1') === 'Star Guard' && cell(s1, 'A4') === 'License No. PPO 120456' && cell(s1, 'B1') === null
+        && (noLogo as any).model.media.length === 0 && s1.getImages().length === 0, 'B9 logo null: no picture, and the text starts in column A');
+      const emptyLh = await loadXlsx(await xlsx(curWB, week, EMPTY));
+      const s2 = emptyLh.getWorksheet('SUMMARY')!;
+      check(cell(s2, 'A1') === 'Star Guard' && cell(s2, 'A2') === null && cell(s2, 'A3') === null && cell(s2, 'A4') === null
+        && String(cell(s2, 'A5')).startsWith('Hours Report') && cell(s2, 'A7') === 'Shifts', 'B10 empty profile: the name alone, rows 2-4 blank, the rest where it always is');
+      const amp = await loadXlsx(await xlsx(curWB, week, { ...EMPTY, companyName: 'Star Guard & Patrol' }));
+      check(amp.getWorksheet('SUMMARY')!.headerFooter.oddHeader === '&L&BStar Guard && Patrol&RHours Report' && cell(amp.getWorksheet('SUMMARY'), 'A1') === 'Star Guard & Patrol',
+        'B11 an & in the name prints as one: written && in the header/footer codes, as itself in the cell');
+      for (const [label, bad] of [['PNG', pngCorruptAfterHeader(400, 160)], ['JPEG', jpegCorruptAfterHeader(400, 160)]] as const) {
+        let threw: unknown = null;
+        let wb: any = null;
+        try { wb = await loadXlsx(await xlsx(curWB, week, { ...FULL, logo: bad })); } catch (e) { threw = e; }
+        const s3s = wb?.getWorksheet('SUMMARY');
+        check(threw === null && wb.model.media.length === 0 && cell(s3s, 'A1') === 'Star Guard' && cell(s3s, 'A2') === '1200 Example Avenue, Suite 300, San Jose, CA 95110',
+          `B12 N167: a ${label} with a valid header and a garbage body: the workbook is produced, no picture, the name in its place (threw ${String(threw)})`);
+      }
+    }
+    // ── the routes ──
+    {
+      const r = await frozen(() => call('GET', '/api/billing/hours-export?start_date=2026-09-15&end_date=2026-09-15', adminToken(adminA, STAR_GUARD)));
+      const wb = r.status === 200 ? await loadXlsx(r.body) : null;
+      const s0 = wb?.getWorksheet('SUMMARY');
+      const detail = wb ? rowsFrom(wb.getWorksheet('HOURS DETAIL'), 2).join(' ') : '';
+      check(r.status === 200 && cell(s0, 'B1') === 'Star Guard' && cell(s0, 'B4') === 'License No. PPO 120456' && (wb as any).model.media.length === 1
+        && detail.includes('Fixture Guard A') && r.disposition === 'attachment; filename="netraops-hours-star-guard-2026-09-15-to-2026-09-15.xlsx"',
+        `B13 GET /api/billing/hours-export as Star Guard's admin: Star Guard's block and logo over its own hours; the filename unchanged (${r.status} ${r.disposition})`);
+    }
+    {
+      const r = await frozen(() => call('GET', `/api/billing/hours-export?company_id=${other}&start_date=2026-09-15&end_date=2026-09-15`, vishnuToken));
+      const wb = r.status === 200 ? await loadXlsx(r.body) : null;
+      const s0 = wb?.getWorksheet('SUMMARY');
+      check(r.status === 200 && cell(s0, 'A1') === OTHER_NAME && !JSON.stringify(rowsFrom(s0, 1)).includes('Star Guard') && (wb as any).model.media.length === 0,
+        `B14 as Vishnu, for the other company: that company's block, nothing of Star Guard's (${r.status})`);
+    }
+    {
+      const MR = require('../src/services/monthlyReport');
+      s3Uploads.length = 0;
+      const res = await frozen<any>(() => MR.generateMonthlyReport(STAR_GUARD, 2026, 9));
+      const up = s3Uploads[0];
+      const wb = up ? await loadXlsx(up.buf) : null;
+      const s0 = wb?.getWorksheet('SUMMARY');
+      check(s3Uploads.length === 1 && up.key === `monthly-reports/${STAR_GUARD}/netraops-hours-star-guard-2026-09.xlsx` && res?.key === up.key
+        && cell(s0, 'B1') === 'Star Guard' && String(cell(s0, 'A5')) === 'Hours Report   ·   Period 01-Sep-26 to 30-Sep-26'
+        && (wb as any).model.media.length === 1 && rowsFrom(wb!.getWorksheet('HOURS DETAIL'), 2).join(' ').includes('Fixture Guard A'),
+        `B15 #5 generateMonthlyReport(Star Guard, 2026-09): the archived file carries the letterhead over September's hours, under the same key (${up?.key})`);
+    }
+
     // ── (next section) ──
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (!hadMonthlyRow) await q('DELETE FROM monthly_hours_reports WHERE company_id = $1 AND year = 2026 AND month = 9', [STAR_GUARD]);
     for (const table of ['reports', 'location_pings', 'shift_sessions', 'shifts', 'guards', 'sites', 'company_admins', 'companies']) {
       if (seeded[table].length) await q(`DELETE FROM ${table} WHERE id = ANY($1::uuid[])`, [seeded[table]]);
     }

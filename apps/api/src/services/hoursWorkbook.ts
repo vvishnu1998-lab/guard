@@ -40,11 +40,22 @@
  * written as static fills. Conditional-formatting rules would re-derive the
  * thresholds inside Excel, which is a second implementation of a rule the
  * contract owns — the same class of drift this whole arc has been closing.
+ *
+ * ── THE LETTERHEAD (Phase B, B1) ─────────────────────────────────────────
+ *
+ * With a letterhead, SUMMARY opens with the company's block (rows 1-4, see
+ * letterhead/xlsx.ts), then "Hours Report · Period …" with "Powered by
+ * NetraOps" at the right of the same row, and every sheet prints with the
+ * company's header and footer. The KPI row and everything under it move down
+ * three rows; the other three sheets do not change. Without one (null: the
+ * lookup failed) the workbook is today's, byte for byte.
  */
 
 import ExcelJS from 'exceljs';
 import { effectiveEndDate } from './hoursExport';
 import type { HoursExportDataset, HoursAggregate, HoursExportRow } from './hoursExport';
+import type { Letterhead } from './letterhead/types';
+import { writeLetterheadBlock, stampPrintChrome, LETTERHEAD_ROWS } from './letterhead/xlsx';
 
 // Brand — apps/web and the marketing site use the same navy.
 const NAVY  = 'FF0B1526';
@@ -208,7 +219,7 @@ function addAggTable(
   ws.addRow([]);
 }
 
-export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
+export function buildHoursWorkbook(data: HoursExportDataset, lh?: Letterhead | null): ExcelJS.Workbook {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'NetraOps';
   // An open-ended range prints today's site-local date, never "all" — see
@@ -227,8 +238,20 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   // Payable column (D19), which moved each of those one to the right.
   s.columns = [{ width: 26 }, { width: 26 }, { width: 10 }, { width: 12 }, { width: 12 },
                { width: 12 }, { width: 21 }, { width: 12 }, { width: 20 }, { width: 20 }, { width: 22 }];
-  s.addRow(['NetraOps — Hours Report']).font = { bold: true, size: 16, color: { argb: NAVY } };
-  s.addRow([`${data.company_name}   ·   Period ${period}`]).font = { italic: true, size: 11 };
+  if (lh) {
+    wb.company = lh.companyName;
+    writeLetterheadBlock(wb, s, lh);
+    const title = s.getRow(LETTERHEAD_ROWS + 1);
+    title.getCell(1).value = `Hours Report   ·   Period ${period}`;
+    title.getCell(1).font = { bold: true, size: 12, color: { argb: NAVY } };
+    const powered = title.getCell(11);
+    powered.value = 'Powered by NetraOps';
+    powered.font = { size: 8, color: { argb: 'FF94A3B8' } };
+    powered.alignment = { horizontal: 'right' };
+  } else {
+    s.addRow(['NetraOps — Hours Report']).font = { bold: true, size: 16, color: { argb: NAVY } };
+    s.addRow([`${data.company_name}   ·   Period ${period}`]).font = { italic: true, size: 11 };
+  }
   s.addRow([]);
 
   const KPI = ['Shifts', 'Scheduled h', 'Actual h', 'Payable h', 'Coverage %', 'Break h', 'Geofence violation h', 'Flagged', '', '', ''];
@@ -379,6 +402,7 @@ export function buildHoursWorkbook(data: HoursExportDataset): ExcelJS.Workbook {
   note('Removed columns', 'Total Hours (legacy), Break (mins) and Status were dropped. The first contradicted Actual by design, the second duplicated Break in different units, the third described the shift rather than its hours. Payable is a different figure from the dropped Total Hours: it is clipped to the scheduled window at both ends.');
   note('Times', 'All dates and times are rendered in each site’s own timezone, not UTC and not the server’s.');
 
+  if (lh) stampPrintChrome(wb, lh, 'Hours Report');
   return wb;
 }
 

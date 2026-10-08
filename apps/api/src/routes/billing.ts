@@ -14,6 +14,7 @@ import { pool } from '../db/pool';
 import { urlOrPresign } from '../services/s3';
 import { buildHoursExport, effectiveEndDate } from '../services/hoursExport';
 import { buildHoursWorkbook, workbookToBuffer } from '../services/hoursWorkbook';
+import { letterheadForCompany } from '../services/letterhead';
 import {
   generateMonthlyReport,
   monthHasEnded,
@@ -59,7 +60,10 @@ router.get('/hours-export', requireAuth('company_admin', 'vishnu'), async (req, 
   const ed = effectiveEndDate(data);
   const fileName = `netraops-hours-${data.company_slug}-${sd}-to-${ed}.xlsx`;
 
-  const buf = await workbookToBuffer(buildHoursWorkbook(data));
+  // The letterhead of the company whose hours these are, whoever downloads
+  // them (Phase B, B1). Never throws: null keeps today's workbook.
+  const lh = await letterheadForCompany(companyId);
+  const buf = await workbookToBuffer(buildHoursWorkbook(data, lh));
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
