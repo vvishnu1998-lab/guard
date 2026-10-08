@@ -17,11 +17,19 @@
  * each has a control that shows the comparison can fail.
  *
  *   T  contactLines() moved from letterhead/pdf.ts to letterhead/text.ts
+ *   A  #1 Activity Logs PDF (services/pdf/activityLog.ts, POST /api/admin/activity-log/pdf)
+ *
+ * Then what each surface does WITH a letterhead: the tenant's own (never
+ * another's), every line of it, and nothing else on the page moved.
  */
 import Module from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 import ts from 'typescript';
 import { pngImage } from './image-fixtures';
 
@@ -29,6 +37,13 @@ const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost']);
 /** main before B1: PR #95's merge. Every "before" is read from here. */
 const BASE = '09791ddc9326ffd1bb0639c6835819dafeaebd67';
 const T0 = '2026-10-07T19:00:00Z';
+const STAR_GUARD = 'b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee';
+/** A well-formed company id that no row has: its letterhead lookup returns null. */
+const NO_SUCH_COMPANY = '00000000-0000-4000-8000-00000000b1b1';
+const JWT_SECRET = 'test-only-letterhead-b1';
+const S3_HOST = 'test-bucket.s3.us-east-1.amazonaws.com';
+
+process.env.JWT_SECRET = JWT_SECRET;
 
 process.env.S3_BUCKET = 'test-bucket';
 process.env.AWS_REGION = 'us-east-1';
@@ -43,6 +58,12 @@ function refuseUnlessLocal(): void {
     try { h = new URL(url).hostname; } catch { h = '(unparseable)'; }
     if (!LOCAL_HOSTS.has(h)) { console.error(`REFUSING: DATABASE_URL points at ${h}.`); process.exit(2); }
   }
+}
+function stubModule(name: string, overrides: Record<string, unknown> = {}): unknown {
+  return new Proxy({ __esModule: true, ...overrides }, {
+    get: (target, prop) => (prop in target ? (target as Record<string | symbol, unknown>)[prop]
+      : () => { throw new Error(`${name}.${String(prop)} called in the B1 letterhead test`); }),
+  });
 }
 function inject(request: string, exports: unknown): void {
   const resolved = require.resolve(request);
@@ -127,11 +148,58 @@ const LONG = {
 
 async function main(): Promise<void> {
   refuseUnlessLocal();
+  if (spawnSync('pdftotext', ['-v']).status !== 0 || spawnSync('pdfimages', ['-v']).status !== 0) {
+    console.error('poppler (pdftotext, pdfimages) is required.');
+    process.exit(2);
+  }
+  const sentry: Array<{ what: unknown; ctx: any }> = [];
   inject('../src/services/sentry', {
-    Sentry: { captureMessage: () => 'evt', captureException: () => 'evt', addBreadcrumb: () => undefined },
+    Sentry: {
+      captureMessage: (what: unknown, ctx: unknown) => { sentry.push({ what, ctx }); return 'evt'; },
+      captureException: (what: unknown, ctx: unknown) => { sentry.push({ what, ctx }); return 'evt'; },
+      addBreadcrumb: () => undefined,
+    },
     tagRequest: () => undefined,
   });
+  inject('../src/services/email', stubModule('email'));
+  // The letterhead reads the logo through these three; nothing else may touch S3.
+  class S3ObjectTooLargeError extends Error {}
+  const s3Objects = new Map<string, Buffer>();
+  const s3Fetches: string[] = [];
+  inject('../src/services/s3', stubModule('s3', {
+    S3ObjectTooLargeError,
+    s3KeyFromPublicUrl: (url: string): string | null => {
+      try {
+        const u = new URL(url);
+        if (u.hostname !== S3_HOST) return null;
+        const key = u.pathname.replace(/^\//, '');
+        return key.length > 0 ? key : null;
+      } catch { return null; }
+    },
+    getS3ObjectBuffer: async (key: string) => {
+      s3Fetches.push(key);
+      const b = s3Objects.get(key);
+      if (!b) throw Object.assign(new Error('NoSuchKey'), { code: 'NoSuchKey', statusCode: 404 });
+      return b;
+    },
+  }));
   const PDFDocument = (await import('pdfkit')).default;
+  const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'letterhead-b1-'));
+  const file = (buf: Buffer, name: string) => { const f = path.join(TMP, name); fs.writeFileSync(f, buf); return f; };
+  // Whitespace collapsed: pdftotext's spacing between words is not stable, the words are.
+  const flat = (t: string) => t.replace(/\s+/g, ' ');
+  const pdfPages = (f: string) => Number(execFileSync('pdfinfo', [f], { encoding: 'utf8' }).match(/^Pages:\s+(\d+)/m)?.[1]);
+  const pageText = (f: string, p: number) => flat(execFileSync('pdftotext', ['-f', String(p), '-l', String(p), f, '-'], { encoding: 'utf8' }));
+  const words = (f: string, p: number) => {
+    const html = execFileSync('pdftotext', ['-f', String(p), '-l', String(p), '-bbox', f, '-'], { encoding: 'utf8' });
+    return [...html.matchAll(/<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">([^<]*)<\/word>/g)]
+      .map((m) => ({ x0: +m[1], y0: +m[2], x1: +m[3], y1: +m[4], w: m[5] }));
+  };
+  // Image rows only: an RGBA logo also lists an `smask` row, and both say "image" in the enc column.
+  const imgs = (f: string) => execFileSync('pdfimages', ['-list', f], { encoding: 'utf8' }).split('\n').slice(2)
+    .map((l) => l.trim().split(/\s+/)).filter((c) => c[2] === 'image');
+  // The page count is drawn "1 / 2"; pdftotext joins it to "1/2", so it is matched either way.
+  const pageCount = (t: string, n: number, of: number) => new RegExp(`(^|\\s)${n} ?/ ?${of}(\\s|$)`).test(t);
 
   /** A one-page document drawn with a letterhead module's header and footer. */
   async function letterheadPage(mod: any, lh: unknown): Promise<Buffer> {
@@ -170,6 +238,199 @@ async function main(): Promise<void> {
     const mutant = loadBase('src/services/letterhead/pdf.ts', (s) => s.replace('`License No. ${lh.licenceNumber}`', '`License No: ${lh.licenceNumber}`'));
     const m = await frozen(() => letterheadPage(mutant, FULL));
     check(!m.equals(await frozen(() => letterheadPage(current, FULL))), 'T5 control: the base with one character of the licence line changed DIFFERS');
+  }
+
+  // ══ the database: Star Guard and an invented second company, fake data, local only ══
+  const jwt = (await import('jsonwebtoken')).default;
+  const poolMod: any = await import('../src/db/pool');
+  const pool = poolMod.pool;
+  if (pool.options?.connectionString) { console.error('REFUSING: the app pool carries a connection string.'); process.exit(2); }
+  await import('express-async-errors');
+  const express = (await import('express')).default;
+  const q = (sql: string, params: unknown[] = []) => pool.query(sql, params);
+  const marker = `lhb1-${RealDate.now().toString(36)}`;
+  const seeded: Record<string, string[]> = {
+    reports: [], location_pings: [], shift_sessions: [], shifts: [], guards: [], sites: [], company_admins: [], companies: [],
+  };
+  const ins = async (table: string, sql: string, params: unknown[]) => {
+    const id = (await q(sql, params)).rows[0].id as string;
+    seeded[table].push(id);
+    return id;
+  };
+  // Star Guard's row is created when this database has none, and its profile is put back either way.
+  const PROFILE = ['contact_email', 'phone', 'address', 'licence_number', 'website', 'logo_url', 'logo_updated_at'];
+  const priorStarGuard = (await q(`SELECT ${PROFILE.join(', ')} FROM companies WHERE id = $1`, [STAR_GUARD])).rows[0] ?? null;
+  if (!priorStarGuard) await q(`INSERT INTO companies (id, name) VALUES ($1, 'Star Guard')`, [STAR_GUARD]);
+  const logoKey = `company-logos/${STAR_GUARD}/${marker}.png`;
+  s3Objects.set(logoKey, LOGO);
+  await q(`UPDATE companies SET contact_email = $2, phone = $3, address = $4, licence_number = $5, website = $6,
+             logo_url = $7, logo_updated_at = $8 WHERE id = $1`,
+    [STAR_GUARD, FULL.contactEmail, FULL.phone, FULL.address, FULL.licenceNumber, FULL.website,
+     `https://${S3_HOST}/${logoKey}`, new RealDate('2026-10-07T18:00:00Z')]);
+  const OTHER_NAME = `Fixture Patrol ${marker}`;
+  const other = await ins('companies', 'INSERT INTO companies (name) VALUES ($1) RETURNING id', [OTHER_NAME]);
+  const mkAdmin = (companyId: string, tag: string) => ins('company_admins',
+    `INSERT INTO company_admins (company_id, name, email, password_hash, is_primary) VALUES ($1, $2, $3, 'x', true) RETURNING id`,
+    [companyId, `${marker} ${tag}`, `${marker}-${tag}@test.invalid`]);
+  const adminA = await mkAdmin(STAR_GUARD, 'admin-a');
+  const adminB = await mkAdmin(other, 'admin-b');
+  const site = await ins('sites', `INSERT INTO sites (company_id, name, address, contract_start)
+    VALUES ($1, $2, '1200 Example Avenue, San Jose', '2026-01-01') RETURNING id`, [STAR_GUARD, `${marker} North Gate`]);
+  const guard = await ins('guards', `INSERT INTO guards (company_id, name, email, password_hash, badge_number)
+    VALUES ($1, 'Fixture Guard A', $2, 'x', 'GRD9801') RETURNING id`, [STAR_GUARD, `${marker}-g@test.invalid`]);
+  // One completed shift, 08:00-16:00 PT on 2026-09-15, with two pings and an activity report.
+  const shiftStart = new RealDate('2026-09-15T15:00:00Z');
+  const at = (min: number) => new RealDate(shiftStart.getTime() + min * 60e3);
+  const shift = await ins('shifts', `INSERT INTO shifts (site_id, guard_id, scheduled_start, scheduled_end, status)
+    VALUES ($1, $2, $3, $4, 'completed') RETURNING id`, [site, guard, shiftStart, at(480)]);
+  const sess = await ins('shift_sessions', `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clocked_out_at, clock_in_coords)
+    VALUES ($1, $2, $3, $4, $5, '37.33,-121.89') RETURNING id`, [shift, guard, site, at(2), at(477)]);
+  for (const min of [31, 62]) {
+    await ins('location_pings', `INSERT INTO location_pings (shift_session_id, guard_id, site_id, latitude, longitude,
+        is_within_geofence, ping_type, photo_delete_at, pinged_at)
+      VALUES ($1, $2, $3, 37.33, -121.89, true, 'gps_only', $4, $5) RETURNING id`, [sess, guard, site, at(60 * 24 * 90), at(min)]);
+  }
+  await ins('reports', `INSERT INTO reports (shift_session_id, site_id, report_type, description, reported_at)
+    VALUES ($1, $2, 'activity', 'Perimeter checked, gate secured, lobby clear.', $3) RETURNING id`, [sess, site, at(130)]);
+
+  // ══ the real routers over HTTP ══
+  const app = express();
+  app.use(express.json());
+  app.use('/api/admin', (await import('../src/routes/admin')).default);
+  const server: Server = await new Promise((resolve) => { const sv = app.listen(0, '127.0.0.1', () => resolve(sv)); });
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const adminToken = (sub: string, companyId: string) =>
+    jwt.sign({ sub, role: 'company_admin', company_id: companyId, is_primary: true }, JWT_SECRET, { expiresIn: '1h' });
+  async function call(method: string, pathname: string, token: string, body?: unknown) {
+    const r = await fetch(`${origin}${pathname}`, {
+      method, headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: r.status, type: r.headers.get('content-type') ?? '', disposition: r.headers.get('content-disposition') ?? '', body: Buffer.from(await r.arrayBuffer()) };
+  }
+
+  try {
+    // ══════════════════════════════════════════════════════════════════════════
+    section(`A  #1 Activity Logs PDF — no letterhead: the same bytes as at ${BASE.slice(0, 7)}; with one: the tenant's, and nothing else moves`);
+    const fx = await import('../src/services/pdf/_activityLogFixture');
+    const baseAL = loadBase('src/services/pdf/activityLog.ts');
+    const curAL = require('../src/services/pdf/activityLog');
+    check(!/\blh\b/.test(String(baseAL.renderActivityLogPdf)) && /\blh\b/.test(String(curAL.renderActivityLogPdf)),
+      'A0 the base renderer predates the letterhead; the current one takes it');
+    for (const [label, rows, meta] of [
+      ['multi-page fixture', fx.FIXTURE_ROWS, fx.FIXTURE_META],
+      ['one page, shift-scoped', fx.FIXTURE_ROWS_ONE_PAGE, fx.FIXTURE_META_WITH_SHIFT],
+    ] as const) {
+      const before = await frozen<Buffer>(() => baseAL.renderActivityLogPdf([...rows], { ...meta }));
+      const absent = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...rows], { ...meta }));
+      const nul = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...rows], { ...meta, lh: null }));
+      check(before.equals(absent) && before.equals(nul),
+        `A1 ${label}: base ${sha(before)} = lh absent ${sha(absent)} = lh null ${sha(nul)} (${pdfPages(file(nul, `a1-${rows.length}.pdf`))} pages)`);
+    }
+    {
+      const mutant = loadBase('src/services/pdf/activityLog.ts', (src) => src.replace(".text('Activity Logs', ML, y);", ".text('Activity Logs', ML, y + 1);"));
+      const m = await frozen<Buffer>(() => mutant.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META }));
+      const c = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META }));
+      check(!m.equals(c), 'A2 control: the base with its title 1 pt lower DIFFERS');
+    }
+    const plain = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META }));
+    const withLh = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META, lh: FULL }));
+    const fp = file(plain, 'a-plain.pdf');
+    const fl = file(withLh, 'a-letterhead.pdf');
+    const n = pdfPages(fl);
+    check(!withLh.equals(plain) && n === pdfPages(fp) && n >= 2, `A3 with a letterhead the document differs and keeps its page count (${n})`);
+    {
+      const missing: string[] = [];
+      for (let p = 1; p <= n; p++) {
+        const t = pageText(fl, p);
+        for (const want of ['Star Guard', '1200 Example Avenue, Suite 300, San Jose, CA 95110',
+          '(408) 555-0142  ·  dispatch@starguard.example  ·  www.starguard.example', 'License No. PPO 120456',
+          'ACTIVITY LOGS', `${fx.FIXTURE_META.siteLabel}  |`, 'Confidential — Star Guard', 'Powered by NetraOps']) {
+          if (!t.includes(flat(want))) missing.push(`p${p} "${want}"`);
+        }
+        if (!pageCount(t, p, n)) missing.push(`p${p} "${p} / ${n}"`);
+        if (/SECURITY MANAGEMENT|Confidential — NetraOps/.test(t)) missing.push(`p${p} still carries NetraOps chrome`);
+      }
+      check(missing.length === 0, `A4 every page: the company, its three contact lines, ACTIVITY LOGS, "n / ${n}", "<site>  |  <period>  |  Confidential — Star Guard", Powered by NetraOps; no NetraOps chrome (${missing.join('; ') || 'nothing missing'})`);
+    }
+    {
+      const li = imgs(fl);
+      check(li.length === n && new Set(li.map((c) => c[10])).size === 1 && imgs(fp).length === 0,
+        `A5 one embedded logo object, drawn on each of the ${n} pages (pdfimages: ${li.map((c) => `p${c[0]} obj ${c[10]}`).join(', ')})`);
+    }
+    {
+      let moved = 0;
+      let compared = 0;
+      for (let p = 1; p <= n; p++) {
+        // Sorted: pdftotext's reading order between equal-looking pages is not stable; text and place are.
+        const body = (f: string) => words(f, p).filter((w) => w.y0 >= 75 && w.y1 <= 842 - 30)
+          .map((w) => `${w.w}@${w.x0.toFixed(2)},${w.y0.toFixed(2)}`).sort();
+        const a = body(fp);
+        compared += a.length;
+        if (a.join('|') !== body(fl).join('|')) moved += 1;
+      }
+      check(moved === 0 && compared > 100, `A6 the body did not move: ${compared} words on ${n} pages, the same text at the same place with and without the letterhead (${moved} pages differ)`);
+    }
+    {
+      const hw = words(fl, 1).filter((w) => w.y0 < 80);
+      const outside = hw.filter((w) => w.y1 > 70 || w.x0 < 0 || w.x1 > 595 - 50 + 0.5);
+      const overlaps: string[] = [];
+      for (let i = 0; i < hw.length; i++) for (let j = i + 1; j < hw.length; j++) {
+        const a = hw[i]; const b = hw[j];
+        if (a.x0 < b.x1 - 0.5 && b.x0 < a.x1 - 0.5 && a.y0 < b.y1 - 0.5 && b.y0 < a.y1 - 0.5) overlaps.push(`${a.w}/${b.w}`);
+      }
+      check(hw.length > 10 && outside.length === 0 && overlaps.length === 0,
+        `A7 page 1 header: ${hw.length} words, all inside x 0..545 y 0..70, none overlapping (outside ${outside.map((w) => w.w).join(' ') || 'none'}; overlaps ${overlaps.join(' ') || 'none'})`);
+    }
+    // ── the route ──
+    const from = '2026-09-15T07:00:00.000Z';
+    const to = '2026-09-16T06:59:59.999Z';
+    {
+      const r = await frozen(() => call('POST', '/api/admin/activity-log/pdf', adminToken(adminA, STAR_GUARD), { from, to }));
+      const f = file(r.body, 'a-route-star-guard.pdf');
+      const t = r.status === 200 ? pageText(f, 1) : r.body.toString().slice(0, 200);
+      check(r.status === 200 && r.type.startsWith('application/pdf') && t.includes('Star Guard')
+        && t.includes('License No. PPO 120456') && t.includes('Powered by NetraOps') && t.includes('Perimeter checked')
+        && imgs(f).length === pdfPages(f),
+        `A8 POST /api/admin/activity-log/pdf as Star Guard's admin: 200, its rows under Star Guard's letterhead and logo (${r.status}: ${t.slice(0, 80)})`);
+      check(s3Fetches.includes(logoKey) && !sentry.some((e) => /letterhead/.test(String(e.what))),
+        `A8b the logo was read from Star Guard's own key, and no letterhead warning was sent (fetches ${s3Fetches.length}, sentry ${sentry.length})`);
+    }
+    {
+      const r = await frozen(() => call('POST', '/api/admin/activity-log/pdf', adminToken(adminB, other), { from, to }));
+      const f = file(r.body, 'a-route-other.pdf');
+      const t = r.status === 200 ? pageText(f, 1) : '';
+      check(r.status === 200 && t.includes(OTHER_NAME) && !t.includes('Star Guard') && !t.includes('License No.')
+        && !t.includes('Perimeter checked') && imgs(f).length === 0,
+        `A9 as the other company's admin: its own name and no logo; nothing of Star Guard's (${r.status})`);
+    }
+    {
+      // requireAuth re-reads the ADMIN row, not the company, so a token naming a company with no row
+      // reaches the handler: no rows, and a letterhead lookup that returns null.
+      const r = await frozen(() => call('POST', '/api/admin/activity-log/pdf', adminToken(adminA, NO_SUCH_COMPANY), { from, to }));
+      const expected = await frozen<Buffer>(() => baseAL.renderActivityLogPdf([], { siteLabel: 'All sites', fromIso: from, toIso: to }));
+      check(r.status === 200 && r.body.equals(expected),
+        `A10 a company with no row: the lookup returns null and the route's PDF is the base renderer's, byte for byte (${sha(r.body)} = ${sha(expected)})`);
+    }
+
+    // ── (next section) ──
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    for (const table of ['reports', 'location_pings', 'shift_sessions', 'shifts', 'guards', 'sites', 'company_admins', 'companies']) {
+      if (seeded[table].length) await q(`DELETE FROM ${table} WHERE id = ANY($1::uuid[])`, [seeded[table]]);
+    }
+    if (priorStarGuard) {
+      await q(`UPDATE companies SET ${PROFILE.map((c, i) => `${c} = $${i + 2}`).join(', ')} WHERE id = $1`,
+        [STAR_GUARD, ...PROFILE.map((c) => priorStarGuard[c])]);
+    } else {
+      await q('DELETE FROM companies WHERE id = $1', [STAR_GUARD]);
+    }
+    const left = (await q(`SELECT (SELECT count(*) FROM sites WHERE name LIKE $1)::int + (SELECT count(*) FROM company_admins WHERE email LIKE $1)::int
+                                + (SELECT count(*) FROM companies WHERE name LIKE $2)::int AS n`, [`${marker}%`, `%${marker}`])).rows[0].n;
+    console.log(`\ncleanup: ${left} seeded rows left`);
+    if (left !== 0) failures += 1;
+    await pool.end();
+    fs.rmSync(TMP, { recursive: true, force: true });
   }
 
   finished = true;

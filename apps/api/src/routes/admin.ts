@@ -12,6 +12,7 @@ import { Sentry } from '../services/sentry';
 import { sendPrimaryAdminWelcomeEmail, sendSecondaryAdminWelcomeEmail } from '../services/email';
 import { urlOrPresign } from '../services/s3';
 import { renderActivityLogPdf } from '../services/pdf/activityLog';
+import { letterheadForCompany } from '../services/letterhead';
 import {
   fetchActivityRows,
   type UserScope,
@@ -1916,7 +1917,8 @@ router.get('/sessions', requireAuth('company_admin'), async (req, res) => {
 // bare ping).
 //
 // Layout lives in services/pdf/activityLog.ts. This handler owns auth,
-// params, the fetch and the response headers, and nothing else.
+// params, the fetches (the rows and the tenant's letterhead) and the response
+// headers, and nothing else.
 //
 // The document is buffered rather than piped at `res`: renderActivityLogPdf
 // returns a Buffer so the renderer can be exercised without an Express
@@ -1980,7 +1982,12 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
   const toDate    = toIso.slice(0, 10);
   const filename  = `activity-logs-${fromDate}_${toDate}.pdf`;
 
-  const pdf = await renderActivityLogPdf(rows, { siteLabel, fromIso, toIso, shift });
+  // The tenant's letterhead (Phase B, B1). letterheadForCompany never throws:
+  // for an unknown company, or on any failure, it returns null and the
+  // document keeps today's NetraOps chrome.
+  const lh = await letterheadForCompany(req.user!.company_id!);
+
+  const pdf = await renderActivityLogPdf(rows, { siteLabel, fromIso, toIso, shift, lh });
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
