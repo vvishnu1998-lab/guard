@@ -5257,16 +5257,20 @@ so nothing breaks.
 
 ## New from Company Profile, Phase A (2026-10-06)
 
-**Status 2026-10-06 — PR #92 and PR #93 SHIPPED.**
+**Status 2026-10-06 — PR #92, PR #93 and PR #94 SHIPPED. Phase A is complete.**
 - **PR #92:** schema_v82, the `POINTER_COLUMNS` entry, the v82 hand-apply scripts and the triage
   map line. Vishnu hand-applied v82 before the merge. Merged as `deab5eb` at 12:06:02 PT by PROXY
   (gating guard GRD0024). Railway `80e63900` SUCCESS.
 - **PR #93:** the API routes. Merged as `66ac758` at 14:00:20 PT by **OVERRIDE**: Vishnu waived the
   gate after the 13:30 PROXY run aborted on a silent gating guard. Railway `b553eae1` SUCCESS, and
   0 STARNET writes landed in the restart window.
+- **PR #94:** the Settings page. Merged as `5def3a5` at 16:03:49 PT by PROXY (gating guard GRD0024).
+  Railway `0b9f2a1b` SUCCESS. A web-only merge still restarts Railway (N154).
+- **Prod logo test PASSED** (Vishnu, logged in as Star Guard's primary admin, from Settings,
+  16:11-16:12 PT): upload, then reload with the preview back, then remove. Two audit rows; Star
+  Guard is back to no logo.
 
-Details are in STATE.md, "Shipped 2026-10-06". The Settings page (this PR) comes next; the Star
-Guard prod logo test runs from that page once it ships.
+Details are in STATE.md, "Shipped 2026-10-06".
 
 ### N166 — POLICY.md: the deploy gate's CONDITION route cannot be met while STARNET staffs a post around the clock
 
@@ -5295,6 +5299,17 @@ pdfkit, exceljs or a mail client cannot draw.
 - **Test:** a header-valid, garbage-body PNG and JPEG through each renderer (PDF, XLSX, email):
   the document is produced and the company name stands where the logo would be.
 - **Size: part of Phase B. Tier 1.**
+- **Status 2026-10-06 (B0): the fallback is mandatory, not cosmetic.** pdfkit 0.18 decodes some
+  PNGs through png-js: those with alpha, tRNS or interlacing. png-js throws from a zlib callback
+  on a later tick, where no try/catch can reach it, and the API has no handler for that (N169).
+  - **Measured:** a header-valid, garbage-body PNG ended a rendering process with exit 1 and no
+    PDF.
+  - **The check:** B0 adds `checkImageDecodes` (`services/imageDecode.ts`): a full PNG decode
+    check and a JPEG marker walk.
+  - **Where it runs:** at upload, where `POST /logo` refuses with `LOGO_UNREADABLE`, and at render,
+    where `services/letterhead` returns `logo: null` and sends a Sentry warning.
+  - **Still open:** consumers are switched over stage by stage, B1 onward. The XLSX and email
+    tests listed above still apply.
 
 ## New from the PR #93 post-deploy check (2026-10-06)
 
@@ -5318,3 +5333,45 @@ at 22:00 PT.
   - A side effect: while GRD0013's session is open, GRD0010 cannot gate a PROXY merge.
 - Vishnu, 2026-10-06: log it; do not act yet.
 - **Size S, Tier 0** (read-only investigation).
+
+## New from Phase B, stage B0 (2026-10-06)
+
+**Status:** B0 (this PR) builds the letterhead module and changes nothing anyone sees.
+- **Built:** `services/letterhead`, the `lh` argument on the PDF theme, and the decode check.
+- **Byte-identical:** every existing PDF matches its 5def3a5 output (`scripts/test-letterhead-pdf.ts`).
+- **One behaviour change:** `POST /logo` now refuses a logo that does not decode (N167).
+
+### N169 — the API registers no handler for an uncaught exception or an unhandled rejection
+
+verified 2026-10-06, read-only: nothing in `apps/api/src` calls `process.on('uncaughtException'
+| 'unhandledRejection')`. What happens is decided by defaults:
+- **In production:** `Sentry.init` (`services/sentry.ts`, only when `SENTRY_DSN` is set) passes an
+  `integrations` array, which @sentry/node 8.55.2 ADDS to its defaults.
+  - `onUncaughtException`: no other listener exists, so after reporting it ENDS THE PROCESS, and
+    Railway restarts it.
+  - `onUnhandledRejection` (default mode `warn`): it reports, and the process KEEPS RUNNING with
+    the rejection swallowed.
+- **Locally, without `SENTRY_DSN`:** Node's defaults apply, and both exit.
+- **Why it matters:** the B0 control is a png-js throw on a later tick, from pdfkit given a
+  corrupt logo (N167). In prod that one throw would restart the API mid-shift, on every report
+  that drew such a logo.
+  - B0 closes that one path at both ends: upload and render.
+  - Any other asynchronous throw still restarts the API; nothing guards against it.
+- **Fix (not done; Vishnu 2026-10-06: log only):** decide the policy explicitly and in code.
+  - For an uncaught exception, Node's guidance is: log, flush Sentry, exit non-zero.
+  - Decide deliberately whether an unhandled rejection should crash or warn.
+  - Make a restart visible: today it only shows as a new Railway deployment log.
+- **Size S. Tier 1** (a code PR through the deploy gate).
+
+### N170 — routes/activityLog.ts imports from the PDF theme and pdfkit, and uses none of it
+
+verified 2026-10-06: `apps/api/src/routes/activityLog.ts:85` imports `PDFDocument` from pdfkit.
+`:89-93` imports 17 names from `services/pdf/theme`: the nine colours, the five geometry
+constants, `drawHeader`, `drawFooter` and `badge`. Each appears only on its import line. They
+are left over from before the activity-log PDF moved to `services/pdf/activityLog.ts`.
+- **Harmless at runtime:** the modules load anyway.
+- **Misleading:** a reader looking for every caller of `drawHeader` finds this file. The B0
+  byte-identity test reloads it with the theme for exactly that reason.
+- **Fix (not done; Vishnu 2026-10-06: log only):** delete both imports. Ride with the next change
+  to that route.
+- **Size XS. Tier 1.**

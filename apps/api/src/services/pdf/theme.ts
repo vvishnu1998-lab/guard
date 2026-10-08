@@ -8,26 +8,22 @@
  *
  * If a future export needs a different accent, pass a color in — do not
  * fork these helpers.
+ *
+ * COMPANY LETTERHEAD (Phase B). drawHeader, drawFooter, drawGuardFooter and
+ * stampPages take an optional last argument `lh` (services/letterhead). Given
+ * one, they draw the company's letterhead in the same bands
+ * (letterhead/pdf.ts). Without one (undefined OR null) they draw exactly what
+ * they drew before the argument existed: the null path is held byte-identical
+ * by scripts/test-letterhead-pdf.ts. B0 adds the argument; no caller passes it.
  */
 import PDFDocument from 'pdfkit';
+import { NAVY, WHITE, GRAY2, MUTED, PAGE_W, PAGE_H, ML, MR, CW } from './palette';
+import { drawLetterheadFooter, drawLetterheadHeader } from '../letterhead/pdf';
+import type { Letterhead } from '../letterhead/types';
 
-// ── Colors ────────────────────────────────────────────────────────────────────
-export const NAVY  = '#0B1526';
-export const WHITE = '#FFFFFF';
-export const BLUE  = '#2563EB';
-export const RED   = '#DC2626';
-export const AMBER = '#D97706';
-export const GRAY1 = '#F8FAFC';
-export const GRAY2 = '#E2E8F0';
-export const TEXT  = '#1E293B';
-export const MUTED = '#64748B';
-
-// ── Page geometry (A4) ────────────────────────────────────────────────────────
-export const PAGE_W = 595;
-export const PAGE_H = 842;
-export const ML = 50;
-export const MR = 545;
-export const CW = MR - ML;
+// Colours and page geometry live in ./palette, shared with the letterhead.
+// Re-exported, so every existing import from this module keeps working.
+export { NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED, PAGE_W, PAGE_H, ML, MR, CW } from './palette';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 export function drawHeader(
@@ -35,7 +31,9 @@ export function drawHeader(
   title: string,
   pageNum: number,
   totalPages: number,
+  lh?: Letterhead | null,
 ) {
+  if (lh) { drawLetterheadHeader(doc, title, pageNum, totalPages, lh); return; }
   doc.rect(0, 0, PAGE_W, 72).fill(NAVY);
   doc.fontSize(18).fillColor(WHITE).font('Helvetica-Bold').text('NetraOps', ML, 18, { lineBreak: false });
   doc.fontSize(9).fillColor('#94A3B8').font('Helvetica').text('SECURITY MANAGEMENT', ML, 40);
@@ -47,7 +45,9 @@ export function drawFooter(
   doc: InstanceType<typeof PDFDocument>,
   siteName: string,
   period: string,
+  lh?: Letterhead | null,
 ) {
+  if (lh) { drawLetterheadFooter(doc, `${siteName}  |  ${period}`, lh); return; }
   doc.rect(0, PAGE_H - 30, PAGE_W, 30).fill('#F1F5F9');
   doc.moveTo(ML, PAGE_H - 30).lineTo(MR, PAGE_H - 30).strokeColor(GRAY2).lineWidth(0.5).stroke();
   doc.fontSize(7).fillColor(MUTED).font('Helvetica')
@@ -69,8 +69,10 @@ export function drawGuardFooter(
   guardName: string,
   badgeNumber: string | null,
   period: string,
+  lh?: Letterhead | null,
 ) {
   const who = badgeNumber ? `${guardName} (${badgeNumber})` : guardName;
+  if (lh) { drawLetterheadFooter(doc, `${who}  |  ${period}`, lh); return; }
   doc.rect(0, PAGE_H - 30, PAGE_W, 30).fill('#F1F5F9');
   doc.moveTo(ML, PAGE_H - 30).lineTo(MR, PAGE_H - 30).strokeColor(GRAY2).lineWidth(0.5).stroke();
   doc.fontSize(7).fillColor(MUTED).font('Helvetica')
@@ -94,16 +96,19 @@ export function drawGuardFooter(
  * CONTENT_TOP..CONTENT_BOTTOM, and then nothing overlaps.
  *
  * The caller must still call doc.end(); this only flushes the buffered pages.
+ *
+ * `lh` goes to drawHeader; the footer closure carries its own.
  */
 export function stampPages(
   doc: InstanceType<typeof PDFDocument>,
   title: string,
   footer: (doc: InstanceType<typeof PDFDocument>) => void,
+  lh?: Letterhead | null,
 ) {
   const range = doc.bufferedPageRange();
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
-    drawHeader(doc, title, i + 1, range.count);
+    drawHeader(doc, title, i + 1, range.count, lh);
     footer(doc);
   }
   doc.flushPages();

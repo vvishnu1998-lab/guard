@@ -177,6 +177,48 @@ export async function getS3ObjectHead(key: string, n = 16): Promise<Buffer> {
   return resp.Body as Buffer;
 }
 
+/** Thrown by getS3ObjectBuffer when the object is larger than the caller's cap. */
+export class S3ObjectTooLargeError extends Error {
+  constructor(readonly key: string, readonly maxBytes: number) {
+    super(`s3://${BUCKET}/${key} is larger than ${maxBytes} bytes`);
+    this.name = 'S3ObjectTooLargeError';
+  }
+}
+
+type GetObjectClient = Pick<AWS.S3, 'getObject'>;
+
+/**
+ * A whole SMALL object in memory: the company logo for the letterhead
+ * (services/letterhead), capped at the upload limit.
+ *
+ * The cap is part of the request, a Range of maxBytes + 1 bytes, so an object
+ * that is too large costs one byte more than the cap to discover and is
+ * refused (S3ObjectTooLargeError), never truncated. timeoutMs aborts the
+ * request; the rejection then carries code 'RequestAbortedError'. Every other
+ * S3 error (NoSuchKey, AccessDenied, ...) is passed through for the caller to
+ * classify. `client` exists for tests; production uses this module's client.
+ */
+export async function getS3ObjectBuffer(
+  key: string,
+  opts: { maxBytes: number; timeoutMs: number },
+  client: GetObjectClient = s3,
+): Promise<Buffer> {
+  const req = client.getObject({ Bucket: BUCKET, Key: key, Range: `bytes=0-${opts.maxBytes}` });
+  const timer = setTimeout(() => req.abort(), opts.timeoutMs);
+  try {
+    const { Body: body } = await req.promise();
+    let buf: Buffer;
+    if (Buffer.isBuffer(body)) buf = body;
+    else if (body instanceof Uint8Array) buf = Buffer.from(body);
+    else if (typeof body === 'string') buf = Buffer.from(body);
+    else throw new Error(`no buffered body for s3://${BUCKET}/${key}`);
+    if (buf.length > opts.maxBytes) throw new S3ObjectTooLargeError(key, opts.maxBytes);
+    return buf;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Streaming GetObject — returns a Node Readable that emits body chunks
  * as they arrive from S3. Callers pipe directly to an Express response
