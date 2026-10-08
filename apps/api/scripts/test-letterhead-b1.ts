@@ -20,6 +20,8 @@
  *   A  #1 Activity Logs PDF (services/pdf/activityLog.ts, POST /api/admin/activity-log/pdf)
  *   B  #4 billing hours XLSX and #5 the monthly archive (services/hoursWorkbook.ts,
  *      GET /api/billing/hours-export, generateMonthlyReport)
+ *   C  #6 analytics CSV (GET /api/exports/analytics/csv; the base route itself, read from
+ *      git, is mounted beside the current one)
  *
  * Then what each surface does WITH a letterhead: the tenant's own (never
  * another's), every line of it, and nothing else on the page moved.
@@ -150,6 +152,26 @@ const LONG = {
   address: '1200 Example Avenue, Building C, Suite 300, Attn: Operations Desk\nSan Jose, CA 95110-1234',
   licenceNumber: 'PPO 120456 / ALARM ACO 7781 / PI 29981', website: 'https://www.starguard-protective-services.example/locations', logo: LOGO,
 };
+
+/** RFC 4180, enough for these files: quoted cells, doubled quotes, LF row ends. */
+function parseCsv(t: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let f = '';
+  let quoted = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (quoted) {
+      if (ch === '"') { if (t[i + 1] === '"') { f += '"'; i++; } else quoted = false; } else f += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { row.push(f); f = ''; }
+    else if (ch === '\n') { row.push(f); rows.push(row); row = []; f = ''; }
+    else f += ch;
+  }
+  row.push(f);
+  rows.push(row);
+  return rows;
+}
 
 /** A deterministic HoursExportDataset: `days` days from `start`, three guards on two sites. */
 function hoursFixture(start: string, days: number): any {
@@ -351,6 +373,9 @@ async function main(): Promise<void> {
   app.use(express.json());
   app.use('/api/admin', (await import('../src/routes/admin')).default);
   app.use('/api/billing', (await import('../src/routes/billing')).default);
+  app.use('/api/exports', (await import('../src/routes/exports')).default);
+  app.use('/api/exports-base', loadBase('src/routes/exports.ts').default);
+  app.use('/api/exports-mutant', loadBase('src/routes/exports.ts', (src) => src.replace("sections.push('GUARD HOURS\\n' + rowsToCsv(", "sections.push('GUARD HOURS \\n' + rowsToCsv(")).default);
   const server: Server = await new Promise((resolve) => { const sv = app.listen(0, '127.0.0.1', () => resolve(sv)); });
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const adminToken = (sub: string, companyId: string) =>
@@ -581,6 +606,69 @@ async function main(): Promise<void> {
         && cell(s0, 'B1') === 'Star Guard' && String(cell(s0, 'A5')) === 'Hours Report   ·   Period 01-Sep-26 to 30-Sep-26'
         && (wb as any).model.media.length === 1 && rowsFrom(wb!.getWorksheet('HOURS DETAIL'), 2).join(' ').includes('Fixture Guard A'),
         `B15 #5 generateMonthlyReport(Star Guard, 2026-09): the archived file carries the letterhead over September's hours, under the same key (${up?.key})`);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    section(`C  #6 analytics CSV — no letterhead: the same bytes as the ${BASE.slice(0, 7)} route; with one: the preamble, and the export below it unchanged`);
+    const get = (pathname: string, token: string) => frozen(() => call('GET', pathname, token));
+    const BOM = '﻿';
+    const range = 'date_from=2026-09-15&date_to=2026-09-15';
+    for (const [label, token] of [['Vishnu (every company)', vishnuToken], ['an admin whose company has no row', adminToken(adminA, NO_SUCH_COMPANY)]] as const) {
+      for (const type of ['', '&type=violations', '&type=hours']) {
+        const b = await get(`/api/exports-base/analytics/csv?${range}${type}`, token);
+        const c = await get(`/api/exports/analytics/csv?${range}${type}`, token);
+        check(b.status === 200 && c.status === 200 && b.body.equals(c.body) && b.disposition === c.disposition,
+          `C1 ${label}${type ? `, ${type.slice(1)}` : ''}: base route ${sha(b.body)} = current ${sha(c.body)} (${c.body.length} bytes)`);
+      }
+    }
+    {
+      const m = await get(`/api/exports-mutant/analytics/csv?${range}`, vishnuToken);
+      const c = await get(`/api/exports/analytics/csv?${range}`, vishnuToken);
+      check(m.status === 200 && !m.body.equals(c.body), 'C2 control: the base route with one space added to a section title DIFFERS');
+    }
+    const PREAMBLE = ['"Star Guard"', '"1200 Example Avenue, Suite 300, San Jose, CA 95110"',
+      '"Tel (408) 555-0142  ·  dispatch@starguard.example  ·  www.starguard.example"', '"License No. PPO 120456"', '"Powered by NetraOps"'].join('\n');
+    {
+      const b = await get(`/api/exports-base/analytics/csv?${range}`, adminToken(adminA, STAR_GUARD));
+      const c = await get(`/api/exports/analytics/csv?${range}`, adminToken(adminA, STAR_GUARD));
+      const base = b.body.toString('utf8');
+      const now = c.body.toString('utf8');
+      check(c.status === 200 && base.startsWith(`${BOM}GUARD HOURS`) && now === `${BOM}${PREAMBLE}\n\n${base.slice(1)}` && c.disposition === b.disposition,
+        "C3 Star Guard's admin: the BOM, the five preamble lines, one blank line, then the base route's export unchanged; the filename unchanged");
+      check(now.includes('Fixture Guard A') && now.includes('Perimeter checked'), "C3b ...over Star Guard's own hours and reports");
+      const rows = parseCsv(now.slice(1));
+      const want = [['Star Guard'], ['1200 Example Avenue, Suite 300, San Jose, CA 95110'],
+        ['Tel (408) 555-0142  ·  dispatch@starguard.example  ·  www.starguard.example'], ['License No. PPO 120456'],
+        ['Powered by NetraOps'], [''], ['GUARD HOURS']];
+      check(JSON.stringify(rows.slice(0, 7)) === JSON.stringify(want),
+        'C3c a CSV parser reads each preamble line back as one cell, then a blank row, then the first section title');
+    }
+    {
+      const b = await get(`/api/exports-base/analytics/csv?${range}&type=violations`, adminToken(adminA, STAR_GUARD));
+      const c = await get(`/api/exports/analytics/csv?${range}&type=violations`, adminToken(adminA, STAR_GUARD));
+      const base = b.body.toString('utf8');
+      check(base.startsWith(`${BOM}\nGEOFENCE VIOLATIONS`) && c.body.toString('utf8') === `${BOM}${PREAMBLE}\n${base.slice(1)}`,
+        'C4 type=violations (the live-status download), whose section already starts with a blank line: still exactly one blank line after the preamble');
+    }
+    {
+      const c = await get(`/api/exports/analytics/csv?${range}`, adminToken(adminB, other));
+      const now = c.body.toString('utf8');
+      check(c.status === 200 && now.startsWith(`${BOM}"${OTHER_NAME}"\n"Powered by NetraOps"\n\nGUARD HOURS`) && !now.includes('Star Guard') && !now.includes('Fixture Guard A'),
+        "C5 the other company's admin: its own name and an empty profile; nothing of Star Guard's");
+    }
+    {
+      const { csvPreamble, withCsvPreamble } = await import('../src/services/letterhead/csv');
+      const pre = (lh: object) => csvPreamble({ ...EMPTY, ...lh } as never);
+      const dq = '"';
+      check(JSON.stringify(pre({ companyName: `Star ${dq}Guard${dq}` })) === JSON.stringify([`${dq}Star ${dq}${dq}Guard${dq}${dq}${dq}`, `${dq}Powered by NetraOps${dq}`]),
+        'C6 a quote in a line is doubled inside its quoted cell');
+      check(pre({ phone: '+1 (408) 555-0142' })[1] === '"Tel +1 (408) 555-0142"', 'C7 a "+1" phone leads its line labelled "Tel", so the guard never needs to fire on it');
+      check(pre({ address: `=HYPERLINK(${dq}http://x.example${dq},${dq}click${dq})` })[1] === `${dq}'=HYPERLINK(${dq}${dq}http://x.example${dq}${dq},${dq}${dq}click${dq}${dq})${dq}`,
+        'C8 a line a spreadsheet would run as a formula gets a leading apostrophe, inside the quotes');
+      check(['-1 Main St', '@corp', '+x', '=1+1'].every((a) => pre({ address: a })[1].startsWith(`${dq}'`)) && pre({ address: '1 Main St' })[1] === '"1 Main St"',
+        'C8b = + - @ all trigger the guard, and an ordinary line does not');
+      check(pre({ contactEmail: 'ops@starguard.example' })[1] === '"ops@starguard.example"', 'C9 no phone: the line starts with the email, unlabelled');
+      check(withCsvPreamble(null, 'GUARD HOURS\nx') === 'GUARD HOURS\nx' && withCsvPreamble(null, '\nGEO') === '\nGEO', 'C10 no letterhead: the body comes back untouched');
     }
 
     // ── (next section) ──

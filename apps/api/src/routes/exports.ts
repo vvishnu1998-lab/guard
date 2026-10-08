@@ -5,7 +5,8 @@
  * exports span every company, mirroring the pattern on GET /api/sites
  * and GET /api/admin/violations.
  *
- * GET /api/exports/analytics/csv   → UTF-8 CSV attachment
+ * GET /api/exports/analytics/csv   → UTF-8 CSV attachment; a company admin's
+ *                                    opens with the company letterhead (B1)
  * GET /api/exports/analytics/xlsx  → Excel workbook attachment
  *
  * Query params (all optional):
@@ -20,6 +21,8 @@ import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
 import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
+import { letterheadForCompany } from '../services/letterhead';
+import { withCsvPreamble } from '../services/letterhead/csv';
 
 const router = Router();
 
@@ -222,10 +225,16 @@ router.get('/analytics/csv', requireAuth('company_admin', 'vishnu'), async (req:
     ));
   }
 
+  // The admin's own company letterhead above the first section (Phase B, B1;
+  // decision 2a). The same file serves the live-status violations download.
+  // Vishnu's export spans every company and gets none. letterheadForCompany
+  // never throws, and null leaves the file exactly as it was.
+  const lh = isVishnu ? null : await letterheadForCompany(req.user!.company_id!);
+
   const filename = `guard-analytics-${new Date().toISOString().slice(0,10)}.csv`;
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send('\uFEFF' + sections.join('\n')); // BOM for Excel UTF-8 compatibility
+  res.send('\uFEFF' + withCsvPreamble(lh, sections.join('\n'))); // BOM for Excel UTF-8 compatibility
 });
 
 // ── Excel (XLSX) export ──────────────────────────────────────────────────────
