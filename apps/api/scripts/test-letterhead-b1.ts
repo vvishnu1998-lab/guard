@@ -330,66 +330,84 @@ async function main(): Promise<void> {
     seeded[table].push(id);
     return id;
   };
+  // Rows an earlier run left behind (a run killed outright never reaches its finally), found by
+  // this harness's own markers and swept before anything else is written.
+  let swept = 0;
+  for (const sql of [
+    "DELETE FROM reports WHERE site_id IN (SELECT id FROM sites WHERE name LIKE 'lhb1-%')",
+    "DELETE FROM location_pings WHERE site_id IN (SELECT id FROM sites WHERE name LIKE 'lhb1-%')",
+    "DELETE FROM shift_sessions WHERE site_id IN (SELECT id FROM sites WHERE name LIKE 'lhb1-%')",
+    "DELETE FROM shifts WHERE site_id IN (SELECT id FROM sites WHERE name LIKE 'lhb1-%')",
+    "DELETE FROM guards WHERE email LIKE 'lhb1-%'",
+    "DELETE FROM sites WHERE name LIKE 'lhb1-%'",
+    "DELETE FROM company_admins WHERE email LIKE 'lhb1-%'",
+    "DELETE FROM companies WHERE name LIKE 'Fixture Patrol lhb1-%'",
+  ]) swept += (await q(sql)).rowCount ?? 0;
+  if (swept > 0) console.log(`(swept ${swept} rows an earlier run left behind)`);
   // Star Guard's row is created when this database has none, and its profile is put back either way.
   const PROFILE = ['contact_email', 'phone', 'address', 'licence_number', 'website', 'logo_url', 'logo_updated_at'];
   const priorStarGuard = (await q(`SELECT ${PROFILE.join(', ')} FROM companies WHERE id = $1`, [STAR_GUARD])).rows[0] ?? null;
-  if (!priorStarGuard) await q(`INSERT INTO companies (id, name) VALUES ($1, 'Star Guard')`, [STAR_GUARD]);
-  const logoKey = `company-logos/${STAR_GUARD}/${marker}.png`;
-  s3Objects.set(logoKey, LOGO);
-  await q(`UPDATE companies SET contact_email = $2, phone = $3, address = $4, licence_number = $5, website = $6,
-             logo_url = $7, logo_updated_at = $8 WHERE id = $1`,
-    [STAR_GUARD, FULL.contactEmail, FULL.phone, FULL.address, FULL.licenceNumber, FULL.website,
-     `https://${S3_HOST}/${logoKey}`, new RealDate('2026-10-07T18:00:00Z')]);
-  const OTHER_NAME = `Fixture Patrol ${marker}`;
-  const other = await ins('companies', 'INSERT INTO companies (name) VALUES ($1) RETURNING id', [OTHER_NAME]);
-  const mkAdmin = (companyId: string, tag: string) => ins('company_admins',
-    `INSERT INTO company_admins (company_id, name, email, password_hash, is_primary) VALUES ($1, $2, $3, 'x', true) RETURNING id`,
-    [companyId, `${marker} ${tag}`, `${marker}-${tag}@test.invalid`]);
-  const adminA = await mkAdmin(STAR_GUARD, 'admin-a');
-  const adminB = await mkAdmin(other, 'admin-b');
-  const site = await ins('sites', `INSERT INTO sites (company_id, name, address, contract_start)
-    VALUES ($1, $2, '1200 Example Avenue, San Jose', '2026-01-01') RETURNING id`, [STAR_GUARD, `${marker} North Gate`]);
-  const guard = await ins('guards', `INSERT INTO guards (company_id, name, email, password_hash, badge_number)
-    VALUES ($1, 'Fixture Guard A', $2, 'x', 'GRD9801') RETURNING id`, [STAR_GUARD, `${marker}-g@test.invalid`]);
-  // One completed shift, 08:00-16:00 PT on 2026-09-15, with two pings and an activity report.
-  const shiftStart = new RealDate('2026-09-15T15:00:00Z');
-  const at = (min: number) => new RealDate(shiftStart.getTime() + min * 60e3);
-  const shift = await ins('shifts', `INSERT INTO shifts (site_id, guard_id, scheduled_start, scheduled_end, status)
-    VALUES ($1, $2, $3, $4, 'completed') RETURNING id`, [site, guard, shiftStart, at(480)]);
-  const sess = await ins('shift_sessions', `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clocked_out_at, clock_in_coords)
-    VALUES ($1, $2, $3, $4, $5, '37.33,-121.89') RETURNING id`, [shift, guard, site, at(2), at(477)]);
-  for (const min of [31, 62]) {
-    await ins('location_pings', `INSERT INTO location_pings (shift_session_id, guard_id, site_id, latitude, longitude,
-        is_within_geofence, ping_type, photo_delete_at, pinged_at)
-      VALUES ($1, $2, $3, 37.33, -121.89, true, 'gps_only', $4, $5) RETURNING id`, [sess, guard, site, at(60 * 24 * 90), at(min)]);
-  }
-  await ins('reports', `INSERT INTO reports (shift_session_id, site_id, report_type, description, reported_at)
-    VALUES ($1, $2, 'activity', 'Perimeter checked, gate secured, lobby clear.', $3) RETURNING id`, [sess, site, at(130)]);
-
   const hadMonthlyRow = (await q('SELECT 1 FROM monthly_hours_reports WHERE company_id = $1 AND year = 2026 AND month = 9', [STAR_GUARD])).rowCount > 0;
+  let server: Server | null = null;
 
-  // ══ the real routers over HTTP ══
-  const app = express();
-  app.use(express.json());
-  app.use('/api/admin', (await import('../src/routes/admin')).default);
-  app.use('/api/billing', (await import('../src/routes/billing')).default);
-  app.use('/api/exports', (await import('../src/routes/exports')).default);
-  app.use('/api/exports-base', loadBase('src/routes/exports.ts').default);
-  app.use('/api/exports-mutant', loadBase('src/routes/exports.ts', (src) => src.replace("sections.push('GUARD HOURS\\n' + rowsToCsv(", "sections.push('GUARD HOURS \\n' + rowsToCsv(")).default);
-  const server: Server = await new Promise((resolve) => { const sv = app.listen(0, '127.0.0.1', () => resolve(sv)); });
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const adminToken = (sub: string, companyId: string) =>
-    jwt.sign({ sub, role: 'company_admin', company_id: companyId, is_primary: true }, JWT_SECRET, { expiresIn: '1h' });
-  const vishnuToken = jwt.sign({ sub: 'vishnu-fixture', role: 'vishnu' }, VISHNU_SECRET, { expiresIn: '1h' });
-  async function call(method: string, pathname: string, token: string, body?: unknown) {
-    const r = await fetch(`${origin}${pathname}`, {
-      method, headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    return { status: r.status, type: r.headers.get('content-type') ?? '', disposition: r.headers.get('content-disposition') ?? '', body: Buffer.from(await r.arrayBuffer()) };
-  }
-
+  // Everything that writes is inside the try, so the finally cleans up whatever stops the run:
+  // a failed check, a compile error in a module under test, or a seed that half-ran.
   try {
+    if (!priorStarGuard) await q(`INSERT INTO companies (id, name) VALUES ($1, 'Star Guard')`, [STAR_GUARD]);
+    const logoKey = `company-logos/${STAR_GUARD}/${marker}.png`;
+    s3Objects.set(logoKey, LOGO);
+    await q(`UPDATE companies SET contact_email = $2, phone = $3, address = $4, licence_number = $5, website = $6,
+               logo_url = $7, logo_updated_at = $8 WHERE id = $1`,
+      [STAR_GUARD, FULL.contactEmail, FULL.phone, FULL.address, FULL.licenceNumber, FULL.website,
+       `https://${S3_HOST}/${logoKey}`, new RealDate('2026-10-07T18:00:00Z')]);
+    const OTHER_NAME = `Fixture Patrol ${marker}`;
+    const other = await ins('companies', 'INSERT INTO companies (name) VALUES ($1) RETURNING id', [OTHER_NAME]);
+    const mkAdmin = (companyId: string, tag: string) => ins('company_admins',
+      `INSERT INTO company_admins (company_id, name, email, password_hash, is_primary) VALUES ($1, $2, $3, 'x', true) RETURNING id`,
+      [companyId, `${marker} ${tag}`, `${marker}-${tag}@test.invalid`]);
+    const adminA = await mkAdmin(STAR_GUARD, 'admin-a');
+    const adminB = await mkAdmin(other, 'admin-b');
+    const site = await ins('sites', `INSERT INTO sites (company_id, name, address, contract_start)
+      VALUES ($1, $2, '1200 Example Avenue, San Jose', '2026-01-01') RETURNING id`, [STAR_GUARD, `${marker} North Gate`]);
+    const guard = await ins('guards', `INSERT INTO guards (company_id, name, email, password_hash, badge_number)
+      VALUES ($1, 'Fixture Guard A', $2, 'x', 'GRD9801') RETURNING id`, [STAR_GUARD, `${marker}-g@test.invalid`]);
+    // One completed shift, 08:00-16:00 PT on 2026-09-15, with two pings and an activity report.
+    const shiftStart = new RealDate('2026-09-15T15:00:00Z');
+    const at = (min: number) => new RealDate(shiftStart.getTime() + min * 60e3);
+    const shift = await ins('shifts', `INSERT INTO shifts (site_id, guard_id, scheduled_start, scheduled_end, status)
+      VALUES ($1, $2, $3, $4, 'completed') RETURNING id`, [site, guard, shiftStart, at(480)]);
+    const sess = await ins('shift_sessions', `INSERT INTO shift_sessions (shift_id, guard_id, site_id, clocked_in_at, clocked_out_at, clock_in_coords)
+      VALUES ($1, $2, $3, $4, $5, '37.33,-121.89') RETURNING id`, [shift, guard, site, at(2), at(477)]);
+    for (const min of [31, 62]) {
+      await ins('location_pings', `INSERT INTO location_pings (shift_session_id, guard_id, site_id, latitude, longitude,
+          is_within_geofence, ping_type, photo_delete_at, pinged_at)
+        VALUES ($1, $2, $3, 37.33, -121.89, true, 'gps_only', $4, $5) RETURNING id`, [sess, guard, site, at(60 * 24 * 90), at(min)]);
+    }
+    await ins('reports', `INSERT INTO reports (shift_session_id, site_id, report_type, description, reported_at)
+      VALUES ($1, $2, 'activity', 'Perimeter checked, gate secured, lobby clear.', $3) RETURNING id`, [sess, site, at(130)]);
+
+    // ══ the real routers over HTTP ══
+    const app = express();
+    app.use(express.json());
+    app.use('/api/admin', (await import('../src/routes/admin')).default);
+    app.use('/api/billing', (await import('../src/routes/billing')).default);
+    app.use('/api/exports', (await import('../src/routes/exports')).default);
+    app.use('/api/exports-base', loadBase('src/routes/exports.ts').default);
+    app.use('/api/exports-mutant', loadBase('src/routes/exports.ts', (src) => src.replace("sections.push('GUARD HOURS\\n' + rowsToCsv(", "sections.push('GUARD HOURS \\n' + rowsToCsv(")).default);
+    const listening: Server = await new Promise((resolve) => { const sv = app.listen(0, '127.0.0.1', () => resolve(sv)); });
+    server = listening;
+    const origin = `http://127.0.0.1:${(listening.address() as AddressInfo).port}`;
+    const adminToken = (sub: string, companyId: string) =>
+      jwt.sign({ sub, role: 'company_admin', company_id: companyId, is_primary: true }, JWT_SECRET, { expiresIn: '1h' });
+    const vishnuToken = jwt.sign({ sub: 'vishnu-fixture', role: 'vishnu' }, VISHNU_SECRET, { expiresIn: '1h' });
+    async function call(method: string, pathname: string, token: string, body?: unknown) {
+      const r = await fetch(`${origin}${pathname}`, {
+        method, headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      return { status: r.status, type: r.headers.get('content-type') ?? '', disposition: r.headers.get('content-disposition') ?? '', body: Buffer.from(await r.arrayBuffer()) };
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     section(`A  #1 Activity Logs PDF — no letterhead: the same bytes as at ${BASE.slice(0, 7)}; with one: the tenant's, and nothing else moves`);
     const fx = await import('../src/services/pdf/_activityLogFixture');
@@ -549,8 +567,8 @@ async function main(): Promise<void> {
       let ok = 0;
       wbFull.eachSheet((ws: any) => {
         heads.push(ws.name);
-        if (ws.headerFooter.oddHeader === '&L&BStar Guard&RHours Report'
-          && ws.headerFooter.oddFooter === '&L&8Confidential — Star Guard&C&8Page &P of &N&R&8Powered by NetraOps') ok += 1;
+        if (ws.headerFooter?.oddHeader === '&L&BStar Guard&RHours Report'
+          && ws.headerFooter?.oddFooter === '&L&8Confidential — Star Guard&C&8Page &P of &N&R&8Powered by NetraOps') ok += 1;
       });
       let none = 0;
       wbNull.eachSheet((ws: any) => { if (!ws.headerFooter?.oddHeader && !ws.headerFooter?.oddFooter) none += 1; });
@@ -567,7 +585,7 @@ async function main(): Promise<void> {
       check(cell(s2, 'A1') === 'Star Guard' && cell(s2, 'A2') === null && cell(s2, 'A3') === null && cell(s2, 'A4') === null
         && String(cell(s2, 'A5')).startsWith('Hours Report') && cell(s2, 'A7') === 'Shifts', 'B10 empty profile: the name alone, rows 2-4 blank, the rest where it always is');
       const amp = await loadXlsx(await xlsx(curWB, week, { ...EMPTY, companyName: 'Star Guard & Patrol' }));
-      check(amp.getWorksheet('SUMMARY')!.headerFooter.oddHeader === '&L&BStar Guard && Patrol&RHours Report' && cell(amp.getWorksheet('SUMMARY'), 'A1') === 'Star Guard & Patrol',
+      check(amp.getWorksheet('SUMMARY')?.headerFooter?.oddHeader === '&L&BStar Guard && Patrol&RHours Report' && cell(amp.getWorksheet('SUMMARY'), 'A1') === 'Star Guard & Patrol',
         'B11 an & in the name prints as one: written && in the header/footer codes, as itself in the cell');
       for (const [label, bad] of [['PNG', pngCorruptAfterHeader(400, 160)], ['JPEG', jpegCorruptAfterHeader(400, 160)]] as const) {
         let threw: unknown = null;
@@ -673,7 +691,7 @@ async function main(): Promise<void> {
 
     // ── (next section) ──
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) { const sv = server; await new Promise<void>((resolve) => sv.close(() => resolve())); }
     if (!hadMonthlyRow) await q('DELETE FROM monthly_hours_reports WHERE company_id = $1 AND year = 2026 AND month = 9', [STAR_GUARD]);
     for (const table of ['reports', 'location_pings', 'shift_sessions', 'shifts', 'guards', 'sites', 'company_admins', 'companies']) {
       if (seeded[table].length) await q(`DELETE FROM ${table} WHERE id = ANY($1::uuid[])`, [seeded[table]]);
