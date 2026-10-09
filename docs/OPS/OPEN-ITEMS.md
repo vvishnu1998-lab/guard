@@ -5383,8 +5383,8 @@ are left over from before the activity-log PDF moved to `services/pdf/activityLo
 
 ## New from Phase B, stage B1 (2026-10-07)
 
-**Status:** B1 (this PR) puts the company letterhead on the four admin surfaces, per Vishnu's
-decisions 1a, 2a and 3a (2026-10-07):
+**Status: SHIPPED 2026-10-08** as `1632dd6` (PR #97, the "any guard" method; see STATE.md). B1 put
+the company letterhead on the four admin surfaces, per Vishnu's decisions 1a, 2a and 3a (2026-10-07):
 - **#1 Activity Logs PDF:** layout (a) header and footer on every page.
 - **#4 billing hours XLSX and #5 the monthly archive:** a block on SUMMARY (logo, name, contact
   lines), "Hours Report · Period" with "Powered by NetraOps", and print chrome on all four sheets.
