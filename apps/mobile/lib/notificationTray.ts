@@ -49,17 +49,29 @@ export function windowOf(data: unknown): string | null {
  * Every `NotificationType` that is written to the `notifications` table.
  * Verbatim from apps/api/src/services/notifications.ts's union at 3148286.
  *
- * THIS IS A SAFETY GATE, NOT A CONVENIENCE. The API also pushes six types
- * that write NO row — `site_deactivated`, `task_assigned`, `shift_cancelled`,
- * `shift_schedule_edited`, `shift_reassigned_away`, and `shifts_assigned`
- * (whose push `data.type` does not even match the `shift_assigned` row it
- * accompanies). Those can never appear in the live list, so a bare
- * "type not live -> dismiss" rule would clear a shift-cancelled banner the
- * instant the guard next foregrounded the app, possibly before they read it.
+ * THIS IS A SAFETY GATE, NOT A CONVENIENCE. A bare "type not live -> dismiss"
+ * rule would clear a banner for any type the server does not write a row for,
+ * the instant the guard next foregrounded the app — a shift-cancelled notice
+ * wiped before they read it. So the legacy path dismisses only types it can
+ * positively account for; anything unrecognised is left for the guard to
+ * swipe, which is the safe direction.
  *
- * So the legacy path dismisses only types it can positively account for.
- * Anything unrecognised is left for the guard to swipe — today's behaviour,
- * and the safe direction.
+ * FIVE TYPES JOINED THIS SET WHEN THE API STARTED WRITING THEIR ROWS.
+ * `site_deactivated`, `task_assigned`, `shift_reassigned_away`,
+ * `shift_cancelled` and `shift_schedule_edited` were pushed with no row and
+ * no union membership until apps/api b9579bc, which gave all five an
+ * unconditional insertNotification ahead of the token lookup and put them in
+ * the NotificationType union (29 -> 34). They are now reconcilable: the live
+ * list can contain them, so absence genuinely means resolved.
+ *
+ * `shifts_assigned` is NOT in this set and must never be added. It was never
+ * a type — it was a typo in shiftPush.ts's push payload, sending
+ * `data.type: 'shifts_assigned'` (plural) alongside a row typed
+ * `shift_assigned`. apps/api b9579bc corrected the sender, but banners
+ * delivered before that deploy still carry the plural, and no row will ever
+ * match it. Adding it here would make those banners vanish on the next
+ * foreground. navigateForNotification keeps its `shifts_assigned` case for
+ * the same reason.
  */
 export const ROW_BACKED_TYPES = new Set([
   'activity_report_reminder',
@@ -91,6 +103,12 @@ export const ROW_BACKED_TYPES = new Set([
   'swap_request_received',
   'swap_request_sent',
   'task_reminder',
+  // Row-backed since apps/api b9579bc — see the docblock above.
+  'site_deactivated',
+  'task_assigned',
+  'shift_reassigned_away',
+  'shift_cancelled',
+  'shift_schedule_edited',
 ]);
 
 /** The parts of a presented notification the predicate needs. Kept minimal so

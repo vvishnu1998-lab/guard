@@ -57,6 +57,10 @@ import * as SecureStore from 'expo-secure-store';
 import * as Sentry from '@sentry/react-native';
 import { isPastShiftExpiry, SHIFT_EXPIRY_GRACE_MS } from '../lib/shiftExpiry';
 import { isBreakActive } from '../lib/breakState';
+import { createSerialQueue } from '../lib/asyncQueue';
+import {
+  decidePastExpiryRecheck, RECHECK_TIMEOUT_MS, RecheckResponse, RecheckVerdict,
+} from '../lib/pastExpiryRecheck';
 import {
   GEOFENCE_STATE_KEY,
   decideTransition,
@@ -93,6 +97,64 @@ async function persistGeofenceState(
       data:     { state, reported, error: String(err) },
     });
   }
+}
+
+/**
+ * One GET /api/shifts/active-session with the stored token, judged by
+ * lib/pastExpiryRecheck.ts. Never throws.
+ *
+ * Not apiClient: it answers a 401 by refreshing the token and, if that fails,
+ * logging the guard out — neither belongs in a headless task that runs while
+ * the phone is in a pocket. A 401 here simply means "suppress as before".
+ *
+ * Not fetch either. On Android, JS timers do not run while the app is
+ * backgrounded or headless (react-native JavaTimerManager pauses with the
+ * host; expo-task-manager starts no HeadlessJsTask), and React Native's fetch
+ * (whatwg-fetch) resolves and rejects only through setTimeout(…, 0) — so
+ * `await fetch` would not settle, and an AbortController timer would not fire,
+ * until the guard next opened the app. React Native's XMLHttpRequest
+ * dispatches load/error/timeout straight from native network events, and
+ * `xhr.timeout` is enforced natively (OkHttp callTimeout on Android,
+ * NSURLRequest timeoutInterval on iOS), so this promise settles without any JS
+ * timer. That it does so in the background is read from the source, not yet
+ * seen on a device; the late check in decidePastExpiryRecheck is the backstop
+ * either way — an answer handled after RECHECK_LATE_AFTER_MS suppresses.
+ */
+function getActiveSession(apiUrl: string, accessToken: string): Promise<RecheckResponse> {
+  return new Promise<RecheckResponse>((resolve) => {
+    let settled = false;
+    const settle = (r: RecheckResponse) => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', `${apiUrl}/api/shifts/active-session`);
+      xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
+      xhr.timeout = RECHECK_TIMEOUT_MS;
+      xhr.onload = () => {
+        let body: unknown = undefined;
+        if (xhr.status === 200) {
+          try { body = JSON.parse(xhr.responseText); } catch { body = undefined; }
+        }
+        settle({ ok: true, status: xhr.status, body });
+      };
+      xhr.onerror   = () => settle({ ok: false });
+      xhr.ontimeout = () => settle({ ok: false });
+      xhr.onabort   = () => settle({ ok: false });
+      xhr.send();
+    } catch {
+      settle({ ok: false });
+    }
+  });
+}
+
+async function recheckPastExpiry(sessionId: string, accessToken: string): Promise<RecheckVerdict> {
+  const apiUrl = process.env.EXPO_PUBLIC_API_URL;
+  const askedAt = Date.now();
+  const res: RecheckResponse = apiUrl ? await getActiveSession(apiUrl, accessToken) : { ok: false };
+  return decidePastExpiryRecheck(res, sessionId, askedAt, Date.now());
 }
 
 export const GEOFENCE_TASK = 'GUARD_GEOFENCE';
@@ -157,8 +219,9 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
     return;
   }
 
-  // Local expiry gate. autoCompleteShifts closes the session server-side at
-  // scheduled_end, and a backgrounded or killed app never learns that — the
+  // Local expiry gate. autoCompleteShifts closes the session server-side once
+  // scheduled_end + its 15-minute grace has passed (SHIFT_EXPIRY_GRACE_MS
+  // mirrors it), and a backgrounded or killed app never learns that — the
   // region stays armed and keeps reporting. This is the only check that works
   // with no network on an app the OS has killed, so it runs before anything
   // is delivered or sent.
@@ -169,18 +232,41 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
   // Fails open — a missing or malformed active_shift_end returns false from
   // isPastShiftExpiry and we notify as before. A bad field must never be the
   // reason a genuine breach goes unreported.
+  //
+  // Before suppressing, ask the server once whether the stored end is still
+  // true (T6a, lib/pastExpiryRecheck.ts). An admin may have EXTENDED the shift
+  // while this app was suspended or killed, when no JS ran to rewrite the key.
+  // Only a later end on the same session un-suppresses; offline, a 401, a
+  // timeout or anything unexpected suppresses exactly as before. The normal
+  // path below is untouched — it still alerts before any network call.
   if (isPastShiftExpiry(shiftEnd, Date.now())) {
-    Sentry.addBreadcrumb({
-      category: 'geofence',
-      message: 'suppressed — past shift end + grace',
-      level: 'info',
-      data: {
-        shift_end: shiftEnd,
-        grace_ms: SHIFT_EXPIRY_GRACE_MS,
-        event: isExit ? 'exit' : isEnter ? 'enter' : `type_${eventType}`,
-      },
-    });
-    return;
+    const verdict = await recheckPastExpiry(sessionId, accessToken);
+    if (verdict.kind === 'extended') {
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message: 'past the stored end, but the server has a later one — reporting',
+        level: 'info',
+        data: { stored_end: shiftEnd, server_end: verdict.scheduledEnd, session_id: sessionId },
+      });
+      // Server truth for this session, so the next event skips the round
+      // trip. The app's own writer (syncShiftEndMirror) writes the same value
+      // once it re-reads the shift.
+      await SecureStore.setItemAsync('active_shift_end', verdict.scheduledEnd, KEYCHAIN_OPTS)
+        .catch(() => {});
+    } else {
+      Sentry.addBreadcrumb({
+        category: 'geofence',
+        message: 'suppressed — past shift end + grace',
+        level: 'info',
+        data: {
+          shift_end: shiftEnd,
+          grace_ms: SHIFT_EXPIRY_GRACE_MS,
+          recheck: verdict.reason,
+          event: isExit ? 'exit' : isEnter ? 'enter' : `type_${eventType}`,
+        },
+      });
+      return;
+    }
   }
 
   // Break-quiet policy (server: main 99d09bd; locked 2026-08-20). During an
@@ -259,9 +345,18 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }: TaskManager.TaskMa
       //   * It does nothing without network. A dead zone is exactly where a
       //     guard is most likely to trip a geofence, and there the fetch
       //     rejects and we never see a status at all.
-      // The local expiry gate above is the primary mechanism; this is the
-      // backstop that happens to be what stops the 2026-08-06 repeat, since
-      // both of those exits fell inside the grace window.
+      // The local expiry gate above is the primary mechanism for the auto
+      // clock-out. This is the backstop for what the gate cannot see: an
+      // active_shift_end that was absent or rejected at registration (the
+      // gate fails open), a device clock running behind, and a session
+      // closed any other way while the region is still armed — an admin
+      // shortening or closing an active shift (D20), or a handoff. It does
+      // NOT cover the 0-5 minutes between the grace running out and the sweep
+      // tick: the gate suppresses those exits before any POST while the
+      // session is still open, so nothing reports them (lib/shiftExpiry.ts).
+      // Once the gate has judged the shift over it returns before any POST,
+      // so this teardown never runs there and the region stays armed,
+      // silently, until the app is next opened.
       if (res.status === 409) {
         Sentry.addBreadcrumb({
           category: 'geofence',
@@ -370,13 +465,26 @@ interface StartGeofenceRegion {
   radius_meters: number;
 }
 
+/** Serialises every register and unregister in this JS runtime. Each start is
+ *  a stop-then-start pair across several awaits, and two callers can now ask
+ *  for one — the geofence effect in _layout.tsx and the re-arm after an end
+ *  edit (U3). Interleaved, one caller's hasStarted can read false in the
+ *  middle of the other's stop/start and register twice, or a stop can land
+ *  between the other's stop and start. One at a time, in call order. */
+const geofenceOps = createSerialQueue();
+
 /**
  * Register the guard's active post as a single geofence region. Called
  * from _layout.tsx when activeSession + activeShift.geofence become
- * available. Idempotent — stopGeofencing first so a shift swap or a
+ * available, and again after an end edit that arrived once the old end had
+ * run out (U3). Idempotent — stopGeofencing first so a shift swap or a
  * geofence redefinition takes effect without a stale region lingering.
  */
-export async function startBackgroundLocation(region?: StartGeofenceRegion): Promise<void> {
+export function startBackgroundLocation(region?: StartGeofenceRegion): Promise<void> {
+  return geofenceOps(() => registerRegion(region));
+}
+
+async function registerRegion(region?: StartGeofenceRegion): Promise<void> {
   if (!region) {
     Sentry.addBreadcrumb({
       category: 'geofence', message: 'start skipped — no region', level: 'warning',
@@ -425,7 +533,11 @@ export async function startBackgroundLocation(region?: StartGeofenceRegion): Pro
   });
 }
 
-export async function stopBackgroundLocation(): Promise<void> {
+export function stopBackgroundLocation(): Promise<void> {
+  return geofenceOps(unregisterRegion);
+}
+
+async function unregisterRegion(): Promise<void> {
   const running = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK);
   if (running) {
     await Location.stopGeofencingAsync(GEOFENCE_TASK);
