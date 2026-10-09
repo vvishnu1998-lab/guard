@@ -19,6 +19,7 @@
     "check:end-reconcile": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-end-reconcile.ts",
     "check:clockout-copy": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-clockout-copy.ts",
     "check:past-expiry-recheck": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-past-expiry-recheck.ts",
+    "check:ping-home": "ts-node --compiler-options '{\"module\":\"commonjs\",\"target\":\"es2020\",\"esModuleInterop\":true,\"skipLibCheck\":true}' scripts/check-ping-home.ts",
     "postinstall": "node scripts/check-break-constants.js"
   },
   "dependencies": {
