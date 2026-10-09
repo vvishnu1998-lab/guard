@@ -57,6 +57,73 @@ export function pingTileFor(
   return { enabled: true, label: 'PING NOW', note: `${openWindow!.label} window`, openWindow };
 }
 
+/** What Home's ping line says. */
+export type PingStatus =
+  /** The window is open and unanswered: the guard owes a ping now. */
+  | { kind: 'due';  window: PingWindow; closesInMs: number }
+  /** The open window is answered; nextInMs is null when none remains. */
+  | { kind: 'done'; window: PingWindow; nextInMs: number | null }
+  /** Nothing is owed right now; the next window opens in nextInMs. */
+  | { kind: 'next'; nextInMs: number }
+  | { kind: 'none' };
+
+/**
+ * Home's countdown used to read "Next ping in mm:ss" at every moment of a
+ * shift — including while the CURRENT window was open and unanswered, when
+ * the number was the time until the window AFTER it. The only line on Home
+ * about pings therefore told a guard who owed one that the next was 20
+ * minutes off (N173). This states the obligation instead, from the same
+ * gate as the tile.
+ *
+ * During an open break the window is not owed — the server waives any
+ * window a break overlaps (services/pingWindows.ts breakOverlapsWindow) — so
+ * it is never reported as due; the line falls back to the countdown. The
+ * tile itself stays live during a break, exactly as on active-shift.
+ */
+export function pingStatusFor(args: {
+  pingWindow: PingWindowState | null;
+  nextPingMs: number | null;
+  answered:   AnsweredWindow | null;
+  sessionId:  string;
+  onBreak:    boolean;
+  now:        Date;
+}): PingStatus {
+  const tile = pingTileFor(args.pingWindow, args.answered, args.sessionId);
+  const w = tile.openWindow;
+  if (w && tile.label === 'PINGED') return { kind: 'done', window: w, nextInMs: args.nextPingMs };
+  if (w && tile.enabled && !args.onBreak) {
+    return { kind: 'due', window: w, closesInMs: Math.max(0, w.end.getTime() - args.now.getTime()) };
+  }
+  if (args.nextPingMs !== null) return { kind: 'next', nextInMs: args.nextPingMs };
+  return { kind: 'none' };
+}
+
+/** "m:ss", minutes unbounded — the format Home's countdown has always used. */
+export function formatMinSec(ms: number): string {
+  const mins = Math.floor(ms / 60000);
+  const secs = Math.floor((ms % 60000) / 1000);
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+/** The words for a PingStatus. null renders nothing, as the old countdown
+ *  did once no further window remained. */
+export function pingStatusCopy(s: PingStatus): { title: string | null; text: string } | null {
+  switch (s.kind) {
+    case 'due':
+      return { title: 'PING DUE NOW', text: `${s.window.label} window closes in ${formatMinSec(s.closesInMs)}` };
+    case 'done':
+      return {
+        title: null,
+        text: `✓ ${s.window.label} done` +
+          (s.nextInMs !== null ? ` · next window opens in ${formatMinSec(s.nextInMs)}` : ''),
+      };
+    case 'next':
+      return { title: null, text: `Next ping in ${formatMinSec(s.nextInMs)}` };
+    case 'none':
+      return null;
+  }
+}
+
 /**
  * Same route and same query param the notification deep-link uses
  * (lib/navigateForNotification.ts ping_reminder / missed_ping), so every

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   ActivityIndicator, Dimensions, Linking,
@@ -14,7 +14,8 @@ import { useOfflineStore } from '../../store/offlineStore';
 import { useDrawerStore } from '../../store/drawerStore';
 import { useAuthStore } from '../../store/authStore';
 import { apiClient, ApiError, isNetworkError } from '../../lib/apiClient';
-import { remainingMsUntilNextPing } from '../../lib/pingSchedule';
+import { pingTileFor, pingRouteFor, pingStatusFor, pingStatusCopy, type PingStatus } from '../../lib/pingTile';
+import { usePingWindow } from '../../hooks/usePingWindow';
 import { formatDurationMs, formatHoursHHMM, type ShiftHours } from '../../lib/formatHours';
 import { shiftDayLabel, fmtTimeInTz, tzAbbreviation } from '../../lib/shiftTime';
 import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
@@ -113,7 +114,7 @@ function getCurrentTimeStr() {
 }
 
 export default function HomeScreen() {
-  const { activeSession, activeShift, setPendingShift, setActiveSession, currentBreak } = useShiftStore();
+  const { activeSession, activeShift, setPendingShift, setActiveSession, currentBreak, lastPingedWindow } = useShiftStore();
   const { setPendingShift: setClockInPendingShift, reset: resetClockIn } = useClockInStore();
   const { startSync, stopSync } = useOfflineStore();
   const { open: openDrawer } = useDrawerStore();
@@ -731,53 +732,90 @@ export default function HomeScreen() {
               </View>
             </View>
 
-            {/* Action buttons row */}
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={styles.actionBtn}
-                onPress={() => router.push('/reports/new')}
-              >
-                <Text style={styles.actionIcon}>📋</Text>
-                <Text style={styles.actionLabel}>REPORTS</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.actionBtn}
-                onPress={() => router.push('/(tabs)/tasks')}
-              >
-                <Text style={styles.actionIcon}>✅</Text>
-                <Text style={styles.actionLabel}>TASKS</Text>
-              </TouchableOpacity>
-              {!!activeShift?.instructions_pdf_url && (
-                <TouchableOpacity
-                  style={styles.actionBtn}
-                  onPress={() => setShowInstructions(true)}
-                >
-                  <Text style={styles.actionIcon}>📄</Text>
-                  <Text style={styles.actionLabel}>INSTRUCTIONS</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-
-            {/* Active shift card */}
-            <TouchableOpacity
-              style={styles.activeShiftCard}
-              onPress={() => router.push('/active-shift')}
+            {/* Action row + shift card share ONE 1s ping tick (PingTick),
+                so the PING tile and the ping line can never disagree, and
+                the per-second re-render stays below the map. */}
+            <PingTick
+              clockedInAt={activeSession?.clocked_in_at}
+              scheduledStart={activeShift?.scheduled_start}
+              scheduledEnd={activeShift?.scheduled_end}
             >
-              <View style={styles.activeShiftHeader}>
-                <Text style={styles.activeShiftSite}>
-                  {activeShift?.site_name?.toUpperCase()}
-                </Text>
-                <View style={styles.activeBadge}>
-                  <Text style={styles.activeBadgeText}>SHIFT ACTIVE</Text>
-                </View>
-              </View>
-              <Text style={styles.activeShiftTap}>TAP FOR DETAILS ›</Text>
-              <PingCountdownBanner
-                clockedInAt={activeSession?.clocked_in_at}
-                scheduledStart={activeShift?.scheduled_start}
-                scheduledEnd={activeShift?.scheduled_end}
-              />
-            </TouchableOpacity>
+              {({ pingWindow, nextPingMs, now }) => {
+                // N173: guards who report all shift and never open the
+                // active-shift screen never saw a ping action. Same gate as
+                // that screen's tile (lib/pingTile.ts), same /ping route as
+                // the reminder push.
+                const pingTile = pingTileFor(pingWindow, lastPingedWindow, activeSession!.id);
+                const pingStatus = pingStatusFor({
+                  pingWindow, nextPingMs, now,
+                  answered:  lastPingedWindow,
+                  sessionId: activeSession!.id,
+                  onBreak:   currentBreak !== null,
+                });
+                return (
+                  <>
+                    {/* Action buttons row */}
+                    <View style={styles.actionRow}>
+                      <TouchableOpacity
+                        style={[styles.actionBtn, pingTile.enabled ? styles.actionBtnPing : styles.actionBtnDisabled]}
+                        onPress={() => {
+                          if (pingTile.enabled && pingTile.openWindow) router.push(pingRouteFor(pingTile.openWindow));
+                        }}
+                        disabled={!pingTile.enabled}
+                        accessibilityRole="button"
+                        accessibilityState={{ disabled: !pingTile.enabled }}
+                        accessibilityLabel={pingTile.note ? `${pingTile.label} — ${pingTile.note}` : pingTile.label}
+                      >
+                        <Text style={styles.actionIcon}>📍</Text>
+                        <Text style={[styles.actionLabel, pingTile.enabled && styles.actionLabelPing]} numberOfLines={1}>
+                          {pingTile.label}
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.actionBtn}
+                        onPress={() => router.push('/reports/new')}
+                      >
+                        <Text style={styles.actionIcon}>📋</Text>
+                        <Text style={styles.actionLabel}>REPORTS</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.actionBtn}
+                        onPress={() => router.push('/(tabs)/tasks')}
+                      >
+                        <Text style={styles.actionIcon}>✅</Text>
+                        <Text style={styles.actionLabel}>TASKS</Text>
+                      </TouchableOpacity>
+                      {!!activeShift?.instructions_pdf_url && (
+                        <TouchableOpacity
+                          style={styles.actionBtn}
+                          onPress={() => setShowInstructions(true)}
+                        >
+                          <Text style={styles.actionIcon}>📄</Text>
+                          <Text style={styles.actionLabel}>INSTRUCTIONS</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+                    {/* Active shift card */}
+                    <TouchableOpacity
+                      style={styles.activeShiftCard}
+                      onPress={() => router.push('/active-shift')}
+                    >
+                      <View style={styles.activeShiftHeader}>
+                        <Text style={styles.activeShiftSite}>
+                          {activeShift?.site_name?.toUpperCase()}
+                        </Text>
+                        <View style={styles.activeBadge}>
+                          <Text style={styles.activeBadgeText}>SHIFT ACTIVE</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.activeShiftTap}>TAP FOR DETAILS ›</Text>
+                      <PingStatusLine status={pingStatus} />
+                    </TouchableOpacity>
+                  </>
+                );
+              }}
+            </PingTick>
 
             {/* Clock out button — blocked while a break is open (break
                 enforcement package 5.2): end the break first so the
@@ -920,37 +958,48 @@ function BreakBanner({ breakType, breakStartMs, durationMs }: {
   );
 }
 
-// Countdown is anchored to the shift's scheduled_start, matching the server
-// cron and the active-shift screen (both go through lib/pingSchedule.ts).
-// Renders nothing once no further boundary can fire — a shift in its last
-// partial window has no next ping to count down to, and "0:00" forever was
-// the old behaviour's way of saying that.
-function PingCountdownBanner({
-  clockedInAt, scheduledStart, scheduledEnd,
+// The 1s ping tick for Home, as a wrapper rather than a hook in HomeScreen:
+// a hook there would re-render the whole screen — MapView included — every
+// second. Only what this wraps (the action row and the shift card) ticks.
+function PingTick({
+  clockedInAt, scheduledStart, scheduledEnd, children,
 }: {
   clockedInAt?: string; scheduledStart?: string; scheduledEnd?: string;
+  children: (tick: ReturnType<typeof usePingWindow>) => ReactNode;
 }) {
-  const [remaining, setRemaining] = useState<number | null>(null);
-  const ref = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tick = usePingWindow({ clockedInAt, scheduledStart, scheduledEnd });
+  return <>{children(tick)}</>;
+}
 
-  useEffect(() => {
-    if (!clockedInAt || !scheduledStart || !scheduledEnd) return;
-    const compute = () =>
-      remainingMsUntilNextPing({ scheduledStart, scheduledEnd, clockedInAt });
-    setRemaining(compute());
-    ref.current = setInterval(() => setRemaining(compute()), 1000);
-    return () => { if (ref.current) clearInterval(ref.current); };
-  }, [clockedInAt, scheduledStart, scheduledEnd]);
+// The ping line inside the shift card. Anchored to the shift's
+// scheduled_start like the server's crons (lib/pingSchedule.ts). Renders
+// nothing once no further window can open, as the old countdown did. When a
+// ping is due it is a button straight to the ping — the same route as the
+// PING tile above it.
+function PingStatusLine({ status }: { status: PingStatus }) {
+  const copy = pingStatusCopy(status);
+  if (!copy) return null;
 
-  if (remaining === null) return null;
-
-  const mins = Math.floor(remaining / 60000);
-  const secs = Math.floor((remaining % 60000) / 1000);
-  const label = `Next ping in ${mins}:${String(secs).padStart(2, '0')}`;
+  if (status.kind === 'due') {
+    return (
+      <TouchableOpacity
+        style={[styles.pingBanner, styles.pingBannerDue]}
+        onPress={() => router.push(pingRouteFor(status.window))}
+        accessibilityRole="button"
+        accessibilityLabel={`${copy.title}. ${copy.text}`}
+      >
+        <View style={styles.pingDueInfo}>
+          <Text style={styles.pingDueTitle}>{copy.title}</Text>
+          <Text style={styles.pingDueText}>{copy.text}</Text>
+        </View>
+        <Text style={styles.pingDueChevron}>›</Text>
+      </TouchableOpacity>
+    );
+  }
 
   return (
     <View style={styles.pingBanner}>
-      <Text style={styles.pingText}>{label}</Text>
+      <Text style={styles.pingText}>{copy.text}</Text>
     </View>
   );
 }
@@ -1149,6 +1198,12 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 1.5,
   },
+  // PING tile: cyan while a window is open and unanswered (the one
+  // time-critical action in the row); dimmed like active-shift's disabled
+  // tile otherwise.
+  actionBtnPing: { borderColor: Colors.action, backgroundColor: Colors.action + '1A' },
+  actionBtnDisabled: { opacity: 0.45 },
+  actionLabelPing: { color: Colors.action },
 
   // Active shift card
   activeShiftCard: {
@@ -1201,6 +1256,18 @@ const styles = StyleSheet.create({
     borderLeftColor: Colors.action,
   },
   pingText: { color: Colors.action, fontSize: 13, letterSpacing: 0.5 },
+  // Due: amber, the app's colour for "needs you" (UnsentWritesBanner).
+  pingBannerDue: { flexDirection: 'row', alignItems: 'center', borderLeftColor: Colors.warning },
+  pingDueInfo: { flex: 1 },
+  pingDueTitle: {
+    fontFamily: Fonts.heading,
+    color: Colors.warning,
+    fontSize: 15,
+    letterSpacing: 1.5,
+    marginBottom: 1,
+  },
+  pingDueText: { color: Colors.warning, fontSize: 13, letterSpacing: 0.5 },
+  pingDueChevron: { fontSize: 24, color: Colors.warning, marginLeft: Spacing.sm },
 
   breakBanner: {
     flexDirection: 'row',
