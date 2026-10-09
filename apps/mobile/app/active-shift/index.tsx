@@ -25,7 +25,8 @@ import { router, useFocusEffect } from 'expo-router';
 import { apiClient } from '../../lib/apiClient';
 import { useShiftStore } from '../../store/shiftStore';
 import { useAuthStore }  from '../../store/authStore';
-import { currentPingWindow, remainingMsUntilNextPing, type PingWindowState } from '../../lib/pingSchedule';
+import { pingTileFor, pingRouteFor } from '../../lib/pingTile';
+import { usePingWindow } from '../../hooks/usePingWindow';
 import { checkpointsEnabled, inspectionRequired } from '../../lib/siteFlags';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import UnsentWritesBanner from '../../components/UnsentWritesBanner';
@@ -52,11 +53,16 @@ export default function ActiveShiftScreen() {
   const { guardId } = useAuthStore();
 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [nextPingMs,     setNextPingMs]     = useState<number | null>(null);
   const [clockingOut,    setClockingOut]    = useState(false);
-  // Recomputed on the same 1s tick as the countdown so the tile flips the
-  // instant a window opens or closes — no focus event required.
-  const [pingWindow,     setPingWindow]     = useState<PingWindowState | null>(null);
+  // ── Ping countdown + window gate ───────────────────────────────────────
+  // One 1s tick feeds both the countdown and the PING NOW tile, so the tile
+  // flips the instant a window opens or closes — no focus event required.
+  // Home reads the same hook (N173).
+  const { pingWindow, nextPingMs } = usePingWindow({
+    clockedInAt:    activeSession?.clocked_in_at,
+    scheduledStart: activeShift?.scheduled_start,
+    scheduledEnd:   activeShift?.scheduled_end,
+  });
 
   // ── Checkpoints (C6) ──────────────────────────────────────────────────
   // null = not loaded / fetch failed / site has none → render NOTHING, so
@@ -158,7 +164,6 @@ export default function ActiveShiftScreen() {
   );
 
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pingRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const appStateRef = useRef(AppState.currentState);
 
   // ── Elapsed timer ──────────────────────────────────────────────────────
@@ -174,31 +179,6 @@ export default function ActiveShiftScreen() {
     timerRef.current = setInterval(tick, 1000);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [activeSession?.clocked_in_at]);
-
-  // ── Ping countdown + window gate ───────────────────────────────────────
-  // Both read the SAME helper, so the number on screen and the state of the
-  // PING NOW tile can never disagree with each other — or with the server,
-  // which anchors on scheduled_start too.
-  useEffect(() => {
-    const clockedInAt    = activeSession?.clocked_in_at;
-    const scheduledStart = activeShift?.scheduled_start;
-    const scheduledEnd   = activeShift?.scheduled_end;
-    if (!clockedInAt || !scheduledStart || !scheduledEnd) return;
-
-    // site_tz is not on the /shifts/active-session payload; pingSchedule
-    // falls back to the same zone the server does. See its header.
-    const args = { scheduledStart, scheduledEnd, clockedInAt };
-
-    const tick = () => {
-      const now = new Date();
-      setNextPingMs(remainingMsUntilNextPing({ ...args, now }));
-      setPingWindow(currentPingWindow({ ...args, now }));
-    };
-
-    tick();
-    pingRef.current = setInterval(tick, 1000);
-    return () => { if (pingRef.current) clearInterval(pingRef.current); };
-  }, [activeSession?.clocked_in_at, activeShift?.scheduled_start, activeShift?.scheduled_end]);
 
   // ── Resume correction when app comes back to foreground ───────────────
   // Also the moment the checkpoint counter is most likely to be wrong: JS is
@@ -246,30 +226,12 @@ export default function ActiveShiftScreen() {
   const pingUrgent = nextPingMs !== null && nextPingMs < 5 * 60 * 1000; // < 5 min = highlight
 
   // ── PING NOW gate ──────────────────────────────────────────────────────
-  // One rule per disabled state, each with copy that names the reason. The
-  // tile is never hidden: a guard who cannot ping right now still needs to
-  // see that pinging is a thing this shift expects of them.
-  const openWindow = pingWindow?.status === 'open' ? pingWindow.window : null;
-  const alreadyPinged =
-    openWindow !== null &&
-    lastPingedWindow?.sessionId === activeSession.id &&
-    lastPingedWindow?.label === openWindow.label;
+  // The rule lives in lib/pingTile.ts so Home applies exactly the same one.
+  const pingTile = pingTileFor(pingWindow, lastPingedWindow, activeSession.id);
 
-  const pingTile: { enabled: boolean; label: string; note: string | null } = (() => {
-    if (!pingWindow)                          return { enabled: false, label: 'PING',     note: null };
-    if (pingWindow.status === 'before_shift')  return { enabled: false, label: 'PING',     note: 'Starts at shift time' };
-    if (pingWindow.status === 'shift_ending')  return { enabled: false, label: 'PING',     note: 'Shift ending' };
-    if (pingWindow.status === 'before_clock_in') return { enabled: false, label: 'PING',   note: 'Next window' };
-    if (alreadyPinged)                        return { enabled: false, label: 'PINGED',   note: `${openWindow!.label} done` };
-    return { enabled: true, label: 'PING NOW', note: `${openWindow!.label} window` };
-  })();
-
-  // Same route and same query param the notification deep-link uses
-  // (lib/navigateForNotification.ts ping_reminder / missed_ping), so the
-  // two entry points converge on one flow and write one shape of row.
   function goPing() {
-    if (!openWindow) return;
-    router.push(`/ping?window_label=${encodeURIComponent(openWindow.label)}`);
+    if (!pingTile.openWindow) return;
+    router.push(pingRouteFor(pingTile.openWindow));
   }
 
   return (
