@@ -9,6 +9,11 @@
  * (letterhead/text.ts, the lines the PDF prints) sit beside it in column B.
  * With no logo the text starts in column A.
  *
+ * Every line is written through neutralizeFormula() (N171), so the block is
+ * safe in any workbook. A contact line that starts with a phone a spreadsheet
+ * would read as a formula ("+1 …") is labelled "Tel" instead, so a phone number
+ * never shows the apostrophe; "(408) …" and other lines are written as they are.
+ *
  * The logo is checked again here (N167). services/letterhead only hands over
  * bytes that checkImageDecodes() accepted, but exceljs embeds whatever it is
  * given verbatim, and Excel would open a broken picture; one decode per
@@ -23,6 +28,7 @@ import type ExcelJS from 'exceljs';
 import type { Letterhead } from './types';
 import { contactLines } from './text';
 import { checkImageDecodes } from '../imageDecode';
+import { neutralizeFormula, readsAsFormula } from '../spreadsheetSafe';
 
 const NAVY = 'FF0B1526';
 const MUTED = 'FF64748B';
@@ -47,12 +53,13 @@ export function writeLetterheadBlock(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet
   ws.getRow(1).height = 24;
   for (let r = 2; r <= LETTERHEAD_ROWS; r++) ws.getRow(r).height = 15;
   const name = ws.getRow(1).getCell(textCol);
-  name.value = lh.companyName;
+  name.value = neutralizeFormula(lh.companyName);
   name.font = { bold: true, size: 16, color: { argb: NAVY } };
   name.alignment = { vertical: 'middle' };
   contactLines(lh).forEach((line, i) => {
     const cell = ws.getRow(2 + i).getCell(textCol);
-    cell.value = line;
+    const labelled = lh.phone && line.startsWith(lh.phone) && readsAsFormula(line) ? `Tel ${line}` : line;
+    cell.value = neutralizeFormula(labelled);
     cell.font = { size: 9, color: { argb: MUTED } };
   });
 }
