@@ -5410,6 +5410,16 @@ reports) and admin-typed names (guards, sites). So a report description such as
   `= + - @`, tab, CR), with a test that a report description starting with each reads back as text.
   Check the browser-built checkpoint CSV (`admin/sites/[id]/page.tsx`, surface #8) for the same gap.
 - **Size S. Tier 1** (a code PR through the deploy gate).
+- **Status 2026-10-08: FIXED in this PR.** `services/spreadsheetSafe.ts` holds the one rule (a leading
+  apostrophe on `= + - @`, tab, CR; plain numbers and non-strings untouched). It now runs on:
+  - the analytics CSV (`rowsToCsv`);
+  - the analytics XLSX (`neutralizeRow` before `json_to_sheet`);
+  - the hours workbooks (a `neutralizeWorkbook` pass over every text cell);
+  - the letterhead block and preamble.
+
+  The browser-built checkpoint CSV (surface #8) already had the guard (`csvField`, C5).
+  - **Evidence:** `scripts/test-n171-formula-guard.ts` (58), with clean data byte-identical to `1632dd6`.
+  - **Mutation controls:** 16 of 16 caught, plus one equivalent mutant.
 
 ### N172 — scripts/test-payable-hours.ts cannot seed its case I since schema v81
 
