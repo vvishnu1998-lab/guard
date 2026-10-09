@@ -56,6 +56,7 @@ import { effectiveEndDate } from './hoursExport';
 import type { HoursExportDataset, HoursAggregate, HoursExportRow } from './hoursExport';
 import type { Letterhead } from './letterhead/types';
 import { writeLetterheadBlock, stampPrintChrome, LETTERHEAD_ROWS } from './letterhead/xlsx';
+import { neutralizeWorkbook } from './spreadsheetSafe';
 
 // Brand — apps/web and the marketing site use the same navy.
 const NAVY  = 'FF0B1526';
@@ -403,6 +404,10 @@ export function buildHoursWorkbook(data: HoursExportDataset, lh?: Letterhead | n
   note('Times', 'All dates and times are rendered in each site’s own timezone, not UTC and not the server’s.');
 
   if (lh) stampPrintChrome(wb, lh, 'Hours Report');
+  // N171: guard, site and company names are typed by people. A text cell that
+  // starts with = + - @ (tab, CR) gets a leading apostrophe; every other cell is
+  // left exactly as written above, so ordinary data produces the same bytes.
+  neutralizeWorkbook(wb);
   return wb;
 }
 

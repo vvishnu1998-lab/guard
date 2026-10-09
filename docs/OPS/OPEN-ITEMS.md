@@ -5383,8 +5383,8 @@ are left over from before the activity-log PDF moved to `services/pdf/activityLo
 
 ## New from Phase B, stage B1 (2026-10-07)
 
-**Status:** B1 (this PR) puts the company letterhead on the four admin surfaces, per Vishnu's
-decisions 1a, 2a and 3a (2026-10-07):
+**Status: SHIPPED 2026-10-08** as `1632dd6` (PR #97, the "any guard" method; see STATE.md). B1 put
+the company letterhead on the four admin surfaces, per Vishnu's decisions 1a, 2a and 3a (2026-10-07):
 - **#1 Activity Logs PDF:** layout (a) header and footer on every page.
 - **#4 billing hours XLSX and #5 the monthly archive:** a block on SUMMARY (logo, name, contact
   lines), "Hours Report · Period" with "Powered by NetraOps", and print chrome on all four sheets.
@@ -5410,6 +5410,16 @@ reports) and admin-typed names (guards, sites). So a report description such as
   `= + - @`, tab, CR), with a test that a report description starting with each reads back as text.
   Check the browser-built checkpoint CSV (`admin/sites/[id]/page.tsx`, surface #8) for the same gap.
 - **Size S. Tier 1** (a code PR through the deploy gate).
+- **Status 2026-10-08: FIXED in this PR.** `services/spreadsheetSafe.ts` holds the one rule (a leading
+  apostrophe on `= + - @`, tab, CR; plain numbers and non-strings untouched). It now runs on:
+  - the analytics CSV (`rowsToCsv`);
+  - the analytics XLSX (`neutralizeRow` before `json_to_sheet`);
+  - the hours workbooks (a `neutralizeWorkbook` pass over every text cell);
+  - the letterhead block and preamble.
+
+  The browser-built checkpoint CSV (surface #8) already had the guard (`csvField`, C5).
+  - **Evidence:** `scripts/test-n171-formula-guard.ts` (58), with clean data byte-identical to `1632dd6`.
+  - **Mutation controls:** 16 of 16 caught, plus one equivalent mutant.
 
 ### N172 — scripts/test-payable-hours.ts cannot seed its case I since schema v81
 

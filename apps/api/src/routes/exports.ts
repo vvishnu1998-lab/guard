@@ -23,6 +23,7 @@ import { pool } from '../db/pool';
 import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
 import { letterheadForCompany } from '../services/letterhead';
 import { withCsvPreamble } from '../services/letterhead/csv';
+import { neutralizeFormula, neutralizeRow } from '../services/spreadsheetSafe';
 
 const router = Router();
 
@@ -179,7 +180,10 @@ function rowsToCsv(
   // can't accidentally desync labels and lookups.
   const headerLabels = labels && labels.length === headers.length ? labels : headers;
   const header = headerLabels.map(escape).join(',');
-  const body   = rows.map((row) => headers.map((h) => escape(row[h])).join(',')).join('\n');
+  // N171: a value a spreadsheet would run as a formula (= + - @, tab, CR) gets a
+  // leading apostrophe before it is quoted. Guard and site names, badges and
+  // report descriptions are typed by people; quoting alone does not stop Excel.
+  const body   = rows.map((row) => headers.map((h) => escape(neutralizeFormula(row[h]))).join(',')).join('\n');
   return `${header}\n${body}`;
 }
 
@@ -252,16 +256,18 @@ router.get('/analytics/xlsx', requireAuth('company_admin', 'vishnu'), async (req
 
   const wb = XLSX.utils.book_new();
 
+  // Every value goes through neutralizeRow (N171): SheetJS stores strings as
+  // text cells, but Excel re-reads a text cell as typed input when it is edited.
   // Sheet 1 — Guard Hours
-  const hoursWs = XLSX.utils.json_to_sheet(data.hours);
+  const hoursWs = XLSX.utils.json_to_sheet(data.hours.map(neutralizeRow));
   XLSX.utils.book_append_sheet(wb, hoursWs, 'Guard Hours');
 
   // Sheet 2 — Reports
-  const reportsWs = XLSX.utils.json_to_sheet(data.reports);
+  const reportsWs = XLSX.utils.json_to_sheet(data.reports.map(neutralizeRow));
   XLSX.utils.book_append_sheet(wb, reportsWs, 'Reports');
 
   // Sheet 3 — Geofence Violations
-  const violWs = XLSX.utils.json_to_sheet(data.violations);
+  const violWs = XLSX.utils.json_to_sheet(data.violations.map(neutralizeRow));
   XLSX.utils.book_append_sheet(wb, violWs, 'Geofence Violations');
 
   const buffer: Buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });

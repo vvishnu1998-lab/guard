@@ -62,11 +62,24 @@ API.** Hold the deploy gate for it like any other merge.
 1. **CONDITION** — zero active STARNET shifts and zero open STARNET sessions. No
    ping can land, so the proxy is unsatisfiable while the thing it protects
    (nobody on post to disrupt) is trivially true. Safest window, not a bypass.
-2. **PROXY** — the normal path: a STARNET guard's new ping lands, push inside 90s.
-   **One calibrated guard gates (D23):** the merge waits for a new ping from ONE
-   STARNET guard whose device UA is calibrated, chosen from those who pinged in
-   the window before the boundary. Silent sessions never gate. The tool is
-   `scripts/ops/proxy-merge.sh`.
+2. **PROXY** — the normal path. **Since 2026-10-08 the default is the "any guard"
+   method (Vishnu):** merge within **60 s** of the first new STARNET ping at or after
+   a :00 or :30 boundary, from **any** STARNET guard on post. A new ping is a 201: a
+   new `location_pings` row; a 200 is a resend. No STARNET ping by boundary + 10 min:
+   stop, no merge.
+   - **Prechecks first:** CI green and the merge state CLEAN; the PR head pinned;
+     `main` pinned; the newest Railway deployment SUCCESS from `main`, and `/health`
+     reporting `main`.
+   - **Merges happen while Vishnu is present.** No single-guard UA calibration and
+     no scheduled wake-ups.
+   - **The tool is `scripts/ops/any-guard-merge.py`.** It reads through the
+     `postgres-readonly` role in a read-only transaction, and its one write is
+     `gh pr merge --merge --match-head-commit`. Dry-run it on the previous wave first,
+     with a deadline still in the future.
+   - **This replaces D23's one-calibrated-guard gate** (`scripts/ops/proxy-merge.sh`).
+     That gate kept failing on things outside the code: a guard's phone changing
+     between days, two guards on an identical UA, ad-hoc shifts, and a session
+     wake-up that never fired, which missed #97's 10-08 window.
 3. **OVERRIDE** — Vishnu waives it explicitly. Record as a bypass and capture what
    landed during the window.
 

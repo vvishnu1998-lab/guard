@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-08 — PR #97, company letterhead on the admin surfaces (Phase B, stage B1) — verified 2026-10-08 17:50 PT
+
+| thing | value |
+|---|---|
+| merge | PR #97 merged as `1632dd6` at **17:32:41 PT** by the **"any guard" method**, the new default (POLICY.md, route 2): merge within 60 s of the first STARNET ping after the boundary. Boundary 17:30:00; the first STARNET ping was GRD0015's at 17:32:33.5; `scripts/ops/any-guard-merge.py` confirmed the merge 9.9 s later. The merge tree equals the approved head's tree (`882b83d`). A wake-up for the planned 16:30 window never fired, and nothing ran then. |
+| Railway | `ea07afba-2284-4f97-bb77-56586910a249` **SUCCESS** at 17:34:06 PT from `1632dd6`. |
+| web | Vercel production on `1632dd6`: success at 17:34:00 PT, per its GitHub deployment record. |
+| health | `/health` commit `1632dd6`; `/health/crons` 20 jobs, `stale: []` (17:50 PT). |
+| switchover | The new container started at 17:34:00 and the old one (`aecfab2d`) stopped at 17:34:17. 0 5xx on the old deployment over its whole life (37 client aborts, all before 17:06) and 0 on the new one (162 requests by 17:50). Sentry, 17:30–17:50 PT: 0 issues on the API; on mobile, only the known MOBILE-13 (N168). |
+| restart window | No STARNET write between the merge and the old container stopping. The next two pings, GRD0026 at 17:35:04 and GRD0024 at 17:40:10, were answered 201 by the new deployment. |
+| visible change | Every tenant's admins: the Activity Logs PDF, the billing hours XLSX, the analytics CSV (including the live-status violations download) and, from the 2026-11-01 run, the monthly hours XLSX carry the company letterhead. STARNET's profile is empty, so theirs shows the name only: "STARNET SECURITY". |
+
+---
+
 ## Shipped 2026-10-07 — PR #95, letterhead module (Phase B, stage B0) — verified 2026-10-07 17:31 PT
 
 | thing | value |
