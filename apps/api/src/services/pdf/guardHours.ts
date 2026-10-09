@@ -36,6 +36,13 @@
  * so it is not reintroduced: shifts.scheduled_start and scheduled_end are
  * both NOT NULL, and zero rows in prod have a zero-length window, so the
  * absent-window case cannot occur.
+ *
+ * ── THE LETTERHEAD (Phase B, B2) ────────────────────────────────────────
+ *
+ * With `data.lh` the header and footer are the employer's letterhead
+ * (letterhead/pdf.ts, layout (a)); without one, or with null, they are today's
+ * NetraOps chrome, byte for byte. The body never moves, the identity block's
+ * employer line included: the letterhead uses the same header and footer bands.
  */
 
 import PDFDocument from 'pdfkit';
@@ -49,6 +56,7 @@ import {
 import {
   formatHoursHHMM, formatOffPostHours, formatScheduledHours,
 } from '../shiftHours';
+import type { Letterhead } from '../letterhead/types';
 
 /**
  * PENDING ATTORNEY REVIEW — treat this wording as provisional.
@@ -166,6 +174,11 @@ export interface GuardHoursDoc {
   timeZone: string;
   rows: GuardHoursRow[];
   generatedAt: Date;
+  /**
+   * The employer's letterhead, looked up by the route (the renderer does not
+   * touch the database). Absent or null: today's NetraOps chrome.
+   */
+  lh?: Letterhead | null;
 }
 
 // ── Column geometry ───────────────────────────────────────────────────────
@@ -532,7 +545,7 @@ export function renderGuardHoursPdf(data: GuardHoursDoc, sink: Writable): Promis
 
   // ── Chrome last, now that the page count is known ───────────────────────
   stampPages(doc, 'GUARD HOURS', (d) =>
-    drawGuardFooter(d, data.guardName, data.badgeNumber, period));
+    drawGuardFooter(d, data.guardName, data.badgeNumber, period, data.lh), data.lh);
   doc.end();
   return done;
 }
