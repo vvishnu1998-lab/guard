@@ -28,6 +28,7 @@ import { getBreakAllowance, breakBlockMessage } from '../services/breakAllowance
 import {
   renderGuardHoursPdf, guardHoursFilename, MAX_RANGE_DAYS,
 } from '../services/pdf/guardHours';
+import { letterheadForGuard } from '../services/letterhead';
 import { pushShiftAssignments, type CreatedShift } from '../services/shiftPush';
 import {
   pushSwapRequestToRecipient,
@@ -4254,6 +4255,12 @@ router.get('/my-hours.pdf', requireAuth('guard'), async (req, res) => {
       [req.user!.sub, fromQ, toQ],
     );
 
+    // The employer's letterhead (Phase B, B2), looked up before the first
+    // header is set: the render below streams into `res`. letterheadForGuard
+    // never throws; on any failure it returns null and the document keeps
+    // today's NetraOps chrome.
+    const lh = await letterheadForGuard(req.user!.sub);
+
     const filename = guardHoursFilename(guard.name, fromQ, toQ);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -4283,6 +4290,7 @@ router.get('/my-hours.pdf', requireAuth('guard'), async (req, res) => {
       timeZone:    'America/Los_Angeles',
       rows:        rows.rows,
       generatedAt: new Date(),
+      lh,
     }, res);
   } catch (err: any) {
     console.error('[my-hours.pdf] generation failed:', err);
