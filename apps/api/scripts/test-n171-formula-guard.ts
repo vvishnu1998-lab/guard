@@ -278,6 +278,13 @@ async function main(): Promise<void> {
     const amp = await loadXlsx(await xlsxOf(curWB, clean, { ...FULL, phone: '(408) 555-0142' }));
     check(amp.getWorksheet('SUMMARY')!.getCell('B3').value === '(408) 555-0142  ·  dispatch@starguard.example  ·  www.starguard.example',
       'W7 a "(408)" phone line is written exactly as B1 wrote it: no label');
+    // The block on its own, in a bare workbook with no whole-workbook pass after it: it must be safe by itself.
+    const { writeLetterheadBlock } = require('../src/services/letterhead/xlsx');
+    const bare = new ExcelJS.Workbook();
+    const ws = bare.addWorksheet('ANY');
+    writeLetterheadBlock(bare, ws, { ...FULL, logo: null, companyName: '=EVIL()', address: '@SUM(1)', phone: '-5 hostile' });
+    check(ws.getCell('A1').value === "'=EVIL()" && ws.getCell('A2').value === "'@SUM(1)" && String(ws.getCell('A3').value).startsWith('Tel -5 hostile'),
+      `W8 the letterhead block by itself, in a bare workbook: the name and lines are escaped, the phone line labelled (A1 ${show(ws.getCell('A1').value)}, A2 ${show(ws.getCell('A2').value)}, A3 ${show(ws.getCell('A3').value)})`);
   }
 
   // ══ the database and the routes ══
