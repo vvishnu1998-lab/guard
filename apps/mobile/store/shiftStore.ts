@@ -4,6 +4,9 @@ import * as SecureStore from 'expo-secure-store';
 import { setShiftTag } from '../lib/sentry';
 import { apiClient } from '../lib/apiClient';
 import { persistBreakUntil, clearBreakUntil } from '../lib/breakState';
+import {
+  ANSWERED_WINDOW_KEY, serializeAnsweredWindow, parseAnsweredWindow, shouldApplyStored,
+} from '../lib/answeredWindow';
 import { isUsableShiftEnd } from '../lib/shiftExpiry';
 import { decideWindowRewrite, isEditForActiveShift } from '../lib/activeShiftReconcile';
 import { createCoalescer, createSerialQueue } from '../lib/asyncQueue';
@@ -101,16 +104,19 @@ interface ShiftState {
    *  /shifts/active-session response that carries break_quotas. */
   breakQuotas: BreakQuotas | null;
   /** Last ping window this device successfully submitted, as
-   *  { sessionId, label }. Read by the PING NOW gate on the active-shift
-   *  screen to grey the tile once the current window is satisfied.
+   *  { sessionId, label }. Read by the PING gate (lib/pingTile.ts) on the
+   *  active-shift screen and on Home to grey the tile once the current
+   *  window is satisfied.
    *
-   *  Deliberately NOT authoritative: this store is not persisted, so a cold
-   *  start mid-shift forgets it. The gate therefore fails OPEN (tile stays
-   *  enabled) rather than closed. A redundant ping writes one extra
-   *  location_pings row; a wrongly-disabled tile recreates the dead end
-   *  that left 17 windows unanswered on STARNET shift b8d23d66. There is no
-   *  server endpoint that reports pings for the current window — adding one
-   *  is the real fix and is an API change. */
+   *  Mirrored to SecureStore (lib/answeredWindow.ts) and restored by
+   *  setActiveSession, so an app restart mid-shift no longer forgets it.
+   *  Still deliberately NOT authoritative: a value that cannot be read back
+   *  leaves it null, and the gate fails OPEN (tile stays enabled) rather
+   *  than closed. A redundant ping writes one extra location_pings row; a
+   *  wrongly-disabled tile recreates the dead end that left 17 windows
+   *  unanswered on STARNET shift b8d23d66. There is no server endpoint that
+   *  reports pings for the current window — adding one is the real fix and
+   *  is an API change. */
   lastPingedWindow: { sessionId: string; label: string } | null;
   setPendingShift: (shift: Shift) => void;
   setActiveSession: (shift: Shift, session: ShiftSession) => void;
@@ -154,11 +160,25 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     // outgoing guard's answered window.
     set({ activeShift: shift, activeSession: session, pendingShift: null, lastPingedWindow: null });
     setShiftTag(session.id);
+    // ...then restore THIS session's answer from before an app restart, if
+    // there is one (lib/answeredWindow.ts). Fails open: no value, a bad
+    // value or another session's value leaves the tile live.
+    void SecureStore.getItemAsync(ANSWERED_WINDOW_KEY)
+      .then((raw) => {
+        const stored = parseAnsweredWindow(raw, session.id);
+        const s = get();
+        if (shouldApplyStored({ stored, current: s.lastPingedWindow, activeSessionId: s.activeSession?.id ?? null })) {
+          set({ lastPingedWindow: stored });
+        }
+      })
+      .catch(() => {});
   },
 
   clearSession: () => {
     // Breaks die with the session — clear the SecureStore mirror too.
     void clearBreakUntil();
+    // So does the answered ping window.
+    void SecureStore.deleteItemAsync(ANSWERED_WINDOW_KEY).catch(() => {});
     set({
       activeShift: null, activeSession: null, pendingShift: null,
       currentBreak: null, breakQuotas: null, lastPingedWindow: null,
@@ -177,7 +197,13 @@ export const useShiftStore = create<ShiftState>((set, get) => ({
     set({ currentBreak: b });
   },
 
-  markWindowPinged: (sessionId, label) => set({ lastPingedWindow: { sessionId, label } }),
+  // Persisted as well, so an app restart does not forget it (N173).
+  // Fire-and-forget — Keychain latency must not block UI state.
+  markWindowPinged: (sessionId, label) => {
+    set({ lastPingedWindow: { sessionId, label } });
+    void SecureStore.setItemAsync(ANSWERED_WINDOW_KEY, serializeAnsweredWindow({ sessionId, label }))
+      .catch(() => {});
+  },
 
   // The body is refreshOnce() below the store; this is the coalesced entry
   // point every caller uses.
