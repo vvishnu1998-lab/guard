@@ -11,15 +11,16 @@
  *
  * FORMULA GUARD. A spreadsheet runs a cell that starts with = + - @ (or a tab
  * or a CR) as a formula, quoted or not, so a preamble line that would gets a
- * leading apostrophe (OWASP CSV-injection guidance). The phone leads the
- * contact line and is often "+1 …", which would show that apostrophe, so that
- * line is labelled "Tel" when it starts with the phone. The data cells below
- * the preamble are not guarded here: that is N171.
+ * leading apostrophe: neutralizeFormula(), the one rule every CSV and XLSX cell
+ * uses (services/spreadsheetSafe.ts, N171). The phone leads the contact line and
+ * is often "+1 …", which would show that apostrophe, so that line is labelled
+ * "Tel" when it starts with the phone.
  */
 import type { Letterhead } from './types';
 import { contactLines } from './text';
+import { neutralizeFormula } from '../spreadsheetSafe';
 
-const cell = (s: string): string => `"${(/^[=+\-@\t\r]/.test(s) ? `'${s}` : s).replace(/"/g, '""')}"`;
+const cell = (s: string): string => `"${String(neutralizeFormula(s)).replace(/"/g, '""')}"`;
 
 /** The preamble's lines, each one quoted cell, without line endings. */
 export function csvPreamble(lh: Letterhead): string[] {
