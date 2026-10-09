@@ -5310,6 +5310,9 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
+- **Status 2026-10-09 (B2):** the guard's own hours PDF now carries the employer's letterhead. The logo
+  arrives through the same decode-checked lookup (`letterheadForGuard`), and a lookup that fails leaves
+  today's PDF byte for byte (`scripts/test-letterhead-b2.ts`, H4).
 - **Status 2026-10-07 (B1):** the Activity Logs PDF, both hours workbooks and the analytics CSV now
   carry the letterhead. The XLSX renderer decodes the logo again before exceljs embeds it, because
   exceljs embeds bytes verbatim. A header-valid, garbage-body PNG and JPEG through it produce the
@@ -5410,7 +5413,7 @@ reports) and admin-typed names (guards, sites). So a report description such as
   `= + - @`, tab, CR), with a test that a report description starting with each reads back as text.
   Check the browser-built checkpoint CSV (`admin/sites/[id]/page.tsx`, surface #8) for the same gap.
 - **Size S. Tier 1** (a code PR through the deploy gate).
-- **Status 2026-10-08: FIXED in this PR.** `services/spreadsheetSafe.ts` holds the one rule (a leading
+- **Status 2026-10-08: FIXED, shipped as `ee34721` (PR #98; see STATE.md).** `services/spreadsheetSafe.ts` holds the one rule (a leading
   apostrophe on `= + - @`, tab, CR; plain numbers and non-strings untouched). It now runs on:
   - the analytics CSV (`rowsToCsv`);
   - the analytics XLSX (`neutralizeRow` before `json_to_sheet`);
@@ -5432,3 +5435,16 @@ equals its start. `shifts_end_after_start` (v81) refuses it, and the harness sto
 - **Fix:** rewrite case I as a shape v81 still allows, or drop it, and decide whether the
   NO_SCHEDULE flag can still be reached by new data. Rerun.
 - **Size XS. Tier 0** (test only).
+
+## New from Phase B, stage B2 (2026-10-09)
+
+**Status:** B2 (this PR) puts the employer's letterhead on the guard's own hours PDF (surface #3,
+`GET /api/shifts/my-hours.pdf`), which the mobile app downloads and shares. There is no app change: the
+server renders the document.
+- **What changes:** layout (a) header and footer on every page, the footer naming the guard, badge and
+  period and then "Confidential — <company>". The identity block, the employer line included, does not
+  move.
+- **No letterhead, no change:** a lookup that gives null leaves the PDF byte for byte as it was at
+  `ee34721`, at the renderer and through the route (`scripts/test-letterhead-b2.ts`, 13 checks).
+- **Visible on deploy to every guard who downloads their hours.** STARNET's profile is empty, so its
+  guards see the name only: "STARNET SECURITY".

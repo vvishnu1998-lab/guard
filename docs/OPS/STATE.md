@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-08 — PR #98, N171: no CSV or XLSX cell from user-typed data runs as a formula — verified 2026-10-08 19:18 PT
+
+| thing | value |
+|---|---|
+| merge | PR #98 merged as `ee34721` at **19:00:47 PT** by the **"any guard" method** (POLICY.md, route 2). Boundary 19:00:00; the first STARNET ping was GRD0015's at 19:00:42.0; `scripts/ops/any-guard-merge.py` confirmed the merge 7.4 s later. A dry run on the 18:30 wave had correctly declined an 11-minute-old ping. The merge tree equals the approved head's tree (`ebcbf11`). |
+| Railway | `6e832272-0c8d-4d34-bd02-6e058e8169d0` **SUCCESS** at 19:02:22 PT from `ee34721`. |
+| web | Vercel production on `ee34721`: success at 19:02:26 PT, per its GitHub deployment record. |
+| health | `/health` commit `ee34721`; `/health/crons` 20 jobs, `stale: []` (19:18 PT). |
+| switchover | The new container started at 19:02:16 and the old one (`ea07afba`) stopped at 19:02:33. The old deployment served 999 requests over its life with 0 5xx and 1 client abort (18:43). The count ran in 30-min chunks, each rc=0, because a single whole-life `railway logs` query had failed with rc=1, which is a failure, not a zero. The new deployment served 223 requests by 19:18, none at 499 or above. Sentry, 18:58–19:18 PT: 0 on the API; on mobile, only the known info-level MOBILE-10. |
+| restart window | No STARNET write between the merge and the old container stopping. After the switch, the new deployment took a clock-in with its verification (19:12:43), two reports (19:14, 19:17) and the 19:10 cron notification. |
+| visible change | A CSV or XLSX text cell that starts with `= + - @`, a tab or a CR now carries a leading apostrophe. Ordinary names, descriptions and every figure are unchanged. |
+
+---
+
 ## Shipped 2026-10-08 — PR #97, company letterhead on the admin surfaces (Phase B, stage B1) — verified 2026-10-08 17:50 PT
 
 | thing | value |
