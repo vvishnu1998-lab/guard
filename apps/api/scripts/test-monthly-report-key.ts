@@ -21,6 +21,11 @@
  * workbook renderer by a stub. The workbook is not under test here;
  * scripts/hours-export-snapshot.ts pins it.
  *
+ * Phase B, B1: both writers now look up the company's letterhead before the
+ * build, so the fake pool also answers that lookup (with the company's name
+ * and an empty profile), and the workbook stub records the letterhead it is
+ * handed; both writers must pass the company's own.
+ *
  * EXPECTED KEYS ARE WRITTEN OUT BY HAND below, not computed with slugify() or
  * monthlyReportKey(). The parity check is route key === cron key === that
  * literal.
@@ -97,11 +102,13 @@ let activeForCron: string[] = [];                   // what the cron's company q
 const uploads: Array<{ key: string; mime: string; bytes: number }> = [];
 const inserts: Array<{ sql: string; params: unknown[] }> = [];
 const builds: Array<{ company_id: string; start_date: string; end_date: string }> = [];
+/** What each buildHoursWorkbook call was handed as its letterhead (B1). */
+const workbookLetterheads: unknown[] = [];
 const sentryCalls: Array<{ err: unknown; ctx: any }> = [];
 const logEvents: unknown[][] = [];
 const failUploadFor = new Set<string>();            // lowercase company ids
 function reset(): void {
-  uploads.length = 0; inserts.length = 0; builds.length = 0;
+  uploads.length = 0; inserts.length = 0; builds.length = 0; workbookLetterheads.length = 0;
   sentryCalls.length = 0; logEvents.length = 0; failUploadFor.clear();
 }
 
@@ -141,6 +148,12 @@ async function fakeQuery(sql: string, params: unknown[] = []): Promise<{ rows: a
     const c = lookup(params[0]);
     return { rows: c ? [{ id: c.id, is_test: c.is_test }] : [] };
   }
+  // services/letterhead's lookup (B1): the name, and no profile fields or logo.
+  if (q === 'SELECT c.id, c.name, c.contact_email, c.phone, c.address, c.licence_number, c.website, c.logo_url, c.logo_updated_at FROM companies c WHERE c.id = $1') {
+    const c = lookup(params[0]);
+    return { rows: c ? [{ id: c.id, name: c.name, contact_email: null, phone: null, address: null, licence_number: null,
+      website: null, logo_url: null, logo_updated_at: null }] : [] };
+  }
   if (q.startsWith('INSERT INTO monthly_hours_reports')) {
     const month = pgInt(params[1]);
     pgInt(params[2]);
@@ -174,7 +187,7 @@ inject('../src/services/sentry', only('sentry', {
 }));
 inject('../src/services/email', only('email', {}));
 inject('../src/services/hoursWorkbook', only('hoursWorkbook', {
-  buildHoursWorkbook: () => ({}),
+  buildHoursWorkbook: (_data: unknown, lh: unknown) => { workbookLetterheads.push(lh); return {}; },
   workbookToBuffer: async () => Buffer.from('fake-xlsx'),
 }));
 const rolesByMiddleware = new Map<unknown, string[]>();
@@ -369,6 +382,7 @@ async function main(): Promise<void> {
     const cronRow = inserts[0]?.params;
     if (inserts[0]) insertSql.add(inserts[0].sql);
     const cronBuild = builds[0];
+    const cronLh = workbookLetterheads[0] as { companyName?: string } | undefined;
 
     reset();
     const route = await post({ company_id: c.id, year: 2026, month: 8 });
@@ -376,6 +390,7 @@ async function main(): Promise<void> {
     const routeRow = inserts[0]?.params;
     if (inserts[0]) insertSql.add(inserts[0].sql);
     const routeBuild = builds[0];
+    const routeLh = workbookLetterheads[0] as { companyName?: string } | undefined;
 
     check(
       cronKey === expected && routeKey === expected,
@@ -395,6 +410,9 @@ async function main(): Promise<void> {
         `cron:  ${fmt(cronBuild)}\n      route: ${fmt(routeBuild)}`,
       );
       check(uploads[0]?.mime === XLSX_MIME, '  uploaded as xlsx');
+      check(cronLh?.companyName === name && routeLh?.companyName === name,
+        '  and BOTH hand the workbook the company\'s own letterhead (B1)',
+        `cron: ${fmt(cronLh)}\n      route: ${fmt(routeLh)}`);
       check(cron.logs.includes(`[monthly-hours] Generated for company ${c.id} 2026-8`),
         "  the cron's log line is unchanged (docs/OPS/CRONS.md)");
     }

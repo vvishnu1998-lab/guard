@@ -5308,8 +5308,12 @@ pdfkit, exceljs or a mail client cannot draw.
     check and a JPEG marker walk.
   - **Where it runs:** at upload, where `POST /logo` refuses with `LOGO_UNREADABLE`, and at render,
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
-  - **Still open:** consumers are switched over stage by stage, B1 onward. The XLSX and email
-    tests listed above still apply.
+  - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
+    above still apply (B4, B5).
+- **Status 2026-10-07 (B1):** the Activity Logs PDF, both hours workbooks and the analytics CSV now
+  carry the letterhead. The XLSX renderer decodes the logo again before exceljs embeds it, because
+  exceljs embeds bytes verbatim. A header-valid, garbage-body PNG and JPEG through it produce the
+  workbook with no picture and the name in place (`scripts/test-letterhead-b1.ts`, B12).
 
 ## New from the PR #93 post-deploy check (2026-10-06)
 
@@ -5336,7 +5340,8 @@ at 22:00 PT.
 
 ## New from Phase B, stage B0 (2026-10-06)
 
-**Status:** B0 (this PR) builds the letterhead module and changes nothing anyone sees.
+**Status: SHIPPED 2026-10-07** as `09791dd` (PR #95, PROXY; see STATE.md). It built the letterhead
+module and changed nothing anyone sees.
 - **Built:** `services/letterhead`, the `lh` argument on the PDF theme, and the decode check.
 - **Byte-identical:** every existing PDF matches its 5def3a5 output (`scripts/test-letterhead-pdf.ts`).
 - **One behaviour change:** `POST /logo` now refuses a logo that does not decode (N167).
@@ -5375,3 +5380,45 @@ are left over from before the activity-log PDF moved to `services/pdf/activityLo
 - **Fix (not done; Vishnu 2026-10-06: log only):** delete both imports. Ride with the next change
   to that route.
 - **Size XS. Tier 1.**
+
+## New from Phase B, stage B1 (2026-10-07)
+
+**Status:** B1 (this PR) puts the company letterhead on the four admin surfaces, per Vishnu's
+decisions 1a, 2a and 3a (2026-10-07):
+- **#1 Activity Logs PDF:** layout (a) header and footer on every page.
+- **#4 billing hours XLSX and #5 the monthly archive:** a block on SUMMARY (logo, name, contact
+  lines), "Hours Report · Period" with "Powered by NetraOps", and print chrome on all four sheets.
+- **#6 analytics CSV:** up to five preamble lines (name, contact lines, "Powered by NetraOps") above
+  the first section. The live-status violations
+  download is the same endpoint and gets them too; Vishnu's all-company export does not.
+- **No letterhead, no change:** when the lookup returns null, every surface is byte-identical to
+  09791dd (`scripts/test-letterhead-b1.ts`, 59 checks, each identity with a control).
+- **Visible on deploy to every tenant's admins**, STARNET included. Monthly files already archived
+  are not rewritten; the next run is 2026-11-01.
+
+### N171 — analytics CSV cells are not neutralised against spreadsheet formulas
+
+verified 2026-10-07: `rowsToCsv` in `apps/api/src/routes/exports.ts` quotes every value and
+doubles its quotes, and does nothing about a leading `=`, `+`, `-` or `@`. A spreadsheet runs such
+a cell as a formula, quoted or not. The cells include guard-typed text (`description_preview`, from
+reports) and admin-typed names (guards, sites). So a report description such as
+`=HYPERLINK("https://…","Open")` opens in Excel as a live link on the admin's machine.
+- **Pre-existing.** B1 did not touch these cells; its own preamble lines are guarded
+  (`services/letterhead/csv.ts`).
+- **Priority: HIGH (Vishnu, 2026-10-07).** Fix as its own small PR right after B1 ships, before B2.
+- **Fix:** neutralise every cell in `rowsToCsv` the way the preamble is (a leading apostrophe on
+  `= + - @`, tab, CR), with a test that a report description starting with each reads back as text.
+  Check the browser-built checkpoint CSV (`admin/sites/[id]/page.tsx`, surface #8) for the same gap.
+- **Size S. Tier 1** (a code PR through the deploy gate).
+
+### N172 — scripts/test-payable-hours.ts cannot seed its case I since schema v81
+
+verified 2026-10-07 on a local database with the full migration chain: case I, the zero-length
+schedule (`startMin = endMin = -300`, `scripts/test-payable-hours.ts:156`), inserts a shift whose end
+equals its start. `shifts_end_after_start` (v81) refuses it, and the harness stops at its seed
+(`:277`) before any check runs. The same happens at 09791dd, so it predates B1.
+- **Effect:** the D19 payable-hours harness has not run against a current schema since v81, and
+  its billing-route coverage went with it. B1 covers that route in `scripts/test-letterhead-b1.ts`.
+- **Fix:** rewrite case I as a shape v81 still allows, or drop it, and decide whether the
+  NO_SCHEDULE flag can still be reached by new data. Rerun.
+- **Size XS. Tier 0** (test only).

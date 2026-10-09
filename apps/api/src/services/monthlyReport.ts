@@ -46,6 +46,7 @@ import { pool } from '../db/pool';
 import { uploadBufferToS3 } from './s3';
 import { buildHoursExport } from './hoursExport';
 import { buildHoursWorkbook, workbookToBuffer } from './hoursWorkbook';
+import { letterheadForCompany } from './letterhead';
 import { Sentry } from './sentry';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -148,7 +149,9 @@ export interface MonthlyReportResult {
 /**
  * Build one company's monthly hours report and store it at THE key.
  *
- * Order: validate -> look the company up -> build -> key -> upload -> upsert.
+ * Order: validate -> look the company up -> build (with the company's
+ * letterhead, Phase B B1; the lookup never throws, and null keeps today's
+ * workbook) -> key -> upload -> upsert.
  * Everything before the upload refuses with a typed error and writes nothing.
  * A typed refusal (MonthlyReportInputError, MonthlyReportNotEligibleError) is
  * an answer, not a failure, and is not sent to Sentry. Any other error — the
@@ -182,7 +185,8 @@ export async function generateMonthlyReport(
 
     const { start, end } = monthRange(year, month);
     const data = await buildHoursExport({ company_id: id, start_date: start, end_date: end });
-    const buf = await workbookToBuffer(buildHoursWorkbook(data));
+    const lh = await letterheadForCompany(id);
+    const buf = await workbookToBuffer(buildHoursWorkbook(data, lh));
     const key = monthlyReportKey(id, data.company_slug, year, month);
     const s3Url = await uploadBufferToS3(key, buf, XLSX_MIME);
     const saved = await pool.query<{ s3_url: string; generated_at: Date }>(

@@ -12,7 +12,13 @@
  * the rendered PDF through poppler rather than reading this file.
  *
  * Media policy is unchanged: counts only, no embedded images and no
- * filenames, so a 5-photo incident weighs the same as a bare ping.
+ * filenames, so a 5-photo incident weighs the same as a bare ping. The one
+ * image a page can carry is the tenant's logo in the letterhead.
+ *
+ * Chrome (Phase B, B1): with `meta.lh` the header and footer are the tenant's
+ * letterhead (letterhead/pdf.ts, layout (a)); without one, or with null, they
+ * are today's NetraOps chrome, byte for byte. The body never moves: the
+ * letterhead uses the same 0..72 header band and footer band.
  */
 import PDFDocument from 'pdfkit';
 import {
@@ -22,6 +28,7 @@ import {
   CONTENT_TOP, CONTENT_BOTTOM,
 } from './theme';
 import { ACTIVITY_PDF_ROW_CAP, type ActivityRow, type StatusKind } from '../../routes/activityLog';
+import type { Letterhead } from '../letterhead/types';
 
 /**
  * The zone every date in this document is rendered in.
@@ -189,6 +196,11 @@ export interface ActivityPdfMeta {
     /** ISO instant; rendered in SITE_TZ, never the server's zone. */
     clockedInAt: string;
   };
+  /**
+   * The tenant's letterhead, looked up by the route (the renderer does not
+   * touch the database). Absent or null: today's NetraOps chrome.
+   */
+  lh?: Letterhead | null;
 }
 
 /**
@@ -202,7 +214,7 @@ export function renderActivityLogPdf(
   rows: ActivityRow[],
   meta: ActivityPdfMeta,
 ): Promise<Buffer> {
-  const { siteLabel, fromIso, toIso, shift } = meta;
+  const { siteLabel, fromIso, toIso, shift, lh } = meta;
   // Newest first (matches on-screen order)
   rows.sort((a, b) => Date.parse(b.event_time) - Date.parse(a.event_time));
   const truncated = rows.length > ACTIVITY_PDF_ROW_CAP;
@@ -538,7 +550,7 @@ export function renderActivityLogPdf(
   }
 
   // ── Chrome last, now that the page count is known ─────────────────────
-  stampPages(doc, 'ACTIVITY LOGS', (d) => drawFooter(d, siteLabel, periodStr));
+  stampPages(doc, 'ACTIVITY LOGS', (d) => drawFooter(d, siteLabel, periodStr, lh), lh);
   doc.end();
 
   return done;

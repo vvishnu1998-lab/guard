@@ -264,6 +264,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-07 — PR #95, letterhead module (Phase B, stage B0) — verified 2026-10-07 17:31 PT
+
+| thing | value |
+|---|---|
+| merge | PR #95 merged as `09791dd` at **17:00:54 PT** by gate route **PROXY** (`scripts/ops/proxy-merge.sh --live`). Gating guard GRD0024, recalibrated at 16:17 and 16:48 on its 15:30, 16:00 and 16:30 pings. Its day phone that day was iOS `NetraOps/48 CFNetwork/3860.700.1 Darwin/25.6.0`, not the `okhttp/4.12.0` of 10-06, and was the only one with that UA among the three open sessions, all STARNET. GRD0024 pinged at 17:00:34 and the merge ran at ping age 16 s. The branch had been rebased onto `4404f43` (#96); the merge tree equals the approved head's tree (`f8363cbd`). |
+| Railway | `aecfab2d-be84-4266-af33-d1c2e33cd7fb` **SUCCESS** at 17:03:36 PT from `09791dd`. |
+| web | Vercel production on `09791dd`: success at 17:02:41 PT, per its GitHub deployment record. |
+| health | `/health` commit `09791dd`; `/health/crons` 20 jobs, `stale: []` (17:20 PT). |
+| switchover | The new container started at 17:03:08 and the old one stopped at 17:03:50. 0 5xx on either deployment over its whole life. Sentry, 17:00–17:20 PT: on the API only the info-level `retention_run_summary` at 17:00:00, before the merge; on mobile, 0. |
+| restart window | One STARNET write between the merge and the old container stopping: a report at 17:01:16. No guard traffic in the 15 min after the switch. The 17:30 pings from GRD0015 and GRD0024 then landed on the new deployment (201). |
+| visible change | None: no report passed a letterhead yet. `POST /logo` now refuses a logo that does not decode (N167). |
+| #96 | Play Store assets (`marketing/play-store` only), merged 2026-10-06 19:59 PT as `4404f43`, outside a gate window. It restarted Railway (`29d8d13a`). Checked read-only at 00:20 the next day: 0 5xx on both deployments, the 20:00 cron ran once, every STARNET write landed, Sentry 0 on the API. |
+
+---
+
 ## Shipped 2026-10-06 — PR #94, Company Profile web Settings page (Phase A complete) — verified 2026-10-06 16:21 PT
 
 | thing | value |

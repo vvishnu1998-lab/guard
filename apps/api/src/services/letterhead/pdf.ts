@@ -26,6 +26,7 @@
 import PDFDocument from 'pdfkit';
 import { NAVY, GRAY2, MUTED, PAGE_W, PAGE_H, ML, MR, CW } from '../pdf/palette';
 import type { Letterhead } from './types';
+import { contactLines } from './text';
 
 type Doc = InstanceType<typeof PDFDocument>;
 
@@ -62,14 +63,6 @@ function fitText(doc: Doc, s: string, maxW: number): string {
     else hi = mid - 1;
   }
   return lo > 0 ? `${s.slice(0, lo).trimEnd()}…` : '';
-}
-
-function contactLines(lh: Letterhead): string[] {
-  const address = (lh.address ?? '').split(/\r?\n/).map((part) => part.trim()).filter(Boolean).join(', ');
-  const website = (lh.website ?? '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-  const reach = [lh.phone ?? '', lh.contactEmail ?? '', website].filter(Boolean).join('  ·  ');
-  const license = lh.licenceNumber ? `License No. ${lh.licenceNumber}` : '';
-  return [address, reach, license].filter(Boolean);
 }
 
 export function drawLetterheadHeader(doc: Doc, title: string, pageNum: number, totalPages: number, lh: Letterhead): void {
