@@ -22,6 +22,7 @@ import { SiteInstructionsModal } from '../../components/SiteInstructionsModal';
 import { Colors, Spacing, Radius, Fonts } from '../../constants/theme';
 import { guardMessage } from '../../lib/errorCopy';
 import UnsentWritesBanner from '../../components/UnsentWritesBanner';
+import NotificationsOffBanner from '../../components/NotificationsOffBanner';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -583,8 +584,14 @@ export default function HomeScreen() {
           past a map to find is not a warning.
 
           Renders null when the bucket is empty, and its own margins go
-          with it, so the layout is untouched in the normal case. */}
-      <View style={styles.unsentWrap}><UnsentWritesBanner /></View>
+          with it, so the layout is untouched in the normal case.
+
+          The notifications-off banner (N173) is pinned here for the same
+          reason, and also renders null when there is nothing to say. */}
+      <View style={styles.unsentWrap}>
+        <UnsentWritesBanner />
+        <NotificationsOffBanner />
+      </View>
 
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* Map — MapView always mounts with a default initialRegion

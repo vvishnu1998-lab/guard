@@ -22,8 +22,8 @@ import * as Sentry from '@sentry/react-native';
 import { useAuthStore } from '../store/authStore';
 import { useUnreadStore } from '../store/unreadStore';
 import { useShiftStore, syncShiftEndMirror, refreshIfActiveShiftEdited } from '../store/shiftStore';
-import { apiClient } from '../lib/apiClient';
 import { navigateForNotification } from '../lib/navigateForNotification';
+import { registerPushToken } from '../lib/pushRegistration';
 import { startBackgroundLocation, stopBackgroundLocation } from '../tasks/locationBackground';
 import { shouldRearmAfterWindowChange } from '../lib/activeShiftReconcile';
 import { initSentry } from '../lib/sentry';
@@ -62,8 +62,6 @@ initSentry();
 setupAndroidChannels().catch((err) => {
   Sentry.captureException(err, { tags: { flow: 'android_channel_setup' } });
 });
-
-const EAS_PROJECT_ID = '5fd28125-2461-4165-b9df-7f34ced8b194';
 
 // Foreground display: show banner + sound + badge when a push arrives while app is open.
 // Without this, expo-notifications silently drops foreground notifications by default.
@@ -116,36 +114,9 @@ export default function RootLayout() {
   useEffect(() => {
     if (status !== 'authenticated' || mustChangePassword) return;
     (async () => {
-      try {
-        const { status: permStatus } = await Notifications.requestPermissionsAsync();
-        if (permStatus === 'granted') {
-          const t = await Notifications.getExpoPushTokenAsync({ projectId: EAS_PROJECT_ID });
-          await apiClient.post('/auth/guard/fcm-token', { fcm_token: t.data });
-          Sentry.addBreadcrumb({
-            category: 'auth',
-            message: 'fcm-token register success',
-            level: 'info',
-          });
-        } else {
-          Sentry.addBreadcrumb({
-            category: 'auth',
-            message: 'fcm-token register skipped — permission not granted',
-            level: 'info',
-            data: { perm_status: permStatus },
-          });
-        }
-      } catch (err) {
-        console.warn('[push] Failed to register push token:', err);
-        Sentry.addBreadcrumb({
-          category: 'auth',
-          message: 'fcm-token register failed',
-          level: 'warning',
-          data: { message: (err as Error)?.message },
-        });
-        Sentry.captureException(err, {
-          tags: { flow: 'fcm_token_register' },
-        });
-      }
+      // lib/pushRegistration.ts — shared with the notifications-off banner,
+      // which registers the moment permission turns on. Never throws.
+      await registerPushToken();
       // Always pull the latest unread counts so the badge isn't stale on launch.
       refreshUnread();
     })();
