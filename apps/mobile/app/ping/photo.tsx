@@ -26,6 +26,7 @@ import { apiClient, ApiError } from '../../lib/apiClient';
 import { isSessionClosed, handleSessionClosed } from '../../lib/sessionClosed';
 import { uploadToS3 }      from '../../lib/uploadToS3';
 import { currentPingWindow } from '../../lib/pingSchedule';
+import { windowToRemember } from '../../lib/answeredWindow';
 import {
   dismissWindowNotifications,
   outstandingPingWindow,
@@ -118,15 +119,10 @@ export default function PhotoPing() {
       console.log(`[ping] submit complete (${result?.status ?? 'recorded'})`);
       Sentry.addBreadcrumb({ category: 'ping_wizard', message: 'submit succeeded', level: 'info' });
 
-      // Record which window this satisfied so the active-shift PING NOW tile
-      // greys out instead of inviting a duplicate. A backfill (windowLabel
-      // from a missed_ping deep-link) marks the window it backfilled, NOT the
-      // current one — answering 21:00 late leaves the 22:30 tile live, which
-      // is correct. With no label the ping lands in whatever window is open
-      // now, so resolve that one.
-      const satisfied =
-        windowLabel ??
-        (activeShift?.scheduled_start && activeShift?.scheduled_end
+      // The window this ping answered: the one the screen was opened for, or
+      // with no label, whichever is open now.
+      const openNow =
+        activeShift?.scheduled_start && activeShift?.scheduled_end
           ? (() => {
               const w = currentPingWindow({
                 scheduledStart: activeShift.scheduled_start,
@@ -135,8 +131,15 @@ export default function PhotoPing() {
               });
               return w.status === 'open' ? w.window.label : null;
             })()
-          : null);
-      if (satisfied) markWindowPinged(activeSession.id, satisfied);
+          : null;
+      const satisfied = windowLabel ?? openNow;
+      // Tell the PING tiles, so they read PINGED instead of inviting a
+      // duplicate — but only about the window open now, the one they ask
+      // about. A backfill of a closed window leaves them as they were:
+      // answering 21:00 late keeps an unanswered 22:30 live, and no longer
+      // un-answers a 22:30 already pinged (lib/answeredWindow.ts).
+      const remember = windowToRemember(satisfied, openNow);
+      if (remember) markWindowPinged(activeSession.id, remember);
 
       // Clear the delivered OS notification(s) for the window just
       // answered. Nothing in this app has ever called a dismissal API, so
@@ -152,8 +155,8 @@ export default function PhotoPing() {
       // Confirmation now names the window and what remains, instead of
       // "Photo and location saved." A guard who backfills 17:00 at 17:39
       // needs to be told that 17:30 is still open — the old copy left him
-      // to infer it, and the PING NOW tile stays live by design after a
-      // backfill (see markWindowPinged above).
+      // to infer it, and a backfill leaves the PING tile as it was (see
+      // windowToRemember above).
       Alert.alert(
         recorded ? 'Ping Submitted' : 'Already Recorded',
         confirmationMessage({

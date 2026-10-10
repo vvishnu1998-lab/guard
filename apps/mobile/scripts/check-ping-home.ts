@@ -10,7 +10,8 @@
  *   S  pingStatusFor()/pingStatusCopy(): due exactly while the tile is live;
  *      the copy at window edges; everything that is not due or done reads
  *      exactly as Home's old countdown did.
- *   R  answered-window persistence rules.
+ *   R  answered-window rules: persistence, and only the window open now is
+ *      remembered (a backfill must not un-answer it).
  *   N  notifications banner states.
  *   W  wiring in the screens and the store (source-level: they import native
  *      modules, so they cannot be loaded here), including the ping screen's
@@ -28,7 +29,7 @@ import {
   pingTileFor, pingStatusFor, pingStatusCopy, pingRouteFor, formatMinSec,
   type AnsweredWindow,
 } from '../lib/pingTile';
-import { serializeAnsweredWindow, parseAnsweredWindow, shouldApplyStored } from '../lib/answeredWindow';
+import { serializeAnsweredWindow, parseAnsweredWindow, shouldApplyStored, windowToRemember } from '../lib/answeredWindow';
 import { notificationsBannerFor } from '../lib/notificationsBanner';
 
 let passed = 0;
@@ -254,6 +255,30 @@ function instants(startMs: number, endMs: number): number[] {
   check('R6 never into a different session (a handoff swapped it meanwhile)',
     !shouldApplyStored({ stored: w, current: null, activeSessionId: 'sess-2' }));
   check('R7 nothing stored, nothing applied', !shouldApplyStored({ stored: null, current: null, activeSessionId: 'sess-1' }));
+
+  // Only the window open now is remembered (app/ping/photo.tsx): the tile asks
+  // about no other, and a backfill must not overwrite the open window's answer.
+  check('R8 a ping for the window open now is remembered', windowToRemember('22:30', '22:30') === '22:30');
+  check('R9 a backfill of a closed window is not', windowToRemember('22:00', '22:30') === null);
+  check('R10 no window open now: nothing is remembered', windowToRemember('22:30', null) === null && windowToRemember(null, null) === null);
+  const sh = SHIFTS[0];
+  const open2230 = currentPingWindow({
+    scheduledStart: sh.start, scheduledEnd: sh.end,
+    clockedInAt: new Date(Date.parse(sh.start) - 10 * MIN).toISOString(),
+    now: new Date(Date.parse(sh.start) + 40 * MIN),
+  });
+  const tileAfter = (pings: Array<[string, string | null]>) => {
+    let mem: AnsweredWindow | null = null;
+    for (const [answered, openNow] of pings) {
+      const r = windowToRemember(answered, openNow);
+      if (r) mem = { sessionId: SID, label: r };
+    }
+    return pingTileFor(open2230, mem, SID, false);
+  };
+  check('R11 ping 22:30, then backfill 22:00: the tile still reads PINGED',
+    open2230.status === 'open' && open2230.window.label === '22:30' &&
+    tileAfter([['22:30', '22:30'], ['22:00', '22:30']]).label === 'PINGED');
+  check('R12 backfill 22:00 alone: the open 22:30 stays PING NOW', tileAfter([['22:00', '22:30']]).label === 'PING NOW');
 }
 
 // ── N: the notifications banner ───────────────────────────────────────────
@@ -297,6 +322,10 @@ function instants(startMs: number, endMs: number): number[] {
   check('W11 the ping confirmation says "(late)" only when the server stamped submitted_late',
     /wasLate:\s+result\?\.ping\?\.submitted_late === true,/.test(photo) &&
     !photo.includes('Boolean(windowLabel)') && !photo.includes('late ping submit'));
+  check('W12 the ping screen tells the tiles only about the window open now',
+    photo.includes('const remember = windowToRemember(satisfied, openNow);') &&
+    photo.includes('if (remember) markWindowPinged(activeSession.id, remember);') &&
+    !photo.includes('if (satisfied) markWindowPinged'));
 }
 
 reachedEnd = true;

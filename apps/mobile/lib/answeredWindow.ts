@@ -59,3 +59,18 @@ export function shouldApplyStored(args: {
     args.current === null &&
     args.activeSessionId === args.stored.sessionId;
 }
+
+/**
+ * The window a confirmed ping lets the PING tile count as answered: only the
+ * window open now, the one the tile and Home's ping line ask about
+ * (lib/pingTile.ts). A backfill answers a closed window, so there is nothing
+ * to record — and with one slot, recording it overwrote the open window's
+ * answer: ping 07:30, backfill 07:00, and Home read PING DUE NOW for the
+ * 07:30 already pinged.
+ *
+ * `openNow` is the open window's label when the ping is confirmed, or null
+ * when none is open; then nothing is recorded.
+ */
+export function windowToRemember(answered: string | null, openNow: string | null): string | null {
+  return answered !== null && answered === openNow ? answered : null;
+}
