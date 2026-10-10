@@ -752,7 +752,7 @@ export default function HomeScreen() {
                 // active-shift screen never saw a ping action. Same gate as
                 // that screen's tile (lib/pingTile.ts), same /ping route as
                 // the reminder push.
-                const pingTile = pingTileFor(pingWindow, lastPingedWindow, activeSession!.id);
+                const pingTile = pingTileFor(pingWindow, lastPingedWindow, activeSession!.id, currentBreak !== null);
                 const pingStatus = pingStatusFor({
                   pingWindow, nextPingMs, now,
                   answered:  lastPingedWindow,

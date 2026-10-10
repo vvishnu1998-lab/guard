@@ -227,7 +227,7 @@ export default function ActiveShiftScreen() {
 
   // ── PING NOW gate ──────────────────────────────────────────────────────
   // The rule lives in lib/pingTile.ts so Home applies exactly the same one.
-  const pingTile = pingTileFor(pingWindow, lastPingedWindow, activeSession.id);
+  const pingTile = pingTileFor(pingWindow, lastPingedWindow, activeSession.id, currentBreak !== null);
 
   function goPing() {
     if (!pingTile.openWindow) return;

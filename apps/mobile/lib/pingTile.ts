@@ -37,11 +37,17 @@ export interface PingTile {
  * lastPingedWindow), not the server's. When the memory is missing the tile
  * fails OPEN — a redundant ping comes back "Already Recorded", while a
  * wrongly-disabled tile leaves a window unanswered.
+ *
+ * An open break dims the tile: the server waives any window a break overlaps
+ * (services/pingWindows.ts breakOverlapsWindow), so nothing is owed, and the
+ * tile and Home's ping line must not disagree about that. A window answered
+ * before the break still reads PINGED.
  */
 export function pingTileFor(
   pingWindow: PingWindowState | null,
   answered: AnsweredWindow | null,
   sessionId: string,
+  onBreak: boolean,
 ): PingTile {
   const openWindow = pingWindow?.status === 'open' ? pingWindow.window : null;
   const alreadyPinged =
@@ -54,6 +60,7 @@ export function pingTileFor(
   if (pingWindow.status === 'shift_ending')     return { enabled: false, label: 'PING',   note: 'Shift ending',         openWindow };
   if (pingWindow.status === 'before_clock_in')  return { enabled: false, label: 'PING',   note: 'Next window',          openWindow };
   if (alreadyPinged)                            return { enabled: false, label: 'PINGED', note: `${openWindow!.label} done`,   openWindow };
+  if (onBreak)                                  return { enabled: false, label: 'PING',   note: 'On break',             openWindow };
   return { enabled: true, label: 'PING NOW', note: `${openWindow!.label} window`, openWindow };
 }
 
@@ -75,10 +82,9 @@ export type PingStatus =
  * minutes off (N173). This states the obligation instead, from the same
  * gate as the tile.
  *
- * During an open break the window is not owed — the server waives any
- * window a break overlaps (services/pingWindows.ts breakOverlapsWindow) — so
- * it is never reported as due; the line falls back to the countdown. The
- * tile itself stays live during a break, exactly as on active-shift.
+ * "Due" is exactly "the tile is live", so the two cannot disagree. During an
+ * open break the tile is dimmed (the window is waived; see pingTileFor), so
+ * the line falls back to the countdown.
  */
 export function pingStatusFor(args: {
   pingWindow: PingWindowState | null;
@@ -88,10 +94,10 @@ export function pingStatusFor(args: {
   onBreak:    boolean;
   now:        Date;
 }): PingStatus {
-  const tile = pingTileFor(args.pingWindow, args.answered, args.sessionId);
+  const tile = pingTileFor(args.pingWindow, args.answered, args.sessionId, args.onBreak);
   const w = tile.openWindow;
   if (w && tile.label === 'PINGED') return { kind: 'done', window: w, nextInMs: args.nextPingMs };
-  if (w && tile.enabled && !args.onBreak) {
+  if (w && tile.enabled) {
     return { kind: 'due', window: w, closesInMs: Math.max(0, w.end.getTime() - args.now.getTime()) };
   }
   if (args.nextPingMs !== null) return { kind: 'next', nextInMs: args.nextPingMs };

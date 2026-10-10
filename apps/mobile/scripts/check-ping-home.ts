@@ -2,12 +2,14 @@
  * check-ping-home — batch/mobile-19 (N173): PING NOW on Home, the "ping due"
  * line, the answered-window memory, and the notifications-off banner.
  *
- *   T  pingTileFor() is the active-shift gate it replaced, minute by minute,
- *      across shifts, clock-ins and answers (reference: the inline rule at
- *      f5a84c4 app/active-shift/index.tsx:252-265, copied verbatim below).
- *   S  pingStatusFor()/pingStatusCopy(): due only while the tile is live and
- *      no break is open; the copy at window edges; everything that is not
- *      due or done reads exactly as Home's old countdown did.
+ *   T  pingTileFor() with no break open is the active-shift gate it
+ *      replaced, minute by minute, across shifts, clock-ins and answers
+ *      (reference: the inline rule at f5a84c4
+ *      app/active-shift/index.tsx:252-265, copied verbatim below); an open
+ *      break dims it.
+ *   S  pingStatusFor()/pingStatusCopy(): due exactly while the tile is live;
+ *      the copy at window edges; everything that is not due or done reads
+ *      exactly as Home's old countdown did.
  *   R  answered-window persistence rules.
  *   N  notifications banner states.
  *   W  wiring in the screens and the store (source-level: they import native
@@ -116,7 +118,7 @@ function instants(startMs: number, endMs: number): number[] {
           for (const state of [pw, null] as Array<PingWindowState | null>) {
             cases += 1;
             const want = legacyTile(state, a, SID);
-            const got = pingTileFor(state, a, SID);
+            const got = pingTileFor(state, a, SID, false);
             const same = got.enabled === want.enabled && got.label === want.label && got.note === want.note &&
               (got.openWindow === null ? want.openWindow === null
                 : want.openWindow !== null && got.openWindow.label === want.openWindow.label &&
@@ -143,20 +145,26 @@ function instants(startMs: number, endMs: number): number[] {
     scheduledStart: sh.start, scheduledEnd: sh.end,
     clockedInAt: new Date(st + ciMins * MIN).toISOString(), now: new Date(st + minsAfterStart * MIN),
   });
-  const openTile = pingTileFor(at(40), null, SID);
+  const openTile = pingTileFor(at(40), null, SID, false);
   check('T3 open, unanswered: PING NOW, enabled, names the window',
     openTile.enabled && openTile.label === 'PING NOW' && openTile.note === '22:30 window', JSON.stringify(openTile));
-  const done = pingTileFor(at(40), { sessionId: SID, label: '22:30' }, SID);
+  const done = pingTileFor(at(40), { sessionId: SID, label: '22:30' }, SID, false);
   check('T4 open, answered on this session: PINGED, disabled', !done.enabled && done.label === 'PINGED' && done.note === '22:30 done');
-  const other = pingTileFor(at(40), { sessionId: 'session-b', label: '22:30' }, SID);
+  const other = pingTileFor(at(40), { sessionId: 'session-b', label: '22:30' }, SID, false);
   check('T5 an answer from another session does not count', other.enabled && other.label === 'PING NOW');
-  const lateCi = pingTileFor(at(40, 45), null, SID);
+  const lateCi = pingTileFor(at(40, 45), null, SID, false);
   check('T6 the window opened before clock-in: PING, "Next window"', !lateCi.enabled && lateCi.note === 'Next window', JSON.stringify(lateCi));
-  check('T7 before the shift: "Starts at shift time"', pingTileFor(at(-20), null, SID).note === 'Starts at shift time');
-  check('T8 no whole window left (past scheduled_end): "Shift ending"', pingTileFor(at(485), null, SID).note === 'Shift ending');
-  check('T8b an 8-hour shift\'s last whole window is still open at 05:59', pingTileFor(at(479), null, SID).note === '05:30 window');
+  check('T7 before the shift: "Starts at shift time"', pingTileFor(at(-20), null, SID, false).note === 'Starts at shift time');
+  check('T8 no whole window left (past scheduled_end): "Shift ending"', pingTileFor(at(485), null, SID, false).note === 'Shift ending');
+  check('T8b an 8-hour shift\'s last whole window is still open at 05:59', pingTileFor(at(479), null, SID, false).note === '05:30 window');
   check('T9 the route is the deep link\'s: /ping?window_label=22%3A30',
     openTile.openWindow !== null && pingRouteFor(openTile.openWindow) === '/ping?window_label=22%3A30');
+  const brk = pingTileFor(at(40), null, SID, true);
+  check('T10 an open break dims the tile: PING, disabled, "On break"',
+    !brk.enabled && brk.label === 'PING' && brk.note === 'On break' && brk.openWindow?.label === '22:30', JSON.stringify(brk));
+  const brkDone = pingTileFor(at(40), { sessionId: SID, label: '22:30' }, SID, true);
+  check('T11 a window answered before the break still reads PINGED', !brkDone.enabled && brkDone.label === 'PINGED');
+  check('T12 the earlier states still win during a break', pingTileFor(at(40, 45), null, SID, true).note === 'Next window');
 }
 
 // ── S: the ping line ──────────────────────────────────────────────────────
@@ -210,8 +218,9 @@ function instants(startMs: number, endMs: number): number[] {
           const pw = currentPingWindow(args);
           const next = remainingMsUntilNextPing(args);
           const s = pingStatusFor({ pingWindow: pw, nextPingMs: next, answered: null, sessionId: SID, onBreak: brk, now });
-          const tile = pingTileFor(pw, null, SID);
-          if ((s.kind === 'due') !== (tile.enabled && !brk)) bad.push(`due/tile ${shf.name} ${now.toISOString()} brk=${brk}`);
+          const tile = pingTileFor(pw, null, SID, brk);
+          if ((s.kind === 'due') !== tile.enabled) bad.push(`due/tile ${shf.name} ${now.toISOString()} brk=${brk}`);
+          if (brk && tile.enabled) bad.push(`tile live on break ${shf.name} ${now.toISOString()}`);
           if (s.kind !== 'due' && s.kind !== 'done') {
             const legacy = legacyCountdownLabel(next);
             const mine = pingStatusCopy(s)?.text ?? null;
@@ -224,7 +233,7 @@ function instants(startMs: number, endMs: number): number[] {
       }
     }
   }
-  check('S9 at every instant: due exactly when the tile is live and no break is open; otherwise the old countdown, word for word',
+  check('S9 at every instant: due exactly when the tile is live, the tile never live on a break; otherwise the old countdown, word for word',
     bad.length === 0, `${bad.slice(0, 3).join(' | ')} (${bad.length})`);
   check('S10 formatMinSec keeps the old m:ss (minutes unbounded)', formatMinSec(65 * MIN + 5000) === '65:05' && formatMinSec(59_000) === '0:59');
 }
@@ -268,14 +277,14 @@ function instants(startMs: number, endMs: number): number[] {
   const layout = src('app/_layout.tsx');
   const store = src('store/shiftStore.ts');
 
-  check('W1 Home gates its tile and line with lib/pingTile', /pingTileFor\(pingWindow, lastPingedWindow, activeSession!\.id\)/.test(home) && /pingStatusFor\(\{/.test(home));
+  check('W1 Home gates its tile and line with lib/pingTile', /pingTileFor\(pingWindow, lastPingedWindow, activeSession!\.id, currentBreak !== null\)/.test(home) && /pingStatusFor\(\{/.test(home));
   check('W2 Home routes through pingRouteFor, never a hand-built /ping URL', home.includes('pingRouteFor(') && !home.includes('/ping?window_label='));
   check('W3 Home\'s old countdown is gone', !home.includes('remainingMsUntilNextPing') && !home.includes('PingCountdownBanner'));
   check('W4 Home pins the notifications banner above the ScrollView',
     home.indexOf('<NotificationsOffBanner />') > -1 && home.indexOf('<NotificationsOffBanner />') < home.indexOf('<ScrollView'));
   check('W5 the PING tile leads the action row', home.indexOf('pingTile.label') > -1 && home.indexOf('pingTile.label') < home.indexOf("router.push('/reports/new')"));
   check('W6 active-shift uses the shared gate and has no inline copy',
-    active.includes('pingTileFor(pingWindow, lastPingedWindow, activeSession.id)') && !active.includes('alreadyPinged'));
+    active.includes('pingTileFor(pingWindow, lastPingedWindow, activeSession.id, currentBreak !== null)') && !active.includes('alreadyPinged'));
   check('W7 _layout registers through lib/pushRegistration only', layout.includes('await registerPushToken()') && !layout.includes('getExpoPushTokenAsync'));
   check('W8 markWindowPinged persists the answer', /markWindowPinged: \(sessionId, label\) => \{[\s\S]{0,200}setItemAsync\(ANSWERED_WINDOW_KEY/.test(store));
   check('W9 setActiveSession restores it, guarded', /getItemAsync\(ANSWERED_WINDOW_KEY\)[\s\S]{0,300}shouldApplyStored\(/.test(store));
