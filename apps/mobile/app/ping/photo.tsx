@@ -35,18 +35,22 @@ import { guardMessage } from '../../lib/errorCopy';
 
 /** POST /locations/ping. `already_recorded` means the window already had a
  *  ping and the server returned the incumbent instead of adding a second
- *  (schema_v49 uq_location_pings_session_window). */
+ *  (schema_v49 uq_location_pings_session_window). `ping` is the row as
+ *  written; submitted_late is optional here so a body without it says
+ *  nothing about lateness rather than something wrong. */
 interface PingSubmitResponse {
   status: 'recorded' | 'already_recorded';
-  ping:   { id: string } | null;
+  ping:   { id: string; submitted_late?: boolean } | null;
 }
 
 export default function PhotoPing() {
   const { activeSession, activeShift, markWindowPinged } = useShiftStore();
-  // Missed-ping backfill window — set via deep-link from a missed_ping
-  // notification tap (navigateForNotification.ts). When present, the
-  // server sets submitted_late + resolves the matching missed_pings
-  // row on 201. Falsy when the guard opened the screen manually.
+  // The window this ping answers. Every entry point sets it: the PING
+  // tiles and Home's due line (lib/pingTile.ts pingRouteFor) and both
+  // pushes, ping_reminder and missed_ping (navigateForNotification.ts).
+  // A label does NOT mean late — usually it is the window open now. The
+  // server decides lateness (submitted_late) and resolves the matching
+  // missed_pings row; see the confirmation below.
   const { window_label } = useLocalSearchParams<{ window_label?: string }>();
   const windowLabel = typeof window_label === 'string' && window_label ? window_label : null;
 
@@ -84,7 +88,7 @@ export default function PhotoPing() {
       console.log('[ping] submitting…');
       Sentry.addBreadcrumb({
         category: 'ping_wizard',
-        message: windowLabel ? 'late ping submit (missed_ping backfill)' : 'submit initiated',
+        message: 'submit initiated',
         level: 'info',
         data: {
           session_id:   activeSession.id,
@@ -154,7 +158,10 @@ export default function PhotoPing() {
         recorded ? 'Ping Submitted' : 'Already Recorded',
         confirmationMessage({
           window:   satisfied ?? null,
-          wasLate:  Boolean(windowLabel),
+          // The server's verdict on the row it wrote: true only for a
+          // backfill of a window that had already closed. The label alone
+          // said "(late)" on every on-time tile tap.
+          wasLate:  result?.ping?.submitted_late === true,
           recorded,
           outstanding,
         }),

@@ -13,7 +13,8 @@
  *   R  answered-window persistence rules.
  *   N  notifications banner states.
  *   W  wiring in the screens and the store (source-level: they import native
- *      modules, so they cannot be loaded here).
+ *      modules, so they cannot be loaded here), including the ping screen's
+ *      "(late)", which repeats the server's submitted_late.
  *
  * Run: npm run check:ping-home
  */
@@ -276,6 +277,7 @@ function instants(startMs: number, endMs: number): number[] {
   const active = src('app/active-shift/index.tsx');
   const layout = src('app/_layout.tsx');
   const store = src('store/shiftStore.ts');
+  const photo = src('app/ping/photo.tsx');
 
   check('W1 Home gates its tile and line with lib/pingTile', /pingTileFor\(pingWindow, lastPingedWindow, activeSession!\.id, currentBreak !== null\)/.test(home) && /pingStatusFor\(\{/.test(home));
   check('W2 Home routes through pingRouteFor, never a hand-built /ping URL', home.includes('pingRouteFor(') && !home.includes('/ping?window_label='));
@@ -289,6 +291,11 @@ function instants(startMs: number, endMs: number): number[] {
   check('W8 markWindowPinged persists the answer', /markWindowPinged: \(sessionId, label\) => \{[\s\S]{0,200}setItemAsync\(ANSWERED_WINDOW_KEY/.test(store));
   check('W9 setActiveSession restores it, guarded', /getItemAsync\(ANSWERED_WINDOW_KEY\)[\s\S]{0,300}shouldApplyStored\(/.test(store));
   check('W10 clearSession deletes it', /clearSession: \(\) => \{[\s\S]{0,300}deleteItemAsync\(ANSWERED_WINDOW_KEY\)/.test(store));
+  // Every entry point now opens /ping with a window_label, so the label
+  // cannot mean late. "(late)" is the server's verdict on the row it wrote.
+  check('W11 the ping confirmation says "(late)" only when the server stamped submitted_late',
+    /wasLate:\s+result\?\.ping\?\.submitted_late === true,/.test(photo) &&
+    !photo.includes('Boolean(windowLabel)') && !photo.includes('late ping submit'));
 }
 
 reachedEnd = true;
