@@ -266,7 +266,8 @@ function instants(startMs: number, endMs: number): number[] {
   check('N4 denied but the OS will still ask (Android, first denial): tap asks', den1?.action === 'request');
   const den = notificationsBannerFor({ status: 'denied', canAskAgain: false });
   check('N5 denied for good (iOS): tap opens Settings, and says so',
-    den?.action === 'settings' && den.sub === 'You won’t be reminded when a ping is due. Tap to turn on notifications in Settings.');
+    den?.action === 'settings' &&
+    den.sub === 'You won’t be reminded when a ping is due. Tap to turn on notifications in Settings → Apps → NetraOps → Notifications.');
   check('N6 the title', den?.title === '⚠ PING REMINDERS ARE OFF' && und?.title === den?.title);
 }
 

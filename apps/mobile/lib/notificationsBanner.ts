@@ -19,8 +19,10 @@ export interface NotifPermission {
 export interface NotifBanner {
   title: string;
   sub: string;
-  /** 'request' shows the OS prompt; 'settings' opens this app's Settings
-   *  page, the only route left once the OS refuses to prompt. */
+  /** 'request' shows the OS prompt; 'settings' opens Settings, the only
+   *  route left once the OS refuses to prompt. The copy spells out the path
+   *  because Settings does not always open on this app's page (the iOS 26.5
+   *  simulator opened its main page). */
   action: 'request' | 'settings';
 }
 
@@ -32,5 +34,5 @@ export function notificationsBannerFor(p: NotifPermission | null): NotifBanner |
   const canPrompt = p.status === 'undetermined' || p.canAskAgain;
   return canPrompt
     ? { title: TITLE, sub: 'You won’t be reminded when a ping is due. Tap to turn on notifications.', action: 'request' }
-    : { title: TITLE, sub: 'You won’t be reminded when a ping is due. Tap to turn on notifications in Settings.', action: 'settings' };
+    : { title: TITLE, sub: 'You won’t be reminded when a ping is due. Tap to turn on notifications in Settings → Apps → NetraOps → Notifications.', action: 'settings' };
 }
