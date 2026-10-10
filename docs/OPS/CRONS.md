@@ -60,10 +60,11 @@ normal steady state for 13 of the 19 jobs (see table) so silence is not a signal
 
 ## Catch coverage
 
-**Four jobs have no top-level catch at all:**
+**Five jobs have no top-level catch at all** (was four before 2026-09-19):
 
 | job | unwrapped call | note |
 |---|---|---|
+| `chatRetention` | `pool.query` at `:93` | **deliberate, 2026-09-19.** Its console-only catch was DELETED so the throw reaches the `runJob` wrapper: `[chatRetention] tick failed` + `Sentry.captureException({tags:{job}})` + `cron_heartbeats.last_result='error'`. Unlike the four below, a throw here is loud. |
 | `dailyShiftEmail` | `pool.query` at `:24` | DB blip at 09:00 PT → "Starting" logged, "Done" never, nothing else |
 | `missedShiftAlert` | `pool.query` at `:25` | fully silent |
 | `monthlyHoursReport` | `pool.query` at `:52` | "Starting" logged, "Done" never |
@@ -73,10 +74,13 @@ normal steady state for 13 of the 19 jobs (see table) so silence is not a signal
 `breakExpiryCron`, `clockOutReminder`, `missedReportCron`, `orphanedSessionCheck`,
 `taskDueCron`.
 
-**Nine jobs catch to `console.error` only — the error exists solely in Railway
-stdout:** `chatRetention`, `expireSwapRequests`, `handoffNudge`,
-`lateClockInReminder`, `locationIntegrityCron`, `missedPingCron`, `pingReminder`,
-`preShiftReminder`, `shiftStartReminder`.
+**Eight jobs catch to `console.error` only — the error exists solely in Railway
+stdout:** `expireSwapRequests`, `handoffNudge`, `lateClockInReminder`,
+`locationIntegrityCron`, `missedPingCron`, `pingReminder`, `preShiftReminder`,
+`shiftStartReminder`.
+
+`chatRetention` was the ninth until 2026-09-19, when its catch was deleted so
+failures reach Sentry. It is the only one that has moved out of this set.
 
 Two sharp edges inside that set:
 - **`pingReminder` imports Sentry but does not use it at `:407`** — its top-level
@@ -87,11 +91,19 @@ Two sharp edges inside that set:
 
 ## The 19 jobs
 
+> **This table is missing one.** `unstaffedPostWarning` (`*/5 * * * *`, added
+> 2026-09-11 in 39a2d8a) registers in production but has no row here and no
+> entry in the catch-coverage lists above — it is a console-only top-level
+> catch at `unstaffedPostWarning.ts:203`, so the "eight jobs" count above is
+> really nine. 20 jobs register; this table documents 19. Found while moving
+> `chatRetention` to daily on 2026-09-19; not fixed there because writing a
+> row means auditing a job that change does not touch.
+
 | # | Job (file:line) | Interval | TZ | QUIET tick logs | ACTIVE tick logs | Throw → |
 |---|---|---|---|---|---|---|
 | 1 | `autoCompleteShifts.ts:281` | `*/5 * * * *` | container (UTC) | **`[auto_complete_shifts.tick]` {all zeros, duration_ms} — HEARTBEAT** | + `[autoCompleteShifts] Auto-completed N shift(s), closed N open session(s), N open break(s)` | caught `:302` → console + **Sentry** |
 | 2 | `breakExpiryCron.ts:339` | `* * * * *` | container (UTC) | **`[break_expiry.tick]` {all zeros, duration_ms} — HEARTBEAT** | + `[breakExpiry] auto-closed N break(s), finalized N overrun verdict(s) (N flagged), return-checked N (N pushed)` | caught `:363` → console + **Sentry** |
-| 3 | `chatRetention.ts:8` | `0 * * * *` | container (UTC) | **nothing** (gated `rowCount > 0`) | `[chat-retention] Deleted N messages older than 48h` | caught `:16` → console only |
+| 3 | `chatRetention.ts:92` | `37 4 * * *` | container (UTC) | **nothing** (gated `rowCount > 0`) | `[chat-retention] deleted N messages older than 365d` | **no inner catch** → wrapper: console + **Sentry** + `last_result='error'` |
 | 4 | `clockOutReminder.ts:220` | `*/5 * * * *` | container (UTC) | **`[clock_out_reminder.tick]` {claimed:0, pushed:0, failed:0, duration_ms} — HEARTBEAT** | same nonzero; `[clock_out_reminder] push failed session=…`; Sentry warn `clock_out_reminder_push_failed` when `failed > 0` | caught `:207` → console + **Sentry** |
 | 5 | `dailyShiftEmail.ts:19` | `0 9 * * *` | **America/Los_Angeles** | `[daily-email] Starting at <ISO>` + `[daily-email] Done — sent: 0, failed: 0` (both unconditional) | + `[daily-email] Failed for shift <id>` | **NO top-level catch** → silent; "Starting" with no "Done" |
 | 6 | `expireSwapRequests.ts:243` | `* * * * *` | container (UTC) | **nothing** — both halves early-return at `:124` and `:226` (`if (!result.rowCount) return 0`) *before* their logs | `[expire-swap] handoff: N row(s) expired (window 30m)` / `[expire-swap] swap: N row(s) expired (window 24h / start-1h)` / `[expire-swap] reminder: N pending swap(s) reminded at halfway` | 2 catches `:249`, `:254` → console only |
@@ -227,7 +239,7 @@ reasons, one of them measured:
 |---|---|---|---|
 | `autoCompleteShifts` | `*/5 * * * *` | container (UTC) | **false** |
 | `breakExpiryCron` | `* * * * *` | container (UTC) | **false** |
-| `chatRetention` | `0 * * * *` | container (UTC) | **false** |
+| `chatRetention` | `37 4 * * *` | container (UTC) | **false** |
 | `clockOutReminder` | `*/5 * * * *` | container (UTC) | **false** |
 | `dailyShiftEmail` | `0 9 * * *` | **America/Los_Angeles** | **false** |
 | `expireSwapRequests` | `* * * * *` | container (UTC) | **false** |
@@ -359,10 +371,16 @@ Lag scales with the interval, because the threshold is a multiple of it:
 | job class | flagged after |
 |---|---|
 | per-minute (3 jobs) | ~2 minutes |
-| `*/5` (10 jobs) | ~10 minutes |
-| hourly (2 jobs) | ~2 hours |
-| **daily (3 jobs)** | **up to 48 hours** |
+| `*/5` (11 jobs) | ~10 minutes |
+| hourly (1 job) | ~2 hours |
+| **daily (4 jobs)** | **up to 48 hours** |
 | **monthly (1 job)** | **about 62 days** |
+
+`chatRetention` moved from hourly to daily on 2026-09-19, which is why those
+two rows changed; the `*/5` count was already wrong by one. THIS TABLE ONLY
+DETECTS A JOB THAT STOPS TICKING. `computeStaleJobs` branches on row age and
+never on `last_result`, so a job that ticks and throws every night writes a
+fresh row and never appears in `stale`. Sentry is the channel for that.
 
 A `monthlyHoursReport` that dies is not detected for two months. Accepted for
 v1. The fix is to compare against the next expected fire time rather than a

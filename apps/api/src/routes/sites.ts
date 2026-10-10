@@ -185,9 +185,15 @@ router.put('/:id', requireAuth('company_admin'), async (req, res) => {
        contract_start = COALESCE($3, contract_start),
        contract_end = COALESCE($4, contract_end),
        timezone = COALESCE($5, timezone)
-     WHERE id = $6 RETURNING *`,
-    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, timezone || null, req.params.id]
+     WHERE id = $6 AND company_id = $7 RETURNING *`,
+    [name?.trim() || null, address?.trim() || null, contract_start || null, contract_end || null, timezone || null, req.params.id, req.user!.company_id]
   );
+  // N96. The gate above already 404s a foreign site; this is the second half
+  // of the belt and braces. The gate is a SEPARATE statement on a SEPARATE
+  // pooled connection, so its verdict is a read that the write does not
+  // inherit — scoping the write is what makes the tenant check part of the
+  // mutation rather than a promise made a moment earlier.
+  if (!result.rows[0]) return res.status(404).json({ error: 'Site not found' });
   res.json(result.rows[0]);
 });
 
@@ -355,10 +361,13 @@ router.post('/:id/instructions', requireAuth('company_admin'), upload.single('fi
   const key = `site-instructions/${req.params.id}/instructions.pdf`;
   const url = await uploadBufferToS3(key, buf, 'application/pdf');
 
-  await pool.query(
-    'UPDATE sites SET instructions_pdf_url = $1 WHERE id = $2',
-    [url, req.params.id]
+  const result = await pool.query(
+    'UPDATE sites SET instructions_pdf_url = $1 WHERE id = $2 AND company_id = $3',
+    [url, req.params.id, req.user!.company_id]
   );
+  // N96. rowCount, not rows[0]: this statement has no RETURNING, so rows is
+  // always empty and a rows[0] test would 404 every upload.
+  if (result.rowCount === 0) return res.status(404).json({ error: 'Site not found' });
 
   res.json({ url, key });
 });
@@ -413,23 +422,58 @@ router.patch('/:id/client-access', requireAuth('company_admin', 'vishnu'), async
   if (!siteRow.rows[0]) return res.status(404).json({ error: 'Site not found' });
   if (!siteRow.rows[0].is_active) return res.status(409).json({ error: 'Site is deactivated. Reactivate it before making changes.' });
 
-  await Promise.all([
+  const [, siteUpdate] = await Promise.all([
     // v36 multi-site: don't touch clients.is_active (that's a per-client
     // global) — just kick any live JWT whose baked-in site_id was this
     // site by bumping tokens_not_before. Filter to clients actually
     // linked to this site via the junction; login re-derives access
     // from the client_sites + sites.client_access_disabled_at gate.
-    pool.query(
-      `UPDATE clients
-          SET tokens_not_before = NOW()
-        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
-      [req.params.id],
-    ),
-    pool.query(
-      `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
-      [req.params.id],
-    ),
+    // N96. Tenant-scoped on the same terms as the sites write below. This one
+    // runs FIRST and unconditionally — the Promise.all starts both before
+    // either result is inspected — so on a cross-tenant call it would revoke
+    // another tenant's client sessions even though the site write matched
+    // nothing. The `site_id` filter alone does not bound it to the caller's
+    // tenant; `client_sites` is a junction and the predicate never mentions
+    // who is asking.
+    //
+    // NO rowCount CHECK HERE, deliberately: a site with no linked clients
+    // legitimately updates zero rows, so a 404 on that would refuse the toggle
+    // for every client-less site. The tenant verdict is the sites write's to
+    // make, and it is made below.
+    isVishnu
+      ? pool.query(
+          `UPDATE clients
+              SET tokens_not_before = NOW()
+            WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
+          [req.params.id],
+        )
+      : pool.query(
+          `UPDATE clients
+              SET tokens_not_before = NOW()
+            WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)
+              AND company_id = $2`,
+          [req.params.id, req.user!.company_id],
+        ),
+    // N96. Tenant-scoped for a company_admin, deliberately NOT for vishnu —
+    // mirroring the gate at the top of this route, which picks an unscoped
+    // SELECT for the same reason. This route grants cross-tenant access to the
+    // super-admin BY DESIGN, and `company_id` is optional on AuthPayload and
+    // absent for that role, so an unconditional predicate here would compare
+    // against undefined and refuse every super-admin call.
+    isVishnu
+      ? pool.query(
+          `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'} WHERE id = $1`,
+          [req.params.id],
+        )
+      : pool.query(
+          `UPDATE sites SET client_access_disabled_at = ${enabled ? 'NULL' : 'NOW()'}
+            WHERE id = $1 AND company_id = $2`,
+          [req.params.id, req.user!.company_id],
+        ),
   ]);
+
+  // N96. rowCount on the sites write — no RETURNING on either arm.
+  if (siteUpdate.rowCount === 0) return res.status(404).json({ error: 'Site not found' });
 
   res.json({ success: true });
 });
@@ -514,10 +558,12 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
 
   // Reactivation branch — single flag update per policy.
   if (active) {
-    await pool.query(
-      'UPDATE sites SET is_active = true WHERE id = $1',
-      [req.params.id],
+    const reactivated = await pool.query(
+      'UPDATE sites SET is_active = true WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.user!.company_id],
     );
+    // N96. rowCount — no RETURNING on this statement.
+    if (reactivated.rowCount === 0) return res.status(404).json({ error: 'Site not found' });
     return res.json({ success: true, cascaded: null });
   }
 
@@ -526,20 +572,42 @@ router.patch('/:id/active', requireAuth('company_admin'), async (req, res) => {
   const affectedGuardIds = new Set<string>();
   try {
     await client.query('BEGIN');
-    await client.query(
-      'UPDATE sites SET is_active = false, client_access_disabled_at = NOW() WHERE id = $1',
-      [req.params.id],
+    const deactivated = await client.query(
+      'UPDATE sites SET is_active = false, client_access_disabled_at = NOW() WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.user!.company_id],
     );
+    // N96. rowCount — no RETURNING. ROLLBACK first: this is the head of a
+    // cascade that goes on to unassign guards and revoke client sessions, and
+    // none of that may survive a site the write could not match.
+    if (deactivated.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Site not found' });
+    }
     // v36 multi-site: kick any live client session whose JWT baked in
     // this site_id. Don't touch clients.is_active — a client covering
     // sites A, B, C shouldn't lose global access just because B was
     // deactivated. Login re-derives access from client_sites + the
     // site's is_active flag.
+    // N96. Tenant-scoped like every other write in this file. Unconditional,
+    // with no isVishnu arm: this route is requireAuth('company_admin') alone,
+    // so there is no super-admin caller to exempt — unlike /:id/client-access,
+    // which admits `vishnu` and needs the ternary.
+    //
+    // It was already unreachable cross-tenant once the site UPDATE above began
+    // ROLLBACKing on a foreign row, so this closes a window that was shut by
+    // SEQUENCING. Safe-by-ordering is the weaker guarantee: it holds only while
+    // the statement above it keeps its 404, and nothing enforces that pairing.
+    // A predicate on the statement itself survives someone reordering the
+    // cascade or lifting this block into another route.
+    //
+    // No rowCount check, same reason as the client-access twin: a site with no
+    // linked clients legitimately revokes nothing.
     await client.query(
       `UPDATE clients
           SET tokens_not_before = NOW()
-        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)`,
-      [req.params.id],
+        WHERE id IN (SELECT client_id FROM client_sites WHERE site_id = $1)
+          AND company_id = $2`,
+      [req.params.id, req.user!.company_id],
     );
     const cancelled = await client.query<{ id: string; guard_id: string | null }>(
       `UPDATE shifts

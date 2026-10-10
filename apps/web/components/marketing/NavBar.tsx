@@ -21,10 +21,10 @@ export default function NavBar() {
 
         {/* Nav links + CTAs */}
         <div className="flex items-center gap-3 md:gap-6">
-          <a href="#features" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
+          <a href="/#features" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             FEATURES
           </a>
-          <a href="#faq" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
+          <a href="/#faq" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             FAQ
           </a>
           <a href="#contact" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">

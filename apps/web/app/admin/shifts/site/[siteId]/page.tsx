@@ -395,7 +395,7 @@ export default function SiteShiftsPage() {
         onClose={() => setShowModal(false)}
         onCreated={load}
         guards={guards}
-        sites={site ? [{ id: site.id, name: site.name }] : []}
+        sites={site ? [{ id: site.id, name: site.name, timezone: site.timezone }] : []}
         prefilledSiteId={siteId}
       />
       <AssignGuardModal

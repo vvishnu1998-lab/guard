@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "PATH=/opt/homebrew/bin:$PATH ts-node-dev --respawn --transpile-only -r dotenv/config src/index.ts dotenv_config_path=../../.env",
     "build": "tsc",
+    "check:types": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.scripts.json",
     "start": "node dist/index.js",
     "db:migrate": "ts-node --require dotenv/config src/db/migrate.ts dotenv_config_path=../../.env",
     "seed:reviewer": "ts-node --require dotenv/config scripts/seed-apple-reviewer.ts dotenv_config_path=../../.env",
@@ -12,7 +13,8 @@
     "script:test-specific-dates": "ts-node --require dotenv/config scripts/test-specific-dates.ts dotenv_config_path=../../.env",
     "script:hours-snapshot": "ts-node --require dotenv/config scripts/hours-export-snapshot.ts dotenv_config_path=../../.env",
     "script:test-guard-site-enforcement": "ts-node --require dotenv/config scripts/test-guard-site-enforcement.ts dotenv_config_path=../../.env",
-    "check:window-anchor": "ts-node --require dotenv/config scripts/check-window-anchor.ts dotenv_config_path=../../.env"
+    "check:window-anchor": "ts-node --require dotenv/config scripts/check-window-anchor.ts dotenv_config_path=../../.env",
+    "check:email-escaping": "ts-node scripts/check-email-escaping.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",

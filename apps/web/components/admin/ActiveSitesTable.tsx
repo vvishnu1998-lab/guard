@@ -1,10 +1,14 @@
 'use client';
 import Link from 'next/link';
 import { formatHoursHHMM } from '../../lib/formatHours';
+import { payableOf } from '../../lib/payableHours';
 
 interface ShiftHours {
   scheduled_hours: number;
   actual_hours:    number;
+  // Optional: an API deployed before D19 does not send it (Vercel and
+  // Railway deploy separately); the cell then reads '—'.
+  payable_hours?:  number;
   break_hours:     number;
   violation_hours: number;
 }
@@ -15,10 +19,8 @@ interface Site {
   guard_count: number;
   reports_today: number;
   // Legacy scalar retained on the interface (the API still emits it) but
-  // Phase 2 Q3 has us trust the `hours` object exclusively. If the API ever
-  // omits `hours`, actualHoursThisWeek() returns 0 and the cell shows "—"
-  // via formatHoursHHMM — no silent regression to the stored-total_hours
-  // formula.
+  // never read: it is the STORED total_hours (start-clamped), neither Actual
+  // nor Payable. The HOURS cell shows hours.payable_hours, '—' when absent.
   hours_this_week: number;
   hours?: ShiftHours;
   days_until_deletion: number | null;
@@ -41,13 +43,23 @@ function displayStatus(site: Site): { label: string; color: string } {
   return                { label: 'INACTIVE',  color: 'text-gray-500' };
 }
 
-// Phase 2 Q3: trust `hours.actual_hours` exclusively. The Phase 1 API
-// always emits the object alongside the legacy scalar, so this branch
-// only degrades to 0 (rendered "—") if the API has genuinely regressed.
+// The STATUS input, not a displayed figure: any clocked-in time this week,
+// raw, so a site whose only work fell outside its scheduled window still
+// reads SCHEDULED. Deliberately Actual, not Payable (D19). A missing object
+// gives 0, which only means "no activity" here — this value is never
+// rendered, so the 0 cannot show up as "0h 00m".
 function actualHoursThisWeek(site: Site): number {
   const fromObj = site.hours?.actual_hours;
   return typeof fromObj === 'number' && Number.isFinite(fromObj) ? fromObj : 0;
 }
+
+// The DISPLAYED figure: Payable this week (D19), or null — rendered '—' —
+// when the API does not send it. Never 0 for "unknown", never Actual.
+function payableHoursThisWeek(site: Site): number | null {
+  return payableOf(site.hours);
+}
+
+const PAYABLE_TITLE = 'Payable: clocked-in time inside the scheduled window, this week';
 
 export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
   return (
@@ -67,14 +79,14 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
             <th className="text-left p-4">SITE</th>
             <th className="text-right p-4">GUARDS</th>
             <th className="text-right p-4">REPORTS</th>
-            <th className="text-right p-4">HOURS THIS WEEK</th>
+            <th className="text-right p-4" title={PAYABLE_TITLE}>PAYABLE THIS WEEK</th>
             <th className="text-right p-4">STATUS</th>
           </tr>
         </thead>
         <tbody>
           {sites.map((site) => {
             const status = displayStatus(site);
-            const hoursWeek = actualHoursThisWeek(site);
+            const hoursWeek = payableHoursThisWeek(site);
             return (
               <tr key={site.id} className="border-b border-[#1A3050] hover:bg-[#0B1526] transition-colors">
                 <td className="p-4">
@@ -105,7 +117,7 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
       <div className="md:hidden">
         {sites.map((site) => {
           const status = displayStatus(site);
-          const hoursWeek = actualHoursThisWeek(site);
+          const hoursWeek = payableHoursThisWeek(site);
           return (
             <div
               key={site.id}
@@ -125,7 +137,7 @@ export default function ActiveSitesTable({ sites = [] }: { sites?: Site[] }) {
               <div className="flex items-center justify-between text-xs text-gray-400 gap-3">
                 <span><span className="text-gray-600 tracking-widest text-[10px]">GUARDS</span> {site.guard_count}</span>
                 <span><span className="text-gray-600 tracking-widest text-[10px]">REPORTS</span> {site.reports_today}</span>
-                <span className="whitespace-nowrap"><span className="text-gray-600 tracking-widest text-[10px]">HOURS</span> {formatHoursHHMM(hoursWeek)}</span>
+                <span className="whitespace-nowrap"><span className="text-gray-600 tracking-widest text-[10px]">PAYABLE</span> {formatHoursHHMM(hoursWeek)}</span>
               </div>
               {site.days_until_deletion !== null && site.days_until_deletion <= 30 && (
                 <p className="text-[11px] text-red-400 mt-1">{site.days_until_deletion}d left</p>

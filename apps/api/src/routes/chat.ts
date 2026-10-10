@@ -132,16 +132,60 @@ router.get('/rooms/:roomId/messages', requireAuth('company_admin', 'guard'), asy
   if (user!.role === 'guard' && r.guard_id !== user!.sub)
     return res.status(403).json({ error: 'Access denied' });
 
+  // ── THE WINDOW IS THE NEWEST 50, NOT THE OLDEST 50 ──────────────────────
+  //
+  // Both branches used to read `ORDER BY created_at ASC LIMIT 50`, which
+  // orders the whole room and then takes the FIRST fifty — the oldest
+  // messages ever sent, not the recent conversation. Neither client sends a
+  // cursor (apps/mobile/app/chat/[roomId].tsx, apps/web/app/admin/chat/page.tsx
+  // both call the bare path), so every chat screen on the platform was
+  // pinned to the default branch.
+  //
+  // IT NEVER SHOWED BECAUSE RETENTION HID IT. At the old 48-hour chat
+  // retention a room could not hold fifty surviving messages, so "oldest 50"
+  // and "all of them" were the same set. PR #70 moved chat retention to 365
+  // days, which arms it: the first room to cross fifty messages pins both
+  // clients to its oldest fifty, and a just-sent message vanishes from the
+  // sender's own screen on the next 10-second poll. Latent today — the
+  // busiest room holds 2 messages — and certain for any room that stays
+  // active.
+  //
+  // ── WHY THE REVERSE IS INSIDE THE SQL ───────────────────────────────────
+  //
+  // Selecting DESC and reversing in the client would work and would cost a
+  // change in two clients, one of them React Native — which means an app
+  // store round trip for a server-side bug. Done here, the response shape is
+  // byte-identical to before: still ascending, still at most fifty, still a
+  // bare array. Neither client changes, nothing ships to a phone.
+  //
+  // idx_chat_messages_room_created is (room_id, created_at DESC), so the
+  // inner query walks it forwards and stops at fifty. The outer ORDER BY
+  // re-sorts at most fifty rows.
+  //
+  // The `before` branch gets the same treatment and needs it more: it read
+  // `created_at < $2 ORDER BY created_at ASC LIMIT 50`, i.e. the oldest fifty
+  // BELOW the cursor rather than the fifty immediately before it — so paging
+  // back from the top of a long room jumped to the beginning of history
+  // instead of stepping one page. It is dead code today, and fixing it now is
+  // what stops it being a trap for the first client that uses it.
   let query: string;
   let params: (string | number)[];
 
   if (before) {
     const cursor = await pool.query('SELECT created_at FROM chat_messages WHERE id = $1', [before]);
     if (!cursor.rows[0]) return res.status(400).json({ error: 'Invalid cursor' });
-    query = `SELECT * FROM chat_messages WHERE room_id = $1 AND created_at < $2 ORDER BY created_at ASC LIMIT 50`;
+    query = `SELECT * FROM (
+               SELECT * FROM chat_messages
+                WHERE room_id = $1 AND created_at < $2
+                ORDER BY created_at DESC LIMIT 50
+             ) page ORDER BY created_at ASC`;
     params = [roomId, cursor.rows[0].created_at];
   } else {
-    query = `SELECT * FROM chat_messages WHERE room_id = $1 ORDER BY created_at ASC LIMIT 50`;
+    query = `SELECT * FROM (
+               SELECT * FROM chat_messages
+                WHERE room_id = $1
+                ORDER BY created_at DESC LIMIT 50
+             ) page ORDER BY created_at ASC`;
     params = [roomId];
   }
 

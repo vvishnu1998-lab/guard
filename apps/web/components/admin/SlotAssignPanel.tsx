@@ -109,7 +109,27 @@ interface AssignFailure {
 
 /** Guard-facing copy per machine reason. Branch on the ENUM, never on prose —
  *  the server's sentence is shown as-is where it carries detail the client
- *  cannot reconstruct, but the short label comes from the code. */
+ *  cannot reconstruct, but the short label comes from the code.
+ *
+ *  THIS MAP IS NOT lib/bulkShiftCopy.ts's, AND THE FALLBACKS DIFFER. This one
+ *  serves POST /api/scheduling/site/:siteId/assign-slots, whose `fail()`
+ *  emits lowercase reasons; bulkShiftCopy serves the cancel and assign routes
+ *  on PATCH /api/shifts/:id/*, whose codes are UPPERCASE. Two endpoints, two
+ *  namespaces — do not merge them.
+ *
+ *  THE RENDER BELOW FALLS BACK TO THE RAW REASON, not to prose:
+ *
+ *      {REASON_LABEL[fail.reason] ?? fail.reason} — {fail.message}
+ *
+ *  So an unmapped reason prints its token at an admin. bulkShiftCopy's
+ *  resolver falls back to the server SENTENCE instead and cannot do that.
+ *  This is safe today only because the two sides happen to match exactly —
+ *  routes/scheduling.ts emits exactly the seven reasons listed here
+ *  (already_on_slot, guard_inactive, not_assigned_to_site, overlap,
+ *  slot_full, template_changed, write_failed) and nothing enforces that they
+ *  stay in step. ADD THE ENTRY HERE IN THE SAME COMMIT that adds a reason
+ *  there, or an admin reads a raw token. N83 deliberately left this alone:
+ *  it changed the two PATCH routes, not assign-slots. */
 const REASON_LABEL: Record<string, string> = {
   overlap:              'Busy elsewhere',
   already_on_slot:      'Already on this slot',

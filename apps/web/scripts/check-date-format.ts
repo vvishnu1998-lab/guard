@@ -38,6 +38,10 @@ import {
   fmtCalDate, fmtCalRange, fmtDate, fmtDateShort, fmtDT, fmtTime,
   fmtDuration, dayOffsetInZone, isoToZonedInputs, zonedInputsToISO,
 } from '../lib/shiftFormat';
+import {
+  isLongShift, fmtShiftDuration, fmtShiftEnd, longShiftLabel, fmtClockInZone,
+} from '../lib/longShift';
+import { localShiftWindow } from '../lib/shiftWindow';
 
 /** Zones spanning both sides of UTC, including a half-hour offset and the two
  *  extremes. Kiritimati is UTC+14, Midway UTC-11. */
@@ -142,6 +146,70 @@ function checkInThisZone(zone: string): void {
   const back = zonedInputsToISO('2026-09-10', '14:00', 'America/Los_Angeles');
   if (back !== '2026-09-10T21:00:00.000Z') {
     fail(`zonedInputsToISO -> '${back}', expected 2026-09-10T21:00:00.000Z`);
+  }
+
+  // 8. U2/U5 (lib/longShift.ts). These take an explicit site zone, so they
+  //    must print the SAME string in every browser zone — the confirm step
+  //    names the real end at the site, and "This clocks the guard out at
+  //    18:00" must not become 01:00 for an admin in UTC. Duration and the
+  //    12-hour rule are elapsed time: 19:00 -> 07:00 across the 2026-11-01
+  //    fall-back is 13 h.
+  const la = 'America/Los_Angeles';
+  const cases: [string, string, string][] = [
+    ['fmtShiftEnd', fmtShiftEnd('2026-09-26T13:00:00Z', la), 'Sat Sep 26, 06:00'],
+    ['longShiftLabel', longShiftLabel('2026-09-25T19:00:00Z', '2026-09-26T13:00:00Z', la), 'Ends Sat Sep 26, 06:00 — 18h'],
+    ['fmtClockInZone', fmtClockInZone('2026-09-26T01:00:00Z', la), '18:00'],
+    ['fmtShiftDuration (fall-back night)', fmtShiftDuration('2026-11-01T02:00:00Z', '2026-11-01T15:00:00Z'), '13h'],
+    ['fmtShiftDuration (half hour)', fmtShiftDuration('2026-09-26T02:00:00Z', '2026-09-26T14:30:00Z'), '12h 30m'],
+  ];
+  for (const [name, got, want] of cases) {
+    if (got !== want) fail(`${name} -> '${got}', expected '${want}'`);
+  }
+  if (isLongShift('2026-09-26T01:00:00Z', '2026-09-26T13:00:00Z')) fail('isLongShift: exactly 12 h must not ask');
+  if (!isLongShift('2026-09-26T01:00:00Z', '2026-09-26T13:01:00Z')) fail('isLongShift: 12 h 01 m must ask');
+  if (!isLongShift('2026-11-01T02:00:00Z', '2026-11-01T15:00:00Z')) fail('isLongShift: 13 h elapsed across the fall-back must ask');
+
+  // 9. The create modal's overnight roll (lib/shiftWindow.ts). An end earlier
+  //    than the start lands on the NEXT CALENDAR DAY at the typed time — in
+  //    every zone, including across the autumn DST day, which is 25 h long in
+  //    the US zones. The old `+86_400_000 ms` put a 19:00 -> 07:00 shift
+  //    starting 2026-11-01 at 07:00 on Nov 1, before its start.
+  const localParts = (iso: string) => {
+    const d = new Date(iso);
+    return { ymd: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+             hm: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` };
+  };
+  for (const [y, m, dd, nextYmd] of [[2026, 9, 31, '2026-11-01'], [2026, 10, 1, '2026-11-02']] as const) {
+    const day = new Date(y, m, dd);          // local midnight of the picked calendar day
+    const w = localShiftWindow(day, '19:00', '07:00');
+    const s0 = localParts(w.start); const e0 = localParts(w.end);
+    const label = `localShiftWindow(${y}-${m + 1}-${dd}, 19:00 -> 07:00)`;
+    if (!w.overnight) fail(`${label}: not flagged overnight`);
+    if (new Date(w.end) <= new Date(w.start)) fail(`${label}: end ${w.end} is not after start ${w.start}`);
+    if (e0.ymd !== nextYmd || e0.hm !== '07:00') fail(`${label}: ends ${e0.ymd} ${e0.hm}, expected ${nextYmd} 07:00 local`);
+    if (s0.hm !== '19:00') fail(`${label}: starts ${s0.hm}, expected 19:00 local`);
+    // What the old arithmetic did here, shown rather than asserted (it is correct in most zones).
+    const old = new Date(day.getTime() + 86_400_000); old.setHours(7, 0, 0, 0);
+    if (old.getTime() <= new Date(w.start).getTime()) {
+      console.log(`      old +86_400_000 ms for ${y}-${m + 1}-${dd}: ends ${old.toISOString()} — before the start   <- the bug, here`);
+    }
+  }
+  const same = localShiftWindow(new Date(2026, 9, 31), '08:00', '16:00');
+  if (same.overnight || localParts(same.end).ymd !== '2026-10-31' || localParts(same.end).hm !== '16:00') {
+    fail(`localShiftWindow same-day 08:00 -> 16:00 -> ${JSON.stringify(same)}`);
+  }
+  // In the site zone (every STARNET site is America/Los_Angeles) the exact instants.
+  if (zone === 'America/Los_Angeles') {
+    const exact: [number, number, number, string, string, number][] = [
+      [2026, 9, 31, '2026-11-01T02:00:00.000Z', '2026-11-01T15:00:00.000Z', 13],   // across the fall-back
+      [2026, 10, 1, '2026-11-02T03:00:00.000Z', '2026-11-02T15:00:00.000Z', 12],   // the day after it
+    ];
+    for (const [y, m, dd, ws, we, hours] of exact) {
+      const w = localShiftWindow(new Date(y, m, dd), '19:00', '07:00');
+      if (w.start !== ws || w.end !== we) fail(`LA localShiftWindow(${y}-${m + 1}-${dd}) -> ${w.start} .. ${w.end}, expected ${ws} .. ${we}`);
+      const h = (new Date(w.end).getTime() - new Date(w.start).getTime()) / 3_600_000;
+      if (h !== hours) fail(`LA localShiftWindow(${y}-${m + 1}-${dd}) is ${h} h, expected ${hours} h`);
+    }
   }
 }
 

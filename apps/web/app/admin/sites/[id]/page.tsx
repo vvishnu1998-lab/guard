@@ -41,6 +41,10 @@ interface Site {
 interface LiveGuard {
   id:               string;
   name:             string;
+  /** N98. Optional on purpose — an API that has not deployed yet omits it and
+   *  presentGuards falls back to the name match. Not `string | null`: the
+   *  column is NOT NULL, so the only way it is missing is the old payload. */
+  site_id?:         string;
   site_name:        string;
   clocked_in_at:    string;
   // Populated by /api/admin/live-guards via JOIN shifts. Optional so
@@ -1261,7 +1265,22 @@ function SiteDetailPageInner() {
 
   const presentGuards = useMemo(() => {
     if (!site) return [];
-    return guards.filter((g) => g.site_name === site.name);
+    // N98. MATCH ON ID, falling back to name. This used to compare
+    // `g.site_name === site.name`, because /api/admin/live-guards sent no id.
+    // Names are unique per company in practice and NOTHING ENFORCES IT — there
+    // is no unique index on (company_id, name) and one is deliberately not
+    // being added — so two same-named sites merged their guards into whichever
+    // page you were looking at, and runningIntervals below then reported the
+    // other site's ping cadence as this one's.
+    //
+    // The name branch is the STALE-API BRIDGE and is meant to stay. Vercel and
+    // Railway are never simultaneous: between this deploy and the API deploy,
+    // `site_id` is undefined on every row, and without the fallback this list
+    // would be empty on every site — a worse failure than the rare wrong match
+    // it replaces. It costs one ternary and expires on its own.
+    return guards.filter((g) =>
+      g.site_id ? g.site_id === site.id : g.site_name === site.name,
+    );
   }, [guards, site]);
 
   /**

@@ -33,3 +33,7 @@ start-metro.command
 *.tsbuildinfo
 cost.json
 report.md
+
+# ops-triage run artifacts (written by scripts/ops/triage.sh in CI)
+slack-brief.txt
+slack-payload.json

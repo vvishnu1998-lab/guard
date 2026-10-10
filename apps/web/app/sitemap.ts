@@ -6,9 +6,14 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const base = 'https://www.netraops.com';
   return [
     { url: `${base}/`, changeFrequency: 'monthly', priority: 1 },
+    // Printed-brochure QR codes point here (apex 308s to www); no nav link.
+    { url: `${base}/demo`, changeFrequency: 'monthly', priority: 0.7 },
     { url: `${base}/support`, changeFrequency: 'monthly', priority: 0.5 },
     { url: `${base}/security`, changeFrequency: 'monthly', priority: 0.5 },
     { url: `${base}/privacy`, changeFrequency: 'yearly', priority: 0.3 },
     { url: `${base}/terms`, changeFrequency: 'yearly', priority: 0.3 },
+    // Referenced from the Play Console Data safety form, so it must stay
+    // crawlable and must not move without updating that field.
+    { url: `${base}/data-deletion`, changeFrequency: 'yearly', priority: 0.3 },
   ];
 }

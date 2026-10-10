@@ -9,11 +9,13 @@ import { sendGeofenceBreachAlert, BreachAlertContext } from '../services/email';
 import { sendPushNotification } from '../services/firebase';
 import { getActivePushToken } from '../services/deviceRegistry';
 import { expiresAtFor } from '../services/retention';
+import { INHERIT_HOLD_COLUMNS, INHERIT_HOLD_FROM_SESSION_SQL } from '../services/legalHold';
 import { scheduleWindows } from '../services/pingWindows';
 import { readShadowSignals } from '../services/shadowSignals';
 import { logClientIdentity } from '../services/clientIdentity';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { recordOffPostEvent } from '../services/offPostEvents';
+import { writeClockInVerification } from '../services/clockInVerification';
 
 /**
  * Fire guard notification row + admin email for a geofence violation.
@@ -313,10 +315,17 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
      *  against the cadence in force when the session started, not against a
      *  site value an admin may have edited mid-shift. */
     ping_interval_minutes: number | null;
+    /** Hold state, read here ONLY for the off-post reject row below, which
+     *  is written by a service that holds no session of its own. The ping
+     *  INSERT deliberately does NOT use this value — it re-reads the flag
+     *  inside the INSERT, because this SELECT is 200 lines and one S3 HEAD
+     *  call away from that write. See services/legalHold.ts. */
+    legal_hold: boolean;
+    legal_hold_at: Date | null;
   }>(
     `SELECT ss.site_id, ss.clocked_in_at, ss.clocked_out_at,
             sh.scheduled_start, sh.scheduled_end, si.timezone AS site_tz,
-            ss.ping_interval_minutes
+            ss.ping_interval_minutes, ss.legal_hold, ss.legal_hold_at
        FROM shift_sessions ss
        JOIN shifts sh ON sh.id = ss.shift_id
        JOIN sites  si ON si.id = ss.site_id
@@ -331,6 +340,8 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
     scheduled_end:   pingScheduledEnd,
     site_tz:         pingSiteTz,
     ping_interval_minutes: pingIntervalMinutes,
+    legal_hold:      pingSessionHold,
+    legal_hold_at:   pingSessionHoldAt,
   } = sessionResult.rows[0];
 
   // Liveness gate — same shape as POST /violation (5a6de20). A ping against
@@ -463,6 +474,8 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       reason:         fence.reason,
       breakSessionId: pingBreakId,
       expiresAt:      expiresAtFor('off_post_event'),
+      legalHold:      pingSessionHold ?? false,
+      legalHoldAt:    pingSessionHoldAt ?? null,
     });
     console.log(
       `[ping.reject] session=${shift_session_id} distance=${fence.distance_m?.toFixed(1) ?? 'null'}m ` +
@@ -532,8 +545,10 @@ router.post('/ping', requireAuth('guard'), async (req, res) => {
       `INSERT INTO location_pings
          (shift_session_id, guard_id, site_id, latitude, longitude, accuracy_meters,
           is_within_geofence, ping_type, photo_url, photo_delete_at, throttle_reason, expires_at,
-          window_label, submitted_late, location_mocked, fix_age_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          window_label, submitted_late, location_mocked, fix_age_ms,
+          ${INHERIT_HOLD_COLUMNS})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+               ${INHERIT_HOLD_FROM_SESSION_SQL('$1')})
        ON CONFLICT (shift_session_id, window_label)
          WHERE window_label IS NOT NULL
            AND pinged_at >= TIMESTAMPTZ '2026-08-21T00:00:00+00'
@@ -657,8 +672,13 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
     return res.status(400).json({ error: 'Invalid position_source.' });
   }
 
-  const sessionResult = await pool.query<{ site_id: string; clocked_out_at: Date | null }>(
-    'SELECT site_id, clocked_out_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
+  const sessionResult = await pool.query<{
+    site_id: string; clocked_out_at: Date | null;
+    legal_hold: boolean; legal_hold_at: Date | null;
+  }>(
+    // legal_hold/_at added for the break_exit off-post row below; the
+    // geofence_violations INSERT on this route inherits inside the INSERT.
+    'SELECT site_id, clocked_out_at, legal_hold, legal_hold_at FROM shift_sessions WHERE id = $1 AND guard_id = $2',
     [shift_session_id, req.user!.sub]
   );
   if (!sessionResult.rows[0]) return res.status(403).json({ error: 'Session not found' });
@@ -668,7 +688,7 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
   const guardId      = req.user!.sub;
 
   // Liveness gate (2026-08-07). Ownership alone is not enough: the
-  // autoCompleteShifts cron closes a session server-side at scheduled_end,
+  // autoCompleteShifts cron closes a session server-side once its grace is up,
   // and the mobile app has no channel to learn that — its registered
   // geofence region stays armed until the store next transitions. On
   // 2026-08-06 that produced two boundary reports 3 and 28 minutes after
@@ -751,6 +771,8 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
       reason:         'boundary exit during active break',
       breakSessionId: openBreak.rows[0].id,
       expiresAt:      expiresAtFor('off_post_event'),
+      legalHold:      sessionResult.rows[0].legal_hold ?? false,
+      legalHoldAt:    sessionResult.rows[0].legal_hold_at ?? null,
     });
     console.log('[violation.suppressed.on_break]', {
       shift_session_id,
@@ -767,8 +789,9 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
   const insertResult = await pool.query(
     `INSERT INTO geofence_violations
        (shift_session_id, guard_id, site_id, violation_lat, violation_lng, photo_url, expires_at,
-        position_source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        position_source, ${INHERIT_HOLD_COLUMNS})
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+             ${INHERIT_HOLD_FROM_SESSION_SQL('$1')})
      ON CONFLICT (shift_session_id) WHERE resolved_at IS NULL DO NOTHING
      RETURNING *`,
     [shift_session_id, guardId, siteId, latitude, longitude, photo_url || null,
@@ -934,18 +957,64 @@ router.post('/clock-in-verification', requireAuth('guard'), async (req, res) => 
   logClientIdentity(req, 'clock-in-verification');
   const verifyShadow = readShadowSignals(req.body, 'clock-in-verification');
 
-  const result = await pool.query(
-    `INSERT INTO clock_in_verifications
-       (shift_session_id, guard_id, site_id, selfie_url, site_photo_url, verified_lat, verified_lng, is_within_geofence,
-        accuracy_meters, location_mocked, fix_age_ms)
-     SELECT $1, ss.guard_id, ss.site_id, $2, $3, $4, $5, $6, $7, $8, $9
-     FROM shift_sessions ss WHERE ss.id = $1
-     RETURNING *`,
-    [shift_session_id, selfie_url ?? null, site_photo_url ?? null, verified_lat, verified_lng, true,
-     verifyShadow.accuracyMeters, verifyShadow.locationMocked, verifyShadow.fixAgeMs],
-  );
+  // ── HOLD INHERITED AT INSERT (schema_v80) ───────────────────────────────
+  //
+  // The second call site where the fragment lands in a SELECT list rather
+  // than a VALUES list; routes/checkpoints.ts is the other. Scalar
+  // subqueries are valid in both and neither changes the source row count.
+  //
+  // NOTE THE SHADOWED ALIAS, AND DO NOT "FIX" IT. This statement already
+  // joins `shift_sessions ss`, and the fragment declares its own `ss` inside
+  // each subquery. The inner one shadows the outer within the subquery, so
+  // `ss.id = $1` there resolves to the subquery's own table — which is the
+  // same row the outer join matched, because both are keyed on $1. The
+  // result is identical either way.
+  //
+  // Reading `ss.legal_hold` off the existing join would be shorter and would
+  // work. It is deliberately not done: the fragment is what keeps the column
+  // list and the values list in one place (INHERIT_HOLD_COLUMNS beside
+  // INHERIT_HOLD_FROM_SESSION_SQL in services/legalHold.ts), and a call site
+  // that hand-rolls the pair is the one that drifts when a third hold column
+  // is added.
+  //
+  // The statement itself lives in services/clockInVerification.ts.
+  //
+  // ── IDEMPOTENT ON RETRY (NETRAOPS-API-X) ────────────────────────────────
+  //
+  // A second POST for the same session is a client retry after a lost
+  // response, not an error: the first row is returned as 200 and is never
+  // overwritten. The ownership check above has already 404'd any session
+  // that is not this guard's, so 'conflict' is a backstop, not a path a
+  // client is expected to reach.
+  const write = await writeClockInVerification(pool, req.user!.sub, {
+    shiftSessionId: shift_session_id,
+    selfieUrl:      selfie_url ?? null,
+    sitePhotoUrl:   site_photo_url ?? null,
+    verifiedLat:    verified_lat,
+    verifiedLng:    verified_lng,
+    accuracyMeters: verifyShadow.accuracyMeters,
+    locationMocked: verifyShadow.locationMocked,
+    fixAgeMs:       verifyShadow.fixAgeMs,
+  });
 
-  res.status(201).json(result.rows[0]);
+  if (write.kind === 'created') return res.status(201).json(write.row);
+
+  if (write.kind === 'existing') {
+    console.info('[clock_in_verification.duplicate]', {
+      shift_session_id,
+      guard_id: req.user!.sub,
+    });
+    return res.status(200).json(write.row);
+  }
+
+  console.warn('[clock_in_verification.conflict]', {
+    shift_session_id,
+    guard_id: req.user!.sub,
+  });
+  return res.status(409).json({
+    error:   'VERIFICATION_CONFLICT',
+    message: 'Clock-in verification could not be saved for this shift. Tell your supervisor.',
+  });
 });
 
 export default router;

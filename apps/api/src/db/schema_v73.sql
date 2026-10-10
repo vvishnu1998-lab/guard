@@ -30,8 +30,8 @@
 -- TWO callers that look like beneficiaries CANNOT use it, and are listed here
 -- explicitly so nobody re-adds them as justification:
 --
---   jobs/autoCompleteShifts.ts:248  filters `s.scheduled_end + INTERVAL
---       '30 minutes' <= NOW()` — a DIFFERENT COLUMN, and expression-wrapped.
+--   jobs/autoCompleteShifts.ts      filters `s.scheduled_end + INTERVAL
+--       '<grace> minutes' <= NOW()` — a DIFFERENT COLUMN, and expression-wrapped.
 --       Neither this index nor v72 helps it; it stays a sequential scan.
 --   jobs/missedShiftAlert.ts:28     filters `scheduled_start + INTERVAL
 --       '10 minutes' <= NOW()` — the column is wrapped in an expression, so a

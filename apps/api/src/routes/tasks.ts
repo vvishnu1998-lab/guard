@@ -5,6 +5,7 @@ import { sendPushNotification } from '../services/firebase';
 import { getActivePushTokens } from '../services/deviceRegistry';
 import { validateAtSite } from '../services/geofence';
 import { expiresAtFor } from '../services/retention';
+import { INHERIT_HOLD_COLUMNS, INHERIT_HOLD_FROM_SESSION_SQL } from '../services/legalHold';
 import { readShadowSignals } from '../services/shadowSignals';
 import { checkMockLocation, MOCK_LOCATION_ERROR } from '../services/mockLocation';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
@@ -180,8 +181,10 @@ router.post('/instances/:id/complete', requireAuth('guard'), async (req, res) =>
          (task_instance_id, shift_session_id, guard_id,
           completion_lat, completion_lng, completion_accuracy_meters,
           completion_within_geofence, photo_url, expires_at,
-          completion_location_mocked, completion_fix_age_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          completion_location_mocked, completion_fix_age_ms,
+          ${INHERIT_HOLD_COLUMNS})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+               ${INHERIT_HOLD_FROM_SESSION_SQL('$2')})`,
       [
         req.params.id, shift_session_id, req.user!.sub,
         completion_lat ?? null, completion_lng ?? null,

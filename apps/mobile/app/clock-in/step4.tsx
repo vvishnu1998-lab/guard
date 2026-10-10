@@ -139,7 +139,7 @@ export default function ClockInStep4() {
       // Server validates lat/lng/accuracy against the site geofence inside the
       // clock-in transaction; on fail returns 422 GEOFENCE_FAILED.
       // Idempotency-Key makes the POST safely retryable: the same key inside
-      // the 10-min server window returns the cached response instead of
+      // the 30-min server window returns the cached response instead of
       // re-running the transaction.
       setStatusStep(1);
       Sentry.addBreadcrumb({

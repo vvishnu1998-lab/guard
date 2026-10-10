@@ -3,7 +3,7 @@
  *
  * Pushes one notification per session shortly before scheduled_end so the
  * guard closes their own shift, with a photo and coordinates, instead of
- * being swept by jobs/autoCompleteShifts.ts thirty minutes later. 23 of the
+ * being swept by jobs/autoCompleteShifts.ts once the grace runs out. 23 of the
  * last 25 clock-outs were auto-closed; the fallback is the norm today, and
  * this job exists to make it the exception.
  *
@@ -25,10 +25,9 @@
  * only answers "not within the last five minutes", which is exactly right
  * for a recurring nag and wrong for a fire-once event.
  *
- * lateClockInReminder is the right precedent, and for a reason its own
- * docblock gets wrong: that file says the shift status flip at scheduled_end
- * is what stops it. It is not — the three late_*_sent_at sentinel columns
- * are. Read the code, not the comment.
+ * lateClockInReminder is the precedent: its three late_*_sent_at sentinels
+ * stop each rung repeating, and the status flip to 'missed' (scheduled_end +
+ * the auto-close grace) ends the ladder.
  *
  * So: a sentinel column (schema_v56 shift_sessions.clock_out_reminder_sent_at)
  * claimed by an ATOMIC update-then-select — the same single-statement claim
@@ -44,9 +43,9 @@
  *
  * ── THE WINDOW, AND WHY IT IS NOT A TOLERANCE ───────────────────────────
  *
- * Eligible from scheduled_end - 5min until scheduled_end + 30min (the moment
- * autoCompleteShifts takes over). It is deliberately a RANGE, not a
- * boundary-with-tolerance.
+ * Eligible from scheduled_end - 5min until scheduled_end + the auto-close
+ * grace, 15min (the moment autoCompleteShifts takes over). It is
+ * deliberately a RANGE, not a boundary-with-tolerance.
  *
  * pingReminder fires only within ±1 min of a window boundary and never
  * retries, so a single skipped cron minute costs that ping outright — this
@@ -81,16 +80,17 @@ import { ACTIVE_PUSH_TOKEN_SQL } from '../services/deviceRegistry';
 import { insertNotification } from '../services/notifications';
 import { Sentry } from '../services/sentry';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
+import { AUTO_CLOSE_GRACE_MINUTES } from '../constants/autoCloseGrace';
 
 /** How long before scheduled_end the reminder becomes eligible. */
 const LEAD_MINUTES = 5;
 
 /**
- * Upper bound of the eligibility window. Matches the auto-close grace in
- * jobs/autoCompleteShifts.ts — once that sweep owns the session there is
- * nothing left to remind about. Keep the two in step.
+ * Upper bound of the eligibility window: the auto-close grace itself
+ * (constants/autoCloseGrace.ts). Past it the sweep owns the session, and a
+ * reminder on the sweep's own tick would promise a clock-out that 404s.
  */
-const GRACE_MINUTES = 30;
+const GRACE_MINUTES = AUTO_CLOSE_GRACE_MINUTES;
 
 interface Candidate {
   session_id:      string;
@@ -126,6 +126,22 @@ export async function runClockOutReminder(): Promise<number> {
           AND sh.status IN ('active', 'scheduled')
           AND NOW() >= sh.scheduled_end - ($1 || ' minutes')::interval
           AND NOW() <  sh.scheduled_end + ($2 || ' minutes')::interval
+          -- The shift's CURRENT end, re-read under a share lock (U2, the
+          -- services/missedWindowInsert.ts pattern). An admin who moves an
+          -- active shift's end clears this latch in the same transaction so
+          -- the reminder fires for the new end. A tick that had already read
+          -- the OLD end would otherwise wait on the session row, re-check it
+          -- (latch now NULL, so it passes) against its stale shifts row, and
+          -- stamp the latch for the old end — no reminder for the new one.
+          -- Under FOR SHARE the tick waits for the edit's shift lock and judges
+          -- the committed end instead.
+          AND EXISTS (
+                SELECT 1 FROM shifts cur
+                 WHERE cur.id = sh.id
+                   AND NOW() >= cur.scheduled_end - ($1 || ' minutes')::interval
+                   AND NOW() <  cur.scheduled_end + ($2 || ' minutes')::interval
+                   FOR SHARE
+              )
           -- Handoff exclusion, BOTH sides of the relationship.
           AND NOT EXISTS (
                 SELECT 1 FROM shift_swap_requests ssr
@@ -218,7 +234,7 @@ export async function runClockOutReminder(): Promise<number> {
   }
 }
 
-// Every 5 minutes. The eligibility window is 35 minutes wide, so any single
-// skipped tick is absorbed rather than costing the reminder — deliberately
-// unlike pingReminder's ±1-minute boundary tolerance.
+// Every 5 minutes. The eligibility window is 20 minutes wide (5 + the grace),
+// so any single skipped tick is absorbed rather than costing the reminder —
+// deliberately unlike pingReminder's ±1-minute boundary tolerance.
 runJob('clockOutReminder', '*/5 * * * *', runClockOutReminder, { sentryMonitor: false });

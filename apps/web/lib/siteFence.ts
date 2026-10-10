@@ -15,6 +15,10 @@ export interface LatLng { lat: number; lng: number }
  *  LEFT JOINed server-side and are null on a site with no fence drawn, and
  *  absent entirely on an API predating them. */
 export interface SiteFenceLike {
+  /** N98. Optional for the same reason the fence fields are: an API that
+   *  predates it simply omits it, and the name fallback below carries the
+   *  match until it deploys. GET /api/sites has always sent it. */
+  id?:                  string;
   name:                 string;
   center_lat?:          number | null;
   center_lng?:          number | null;
@@ -39,18 +43,32 @@ export function hasUsableCircle(s: SiteFenceLike): boolean {
 }
 
 /**
- * Centre of a site's fence, by name. Used by the live-status row click: a
- * guard with no coordinates at all still belongs somewhere, and their post
- * is the honest place to send the viewport.
+ * Centre of a site's fence. Used by the live-status row click: a guard with no
+ * coordinates at all still belongs somewhere, and their post is the honest
+ * place to send the viewport.
  *
- * Matching on name because neither /api/admin/live-guards nor
- * /api/admin/violations returns site_id — live-guards selects s.name only.
- * Names are unique per company in practice, and a collision moves the
- * viewport to the wrong same-named site, which is no worse than the no-op
- * it replaces.
+ * N98. MATCHES ON ID, falling back to name. This used to match on name alone,
+ * because neither /api/admin/live-guards nor /api/admin/violations returned
+ * site_id; both now do. Names are unique per company in practice and NOTHING
+ * ENFORCES IT — there is no unique index on (company_id, name) and one is
+ * deliberately not being added — so a duplicate name sent the viewport to the
+ * wrong same-named site.
+ *
+ * The name branch is the STALE-API BRIDGE and is meant to stay. Vercel and
+ * Railway are never simultaneous: between a web deploy and the API deploy that
+ * follows it, `siteId` is undefined on every row, and without the fallback this
+ * would return null for all of them — replacing a rare wrong answer with a
+ * guaranteed dead click. It costs one ternary and expires on its own the moment
+ * the API is live.
  */
-export function siteFenceCentre(sites: SiteFenceLike[], siteName: string): LatLng | null {
-  const s = sites.find((x) => x.name === siteName);
+export function siteFenceCentre(
+  sites: SiteFenceLike[],
+  siteId: string | undefined,
+  siteName: string,
+): LatLng | null {
+  const s = siteId
+    ? sites.find((x) => x.id === siteId)
+    : sites.find((x) => x.name === siteName);
   if (!s) return null;
   if (Number.isFinite(s.center_lat) && Number.isFinite(s.center_lng)) {
     return { lat: s.center_lat as number, lng: s.center_lng as number };

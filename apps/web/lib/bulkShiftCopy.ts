@@ -94,10 +94,8 @@ export function blockedLabel(verb: BulkVerb, status: string): string {
  *  are this endpoint's, `slot_full`/`template_changed` have no analogue on a
  *  shift and are absent rather than carried over dead. */
 export const REASON_LABEL: Record<string, string> = {
-  // Assign — lowercase, from POST /api/guards/shift-candidates. These are
-  // PRE-FLIGHT reasons shown in the dropdown, not write failures; neither
-  // assign route emits a machine code today (filed as N83), so a failed
-  // assign falls back to the server's prose.
+  // Assign PRE-FLIGHT — lowercase, from POST /api/guards/shift-candidates.
+  // These are dropdown reasons, not write failures.
   guard_inactive:       'Inactive',
   not_reassignable:     'Already completed or missed',
   already_on_shift:     'Already on this shift',
@@ -110,21 +108,59 @@ export const REASON_LABEL: Record<string, string> = {
   SHIFT_HAS_OPEN_SESSION: 'A guard is clocked in on this shift',
   SHIFT_NOT_SCHEDULED:    'No longer scheduled',
   ALREADY_CANCELLED:      'Already cancelled',
+
+  // Assign WRITE FAILURES (N83) — UPPERCASE, from PATCH /:id/assign-guard
+  // and PATCH /:id/reassign. Both routes now emit the same code for the same
+  // condition, so one entry serves both; the surface no longer renders two
+  // registers side by side.
+  //
+  // SHIFT_HAS_OPEN_SESSION is deliberately NOT repeated — assign-guard
+  // reuses the cancel route's token for the same condition, and the entry
+  // above already covers it. One meaning, one row.
+  //
+  // GUARD_OVERLAP arrives from BOTH the pre-flight check and the 23P01 race
+  // handler that schema_v77's exclusion constraint made reachable. Same
+  // label either way, which is the point: an admin should not be able to
+  // tell a lost race from an ordinary conflict.
+  SHIFT_ALREADY_ASSIGNED: 'Already has a guard',
+  SHIFT_NOT_ASSIGNABLE:   'Not in an assignable status',
+  GUARD_OVERLAP:          'Busy elsewhere',
+  GUARD_NOT_FOUND:        'Guard unavailable',
+  GUARD_NOT_ELIGIBLE:     'Not assigned to this site',
+  SITE_DEACTIVATED:       'Site is deactivated',
 };
 
-/** The cancel route is WEB-ONLY and web's ApiError has no `code` field — it
- *  keeps the parsed body on `.body`, so the enum is read from there. See the
- *  route docblock in apps/api/src/routes/shifts.ts for why the enum lives in
- *  `code` only and `error` keeps its prose. */
-export function cancelFailureLabel(e: unknown): string {
+/** Shared resolver. All three routes are WEB-ONLY and web's ApiError has no
+ *  `code` field — it keeps the parsed body on `.body`, so the enum is read
+ *  from there. See the route docblocks in apps/api/src/routes/shifts.ts for
+ *  why the enum lives in `code` and `error` keeps its prose.
+ *
+ *  THE LAST FALLBACK IS `e.message`, WHICH IS `body.error`. That is the whole
+ *  reason the placement rule matters: a code this map does not know yet still
+ *  degrades to a readable server sentence. If a route ever put an enum back
+ *  in `error`, this line would start printing raw tokens at admins — which is
+ *  exactly the defect N78 fixed on the cancel route. */
+function failureLabel(e: unknown, whenNotApiError: string): string {
   if (e instanceof ApiError) {
     const code = (e.body as { code?: unknown } | undefined)?.code;
     if (typeof code === 'string' && REASON_LABEL[code]) return REASON_LABEL[code];
-    // 404 carries no code — both of the route's 404s mean the same thing to
+    // 404 carries no code — every 404 on these routes means the same thing to
     // an admin, and the row is gone from the list after the refetch either way.
     if (e.status === 404) return 'No longer exists';
     return e.message;
   }
-  return 'Could not cancel';
+  return whenNotApiError;
+}
+
+export function cancelFailureLabel(e: unknown): string {
+  return failureLabel(e, 'Could not cancel');
+}
+
+/** N83. PATCH /:id/assign-guard and PATCH /:id/reassign, which the bulk
+ *  surface routes between on the row's status. Both now emit the same code
+ *  for the same condition, so one resolver serves both — and a lost 23P01
+ *  race resolves to the same label as an ordinary conflict, deliberately. */
+export function assignFailureLabel(e: unknown): string {
+  return failureLabel(e, 'Could not assign');
 }
 
