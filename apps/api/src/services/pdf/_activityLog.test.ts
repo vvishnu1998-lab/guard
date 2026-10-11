@@ -30,6 +30,7 @@ import PDFDocument from 'pdfkit';
 import { badge } from './theme';
 import {
   renderActivityLogPdf, STATUS_COLOR, STATUS_LABEL,
+  COL_STATUS_X, COL_GUARD_X, BADGE_TOP, DETAIL_TOP,
   type ActivityPdfMeta,
 } from './activityLog';
 import {
@@ -410,7 +411,9 @@ async function main() {
   console.log('');
   console.log('C6 — layout (L1-L5)');
 
-  const ML_ = 50, MR_ = 545, COL_STATUS_X = ML_ + 60, COL_GUARD_X = ML_ + 170;
+  // The column constants are the renderer's own (imported above); this file
+  // carried a copy of COL_GUARD_X until fix/pdf-polish moved the column.
+  const MR_ = 545;
   const squash = (t: string) => t.replace(/\s+/g, ' ').trim();
 
   check('L1 a 400-char description is printed in full', () => {
@@ -433,7 +436,7 @@ async function main() {
     }
   });
 
-  check('L2 no badge box reaches the guard column', () => {
+  check('L2 every badge box ends at least 10 pt before the guard column', () => {
     // ASSERTED ON THE RETURNED WIDTH, not on pdftotext. The defect is the
     // filled RECT, which carries no text — poppler sees only the label
     // inside it, so an over-wide box and a correct one extract identically.
@@ -444,12 +447,31 @@ async function main() {
     const offenders: string[] = [];
     for (const k of ALL_STATUS_KINDS) {
       const w = badge(probe, COL_STATUS_X, 0, STATUS_LABEL[k], STATUS_COLOR[k]);
-      if (COL_STATUS_X + w >= COL_GUARD_X) {
+      // 10 pt, not 0: at a 4.3 pt gap MISSED / ANSWERED LATE read as running
+      // into the guard's name on the page.
+      if (COL_STATUS_X + w + 10 > COL_GUARD_X) {
         offenders.push(`${STATUS_LABEL[k]} -> ${w.toFixed(1)}pt, ends at ${(COL_STATUS_X + w).toFixed(1)}`);
       }
     }
     assert.deepStrictEqual(offenders, [],
-      `badge boxes reaching the guard column at ${COL_GUARD_X}:\n       ` + offenders.join('\n       '));
+      `badge boxes within 10 pt of the guard column at ${COL_GUARD_X}:\n       ` + offenders.join('\n       '));
+  });
+
+  check('L2b the detail line starts at least 2 pt below its badge', () => {
+    // The badge's height is MEASURED from theme.badge(), not restated here: a
+    // probe document records the rect it draws. At DETAIL_TOP 15 the detail
+    // line began exactly where the badge's fill ended (0 pt).
+    const probe = new PDFDocument({ margin: 0, size: 'A4' });
+    const heights: number[] = [];
+    const rect = probe.rect.bind(probe);
+    (probe as unknown as { rect: typeof probe.rect }).rect = ((x: number, yy: number, w: number, h: number) => {
+      heights.push(h);
+      return rect(x, yy, w, h);
+    }) as typeof probe.rect;
+    badge(probe, COL_STATUS_X, 0, 'ACTIVITY', STATUS_COLOR.activity_report);
+    assert.strictEqual(heights.length, 1, `badge() drew ${heights.length} rects`);
+    const gap = DETAIL_TOP - (BADGE_TOP + heights[0]);
+    assert.ok(gap >= 2, `the detail line starts ${gap.toFixed(1)} pt below the badge (want >= 2)`);
   });
 
   check('L2 badge width tracks real ink, not character count', () => {

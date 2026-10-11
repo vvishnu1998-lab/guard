@@ -209,6 +209,26 @@ export interface ActivityPdfMeta {
   lh?: Letterhead | null;
 }
 
+// ── Timeline row layout ─────────────────────────────────────────────────────
+// Module scope and exported so the test reads these values, not a copy: it
+// carried its own `ML_ + 170` for COL_GUARD_X, which would have kept passing
+// against a column that had moved.
+export const COL_STATUS_X = ML + 60;
+/**
+ * x of the guard name: 14 pt clear of the widest badge, MISSED / ANSWERED
+ * LATE, whose measured box ends at 215.7. At ML + 170 that gap was 4.3 pt,
+ * which on the page read as the badge running into the name.
+ */
+export const COL_GUARD_X = ML + 180;
+/** The badge's top inside its row; theme.badge() draws it 14 pt tall. */
+export const BADGE_TOP = 1;
+/**
+ * y-offset of the detail line inside its row: 3 pt below the badge, which
+ * spans y+1..y+15. At 15 the line's cap height began exactly where the
+ * badge's fill ended, so the badge sat on the first letters.
+ */
+export const DETAIL_TOP = 18;
+
 /**
  * Render the feed to a PDF buffer.
  *
@@ -399,8 +419,6 @@ export function renderActivityLogPdf(
 
   // ── Timeline: per-day sections ──────────────────────────────────────────
   const COL_TIME_X   = ML + 8;
-  const COL_STATUS_X = ML + 60;
-  const COL_GUARD_X  = ML + 170;
   const COL_SITE_X   = ML + 300;
   // Printing the site on all 823 rows of a single-site export says nothing
   // 822 times. Derived from the ROWS, not from meta.siteLabel: an export can
@@ -409,7 +427,9 @@ export function renderActivityLogPdf(
   const singleSite   = new Set(eventRows.map((r) => r.site_id)).size <= 1;
   // The freed 200pt goes to the guard name, which was clipped at 120pt with
   // lineBreak:false — silently, since a clipped name still looks like a name.
-  const COL_GUARD_W  = singleSite ? 250 : 120;
+  // Both widths end where they always did (x 470 and x 340, the latter 10 pt
+  // short of the site column) now that the column starts at ML + 180.
+  const COL_GUARD_W  = singleSite ? 240 : 110;
   // Detail text starts under the BADGE, not at the page margin. It used to
   // share x with the time column, and once the time column grew a second
   // line (the SCHED marker) the two collided: on the merged missed/answered
@@ -420,9 +440,9 @@ export function renderActivityLogPdf(
   const COL_DESC_X   = ML + 60;
   const COL_DESC_W   = MR - COL_DESC_X - 8;
   const ROW_H        = 18;
-  const ROW_DESC_H   = 26;
-  /** y-offset of the detail line inside its row. */
-  const DETAIL_TOP   = 15;
+  // 3 pt deeper with DETAIL_TOP (was 26). A floor only: one line of 8 pt
+  // detail already makes the row DETAIL_TOP + 9.25 + 3 = 30.25 pt.
+  const ROW_DESC_H   = 29;
 
   function ensureRoom(needed: number) {
     // CONTENT_BOTTOM (PAGE_H - 46), not the PAGE_H - 40 this used before.
@@ -527,7 +547,7 @@ export function renderActivityLogPdf(
         doc.fontSize(6).fillColor(MUTED).font('Helvetica')
            .text('SCHED', COL_TIME_X, y + 11, { lineBreak: false, width: 50 });
       }
-      badge(doc, COL_STATUS_X, y + 1, label, color);
+      badge(doc, COL_STATUS_X, y + BADGE_TOP, label, color);
       doc.fontSize(8).fillColor(TEXT).font('Helvetica')
          .text(r.guard_name, COL_GUARD_X, y + 3, { lineBreak: false, width: COL_GUARD_W });
       if (!singleSite) {
