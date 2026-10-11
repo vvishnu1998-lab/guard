@@ -1,5 +1,5 @@
 /**
- * Tests the "Missed — answered N minutes late" figure.
+ * Tests the "Missed — answered … late" figure.
  *
  * WHY. The number is measured from the window's END, because the obligation
  * did not expire until the window closed. It was measured from the START
@@ -11,12 +11,16 @@
  * (admin.ts:1805 reuses this exact string and does not recompute it) — so it
  * is asserted rather than eyeballed.
  *
- * The arithmetic is inlined rather than imported. routes/activityLog.ts is an
- * Express router that opens a database pool at import time, so requiring it
- * from a test would need the whole injection harness _pingReminder.test.ts
- * uses. Inlining keeps the expression in one readable place; the guard against
- * drift is the FORMULA assertion at the bottom, which fails if the source
- * stops matching this shape.
+ * Under a minute it reads in SECONDS (fix/pdf-polish). Rounded to whole
+ * minutes, an answer 9-29 s after the close read "answered 0 minutes late":
+ * missed, and yet not late. 43 of the 224 answered misses in production were
+ * in that band (read 2026-10-11).
+ *
+ * The wording is services/answeredLate.ts's lateBy(), imported here. The
+ * lateness itself is still computed inline in routes/activityLog.ts, an
+ * Express router that opens a database pool at import, so that expression is
+ * restated here and pinned by the SOURCE assertions at the bottom, which fail
+ * if the route stops matching it.
  *
  * Same convention as the sibling tests: no test framework is installed in
  * apps/api, so this is a standalone ts-node script using node:assert.
@@ -27,15 +31,22 @@
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { lateBy } from '../services/answeredLate';
 
-/** Verbatim from routes/activityLog.ts's missed-window loop. */
-function answeredMinutesLate(windowEndIso: string, pingedAtIso: string): number {
-  return Math.max(0, Math.round((Date.parse(pingedAtIso) - Date.parse(windowEndIso)) / 60_000));
+/** The route's expression: milliseconds from the window's END to the answer. */
+function lateMsFromEnd(windowEndIso: string, pingedAtIso: string): number {
+  return Date.parse(pingedAtIso) - Date.parse(windowEndIso);
 }
 
-/** The pre-2026-09-12 form, kept to show the size of the correction. */
+/** The pre-2026-09-12 form, kept to show the size of that correction. */
 function answeredMinutesLate_OLD(windowStartIso: string, pingedAtIso: string): number {
   return Math.max(0, Math.round((Date.parse(pingedAtIso) - Date.parse(windowStartIso)) / 60_000));
+}
+
+/** The route's status text for a resolver at `pingedAtIso`. */
+function render(windowEndIso: string, pingedAtIso: string): string {
+  const ms = lateMsFromEnd(windowEndIso, pingedAtIso);
+  return ms <= 0 ? 'Missed — answered late' : `Missed — answered ${lateBy(ms)} late`;
 }
 
 let passed = 0;
@@ -53,30 +64,31 @@ function test(name: string, fn: () => void): void {
   }
 }
 
-console.log('activityLog — "Missed — answered N minutes late"\n');
+console.log('activityLog — "Missed — answered … late"\n');
 
-// ── The production row this change came from ──────────────────────────────
+// ── The production row the end-measurement came from ──────────────────────
 // session bb3934c9, guard reddy (Star Guard), missed_pings e80658df:
 //   window 18:30:00 → 19:00:00Z, resolved by ping 79e7bd01 at 19:00:52.912Z
 const W_START = '2026-09-12T18:30:00.000Z';
 const W_END   = '2026-09-12T19:00:00.000Z';
 const PINGED  = '2026-09-12T19:00:52.912Z';
 
-test('reddy bb3934c9: 53 s past the deadline reads 1 minute, not 31', () => {
-  assert.strictEqual(answeredMinutesLate(W_END, PINGED), 1);
+test('reddy bb3934c9: 53 s past the deadline reads 53 seconds, not 31 minutes', () => {
+  // 52.912 s: under a minute the figure counts whole seconds.
+  assert.strictEqual(render(W_END, PINGED), 'Missed — answered 53 seconds late');
   assert.strictEqual(answeredMinutesLate_OLD(W_START, PINGED), 31, 'the old figure, for contrast');
 });
 
-test('the figure no longer scales with cadence', () => {
-  // Same 53-second delay, three grids. From the END all read 1; from the
-  // START they read the window length plus the delay.
+test('the figure does not scale with the cadence', () => {
+  // Same delay, three grids. From the END all read the same; from the START
+  // they read the window length plus the delay.
   const cases: Array<[number, string]> = [
     [15, '2026-09-12T18:45:00.000Z'],
     [30, '2026-09-12T18:30:00.000Z'],
     [45, '2026-09-12T18:15:00.000Z'],
   ];
   for (const [mins, start] of cases) {
-    assert.strictEqual(answeredMinutesLate(W_END, PINGED), 1, `${mins}-min grid, from end`);
+    assert.strictEqual(render(W_END, PINGED), 'Missed — answered 53 seconds late', `${mins}-min grid, from end`);
     assert.strictEqual(
       answeredMinutesLate_OLD(start, PINGED), mins + 1,
       `${mins}-min grid, from start — the cadence-scaling defect`,
@@ -84,48 +96,58 @@ test('the figure no longer scales with cadence', () => {
   }
 });
 
-// ── Boundaries ────────────────────────────────────────────────────────────
-test('answered exactly at close reads 0', () => {
-  assert.strictEqual(answeredMinutesLate(W_END, W_END), 0);
+// ── Under a minute: seconds, never zero ───────────────────────────────────
+test('the production band that read "0 minutes" now reads its seconds', () => {
+  // 9.0 s and 29.x s bound the 43 production rows; 15.2 s is their median.
+  assert.strictEqual(render(W_END, '2026-09-12T19:00:09.000Z'), 'Missed — answered 9 seconds late');
+  assert.strictEqual(render(W_END, '2026-09-12T19:00:15.200Z'), 'Missed — answered 15 seconds late');
+  assert.strictEqual(render(W_END, '2026-09-12T19:00:29.400Z'), 'Missed — answered 29 seconds late');
 });
 
-test('a ping BEFORE the close cannot go negative (clamped at 0)', () => {
-  // Reachable: a window is resolved by window_label, and a ping carrying a
-  // label may land before that window's own close — the label is what binds
-  // it, not the timestamp.
-  assert.strictEqual(answeredMinutesLate(W_END, '2026-09-12T18:45:00.000Z'), 0);
+test('under a second reads 1 second, never 0', () => {
+  assert.strictEqual(lateBy(1), '1 second');
+  assert.strictEqual(lateBy(400), '1 second');
+  assert.strictEqual(lateBy(1_499), '1 second');
+  assert.strictEqual(lateBy(1_500), '2 seconds');
 });
 
-test('rounding is to the nearest minute, not floor', () => {
-  assert.strictEqual(answeredMinutesLate(W_END, '2026-09-12T19:00:29.000Z'), 0, '29 s → 0');
-  assert.strictEqual(answeredMinutesLate(W_END, '2026-09-12T19:00:31.000Z'), 1, '31 s → 1');
-  assert.strictEqual(answeredMinutesLate(W_END, '2026-09-12T19:01:30.000Z'), 2, '90 s → 2');
+test('what rounds to a minute reads "1 minute", never "60 seconds"', () => {
+  assert.strictEqual(lateBy(59_499), '59 seconds');
+  assert.strictEqual(lateBy(59_500), '1 minute');
+  assert.strictEqual(lateBy(60_000), '1 minute');
 });
 
-test('singular/plural render matches the source', () => {
-  const render = (n: number) => `Missed — answered ${n} ${n === 1 ? 'minute' : 'minutes'} late`;
-  assert.strictEqual(render(answeredMinutesLate(W_END, PINGED)), 'Missed — answered 1 minute late');
-  assert.strictEqual(
-    render(answeredMinutesLate(W_END, '2026-09-12T19:31:00.000Z')),
-    'Missed — answered 31 minutes late',
-  );
+// ── From a minute up: whole minutes, rounded, as before ───────────────────
+test('rounding is to the nearest minute, as it always was', () => {
+  assert.strictEqual(lateBy(89_000), '1 minute', '89 s → 1');
+  assert.strictEqual(lateBy(90_000), '2 minutes', '90 s → 2');
+  assert.strictEqual(render(W_END, '2026-09-12T19:31:00.000Z'), 'Missed — answered 31 minutes late');
 });
 
 test('a long backfill still reports the real delay', () => {
-  assert.strictEqual(answeredMinutesLate(W_END, '2026-09-12T21:00:00.000Z'), 120);
+  assert.strictEqual(render(W_END, '2026-09-12T21:00:00.000Z'), 'Missed — answered 120 minutes late');
 });
 
-// ── Drift guard: the source must still measure from the END ───────────────
-test('routes/activityLog.ts measures answeredMin from windowEndMs', () => {
+// ── No figure where none is true ──────────────────────────────────────────
+test('an answer at or before the close gets no figure', () => {
+  // A window is resolved by window_label, so a labelled ping may land before
+  // that window's own close. It is not late, and "0 seconds late" would say
+  // the same contradiction "0 minutes late" did. Not seen in production.
+  assert.strictEqual(render(W_END, W_END), 'Missed — answered late');
+  assert.strictEqual(render(W_END, '2026-09-12T18:45:00.000Z'), 'Missed — answered late');
+});
+
+// ── Drift guard: the route must still measure from the END, through lateBy ─
+test('routes/activityLog.ts measures lateMs from windowEndMs and words it with lateBy', () => {
   const src = readFileSync(join(__dirname, 'activityLog.ts'), 'utf8');
   assert.ok(
-    /const answeredMin = resolver\s*\?\s*Math\.max\(0, Math\.round\(\(Date\.parse\(resolver\.pinged_at\) - windowEndMs\) \/ 60_000\)\)/.test(src),
-    'answeredMin no longer matches the expected windowEndMs expression — this test has drifted from the source',
+    src.includes('const lateMs = resolver ? Date.parse(resolver.pinged_at) - windowEndMs : null;'),
+    'lateMs no longer matches the expected windowEndMs expression — this test has drifted from the source',
   );
-  assert.ok(
-    !/answeredMin[\s\S]{0,120}windowStartMs/.test(src),
-    'answeredMin appears to reference windowStartMs again',
-  );
+  assert.ok(!/lateMs[\s\S]{0,120}windowStartMs/.test(src), 'lateMs appears to reference windowStartMs again');
+  assert.ok(src.includes('} else if (lateMs === null || lateMs <= 0) {'), 'the no-figure branch changed');
+  assert.ok(src.includes('status     = `Missed — answered ${lateBy(lateMs)} late`;'), 'the status no longer goes through lateBy');
+  assert.ok(!/answered \$\{\w+\} \$\{\w+ === 1 \? 'minute'/.test(src), 'a minutes-only rendering is back');
   // windowStartMs must SURVIVE — it is the row id and event_time.
   assert.ok(src.includes('const windowStartMs = Date.parse(m.window_start);'), 'windowStartMs still needed');
   assert.ok(src.includes('id:             `missed-${s.session_id}-${windowStartMs}`'), 'row id uses window start');

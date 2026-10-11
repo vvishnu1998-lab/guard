@@ -37,6 +37,7 @@
  *   - missed_pings row, unresolved → "Missed Ping" (the authoritative
  *     source — this route no longer infers misses itself).
  *   - missed_pings row, RESOLVED  → "Missed — answered N minutes late"
+ *     ("N seconds" under a minute; see services/answeredLate.ts)
  *     (status_kind 'missed_answered_late'). The window was missed AND
  *     later answered; both facts belong in the record, so the miss row
  *     and its resolving ping collapse into this ONE row, which carries
@@ -91,6 +92,7 @@ import {
   PAGE_W, PAGE_H, ML, MR, CW,
   drawHeader, drawFooter, badge,
 } from '../services/pdf/theme';
+import { lateBy } from '../services/answeredLate';
 
 const router = Router();
 
@@ -821,21 +823,21 @@ export async function fetchActivityRows(
 
       // Resolved, but the resolving ping fell outside this query's date
       // range (or predates resolved_by_ping_id being populated): state
-      // the outcome without inventing a lateness figure or media.
-      const answeredMin = resolver
-        ? Math.max(0, Math.round((Date.parse(resolver.pinged_at) - windowEndMs) / 60_000))
-        : null;
+      // the outcome without inventing a lateness figure or media. The same
+      // for a resolver at or before the window's end, which has not been
+      // seen in production: it is not late, so no figure fits.
+      const lateMs = resolver ? Date.parse(resolver.pinged_at) - windowEndMs : null;
 
       let status: string;
       let statusKind: StatusKind;
       if (!m.resolved_at) {
         status     = 'Missed Ping';
         statusKind = 'missed';
-      } else if (answeredMin === null) {
+      } else if (lateMs === null || lateMs <= 0) {
         status     = 'Missed — answered late';
         statusKind = 'missed_answered_late';
       } else {
-        status     = `Missed — answered ${answeredMin} ${answeredMin === 1 ? 'minute' : 'minutes'} late`;
+        status     = `Missed — answered ${lateBy(lateMs)} late`;
         statusKind = 'missed_answered_late';
       }
 
