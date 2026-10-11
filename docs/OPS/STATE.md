@@ -264,6 +264,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-09 — PR #99, the guard's hours PDF carries the employer's letterhead (Phase B, stage B2), by OVERRIDE — verified 2026-10-09 00:47 PT
+
+| thing | value |
+|---|---|
+| merge | PR #99 merged as `9298b6c` at **00:29:24 PT by OVERRIDE**: Vishnu waived the ping gate ("OVERRIDE: merge B2 now, no ping gate. I'm waiving it."). His conditions held: CI green and CLEAN; head `e648693` and `main` `ee34721` pinned; one merge call, no retry (`gh pr merge 99 --merge --match-head-commit e6486934…`); the usual post-deploy checks, including any STARNET write in the restart window. The merge tree equals the approved head's tree (`b02cc99d`). |
+| Railway | `673bfc2f-08b8-4989-9a75-364db6bb0fcf` **SUCCESS** at 00:31:34 PT from `9298b6c`. |
+| web | Vercel production succeeded at 00:31:03 PT. |
+| health | `/health` commit `9298b6c` (checked again at 00:47); `/health/crons` 20 jobs, none stale; route control 401. |
+| switchover | The new container started at 00:31:28.9 and the old one (`6e832272`) stopped at 00:31:44.8. The old deployment served 4,835 requests over its life with 0 5xx and 102 client aborts, none in the restart window. The new deployment served 105 requests by 00:47, none at 499 or above; its only 4xx was the 401 control, and its 81 3xx were GET 304s. `offline_dead_letters`: none. Sentry, the 20 minutes after: API 0, mobile 0. |
+| restart window | 00:29:24–00:31:45, and no STARNET write failed. Three 00:30 pings got 201s from the old deployment (GRD0028 00:30:12, GRD0027 00:30:20, GRD0024 00:31:06). The 00:30 cron tick ran once, on the old container (7 notifications, 2 `missed_pings`). The old deployment's 72 requests in the window had one non-2xx, the known GET `/api/inspections/session/:id` 404. After the switch, GRD0024's 00:32:01 report got a 201 from the new deployment. |
+| visible change | The guard's own hours PDF (`GET /api/shifts/my-hours.pdf`, the mobile download) carries the employer's letterhead, layout (a). STARNET's profile was empty at the merge, so its guards saw the name only. It has been filled in since (`updated_at` 2026-10-10 17:03 PT: every contact field and a logo), so they now get the full letterhead; that the logo decodes is UNVERIFIED (see the B3 section of OPEN-ITEMS.md). |
+| sessions that did not ping at 00:30 | Both predate the merge. GRD0012 had not pinged all shift (N173). GRD0018 pinged at 23:30 and missed the 00:00 window before the merge. |
+
+---
+
 ## Shipped 2026-10-08 — PR #98, N171: no CSV or XLSX cell from user-typed data runs as a formula — verified 2026-10-08 19:18 PT
 
 | thing | value |
@@ -457,7 +472,7 @@ Connect, 2026-09-29.
 
 ---
 
-## EAS channels + update groups — updated 2026-09-29 (groups from the publish record and Vishnu's `eas update:list`; adoption from `guard_devices.client`)
+## EAS channels + update groups — updated 2026-10-11 (batch 19's groups from Vishnu's publish record of 2026-10-10; publish time from the first adopted update id; adoption from `guard_devices.client` and Sentry's `ota_updates.update_id`)
 
 Channels: `production`, `preview`, `smoke`, `development` (`eas channel:list`, last run
 2026-09-05). A binary polls only its own channel, and only its own runtime (policy
@@ -466,13 +481,33 @@ Channels: `production`, `preview`, `smoke`, `development` (`eas channel:list`, l
 
 | channel | runtime | current group | from | published (PT) | rollback target |
 |---|---|---|---|---|---|
-| production | 1.0.17 | `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` | `ddc6f0a` | 2026-09-29 11:33:06 | republish `9db401c9-6319-49b4-ab17-64cf559995a0` (`b3dcd55`, 2026-09-17 15:07) — **it has no Sentry DSN and the 30-min grace (N152, N138)**; before it `948d55c8-75da-44ea-8a2f-6847d87144a7` (batch-17) |
-| production | 1.0.18 | `ce679c72-2a37-4034-a29d-1be16afab7e3` — republished from preview `429943ab`, same bundles (android `01a0ef89-8f26-70b3-b186-8be6509ce2e2`, ios `01a0ef89-8f26-7be7-ada6-786f5d9d8a4e`), so vc26 no longer depends on its embedded `7bff232` JS | `f5a84c4` | 2026-09-29 16:39:24 | roll back to embedded (`7bff232` on vc26); no earlier 1.0.18 production group |
-| preview | 1.0.18 | `429943ab-8561-4766-b031-635587d0a6c3` | `f5a84c4` | 2026-09-29 08:39:30 | roll back to embedded (`579ee12` on vc27); no earlier 1.0.18 preview group |
+| production | 1.0.17 | `cfde98cf-9fe6-474e-873c-96557edb1c1a` (batch 19; ios `01a12664-a070-7d24-88b6-d36c9a39dd2a`, android UNVERIFIED) | `a02c583` | 2026-10-10 08:18:11 (from the ios update id) | republish `fe530a7a-3a3d-406e-8125-2d8be8df6ecc` (batch 18, `ddc6f0a`, 2026-09-29 11:33:06) |
+| production | 1.0.18 | `fa07bddb-5b49-41e1-9cf4-78c111108227` (batch 19) | `30f8689` | 2026-10-10, minutes after 08:18; the exact second is UNVERIFIED until a 1.0.18 phone adopts it | republish `ce679c72-2a37-4034-a29d-1be16afab7e3` (batch 18, `f5a84c4`, 2026-09-29 16:39:24) |
+| preview | 1.0.18 | `facf85c4-7562-4a24-87c8-4fcc1d5742b9`, republished from production `fa07bddb` (same bundles) | `30f8689` | 2026-10-10, same | republish `429943ab-8561-4766-b031-635587d0a6c3` (batch 18, `f5a84c4`, 2026-09-29 08:39:30) |
 | preview | 1.0.17 | `ff99ee6f-f732-449c-9eae-38a0fe3f224c` | UNVERIFIED | 2026-09-02 | — |
 | smoke | 1.0.17 | `2e20d40d-ffb3-4689-a7a2-af5183b2995b` at 2026-09-05; **UNVERIFIED since** | — | — | — |
 | development | — | none at 2026-09-05; **UNVERIFIED since** | — | — | — |
 | (any) | 1.0.16 | last updates 2026-08-22 (iOS `01a02a71…`) and 2026-08-26 (Android `01a04071-040b…` 16:39:03, `01a04071-d36e…` 16:39:56, `01a04072…` 16:40:23 — likely one change on three channels); groups and channels UNVERIFIED | — | — | none planned (N115) |
+
+**batch/mobile-19, published 2026-10-10 and pushed.** `a02c583` is the 1.0.17 tree and `30f8689` the
+1.0.18 tree (a merge of `f5a84c4`). Both were exported and gated with `scripts/ops/ota-export-and-gate.sh`
+(D21) at 08:15–08:16 PT: RESULT PASS, 71-file manifests OK, DSN file deleted.
+- Native fingerprints are unchanged from the store builds: 1.0.17 `476dd916`, 1.0.18 `0a0d45d1`.
+- **Contents (N173):**
+  - PING NOW on home, through the same gate as the active-shift tile, and a "PING DUE NOW" line.
+  - The answered window is remembered across restarts, and a backfill no longer un-answers it.
+  - An open break dims PING on both screens.
+  - "(late)" is shown only when the server recorded the ping late.
+  - A notifications-off banner that names the Settings path.
+- Simulator-tested against a local API on 2026-10-09 and 10-10.
+- **The preview channel still has a live binary.** Sentry had 5 events from the batch-18 preview
+  Android update (`01a0edd2…`) on 2026-10-09, so the preview publish was needed.
+- **Older groups, kept for history:**
+  - Production 1.0.17 had `9db401c9-6319-49b4-ab17-64cf559995a0` before batch 18 (`b3dcd55`,
+    2026-09-17 15:07). **It has no Sentry DSN and the 30-min grace (N152, N138).** Before that it
+    had `948d55c8-75da-44ea-8a2f-6847d87144a7` (batch-17).
+  - Production and preview 1.0.18 had no group before batch 18, so rolling back past it means the
+    embedded bundle: `7bff232` on vc26, `579ee12` on vc27.
 
 Earlier 1.0.17 production group: `9386a6d2` (2026-09-10; update ids `01a08a24…`, per
 netraops-invariants). Other 1.0.17 update ids seen on devices, channel UNVERIFIED:
@@ -483,10 +518,16 @@ preview APK (Vishnu gave it to them; confirmed 2026-09-29), `guard_devices` rows
 `dc827710…` from 2026-09-28 04:52 to 2026-09-29 14:23 PT, when the guard signed in on an
 iPhone again (production, `01a0b168…`). The Android row never adopted `429943ab`.
 
-Non-revoked STARNET `guard_devices` rows at 2026-09-29 15:45 PT: 3 iPhones on `fe530a7a`
-(GRD0010, GRD0015, GRD0026), 7 on `9db401c9`'s `01a0b168…`; runtime 1.0.16: GRD0007 (iOS,
-last seen 09-03), GRD0005 (Android, 09-14), GRD0008 (Android, 09-27); 4 rows with no client
-string, last seen in August. N138 has the uuids.
+Non-revoked STARNET `guard_devices` rows at 2026-10-11 10:03 PT:
+- **4 iPhones on batch 19's `01a12664…`:** GRD0018, GRD0027, GRD0028, GRD0030.
+- **7 on batch 18's `01a0ee71…`**, GRD0008 and GRD0012 among them.
+- **4 on older updates, and 3 with no client string.**
+- **Batch 19 also runs on GRD0013, GRD0023 and GRD0024,** per Sentry. Their rows do not show it:
+  they have none, or it has not updated.
+- **GRD0008 is now on an iPhone (1.0.17).** Its Android 1.0.16 rows are revoked.
+- **GRD0013 and GRD0016 have never had a row,** because notifications were never granted.
+
+N138 has the uuids.
 
 History, verified 2026-09-05 08:33 UTC (`eas channel:list`):
 
