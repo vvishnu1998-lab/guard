@@ -610,10 +610,17 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   doc.fontSize(10).fillColor(TEXT).font('Helvetica-Bold').text('Guard Coverage Summary', ML, y);
   y += 16;
   doc.rect(ML, y, CW, 62).fill(GRAY1);
+  // The label follows the total's MEASURED width (N177). At a fixed ML + 80,
+  // a total of 100 h or more ran into it: "236.1" ends at x 140 and the
+  // label began at 130. A total wider than "00.0" pushes the label right by
+  // the difference, keeping the gap a two-digit total has always had; below
+  // 100 h nothing moves.
+  const totalStr = totalHours.toFixed(1);
   doc.fontSize(28).fillColor(NAVY).font('Helvetica-Bold')
-     .text(totalHours.toFixed(1), ML + 20, y + 10, { lineBreak: false });
+     .text(totalStr, ML + 20, y + 10, { lineBreak: false });
+  const extraW = doc.widthOfString(totalStr) - doc.widthOfString('00.0');
   doc.fontSize(11).fillColor(MUTED).font('Helvetica')
-     .text(' hours on duty (actual)', ML + 80, y + 18, { lineBreak: false });
+     .text(' hours on duty (actual)', extraW > 0 ? ML + 80 + extraW : ML + 80, y + 18, { lineBreak: false });
   doc.fontSize(9).fillColor(MUTED).font('Helvetica')
      .text(`${shifts.length} shifts  |  ${guardStats.length} guards deployed`, ML + 20, y + 36);
   // Phase 1 — 4-field breakdown so the PDF matches the canonical service.
