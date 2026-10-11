@@ -16,6 +16,12 @@
  * BASE. Each identity check below compares bytes under a frozen clock, and
  * each has a control that shows the comparison can fail.
  *
+ * Except the activity log since fix/pdf-polish, which changed its body on
+ * purpose (dates by month name, the badge row's spacing). Its A1/A2/A10
+ * compare a null letterhead with NO letterhead in the current renderer;
+ * the identity with 09791dd was proven when B1 shipped (PR #97), and
+ * scripts/test-pdf-polish.ts holds the body changes to the planned ones.
+ *
  *   T  contactLines() moved from letterhead/pdf.ts to letterhead/text.ts
  *   A  #1 Activity Logs PDF (services/pdf/activityLog.ts, POST /api/admin/activity-log/pdf)
  *   B  #4 billing hours XLSX and #5 the monthly archive (services/hoursWorkbook.ts,
@@ -123,10 +129,18 @@ async function frozen<T>(fn: () => Promise<T>): Promise<T> {
  * the current file's do.
  */
 function loadBase(rel: string, edit?: (src: string) => string): any {
+  return loadAt(BASE, rel, edit);
+}
+/** The same, from the working tree: a control's mutant of the CURRENT file. */
+function loadCurrent(rel: string, edit: (src: string) => string): any {
+  return loadAt(null, rel, edit);
+}
+function loadAt(ref: string | null, rel: string, edit?: (src: string) => string): any {
   const file = path.join(__dirname, '..', rel);
-  const src = execFileSync('git', ['show', `${BASE}:apps/api/${rel}`], { encoding: 'utf8' });
+  const src = ref === null ? fs.readFileSync(file, 'utf8')
+    : execFileSync('git', ['show', `${ref}:apps/api/${rel}`], { encoding: 'utf8' });
   const edited = edit ? edit(src) : src;
-  if (edit && edited === src) throw new Error(`loadBase(${rel}): the edit changed nothing`);
+  if (edit && edited === src) throw new Error(`loadAt(${ref ?? 'working tree'}, ${rel}): the edit changed nothing`);
   const js = ts.transpileModule(edited, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
   }).outputText;
@@ -409,7 +423,7 @@ async function main(): Promise<void> {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    section(`A  #1 Activity Logs PDF — no letterhead: the same bytes as at ${BASE.slice(0, 7)}; with one: the tenant's, and nothing else moves`);
+    section('A  #1 Activity Logs PDF — a null letterhead renders exactly what no letterhead renders; with one: the tenant\'s, and nothing else moves');
     const fx = await import('../src/services/pdf/_activityLogFixture');
     const baseAL = loadBase('src/services/pdf/activityLog.ts');
     const curAL = require('../src/services/pdf/activityLog');
@@ -419,17 +433,16 @@ async function main(): Promise<void> {
       ['multi-page fixture', fx.FIXTURE_ROWS, fx.FIXTURE_META],
       ['one page, shift-scoped', fx.FIXTURE_ROWS_ONE_PAGE, fx.FIXTURE_META_WITH_SHIFT],
     ] as const) {
-      const before = await frozen<Buffer>(() => baseAL.renderActivityLogPdf([...rows], { ...meta }));
       const absent = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...rows], { ...meta }));
       const nul = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...rows], { ...meta, lh: null }));
-      check(before.equals(absent) && before.equals(nul),
-        `A1 ${label}: base ${sha(before)} = lh absent ${sha(absent)} = lh null ${sha(nul)} (${pdfPages(file(nul, `a1-${rows.length}.pdf`))} pages)`);
+      check(absent.equals(nul),
+        `A1 ${label}: lh absent ${sha(absent)} = lh null ${sha(nul)} (${pdfPages(file(nul, `a1-${rows.length}.pdf`))} pages)`);
     }
     {
-      const mutant = loadBase('src/services/pdf/activityLog.ts', (src) => src.replace(".text('Activity Logs', ML, y);", ".text('Activity Logs', ML, y + 1);"));
+      const mutant = loadCurrent('src/services/pdf/activityLog.ts', (src) => src.replace(".text('Activity Logs', ML, y);", ".text('Activity Logs', ML, y + 1);"));
       const m = await frozen<Buffer>(() => mutant.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META }));
       const c = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META }));
-      check(!m.equals(c), 'A2 control: the base with its title 1 pt lower DIFFERS');
+      check(m.length > 1000 && !m.equals(c), 'A2 control: the current renderer with its title 1 pt lower DIFFERS');
     }
     const plain = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META }));
     const withLh = await frozen<Buffer>(() => curAL.renderActivityLogPdf([...fx.FIXTURE_ROWS], { ...fx.FIXTURE_META, lh: FULL }));
@@ -506,9 +519,9 @@ async function main(): Promise<void> {
       // requireAuth re-reads the ADMIN row, not the company, so a token naming a company with no row
       // reaches the handler: no rows, and a letterhead lookup that returns null.
       const r = await frozen(() => call('POST', '/api/admin/activity-log/pdf', adminToken(adminA, NO_SUCH_COMPANY), { from, to }));
-      const expected = await frozen<Buffer>(() => baseAL.renderActivityLogPdf([], { siteLabel: 'All sites', fromIso: from, toIso: to }));
+      const expected = await frozen<Buffer>(() => curAL.renderActivityLogPdf([], { siteLabel: 'All sites', fromIso: from, toIso: to }));
       check(r.status === 200 && r.body.equals(expected),
-        `A10 a company with no row: the lookup returns null and the route's PDF is the base renderer's, byte for byte (${sha(r.body)} = ${sha(expected)})`);
+        `A10 a company with no row: the lookup returns null and the route's PDF is the renderer's with no letterhead, byte for byte (${sha(r.body)} = ${sha(expected)})`);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

@@ -30,13 +30,15 @@ import {
   PAGE_W, PAGE_H, ML, MR, CW,
   drawHeader, drawFooter, badge, proportionBar,
 } from '../services/pdf/theme';
+import { monthDayYear, hourMinute } from '../services/pdf/dates';
 import { letterheadForSite } from '../services/letterhead';
 
 const router = Router();
 
 /** Zone every date in the client-facing PDF is rendered in. See the note at
  *  periodStr: Railway sets no TZ, so a bare toLocaleDateString renders UTC.
- *  Five further bare formatters remain in this file — tracked in OPEN-ITEMS. */
+ *  Every date and time in the PDF goes through services/pdf/dates.ts, which
+ *  takes the zone as a required argument (N105 was five calls without it). */
 const SITE_TZ = 'America/Los_Angeles';
 
 // ── v36 multi-site: list this client's accessible sites ─────────────────────
@@ -500,7 +502,10 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
 
   const byDate = new Map<string, typeof reports>();
   for (const r of reports) {
-    const d = new Date(r.reported_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    // The timeline's GROUPING key, not only its label: in the process's zone
+    // (UTC on Railway) every report from 17:00 PT on was filed under the next
+    // day (N105).
+    const d = monthDayYear(r.reported_at, SITE_TZ);
     if (!byDate.has(d)) byDate.set(d, []);
     byDate.get(d)!.push(r);
   }
@@ -531,7 +536,10 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // client-facing report renders its period in UTC. The portal sends an
   // inclusive end-of-local-day bound, which is 06:59Z the NEXT day in UTC,
   // so the end date printed one day late.
-  const periodStr = `${from ? new Date(from).toLocaleDateString('en-GB', { timeZone: SITE_TZ }) : 'All time'} \u2013 ${to ? new Date(to).toLocaleDateString('en-GB', { timeZone: SITE_TZ }) : 'Today'}`;
+  //
+  // Month by name, in US order: "Aug 31, 2026", not en-GB's "31/08/2026";
+  // "11/10/2026" reads as November 10 to a US client.
+  const periodStr = `${from ? monthDayYear(from, SITE_TZ) : 'All time'} \u2013 ${to ? monthDayYear(to, SITE_TZ) : 'Today'}`;
 
   const TYPE_DOT_COLOR: Record<string, string> = { activity: BLUE, incident: RED, maintenance: AMBER };
   const TYPE_LABEL: Record<string, string>     = { activity: 'ACTIVITY', incident: 'INCIDENT', maintenance: 'MAINTENANCE' };
@@ -548,7 +556,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   y += 20;
 
   doc.fontSize(10).fillColor(MUTED).font('Helvetica')
-     .text(`Report Period: ${periodStr}  |  Generated: ${new Date().toLocaleDateString('en-GB', { timeZone: SITE_TZ })}`, ML, y);
+     .text(`Report Period: ${periodStr}  |  Generated: ${monthDayYear(new Date(), SITE_TZ)}`, ML, y);
   y += 30;
 
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(1).stroke();
@@ -666,7 +674,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
         y = 90;
       }
       const dotColor = TYPE_DOT_COLOR[r.report_type] ?? MUTED;
-      const timeStr  = new Date(r.reported_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      const timeStr  = hourMinute(r.reported_at, SITE_TZ);
 
       doc.circle(timelineX, y + 8, 5).fill(dotColor);
       doc.fontSize(8).fillColor(MUTED).font('Helvetica').text(timeStr, timelineX + 12, y + 4, { lineBreak: false });
@@ -784,9 +792,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
       }
       const sev      = (r.severity ?? 'low').toLowerCase();
       const sevColor = sev === 'high' ? RED : sev === 'medium' ? AMBER : '#16A34A';
-      const dt       = new Date(r.reported_at).toLocaleString('en-GB', {
-        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
-      });
+      const dt       = `${monthDayYear(r.reported_at, SITE_TZ)}, ${hourMinute(r.reported_at, SITE_TZ)}`;
 
       doc.rect(ML, y, CW, 4).fill(sevColor);
       doc.rect(ML, y + 4, CW, 44).fill(GRAY1);
@@ -853,8 +859,8 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
 
       const cells = [
         r.guard_name,
-        dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-        dt.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+        monthDayYear(dt, SITE_TZ),
+        hourMinute(dt, SITE_TZ),
         (r.description ?? '').slice(0, 55),
       ];
       let cx3 = ML;

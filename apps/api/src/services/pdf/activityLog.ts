@@ -27,6 +27,7 @@ import {
   drawFooter, badge, stampPages,
   CONTENT_TOP, CONTENT_BOTTOM,
 } from './theme';
+import { monthDayYear } from './dates';
 import { ACTIVITY_PDF_ROW_CAP, type ActivityRow, type StatusKind } from '../../routes/activityLog';
 import type { Letterhead } from '../letterhead/types';
 
@@ -173,6 +174,11 @@ const TIME_LABEL = new Intl.DateTimeFormat('en-GB', {
   hour: '2-digit', minute: '2-digit', timeZone: SITE_TZ,
 });
 
+/** The Generated line's clock: 24-hour with seconds, as it always printed. */
+const GENERATED_TIME = new Intl.DateTimeFormat('en-GB', {
+  hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: SITE_TZ,
+});
+
 export interface ActivityPdfMeta {
   /** Site name, or 'All sites' when the export is not site-filtered. */
   siteLabel:   string;
@@ -237,26 +243,21 @@ export function renderActivityLogPdf(
   // Every sibling formatter in this file already passes the zone (DAY_KEY,
   // DAY_HEADER, TIME_FMT, and the Generated line below). This call was the
   // only one that did not, so it was an omission, not a choice.
-  const periodStr =
-    `${new Date(fromIso).toLocaleDateString('en-GB', { timeZone: SITE_TZ })}` +
-    ` – ${new Date(toIso).toLocaleDateString('en-GB', { timeZone: SITE_TZ })}`;
+  //
+  // Month by name, in US order (services/pdf/dates.ts): "Sep 1, 2026", not
+  // en-GB's "01/09/2026", which a US client reads as January 9.
+  const periodStr = `${monthDayYear(fromIso, SITE_TZ)} – ${monthDayYear(toIso, SITE_TZ)}`;
 
   // Group by Pacific-time day for the on-page sections.
   const DAY_KEY = new Intl.DateTimeFormat('en-CA', {
     year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'America/Los_Angeles',
   });
-  const DAY_HEADER = new Intl.DateTimeFormat('en-GB', {
-    weekday: 'long', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Los_Angeles',
+  // "TUESDAY, SEP 8, 2026": the same date style as the cover and the footer.
+  const DAY_HEADER = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/Los_Angeles',
   });
   const TIME_FMT = new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
-  });
-  // Clock-in on the Shift line: dated as well as timed, because a shift
-  // filter is the one case where the document may cover a single day that
-  // is not obvious from the period.
-  const SHIFT_CLOCK_FMT = new Intl.DateTimeFormat('en-GB', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', timeZone: SITE_TZ,
   });
 
   const byDay = new Map<string, ActivityRow[]>();
@@ -309,15 +310,20 @@ export function renderActivityLogPdf(
   //
   // The guard a reader actually wants is named on the Shift line below,
   // where it means something.
+  //
+  // Clock-in on the Shift line: dated as well as timed, because a shift
+  // filter is the one case where the document may cover a single day that
+  // is not obvious from the period.
   if (shift) {
     doc.text(
       `Shift       ${shift.guardName} \u00B7 ${shift.siteName} \u00B7 ` +
-      `${SHIFT_CLOCK_FMT.format(new Date(shift.clockedInAt))} PT`,
+      `${monthDayYear(shift.clockedInAt, SITE_TZ)}, ${TIME_FMT.format(new Date(shift.clockedInAt))} PT`,
       ML, y,
     );
     y += 15;
   }
-  doc.text(`Generated   ${new Date().toLocaleString('en-GB', { timeZone: 'America/Los_Angeles' })} PT`, ML, y);
+  const generatedAt = new Date();
+  doc.text(`Generated   ${monthDayYear(generatedAt, SITE_TZ)}, ${GENERATED_TIME.format(generatedAt)} PT`, ML, y);
   y += 22;
 
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(0.5).stroke();

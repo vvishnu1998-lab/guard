@@ -145,23 +145,24 @@ async function main() {
 
   check('period end is the picker date, not the next UTC day', () => {
     // Picker 2026-08-24 -> 2026-09-22. Wire end is 2026-09-23T06:59:59.999Z,
-    // which a zone-less formatter on a UTC server renders as 23/09.
+    // which a zone-less formatter on a UTC server renders as Sep 23.
     const period = prod.page(1).split('\n').find((l) => l.includes('Period'));
     assert.ok(period, 'no Period line on the cover');
-    assert.match(period, /22\/09\/2026/, `period end wrong: ${period.trim()}`);
-    assert.doesNotMatch(period, /23\/09\/2026/, `period end is the next UTC day: ${period.trim()}`);
+    assert.match(period, /Sep 22, 2026/, `period end wrong: ${period.trim()}`);
+    assert.doesNotMatch(period, /Sep 23, 2026/, `period end is the next UTC day: ${period.trim()}`);
   });
 
   check('period start is unchanged (07:00Z is already the right day)', () => {
     const period = prod.page(1).split('\n').find((l) => l.includes('Period'))!;
-    assert.match(period, /24\/08\/2026/, `period start wrong: ${period.trim()}`);
+    assert.match(period, /Aug 24, 2026/, `period start wrong: ${period.trim()}`);
   });
 
   check('the footer carries the same corrected period on every page', () => {
     // drawFooter stamps periodStr on all pages; a fix applied only to the
     // cover would leave every other page contradicting it.
     for (let p = 1; p <= prod.pages; p++) {
-      assert.doesNotMatch(prod.page(p), /23\/09\/2026/, `page ${p} footer still says 23/09`);
+      assert.match(prod.page(p), /Aug 24, 2026\s+–\s+Sep 22, 2026/, `page ${p} footer lacks the period`);
+      assert.doesNotMatch(prod.page(p), /Sep 23, 2026/, `page ${p} footer still says Sep 23`);
     }
   });
 
@@ -171,8 +172,9 @@ async function main() {
     // filename disagreeing is the symptom a reader actually reported.
     const period = prod.page(1).split('\n').find((l) => l.includes('Period'))!;
     const webFilenameEnd = '2026-09-22';                 // ActivityLogTable.tsx:613
-    const [y, m, d] = webFilenameEnd.split('-');
-    assert.match(period, new RegExp(`${d}/${m}/${y}`), 'header disagrees with the filename');
+    const asPrinted = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+      .format(new Date(`${webFilenameEnd}T12:00:00Z`));
+    assert.match(period, new RegExp(asPrinted), `header disagrees with the filename (${asPrinted})`);
   });
 
   // ── C2 / D3 — the declared page total is the real one ─────────────────────
@@ -227,6 +229,7 @@ async function main() {
     // 19:00:14Z is 12:00 PT. A server-zone render would say 19:00.
     assert.match(line, /12:00/, `Shift clock-in not in site time: ${line.trim()}`);
     assert.doesNotMatch(line, /19:00/, `Shift clock-in rendered in UTC: ${line.trim()}`);
+    assert.match(line, /Sep 8, 2026, 12:00 PT/, `Shift clock-in not dated as "Sep 8, 2026, 12:00 PT": ${line.trim()}`);
   });
 
   check('an unfiltered export prints no Shift line', () => {
@@ -240,6 +243,35 @@ async function main() {
     // guards had worked that site that day and only one was in the document.
     assert.doesNotMatch(shifted.page(1), /All guards/,
       'cover still claims "All guards" while scoped to one session');
+  });
+
+  // ── C1b — one date style (fix/pdf-polish) ─────────────────────────────────
+  console.log('');
+  console.log('C1b — every date spells its month, in US order');
+
+  check('no page prints a numeric date or a day-first one', () => {
+    // "11/10/2026" is 11 October to en-GB and November 10 to a US client.
+    // "Sept" is en-GB's short September, so it marks a date the change
+    // missed, as does any "08 Sep 2026" day-first order.
+    for (const [name, d] of [['fixture', doc], ['prod-range', prod], ['with-shift', shifted], ['one-page', one]] as const) {
+      for (let p = 1; p <= d.pages; p++) {
+        const t = d.page(p);
+        assert.doesNotMatch(t, /\b\d{1,2}\/\d{1,2}\/\d{4}\b/, `${name} p${p}: a numeric date`);
+        assert.doesNotMatch(t, /\bSept\b/i, `${name} p${p}: en-GB's "Sept"`);
+        assert.doesNotMatch(t, /\b\d{1,2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{4}\b/i,
+          `${name} p${p}: a day-first date`);
+      }
+    }
+  });
+
+  check('the Generated line reads "Mon D, YYYY, HH:MM:SS PT"', () => {
+    const line = doc.page(1).split('\n').find((l) => /^\s*Generated\b/.test(l));
+    assert.ok(line, 'no Generated line');
+    assert.match(line, /^\s*Generated\s+[A-Z][a-z]{2} \d{1,2}, \d{4}, \d{2}:\d{2}:\d{2} PT\s*$/, line);
+  });
+
+  check('day headers read "TUESDAY, SEP 8, 2026"', () => {
+    assert.ok(doc.text.includes('TUESDAY, SEP 8, 2026'), 'the 2026-09-08 day header is not "TUESDAY, SEP 8, 2026"');
   });
 
   // ── C4 — every status kind gets a label and a colour ──────────────────────
