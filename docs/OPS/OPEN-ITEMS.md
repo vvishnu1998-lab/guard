@@ -3786,6 +3786,12 @@ decision first.
 
 ### N105 — the client-facing site-security PDF renders every date in UTC
 
+**FIXED by fix/pdf-polish (2026-10-11).** All five go through `services/pdf/dates.ts` in site time, and
+the report is the same bytes from a UTC process and a Pacific one (`scripts/test-pdf-polish.ts`, C1
+and C2). The extraction called for below was not needed: `scripts/test-letterhead-b3.ts` already renders
+this route over HTTP into a buffer. The severity coercion noted at the end is unchanged. N178 is a
+separate zone defect in the same route: its period bounds.
+
 `clientPortal.ts` has **seven** bare `toLocale*` calls. Two were fixed in
 `fix/activity-pdf` (`periodStr` and `Generated`). **Five remain, and they are the
 ones inside the document body:**
@@ -5310,9 +5316,10 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
-- **Status 2026-10-11 (B3):** the client's site security report now carries the letterhead of the company
-  that runs the site (`letterheadForSite`). A lookup that fails leaves today's PDF byte for byte
-  (`scripts/test-letterhead-b3.ts`, B1).
+- **Status 2026-10-11 (B3, SHIPPED as `c278689`, PR #100):** the client's site security report now carries
+  the letterhead of the company that runs the site (`letterheadForSite`). A lookup that fails leaves the
+  PDF as it would be with no letterhead (`scripts/test-letterhead-b3.ts`, B1). STARNET's logo renders
+  (Vishnu, 2026-10-11).
 - **Status 2026-10-09 (B2):** the guard's own hours PDF now carries the employer's letterhead. The logo
   arrives through the same decode-checked lookup (`letterheadForGuard`), and a lookup that fails leaves
   today's PDF byte for byte (`scripts/test-letterhead-b2.ts`, H4).
@@ -5598,7 +5605,8 @@ post unseen.
 
 ## New from Phase B, stage B3 (2026-10-11)
 
-**Status:** B3 (this PR) puts the letterhead of the company that runs a site on that site's client report
+**Status: SHIPPED 2026-10-11 as `c278689` (PR #100, by the "any guard" method; see STATE.md).** B3 puts the
+letterhead of the company that runs a site on that site's client report
 (surface #2, `GET /api/client/reports/pdf`, the client portal's PDF download). The route looks the
 letterhead up by the download token's site (`letterheadForSite`).
 - **What changes:** layout (a) on every page, continuation pages included. The header is the company's,
@@ -5614,14 +5622,19 @@ letterhead up by the download token's site (`letterheadForSite`).
 - **Visible on deploy to every client who downloads a report.** STARNET's profile was filled in on
   2026-10-10 (17:03 PT: every contact field and a logo). STARNET's client (one active client user) will
   therefore see STARNET's full letterhead, and its admins and guards already get it in B1 and B2.
-  - **UNVERIFIED: that STARNET's logo passes the decode gate.** No letterhead warning reached Sentry in
-    the 7 days to 10-11, but that proves nothing unless a letterhead document was generated.
+  - **VERIFIED 2026-10-11 (Vishnu): STARNET's logo renders.** He checked STARNET's Activity Logs PDF,
+    and the logo appears correctly on all 7 pages. That document fetches and decode-checks the logo the
+    same way this one does.
   - If the logo fails, the documents show the company name in its place, and Sentry gets
     `letterhead_logo_unavailable`.
 - `scripts/test-letterhead-pdf.ts` I3 checks the theme's no-letterhead path through this route. The route
   now passes a letterhead, so I3 stubs its lookup to null.
 
 ### N177 — the client report's hours total runs into its label from 100 hours up
+
+**FIXED by fix/pdf-polish (2026-10-11):** a total wider than "00.0" pushes the label right by the
+difference. Below 100 h nothing moves (`scripts/test-pdf-polish.ts`, C4: 110.2 h clears its label; 23.6 h
+and 7.9 h do not move).
 
 verified 2026-10-11 on the B3 samples, and also present in today's report: the B3 null render is
 byte-identical to `9298b6c`.
@@ -5648,3 +5661,82 @@ verified 2026-10-11.
   so the hazard is latent.
 - **Fix:** the same `refuseUnlessLocal` guard at the top of both.
 - **Size XS. Tier 0** (test only).
+
+## New from the PDF polish pass (fix/pdf-polish, 2026-10-11)
+
+**Status:** this PR is the one small PR after B3 and before B4 (Vishnu, 2026-10-11). It polishes the two
+client-facing PDFs, the activity log and the site security report:
+- **Dates:** every date spells its month, in US order ("Sep 8, 2026"). en-GB's "11/10/2026" reads as
+  November 10 to a US client. One style per document; times stay 24-hour.
+- **N105 fixed:** the site security report's dates and times are in site time.
+- **Address:** a letterhead address line that ends in a comma no longer prints ",,". This applies on every
+  letterhead surface.
+- **Badges:** the activity log's badges clear the detail line by 3 pt and the guard's name by 14 pt.
+- **Lateness:** "Missed — answered 0 minutes late" now reads in seconds under a minute. N179 records
+  the rule itself.
+- **N177 fixed.**
+
+Proof: `scripts/test-pdf-polish.ts` (24 checks, with BASE `c278689` controls) and the updated suites.
+
+`scripts/test-letterhead-b1.ts` (A1, A2, A10) and `scripts/test-letterhead-b3.ts` (B1, B2) now compare a null
+letterhead with no letterhead in the current code, rather than with the pre-letterhead commits. This PR
+changes both bodies on purpose. Their identity with `09791dd` and `9298b6c` was proven when B1 and B3
+shipped.
+
+### N178 — the client report reads the portal's zone-less dates as UTC: its period starts a day early, and it covers 17:00 to 16:59 PT
+
+verified 2026-10-11, by reading the code and the database's zone. fix/pdf-polish does not change it.
+- **What the portal sends:** `buildFromTo` in `apps/web/components/client/DownloadPanel.tsx` sends
+  zone-less strings.
+  - Daily and weekly: `format(startOfDay(…), "yyyy-MM-dd'T'HH:mm:ss")`, e.g. "2026-10-11T00:00:00".
+  - Custom: the picked start bare ("2026-09-01"), and the end as "…T23:59:59".
+- **What `GET /api/client/reports/pdf` does with them:**
+  - **The query:** it passes them straight into SQL (`r.reported_at >= $2`; the same for sessions). The
+    database's TimeZone is `Etc/UTC` (read 2026-10-11; no role overrides it), so "2026-10-11T00:00:00"
+    means 17:00 PT the day before.
+  - **The printed period:** it goes through `new Date(from)`, which reads a zone-less string in the
+    process's zone, UTC on Railway.
+- **The effect:**
+  - A daily report for Oct 11 covers Oct 10 17:00 to Oct 11 16:59 PT and prints "Oct 10, 2026 – Oct 11,
+    2026".
+  - A custom range starts 7 to 8 hours early and stops at 16:59 PT on its last day.
+  - 588 of 1,742 reports (34%) in the 30 days to 10-11 were filed at or after 17:00 PT. An evening's
+    reports therefore land in the next day's PDF.
+- The downloaded file's name is also dated in UTC (`toISOString().slice(0, 10)`).
+- **Fix, either:**
+  - (a) the route reads a zone-less bound in site time, as `siteLocalDayRange`
+    (`services/dateRange.ts`) already does for a bare date; or
+  - (b) the portal sends instants (UTC, with a Z), as the activity log's web code does.
+  - Either one changes which reports a client's PDF contains.
+- **Size S. Tier 1, and clients see it: Vishnu decides.**
+
+### N179 — a missed ping is decided on arrival, about 1 s after the window closes, with no grace
+
+verified 2026-10-11, read-only in production, across all rows to date.
+- **The rule:** `missedPingCron` (every 5 min) flags a window when no ping's `pinged_at`, the time it
+  arrived at the server, falls inside it. On the :00/:30 tick it runs about 1 s after the close: median
+  1.1 s, 90th percentile 3.0 s, over 1,891 flags in 30 days.
+- A ping that arrives later carries the window's label. It resolves the miss and is stamped
+  `submitted_late`.
+- **The rule is applied consistently.** All 224 answered misses arrived after their flag. None arrived
+  before it, and no miss is left open beside a ping for its window.
+- **How late they were:** 43 of the 224 (19%) arrived 9–29 s after the close (median 15.2 s), and 21
+  more arrived 30–90 s after. All of them count as MISSED on client documents.
+- **Unknown:** whether those guards started their ping before the close. The server stores only the
+  arrival time, and photo keys are random. In all 34 of the under-30 s rows that carry a GPS fix age,
+  the fix was taken after the close.
+- **fix/pdf-polish changed only the wording:** "answered 15 seconds late", not "answered 0 minutes late".
+- **If the rule should change, the options are:**
+  - **A grace period:** a ping that arrives within G of the close counts for the window. The cron flags
+    at end + G, and the missed-ping push moves G later.
+  - **A capture time from the phone:** a mobile change, and a value the client controls.
+- **Either one changes the MISSED counts that clients see. Tier 2: Vishnu decides.**
+
+### N180 — the site security report's timeline day count touches the end of its bar
+
+verified 2026-10-11 on the fix/pdf-polish samples. Pre-existing and unchanged.
+- "N reports" is right-aligned to `PAGE_W - ML`, so it ends at x = 545.0, exactly where the navy day bar
+  ends: no right padding. The date at the bar's left has 10 pt.
+- The activity log had the same defect, fixed with `width: PAGE_W - ML - 8` (its check L3).
+- **Fix:** the same 8 pt in `routes/clientPortal.ts`.
+- **Size XS. Tier 1** (clients see it).

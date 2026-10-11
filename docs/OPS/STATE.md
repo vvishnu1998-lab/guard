@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-11 — PR #100, the client's site security report carries the security company's letterhead (Phase B, stage B3) — verified 2026-10-11 12:31 PT
+
+| thing | value |
+|---|---|
+| merge | PR #100 merged as `c278689` at **12:00:21 PT** by the **"any guard" method** (POLICY.md, route 2). Boundary 12:00:00; the first STARNET ping was GRD0023's at 12:00:15.6; `scripts/ops/any-guard-merge.py` confirmed the merge 7.9 s later. A dry run on the 11:30 wave passed first. |
+| Railway | `db50935d-7b96-4e69-ab7b-e6b527b8b202` **SUCCESS** at 12:01:30 PT from `c278689`. |
+| web | Vercel production on `c278689`: success at 12:02:04 PT, per its GitHub deployment record. |
+| health | `/health` commit `c278689`; `/health/crons` 20 jobs, `stale: []` (12:01:52 PT); route control 401. |
+| switchover | The old container (`673bfc2f`) stopped at 12:01:46.8; its last request was at 12:01:26.9. Its whole life (10-09 00:29 to 10-11 12:01) was read in 6-hour chunks, each rc=0. One chunk hit the 5,000-line cap, and its missing half hour was read again. The total: 0 5xx and 12 client aborts, all GETs, none in the restart window. The new deployment served 95 requests by 12:31, none at 499 or above; its only 4xx was the 401 control. Sentry, the 30 minutes after the merge: API 0; mobile, only the known MOBILE-13. |
+| restart window | 12:00:21–12:01:47. The one STARNET write, a report at 12:01:26, got a 201 from the old deployment. None landed 12:01:47–12:16:47. The 12:30 wave was the write-path control: GRD0023's 12:30:34 ping got a 201 from the new deployment. |
+| visible change | Every client who downloads a site security report gets the letterhead of the company that runs the site, so STARNET's client gets STARNET's: every contact field and the logo. Vishnu verified on 2026-10-11, before the merge, that STARNET's logo renders: in its Activity Logs PDF, on all 7 pages. No client had downloaded a report by 12:12 PT. |
+
+---
+
 ## Shipped 2026-10-09 — PR #99, the guard's hours PDF carries the employer's letterhead (Phase B, stage B2), by OVERRIDE — verified 2026-10-09 00:47 PT
 
 | thing | value |
@@ -274,7 +288,7 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 | health | `/health` commit `9298b6c` (checked again at 00:47); `/health/crons` 20 jobs, none stale; route control 401. |
 | switchover | The new container started at 00:31:28.9 and the old one (`6e832272`) stopped at 00:31:44.8. The old deployment served 4,835 requests over its life with 0 5xx and 102 client aborts, none in the restart window. The new deployment served 105 requests by 00:47, none at 499 or above; its only 4xx was the 401 control, and its 81 3xx were GET 304s. `offline_dead_letters`: none. Sentry, the 20 minutes after: API 0, mobile 0. |
 | restart window | 00:29:24–00:31:45, and no STARNET write failed. Three 00:30 pings got 201s from the old deployment (GRD0028 00:30:12, GRD0027 00:30:20, GRD0024 00:31:06). The 00:30 cron tick ran once, on the old container (7 notifications, 2 `missed_pings`). The old deployment's 72 requests in the window had one non-2xx, the known GET `/api/inspections/session/:id` 404. After the switch, GRD0024's 00:32:01 report got a 201 from the new deployment. |
-| visible change | The guard's own hours PDF (`GET /api/shifts/my-hours.pdf`, the mobile download) carries the employer's letterhead, layout (a). STARNET's profile was empty at the merge, so its guards saw the name only. It has been filled in since (`updated_at` 2026-10-10 17:03 PT: every contact field and a logo), so they now get the full letterhead; that the logo decodes is UNVERIFIED (see the B3 section of OPEN-ITEMS.md). |
+| visible change | The guard's own hours PDF (`GET /api/shifts/my-hours.pdf`, the mobile download) carries the employer's letterhead, layout (a). STARNET's profile was empty at the merge, so its guards saw the name only. It has been filled in since (`updated_at` 2026-10-10 17:03 PT: every contact field and a logo), so they now get the full letterhead. Vishnu verified on 2026-10-11 that the logo renders: in STARNET's Activity Logs PDF, on all 7 pages. |
 | sessions that did not ping at 00:30 | Both predate the merge. GRD0012 had not pinged all shift (N173). GRD0018 pinged at 23:30 and missed the 00:00 window before the merge. |
 
 ---
