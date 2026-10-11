@@ -18,6 +18,8 @@
  *   I3  routes/clientPortal.ts        GET /api/client/reports/pdf over HTTP through the
  *                                     real router, on a local Postgres seeded with FAKE
  *                                     data on Star Guard's id: a period, and all time
+ *                                     (its letterhead lookup gives null here: since B3
+ *                                     the route passes one; see test-letterhead-b3.ts)
  *   I4  the theme entry points called directly with an explicit `null` letterhead
  * All under a frozen clock: pdfkit stamps CreationDate (an indirect object) and
  * an /ID derived from it, and two of the documents print the time themselves.
@@ -146,6 +148,11 @@ async function main(): Promise<void> {
     tagRequest: () => undefined,
   });
   inject('../src/services/email', stubModule('email'));
+  // Since B3 the client route looks up its site's company letterhead and passes it to the
+  // theme. I3 tests the theme's no-letterhead path, so here that lookup gives null, as it
+  // does on any failure. The route's letterhead path is scripts/test-letterhead-b3.ts.
+  inject('../src/services/letterhead', { __esModule: true, letterheadForSite: async () => null,
+    letterheadForCompany: async () => null, letterheadForGuard: async () => null });
 
   const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'letterhead-pdf-'));
   const PDFDocument = (await import('pdfkit')).default;

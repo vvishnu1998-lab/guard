@@ -30,6 +30,7 @@ import {
   PAGE_W, PAGE_H, ML, MR, CW,
   drawHeader, drawFooter, badge, proportionBar,
 } from '../services/pdf/theme';
+import { letterheadForSite } from '../services/letterhead';
 
 const router = Router();
 
@@ -505,6 +506,14 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   }
 
   // ── Build PDF ─────────────────────────────────────────────────────────────────
+  // The letterhead of the company that runs this site (Phase B, B3), looked up
+  // before the first header is set: the render below streams into `res`.
+  // letterheadForSite never throws; on any failure it returns null and the
+  // report keeps today's NetraOps chrome, byte for byte. Every drawHeader and
+  // drawFooter below takes it; the body does not move (the letterhead draws in
+  // the same bands) and sets its own font, colour and line width throughout,
+  // so nothing the letterhead header leaves behind reaches it.
+  const lh = await letterheadForSite(payload.site_id);
   const doc = new PDFDocument({ margin: 0, size: 'A4', autoFirstPage: true });
   const filename = `netraops-report-${siteName.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().slice(0, 10)}.pdf`;
 
@@ -530,7 +539,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // ══════════════════════════════════════════════════════════════════════════════
   // PAGE 1 — Cover & Summary
   // ══════════════════════════════════════════════════════════════════════════════
-  drawHeader(doc, 'SITE SECURITY REPORT', 1, 5);
+  drawHeader(doc, 'SITE SECURITY REPORT', 1, 5, lh);
   let y = 90;
 
   doc.fontSize(26).fillColor(TEXT).font('Helvetica-Bold').text(siteName, ML, y);
@@ -617,13 +626,13 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     }
   }
 
-  drawFooter(doc, siteName, periodStr);
+  drawFooter(doc, siteName, periodStr, lh);
 
   // ══════════════════════════════════════════════════════════════════════════════
   // PAGE 2 — Activity Timeline
   // ══════════════════════════════════════════════════════════════════════════════
   doc.addPage();
-  drawHeader(doc, 'ACTIVITY TIMELINE', 2, 5);
+  drawHeader(doc, 'ACTIVITY TIMELINE', 2, 5, lh);
   y = 90;
 
   doc.fontSize(14).fillColor(BLUE).font('Helvetica-Bold').text('Activity Timeline', ML, y);
@@ -633,9 +642,9 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
 
   for (const [dateStr, dayReports] of byDate) {
     if (y > 750) {
-      drawFooter(doc, siteName, periodStr);
+      drawFooter(doc, siteName, periodStr, lh);
       doc.addPage();
-      drawHeader(doc, 'ACTIVITY TIMELINE (cont.)', 2, 5);
+      drawHeader(doc, 'ACTIVITY TIMELINE (cont.)', 2, 5, lh);
       y = 90;
     }
 
@@ -651,9 +660,9 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
 
     for (const r of dayReports) {
       if (y > 750) {
-        drawFooter(doc, siteName, periodStr);
+        drawFooter(doc, siteName, periodStr, lh);
         doc.addPage();
-        drawHeader(doc, 'ACTIVITY TIMELINE (cont.)', 2, 5);
+        drawHeader(doc, 'ACTIVITY TIMELINE (cont.)', 2, 5, lh);
         y = 90;
       }
       const dotColor = TYPE_DOT_COLOR[r.report_type] ?? MUTED;
@@ -679,13 +688,13 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
        .text('No reports for this period.', ML, y, { align: 'center', width: CW });
   }
 
-  drawFooter(doc, siteName, periodStr);
+  drawFooter(doc, siteName, periodStr, lh);
 
   // ══════════════════════════════════════════════════════════════════════════════
   // PAGE 3 — Incident Deep Dive
   // ══════════════════════════════════════════════════════════════════════════════
   doc.addPage();
-  drawHeader(doc, 'INCIDENT DEEP DIVE', 3, 5);
+  drawHeader(doc, 'INCIDENT DEEP DIVE', 3, 5, lh);
   y = 90;
 
   doc.fontSize(14).fillColor(RED).font('Helvetica-Bold').text('Incident Reports', ML, y);
@@ -768,9 +777,9 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
 
     for (const r of incidentReports) {
       if (y > 730) {
-        drawFooter(doc, siteName, periodStr);
+        drawFooter(doc, siteName, periodStr, lh);
         doc.addPage();
-        drawHeader(doc, 'INCIDENT DEEP DIVE (cont.)', 3, 5);
+        drawHeader(doc, 'INCIDENT DEEP DIVE (cont.)', 3, 5, lh);
         y = 90;
       }
       const sev      = (r.severity ?? 'low').toLowerCase();
@@ -791,13 +800,13 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     }
   }
 
-  drawFooter(doc, siteName, periodStr);
+  drawFooter(doc, siteName, periodStr, lh);
 
   // ══════════════════════════════════════════════════════════════════════════════
   // PAGE 4 — Maintenance Summary
   // ══════════════════════════════════════════════════════════════════════════════
   doc.addPage();
-  drawHeader(doc, 'MAINTENANCE SUMMARY', 4, 5);
+  drawHeader(doc, 'MAINTENANCE SUMMARY', 4, 5, lh);
   y = 90;
 
   doc.fontSize(14).fillColor(AMBER).font('Helvetica-Bold').text('Maintenance Reports', ML, y);
@@ -831,9 +840,9 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
 
     for (let ri = 0; ri < maintenanceReports.length; ri++) {
       if (y > 750) {
-        drawFooter(doc, siteName, periodStr);
+        drawFooter(doc, siteName, periodStr, lh);
         doc.addPage();
-        drawHeader(doc, 'MAINTENANCE SUMMARY (cont.)', 4, 5);
+        drawHeader(doc, 'MAINTENANCE SUMMARY (cont.)', 4, 5, lh);
         y = 90;
       }
       const r    = maintenanceReports[ri];
@@ -858,13 +867,13 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     }
   }
 
-  drawFooter(doc, siteName, periodStr);
+  drawFooter(doc, siteName, periodStr, lh);
 
   // ══════════════════════════════════════════════════════════════════════════════
   // PAGE 5 — Guard Activity Summary
   // ══════════════════════════════════════════════════════════════════════════════
   doc.addPage();
-  drawHeader(doc, 'GUARD ACTIVITY SUMMARY', 5, 5);
+  drawHeader(doc, 'GUARD ACTIVITY SUMMARY', 5, 5, lh);
   y = 90;
 
   doc.fontSize(14).fillColor(NAVY).font('Helvetica-Bold').text('Guard Performance', ML, y);
@@ -894,9 +903,9 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   const topGuardName = guardStats[0]?.name;
   for (let gi = 0; gi < guardStats.length; gi++) {
     if (y > 750) {
-      drawFooter(doc, siteName, periodStr);
+      drawFooter(doc, siteName, periodStr, lh);
       doc.addPage();
-      drawHeader(doc, 'GUARD ACTIVITY SUMMARY (cont.)', 5, 5);
+      drawHeader(doc, 'GUARD ACTIVITY SUMMARY (cont.)', 5, 5, lh);
       y = 90;
     }
     const g     = guardStats[gi];
@@ -965,7 +974,7 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   }
   y += 30;
 
-  drawFooter(doc, siteName, periodStr);
+  drawFooter(doc, siteName, periodStr, lh);
   doc.end();
 });
 

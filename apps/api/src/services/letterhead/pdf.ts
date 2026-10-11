@@ -5,7 +5,8 @@
  *
  * Called by pdf/theme.ts when a caller passes a Letterhead (`lh`); with no
  * letterhead, theme.ts draws today's NetraOps chrome and never comes here.
- * B0 ships this unused: no caller passes `lh` yet.
+ * Drawn for the activity log PDF (B1), the guard's hours PDF (B2) and the
+ * client's site security report (B3).
  *
  * HEADER (y 0..72, the same band the NetraOps header uses, so no page body
  * moves): white; logo at the left in a 110 × 46 box, aspect kept; the company

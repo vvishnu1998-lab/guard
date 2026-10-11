@@ -14,7 +14,8 @@
  * one, they draw the company's letterhead in the same bands
  * (letterhead/pdf.ts). Without one (undefined OR null) they draw exactly what
  * they drew before the argument existed: the null path is held byte-identical
- * by scripts/test-letterhead-pdf.ts. B0 adds the argument; no caller passes it.
+ * by scripts/test-letterhead-pdf.ts. Passed by the activity log PDF (B1), the
+ * guard's hours PDF (B2) and the client's site security report (B3).
  */
 import PDFDocument from 'pdfkit';
 import { NAVY, WHITE, GRAY2, MUTED, PAGE_W, PAGE_H, ML, MR, CW } from './palette';

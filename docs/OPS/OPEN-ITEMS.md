@@ -5310,6 +5310,9 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
+- **Status 2026-10-11 (B3):** the client's site security report now carries the letterhead of the company
+  that runs the site (`letterheadForSite`). A lookup that fails leaves today's PDF byte for byte
+  (`scripts/test-letterhead-b3.ts`, B1).
 - **Status 2026-10-09 (B2):** the guard's own hours PDF now carries the employer's letterhead. The logo
   arrives through the same decode-checked lookup (`letterheadForGuard`), and a lookup that fails leaves
   today's PDF byte for byte (`scripts/test-letterhead-b2.ts`, H4).
@@ -5340,6 +5343,34 @@ at 22:00 PT.
   - A side effect: while GRD0013's session is open, GRD0010 cannot gate a PROXY merge.
 - Vishnu, 2026-10-06: log it; do not act yet.
 - **Size S, Tier 0** (read-only investigation).
+
+**Investigated 2026-10-09 (read-only). The MOBILE-13 hypothesis is REFUTED.**
+
+MOBILE-13 ("Background location permission denied") hits 9 STARNET guards, and pings never touch
+the background task (`app/ping/photo.tsx` reads only the store):
+- GRD0024: 131 events, 96% of windows pinged in the last 14 days.
+- GRD0028: 20 events, 100%. GRD0027: 5 events, 99%. GRD0023: 38 events, 86%.
+
+"First seen 2026-09-29" is an artifact, for two reasons. The same error has been MOBILE-G since
+2026-08-17. And no OTA before batch-18 carried the Sentry DSN, while batch-18 also changed the
+throw's stack.
+
+What GRD0013's phone actually does: iPhone18,2, iOS 26.6.1, app 1.0.17 build 48.
+- **Foreground location and camera work.** 100/100 reports in 14 days carry a fresh fix (median
+  6 m from the site centre, all inside the polygon). Clock-in and clock-out use the same camera
+  and GPS component as the ping (`components/CameraCapture.tsx`), and both succeed.
+- **No ping attempt at all.** Railway HTTP logs for the 10-08 13:51–21:55 session show 0
+  `/api/locations/ping` requests and 0 orphan presigns, against 5 reports, each with a photo.
+- **Notifications never granted.** The phone has no `guard_devices` row ever and sent 0
+  `/auth/guard/fcm-token` posts, so it never receives a ping reminder.
+- **Ping rate:** 17–21 pings a night on 09-08..09-12, then declining, with 0 since 09-30. No app
+  change on the ping path explains this: the ping code is byte-identical b3dcd55 → f5a84c4.
+
+**Fix:** batch/mobile-19, published 2026-10-10, adds PING NOW on home, a "ping due" line and a
+notifications-off banner (N173).
+- **First reading, 2026-10-11:** GRD0013 pinged 2 of 15 windows after its phone switched to batch 19.
+  These were its first pings since 2026-09-30.
+- Its notifications are still off.
 
 ## New from Phase B, stage B0 (2026-10-06)
 
@@ -5438,7 +5469,8 @@ equals its start. `shifts_end_after_start` (v81) refuses it, and the harness sto
 
 ## New from Phase B, stage B2 (2026-10-09)
 
-**Status:** B2 (this PR) puts the employer's letterhead on the guard's own hours PDF (surface #3,
+**Status: SHIPPED 2026-10-09 as `9298b6c` (PR #99, by OVERRIDE; see STATE.md).** B2 puts the employer's
+letterhead on the guard's own hours PDF (surface #3,
 `GET /api/shifts/my-hours.pdf`), which the mobile app downloads and shares. There is no app change: the
 server renders the document.
 - **What changes:** layout (a) header and footer on every page, the footer naming the guard, badge and
@@ -5448,3 +5480,171 @@ server renders the document.
   `ee34721`, at the renderer and through the route (`scripts/test-letterhead-b2.ts`, 13 checks).
 - **Visible on deploy to every guard who downloads their hours.** STARNET's profile is empty, so its
   guards see the name only: "STARNET SECURITY".
+
+## New from the N168 investigation and batch/mobile-19 (2026-10-09 → 10-11)
+
+### N173 — guards file reports but skip pings: the phones never attempt one
+
+verified 2026-10-09, read-only. It began as one guard; the investigation found a fleet pattern.
+
+**GRD0012** (STARNET `d0c5780b-3711-4754-94cb-cbe9028ef16f`): iPhone14,5, iOS 27.0.1, app 1.0.17
+build 48 on OTA fe530a7a, push registered.
+- 14 days: 11 pings, 47 missed (19%).
+- Session `19827901` (10-08 21:59 → 10-09 06:00): 2 pings, both 201, and no rejected ping
+  request. Its ping reminders were read about 30 min late, in batches, at the hourly report.
+  Eleven app opens; most fell inside an open window without a ping.
+
+**Fleet, 14 days.** Only STARNET has real shifts: Star Guard had 5 sessions, all under 2 h.
+- Five of 16 guards had sessions with reports, ≥2 missed windows and 0 pings:
+  - GRD0016: never pinged, no push.
+  - GRD0005: Android, runtime 1.0.16, last ping 09-03.
+  - GRD0008: 1 ping ever.
+  - GRD0013 (N168) and GRD0012.
+- GRD0018 is partial (35%). Everyone else is at 86% or more.
+- All low pingers work Jasper, Bethel or CCDC Folsom.
+
+**Cause: workflow, made easy by the app.**
+- Reports are one tap from home. PING NOW sits behind SHIFT ACTIVE → active-shift (it was removed
+  from home in ed1c1f4, 2026-07-13).
+- During an open window that hasn't been pinged, home's countdown reads "Next ping in mm:ss",
+  which counts to the NEXT window (`lib/pingSchedule.ts` remainingMsUntilNextPing). Nothing on
+  home says a ping is due.
+- Phones with notifications off never get a reminder, and nothing tells the guard.
+
+**Ruled out:**
+- **Permissions.** Reports carry precise fixes inside the fence.
+- **Battery.** All iPhones, and a ping is a foreground tap.
+- **A ping-path bug.** There were 0 rejected pings and 0 orphan uploads.
+
+**Fix: batch/mobile-19, an app-only OTA, PUBLISHED 2026-10-10.**
+- Groups: production 1.0.17 `cfde98cf`, production 1.0.18 `fa07bddb`, preview 1.0.18 `facf85c4`.
+- Commits: `a02c583` / `30f8689`. See STATE.
+- What it does:
+  - PING NOW on home, the same gate as the active-shift tile.
+  - The countdown says "PING DUE NOW" and opens the ping.
+  - The answered window is remembered across an app restart. A backfill of a closed window no
+    longer un-answers the open one: before, a ping then a backfill sent both tiles back to PING NOW.
+  - An open break dims PING on both screens, matching the ping line, which never says due during
+    a break.
+  - The confirmation says "(late)" only when the server stamped `submitted_late`. Before, every
+    tile ping said "(late)", because every tile passes a window label.
+  - A notifications-off banner that asks or opens Settings. The banner text names the path
+    "Settings → Apps → NetraOps → Notifications", because `Linking.openSettings()` opened the
+    Settings root on the iOS 26.5 simulator. The phone registers its push token as soon as
+    notifications are allowed.
+- **Outcome check:** ping rates for GRD0012, GRD0013, GRD0016 and GRD0008, before vs after.
+  None of the four had a shift scheduled 10-10 → 10-14 at 08:30 PT 10-10.
+- **First reading, 10-11 10:03 PT.**
+  - **GRD0013** worked an added Jasper shift (10-10 18:39 → 10-11 08:30). The phone switched to
+    batch 19 at 01:01, at the first batch-19 Sentry event.
+    - Before the switch: 0 of 12 windows answered.
+    - After the switch: 2 of 15, on time at 02:00 and 07:00. These are its first pings; the week
+      before was 0 of 131 over 6 shifts.
+    - 12 reports were filed during the shift.
+    - Notifications are still denied (`notif_perm=denied`): the banner shows, but the guard has not
+      turned notifications on, so no reminders arrive.
+  - GRD0012, GRD0016 and GRD0008 had no shift after the OTA.
+  - Others since the OTA: GRD0018 25% → 40% on time; GRD0023 88% → 92%; GRD0024, GRD0026, GRD0027
+    and GRD0030 at 100%.
+  - Sentry over 26 h: 0 new issues. The only rise is MOBILE-1A, the ping photo upload failing with
+    "Network request failed" (3 events, GRD0030 ×2 and GRD0024). Those guards still made 100% of
+    their windows. This is N174 territory.
+
+Not in this fix: GRD0005 needs a store install (runtime 1.0.16), and Vishnu is telling STARNET
+which guards aren't pinging.
+
+### N174 — a ping that fails on the phone leaves no trace
+
+verified 2026-10-09 against f5a84c4. None of these failures reaches Sentry, so "never tried"
+cannot be told apart from "tried and failed" without HTTP-log forensics:
+- **GPS:** "GPS Failed" is an alert only (`components/CameraCapture.tsx:329`).
+- **Server rejects:** 422 `PING_OFF_POST` and `PING_WINDOW_INVALID` produce a breadcrumb only
+  (`app/ping/photo.tsx:179-215`).
+- **Camera denied:** "CAMERA ACCESS NEEDED" (`CameraCapture.tsx:383`) re-requests a permission
+  iOS will not prompt for again. It has no Settings link and no way back, because photo.tsx
+  passes no `onCancel`.
+- **Stale fix:** the GPS read is `getLastKnownPositionAsync()` with no maxAge
+  (`CameraCapture.tsx:142`), the "stale-coordinate defect" its own comment names.
+
+**Fix:**
+- Capture each failure as a Sentry warning with the guard id.
+- Add a Settings link and a cancel to the camera-denied screen.
+- Bound the cached fix's age.
+
+App-only. **Size S, Tier 1.**
+
+### N175 — off-post detection is off on 9 of 16 active STARNET phones (background location denied)
+
+verified 2026-10-09.
+- Sentry MOBILE-13: 320 events from 9 guards since 2026-09-29, plus MOBILE-G (same message) from
+  08-17.
+- `tasks/locationBackground.ts:496` throws before `startGeofencingAsync`, so region monitoring
+  never starts on those phones and no Exit is ever reported.
+- GRD0012, GRD0013 and GRD0016 show it at every clock-in and every app open, and none has ever
+  logged "geofence registered" (MOBILE-9).
+- The app requests "Always" once, at launch (`app/_layout.tsx:164-166`). It never explains why
+  and never offers Settings.
+- It records the state as an ERROR on every open (`_layout.tsx:401`), which is noise.
+
+Pings are unaffected (see N168). Violations are not: a guard on these phones can leave the
+post unseen.
+
+**Fix:**
+- Explain the need at clock-in, with a Settings deep link when "Always" is not granted.
+- Capture the state once per session as a warning, and tag it.
+- Optionally show admins which guards have detection off. That part is an API change.
+
+**Size M, Tier 1.**
+
+## New from Phase B, stage B3 (2026-10-11)
+
+**Status:** B3 (this PR) puts the letterhead of the company that runs a site on that site's client report
+(surface #2, `GET /api/client/reports/pdf`, the client portal's PDF download). The route looks the
+letterhead up by the download token's site (`letterheadForSite`).
+- **What changes:** layout (a) on every page, continuation pages included. The header is the company's,
+  with the page's own title and "n / 5". The footer reads "<site>  |  <period>  |  Confidential —
+  <company>", with "Powered by NetraOps" under it.
+- **The body does not change.** On a 15-page report, 3,620 words stay in place at the same width, and
+  the body band's pixels are identical on every page (`scripts/test-letterhead-b3.ts`, B6 and B7).
+- **No letterhead, no change:** a lookup that gives null leaves the PDF byte for byte as it was at
+  `9298b6c`, for a 5-page report and a 15-page one (B1).
+- **This report draws each page's header before its body**, unlike the B1 and B2 documents, which stamp
+  their chrome last. The body sets its own font, colour and line width before every draw, so nothing the
+  letterhead header leaves behind reaches it. B7 compares pixels to hold that.
+- **Visible on deploy to every client who downloads a report.** STARNET's profile was filled in on
+  2026-10-10 (17:03 PT: every contact field and a logo). STARNET's client (one active client user) will
+  therefore see STARNET's full letterhead, and its admins and guards already get it in B1 and B2.
+  - **UNVERIFIED: that STARNET's logo passes the decode gate.** No letterhead warning reached Sentry in
+    the 7 days to 10-11, but that proves nothing unless a letterhead document was generated.
+  - If the logo fails, the documents show the company name in its place, and Sentry gets
+    `letterhead_logo_unavailable`.
+- `scripts/test-letterhead-pdf.ts` I3 checks the theme's no-letterhead path through this route. The route
+  now passes a letterhead, so I3 stubs its lookup to null.
+
+### N177 — the client report's hours total runs into its label from 100 hours up
+
+verified 2026-10-11 on the B3 samples, and also present in today's report: the B3 null render is
+byte-identical to `9298b6c`.
+- **Where:** page 1, "Guard Coverage Summary" (`routes/clientPortal.ts`). The total is drawn at 28 pt
+  Helvetica-Bold from x = 70, and " hours on duty (actual)" at a fixed x = 130.
+- **What that does:** a total of 100.0 h or more is 5 characters and ends at x ≈ 140, overlapping
+  "hours" (measured: "236.1" spans 70–140.1). From 1,000 h it ends at x ≈ 155.6.
+- **Who sees it:** a site covered around the clock logs about 720 h a month, so a monthly client
+  report for such a site likely shows "720.0hours on duty".
+- **Fix:** place the label after the measured width of the total (plus a gap). That changes the body,
+  so it needs its own PR, not B3.
+- **Size XS. Tier 1** (a client-visible PDF change through the deploy gate).
+
+### N176 — two test scripts that write fixtures take their database from `.env`, with no local-only guard
+
+verified 2026-10-11.
+- `scripts/test-idor-replay.ts` inserts companies, company admins, sites, clients, guards, shifts and
+  reports. `scripts/test-pdf-handoff.ts` reads the first site that has a client.
+- Both `import 'dotenv/config'` and connect to `DATABASE_URL` with no check that it is local, and both
+  boot the whole app in-process.
+- The letterhead harnesses, by contrast, refuse anything but 127.0.0.1 or localhost, and any database
+  whose name does not end in "test".
+- Today neither `.env` in the primary checkout names a Railway host (checked by count only, 2026-10-11),
+  so the hazard is latent.
+- **Fix:** the same `refuseUnlessLocal` guard at the top of both.
+- **Size XS. Tier 0** (test only).
