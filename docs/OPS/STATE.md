@@ -264,6 +264,34 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-11 — PR #102, the nightly purge drains notifications in batches instead of halting at the row cap, by OVERRIDE — verified 2026-10-11 21:41 PT by the session that merged it
+
+| thing | value |
+|---|---|
+| merge | PR #102 merged as `147430b` at **21:35:08 PT by OVERRIDE**: Vishnu waived the ping gate. Head `b72ebae`. |
+| Railway | `9229e025-b631-4c26-87e6-0a505d0e0277` **SUCCESS** from `147430b`; `/health` reported `147430b` at 21:36:22.7 PT. At 21:50:03 PT a second deployment from the same commit, `ff81a87c-723a-4e46-848b-38ef21d51bdd`, replaced it (SUCCESS; `/health` `147430b` when re-checked at 21:51). It has no GitHub deployment record, so it was not a push; its cause is not recorded. |
+| web | Vercel production on `147430b`: success at 21:37:01 PT, per its GitHub deployment record. |
+| switchover | The old deployment (`ee2dd3a4`) served its last request at 21:36:19.9 PT; the merging session measured a 2.76 s gap to the new one. |
+| restart window | 21:33:08–21:41:22.7 PT: 0 STARNET writes (control: the 21:00 and 21:30 waves found 8 pings and 12 notifications), 0 5xx, 0 upstream errors, and 20/20 heartbeats ok. |
+| visible change | None. The purge is still a dry run, because RETENTION_DRY_RUN and RETENTION_LIVE_STEPS are unset in production. The next check is the 2026-10-13 00:00Z run summary: notifications `drained: true`, about 2.5k remaining, `any_halted: false`. |
+| note | The remote branch `fix/retention-notifications-drain` was not deleted: `--delete-branch` failed locally. Deleting it is Vishnu's call. |
+
+---
+
+## Shipped 2026-10-11 — PR #101, the PDF polish pass: dates by month name in site time (N105), the address comma, badge spacing, answered-late seconds and N177, by OVERRIDE — verified 2026-10-11 21:02 PT
+
+| thing | value |
+|---|---|
+| merge | PR #101 merged as `c1a364f` at **20:39:30 PT by OVERRIDE**: Vishnu waived the ping gate ("OVERRIDE: cancel the 21:00 armed run and merge #101 now. I'm waiving the ping gate."). His conditions held. The armed 21:00 "any guard" run was stopped first; its log shows it had only armed and passed preflight. CI was 5/5 green and CLEAN; head `e3f763b` and `main` `c278689` were pinned; there was one merge call and no retry (`gh pr merge 101 --merge --match-head-commit e3f763b…`). The merge tree equals the approved head's tree (`78851430`). A dry run on the 20:30 wave had passed: it saw GRD0024's 20:30:09 ping 2.4 s after it landed. |
+| Railway | `ee2dd3a4-df27-47d0-9977-51d980f447d4` **SUCCESS** at 20:40:35 PT from `c1a364f`. |
+| web | Vercel production on `c1a364f`: success at 20:40:53 PT. |
+| health | `/health` commit `c1a364f`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`db50935d`) stopped at 20:40:46.1 PT; its last request was at 20:40:25. Over its whole life (12:01 to 20:40 PT) it served 2,535 requests, with 0 5xx and 1 client abort (16:29). The new deployment served 346 requests by 21:01, none at 499 or above; its only 4xx were the 401 control and the known GET `/api/inspections/session/:id` 404. Sentry, the 25 minutes after: API 0; mobile, only old info-level events. |
+| restart window | 20:39:30–20:40:47, with no STARNET write; the last one before the merge was at 20:34:30. The 20:40 cron tick ran on the old container. The 21:00 wave was the write-path control: GRD0030, GRD0001, GRD0027 and GRD0024 pinged (21:00:11–21:01:19), and reports landed at 21:00:42, 21:00:52 and 21:01:56, all on the new deployment. |
+| visible change | Both client-facing PDFs changed: every date spells its month, in US order; the site security report's dates and times are in site time (N105); a letterhead address line that ends in a comma prints one comma; the activity log's badges clear the detail line and the guard's name; a miss answered under a minute late reads in seconds; and the hours total no longer runs into its label (N177). |
+
+---
+
 ## Shipped 2026-10-11 — PR #100, the client's site security report carries the security company's letterhead (Phase B, stage B3) — verified 2026-10-11 12:31 PT
 
 | thing | value |
