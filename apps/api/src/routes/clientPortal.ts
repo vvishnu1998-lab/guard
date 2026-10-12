@@ -210,6 +210,9 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
 
 router.get('/reports', requireAuth('client'), async (req: Request, res: Response) => {
   const { type, date_from, date_to } = req.query;
+  // Whole days in site time, as the PDF counts them (N178).
+  const days = reportDays(date_from, date_to);
+  if (days.bad) return res.status(400).json({ error: `invalid date_${days.bad}` });
   let query = `
     SELECT r.id, r.report_type, r.severity, r.description, r.reported_at,
            g.name AS guard_name,
@@ -217,13 +220,13 @@ router.get('/reports', requireAuth('client'), async (req: Request, res: Response
     FROM reports r
     JOIN shift_sessions ss ON ss.id = r.shift_session_id
     JOIN guards g ON g.id = ss.guard_id
+    JOIN sites s ON s.id = r.site_id
     LEFT JOIN report_photos rp ON rp.report_id = r.id
     WHERE r.site_id = $1`;
   const params: unknown[] = [req.user!.site_id];
 
   if (type)      { query += ` AND r.report_type = $${params.length + 1}`; params.push(type); }
-  if (date_from) { query += ` AND r.reported_at >= $${params.length + 1}`; params.push(date_from); }
-  if (date_to)   { query += ` AND r.reported_at <= $${params.length + 1}`; params.push((date_to as string).includes('T') ? date_to : date_to + 'T23:59:59'); }
+  query += ' ' + siteLocalDayRange({ column: 'r.reported_at', siteAlias: 's', from: days.from, to: days.to, args: params }).join(' ');
 
   query += ' GROUP BY r.id, g.name ORDER BY r.reported_at DESC LIMIT 200';
 
