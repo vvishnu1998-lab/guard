@@ -1,11 +1,13 @@
-# Play Store screenshot builder
+# Store screenshot builder
 
-Single-file tool that composes the Google Play Store screenshots for the
-NetraOps guard app from five raw phone captures.
+Single-file tool that composes the store screenshots for the NetraOps guard
+app from raw phone captures. A **Target** selector at the top switches between
+the two stores:
 
-It renders two approved designs — **Version C "Bold Panoramic"** and
-**Version B "Light Contrast"** — five frames each, and exports all ten at
-1080x1920.
+| target | designs | export |
+|---|---|---|
+| **Google Play 1080x1920** | Version C "Bold Panoramic", Version B "Light Contrast" | 10 frames, 1080x1920 |
+| **App Store 6.9-inch 1320x2868** | Version D "Navy & Gold" | 5 frames, 1320x2868 |
 
 Nothing here is wired into a build. `apps/web`, `apps/api`, `apps/mobile`,
 Vercel and CI do not read this directory.
@@ -14,7 +16,8 @@ Vercel and CI do not read this directory.
 
 ```
 netraops_builder.html    the tool — open it, that is all there is
-screens/                 the five source captures, in frame order
+screens/                 Play source captures (Android), in frame order
+screens-ios/             App Store source captures (iPhone 17 Pro Max), in frame order
 vendor/                  html-to-image, JSZip, FileSaver
 out/                     exported images (gitignored — never committed)
 ```
@@ -66,7 +69,7 @@ before every capture. Inter is a variable font, so each weight has to be
 requested individually; loading the family once does not guarantee the 600 and
 700 instances are ready.
 
-## Exporting
+## Exporting — Play target
 
 1. Upload the five files from `screens/` into frames 1-5, **in order** —
    Login, Home, Schedule, Reports, Chat. The tool derives each screenshot's
@@ -115,7 +118,7 @@ The tool exports JPEG by default, which cannot carry an alpha channel. The
 Every capture asserts its own output is exactly 1080x1920 and raises a banner
 if it is not.
 
-## Design constraints
+## Play design constraints
 
 These are approved and deliberate. Do not change them without a new approval:
 
@@ -150,6 +153,85 @@ So the fake status bar is not an overlay. It is its own 22px row stacked
 The row is on by default and controlled by one global toggle. Version B has no
 status bar at all; its `Hide Top` slider only sets how far the device bleeds
 past the top edge of the frame.
+
+## App Store target
+
+Select **App Store 6.9-inch 1320x2868**, upload the five files from
+`screens-ios/` into frames 1-5 in order, and use **Download App Store (5)** or
+the per-frame **Export Frame**. Files are `NetraOps_iOS_D_<N>_<Screen>.jpg`.
+The target has its own upload slots and its own settings key
+(`netraops_builder_ios_v1`); the selected target is remembered under
+`netraops_builder_target_v1`. Images are never stored.
+
+### App Store requirements
+
+| requirement | value |
+|---|---|
+| display size | **6.9-inch** iPhone — required; Apple scales it down for smaller iPhones |
+| resolution | **1320x2868** portrait, which is what this target exports |
+| format | JPEG or PNG, RGB, **no alpha** |
+| count | **1 to 10** screenshots per localisation |
+| iPad | **not required** — `apps/mobile/app.json` sets `ios.supportsTablet: false`. If that ever changes, App Store Connect will also require a 13-inch iPad set |
+
+JPEG 0.95 is the default; **Use PNG** switches format. Both are flattened onto
+an opaque canvas before encoding: a `{alpha:false}` context makes Chromium write
+PNG colour type 2 (RGB) instead of 6 (RGBA), so neither format can carry an
+alpha channel. The size is asserted on the *encoded* file, and a wrong-size
+file is refused rather than saved.
+
+(The Play target's own **Use PNG** path still writes RGBA — see the Play
+requirements note. It is unchanged here on purpose.)
+
+### Version D — "Navy & Gold"
+
+Same brand as Play, deliberately different design:
+
+| | Play (C / B) | App Store (D) |
+|---|---|---|
+| background | blue diagonal gradient + bands / light grey | solid navy `#0B1526`, one soft radial cyan glow behind the phone |
+| phone | tilted ±5° | upright, centred |
+| device | dark rounded frame, cyan ring | iPhone-style: gold `#C9A84C` hairline, titanium band, black bezel, Dynamic Island |
+| status bar | fake 22px row (C) / none (B) | the **real** iOS status bar from the capture — no edits |
+| headline | white, top (C) / navy, bottom (B) | gold Barlow power word + white 85% Inter line; top, top, bottom, top, bottom |
+
+Copy, in frame order:
+
+| frame | power word | supporting line |
+|---|---|---|
+| 1 Login | NETRAOPS | Guard management, done right. |
+| 2 Home | ON POST | Every shift verified by location. |
+| 3 Schedule | THE WEEK AHEAD | Shifts at a glance. |
+| 4 Reports | FILE IT FAST | Reports in seconds, with photos. |
+| 5 Chat | ONE TAP AWAY | Direct line to your admin. |
+
+Apple's guidelines apply as for Play: no "best", "#1", "free", "new", prices,
+ratings, awards or calls to action on the screenshots.
+
+#### Spec (logical px in a 440x956 frame; x3 = 1320x2868)
+
+| element | geometry |
+|---|---|
+| safe area | x 32–408 (content width 376), y 44–912 |
+| headline block | x 32–408, height 94. Top: y 56–150. Bottom: y 806–900 |
+| title | Barlow Condensed 700, 56px / line 56, letter-spacing 0.02em, `#C9A84C`, one line |
+| supporting line | Inter 600, 20px / line 26, `rgba(255,255,255,0.85)`, 12 below the title, one line |
+| headline ↔ phone | 36 minimum, both placements |
+| phone (outer) | 346.02 x 726, x 46.99–393.01. Headline top: y 186–912. Headline bottom: y 44–770 |
+| device layers | gold 1 → titanium `#2E3546` 2 → black 8 → screen; radii concentric |
+| screen | 324.02 x 704 (ratio 2868/1320 exactly), radius 40.50 = 55pt |
+| Dynamic Island | 92.05 x 27.25, top 9.94 inside the screen, centred, radius 13.62 |
+| glow | one radial gradient 330x560 centred on the phone, cyan 30% → 16% → 5% → 0 |
+
+The widest title ("THE WEEK AHEAD") measures 363.5 of the 376 available; the
+widest supporting line measures 316.1. A taller-than-wide capture would keep
+this geometry; a much wider one shrinks the phone to the safe width instead of
+crossing the margins.
+
+Two choices here are measured, not assumed. The 55pt display radius hides only
+uniform background in all five captures (max deviation 0 at every masked
+pixel), so the rounded screen crops no app content. The island's footprint is
+pure background in all five and sits in the gap between the clock and the
+status icons, so it covers nothing.
 
 ## Vendored dependencies
 
