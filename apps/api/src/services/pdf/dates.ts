@@ -30,3 +30,11 @@ export function hourMinute(d: Date | string | number, timeZone: string): string 
   return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', timeZone })
     .format(new Date(d));
 }
+
+/**
+ * "Oct 11, 2026" for a calendar day, 'YYYY-MM-DD'. A day is not an instant, so
+ * no zone moves it: noon UTC on that date, formatted in UTC, is that date.
+ */
+export function dayLabel(day: string): string {
+  return monthDayYear(`${day}T12:00:00Z`, 'UTC');
+}
