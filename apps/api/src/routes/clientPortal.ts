@@ -17,7 +17,7 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { pool } from '../db/pool';
-import { siteLocalDayRange } from '../services/dateRange';
+import { siteLocalDayRange, calendarDay } from '../services/dateRange';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 import jwt from 'jsonwebtoken';
 import type { AuthPayload } from '../middleware/auth';
@@ -30,7 +30,7 @@ import {
   PAGE_W, PAGE_H, ML, MR, CW,
   drawHeader, drawFooter, badge, proportionBar,
 } from '../services/pdf/theme';
-import { monthDayYear, hourMinute } from '../services/pdf/dates';
+import { monthDayYear, hourMinute, dayLabel } from '../services/pdf/dates';
 import { letterheadForSite } from '../services/letterhead';
 
 const router = Router();
@@ -40,6 +40,20 @@ const router = Router();
  *  Every date and time in the PDF goes through services/pdf/dates.ts, which
  *  takes the zone as a required argument (N105 was five calls without it). */
 const SITE_TZ = 'America/Los_Angeles';
+
+/**
+ * A report's period as calendar days in site time (N178): "Oct 11" is Oct 11
+ * 00:00 to 23:59:59 PT, whichever of its shapes the portal sends (see
+ * calendarDay). Each day goes to siteLocalDayRange's whole-day form. An absent
+ * bound stays '' (all time, or up to now); `bad` names one that is present but
+ * not a date.
+ */
+function reportDays(from: unknown, to: unknown): { from: string; to: string; bad?: 'from' | 'to' } {
+  const day = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? calendarDay(v, SITE_TZ) : '');
+  const f = day(from);
+  const t = day(to);
+  return { from: f ?? '', to: t ?? '', bad: f === null ? 'from' : t === null ? 'to' : undefined };
+}
 
 // ── v36 multi-site: list this client's accessible sites ─────────────────────
 //
@@ -196,6 +210,9 @@ router.get('/guards-on-duty', requireAuth('client'), async (req: Request, res: R
 
 router.get('/reports', requireAuth('client'), async (req: Request, res: Response) => {
   const { type, date_from, date_to } = req.query;
+  // Whole days in site time, as the PDF counts them (N178).
+  const days = reportDays(date_from, date_to);
+  if (days.bad) return res.status(400).json({ error: `invalid date_${days.bad}` });
   let query = `
     SELECT r.id, r.report_type, r.severity, r.description, r.reported_at,
            g.name AS guard_name,
@@ -203,13 +220,13 @@ router.get('/reports', requireAuth('client'), async (req: Request, res: Response
     FROM reports r
     JOIN shift_sessions ss ON ss.id = r.shift_session_id
     JOIN guards g ON g.id = ss.guard_id
+    JOIN sites s ON s.id = r.site_id
     LEFT JOIN report_photos rp ON rp.report_id = r.id
     WHERE r.site_id = $1`;
   const params: unknown[] = [req.user!.site_id];
 
   if (type)      { query += ` AND r.report_type = $${params.length + 1}`; params.push(type); }
-  if (date_from) { query += ` AND r.reported_at >= $${params.length + 1}`; params.push(date_from); }
-  if (date_to)   { query += ` AND r.reported_at <= $${params.length + 1}`; params.push((date_to as string).includes('T') ? date_to : date_to + 'T23:59:59'); }
+  query += ' ' + siteLocalDayRange({ column: 'r.reported_at', siteAlias: 's', from: days.from, to: days.to, args: params }).join(' ');
 
   query += ' GROUP BY r.id, g.name ORDER BY r.reported_at DESC LIMIT 200';
 
@@ -330,6 +347,14 @@ router.post('/reports/pdf-link', requireAuth('client'), async (req: Request, res
   if (typeof from !== 'string' || typeof to !== 'string') {
     return res.status(400).json({ error: 'from and to are required (ISO date strings)' });
   }
+  // Pinned as calendar days in site time (N178).
+  const days = reportDays(from, to);
+  if (days.bad || !days.from || !days.to) {
+    return res.status(400).json({ error: 'from and to must be dates, e.g. 2026-10-11.' });
+  }
+  if (days.from > days.to) {
+    return res.status(400).json({ error: 'The start date is after the end date.' });
+  }
 
   const dl = jwt.sign(
     {
@@ -337,8 +362,8 @@ router.post('/reports/pdf-link', requireAuth('client'), async (req: Request, res
       role: 'client',
       site_id: req.user!.site_id,
       purpose: 'pdf_download',
-      from,
-      to,
+      from: days.from,
+      to: days.to,
     },
     process.env.JWT_SECRET!,
     { expiresIn: PDF_DL_TTL_SECONDS }
@@ -411,6 +436,10 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   const to = payload.purpose === 'pdf_download'
     ? (payload.to ?? '')
     : ((req.query.to as string | undefined) ?? '');
+  // Whole days in site time (N178). A handoff token carries days already;
+  // the Bearer fallback's query string may carry any of the portal's shapes.
+  const days = reportDays(from, to);
+  if (days.bad) return res.status(400).json({ error: `invalid ${days.bad}` });
 
   // ── 1. Site info ─────────────────────────────────────────────────────────────
   const siteResult = await pool.query('SELECT name, address FROM sites WHERE id = $1', [payload.site_id]);
@@ -425,10 +454,10 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     FROM reports r
     JOIN shift_sessions ss ON ss.id = r.shift_session_id
     JOIN guards g ON g.id = ss.guard_id
+    JOIN sites s ON s.id = r.site_id
     WHERE r.site_id = $1`;
   const params: unknown[] = [payload.site_id];
-  if (from) { reportQuery += ` AND r.reported_at >= $${params.length + 1}`; params.push(from); }
-  if (to)   { reportQuery += ` AND r.reported_at <= $${params.length + 1}`; params.push((to as string).includes('T') ? to : to + 'T23:59:59'); }
+  reportQuery += ' ' + siteLocalDayRange({ column: 'r.reported_at', siteAlias: 's', from: days.from, to: days.to, args: params }).join(' ');
   reportQuery += ' ORDER BY r.reported_at ASC LIMIT 500';
   const reports = (await pool.query(reportQuery, params)).rows;
 
@@ -445,10 +474,10 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     FROM shift_sessions ss
     JOIN shifts sh ON sh.id = ss.shift_id
     JOIN guards g ON g.id = ss.guard_id
+    JOIN sites s ON s.id = ss.site_id
     WHERE ss.site_id = $1`;
   const shiftParams: unknown[] = [payload.site_id];
-  if (from) { shiftQuery += ` AND ss.clocked_in_at >= $${shiftParams.length + 1}`; shiftParams.push(from); }
-  if (to)   { shiftQuery += ` AND ss.clocked_in_at <= $${shiftParams.length + 1}`; shiftParams.push((to as string).includes('T') ? to : to + 'T23:59:59'); }
+  shiftQuery += ' ' + siteLocalDayRange({ column: 'ss.clocked_in_at', siteAlias: 's', from: days.from, to: days.to, args: shiftParams }).join(' ');
   const shifts = (await pool.query(shiftQuery, shiftParams)).rows;
 
   // ── 4. Monthly incident counts (last 3 months) ────────────────────────────────
@@ -520,7 +549,9 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // so nothing the letterhead header leaves behind reaches it.
   const lh = await letterheadForSite(payload.site_id);
   const doc = new PDFDocument({ margin: 0, size: 'A4', autoFirstPage: true });
-  const filename = `netraops-report-${siteName.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().slice(0, 10)}.pdf`;
+  // Dated in site time, as the Generated line is (N178): after 17:00 PT, UTC is
+  // already tomorrow.
+  const filename = `netraops-report-${siteName.toLowerCase().replace(/\s+/g, '-')}-${calendarDay(new Date().toISOString(), SITE_TZ)}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -531,15 +562,15 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
   // client's PDF. Verified by rasterising, not by pdftotext \u2014 a wrong glyph
   // and a right one both extract as text. An en dash is also the correct mark
   // for a date range and matches the guard PDF's time ranges.
-  // THE ZONE IS NOT OPTIONAL — same defect as the activity-log PDF. Without
-  // it these format in the PROCESS's zone, and Railway sets no TZ, so this
-  // client-facing report renders its period in UTC. The portal sends an
-  // inclusive end-of-local-day bound, which is 06:59Z the NEXT day in UTC,
-  // so the end date printed one day late.
+  //
+  // The period is the two calendar days the queries above covered (N178), so
+  // the period printed is the period counted. Formatting the raw bounds
+  // printed "Oct 10" for a daily report of Oct 11: the portal sends
+  // "2026-10-11T00:00:00" with no zone, and the API runs in UTC.
   //
   // Month by name, in US order: "Aug 31, 2026", not en-GB's "31/08/2026";
   // "11/10/2026" reads as November 10 to a US client.
-  const periodStr = `${from ? monthDayYear(from, SITE_TZ) : 'All time'} \u2013 ${to ? monthDayYear(to, SITE_TZ) : 'Today'}`;
+  const periodStr = `${days.from ? dayLabel(days.from) : 'All time'} \u2013 ${days.to ? dayLabel(days.to) : 'Today'}`;
 
   const TYPE_DOT_COLOR: Record<string, string> = { activity: BLUE, incident: RED, maintenance: AMBER };
   const TYPE_LABEL: Record<string, string>     = { activity: 'ACTIVITY', incident: 'INCIDENT', maintenance: 'MAINTENANCE' };

@@ -100,3 +100,42 @@ export function siteLocalDayRange(input: SiteLocalRangeInput): string[] {
   }
   return out;
 }
+
+const ZONELESS_DATETIME = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d{1,3})?)?$/;
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+/**
+ * The calendar day a date bound names, as 'YYYY-MM-DD', or null when `value`
+ * is not a date. For callers whose ranges are whole days in site time, which
+ * then pass the day to siteLocalDayRange's whole-day form.
+ *
+ * The client portal sends three shapes (DownloadPanel.tsx, buildFromTo):
+ *
+ *   '2026-10-11'            a calendar day already (the custom range's start);
+ *   '2026-10-11T00:00:00'   ZONE-LESS (daily, weekly, and the custom range's
+ *                           end, '…T23:59:59'): the browser formatted it in its
+ *                           own zone, so its date part is the day the client
+ *                           picked. Read as an instant instead, it is 00:00 UTC,
+ *                           17:00 PT the day before, because the API process and
+ *                           the database both run in UTC: that is N178;
+ *   '2026-10-12T06:59:59Z'  an instant, with its zone (no portal caller today):
+ *                           the day it falls on in `timeZone`.
+ *
+ * '2026-02-30' is not a day and returns null, rather than rolling to Mar 2.
+ */
+export function calendarDay(value: string, timeZone: string): string | null {
+  const v = value.trim();
+  let day: string;
+  if (BARE_DATE.test(v) || ZONELESS_DATETIME.test(v)) {
+    day = v.slice(0, 10);
+  } else if (INSTANT.test(v)) {
+    const t = new Date(v);
+    if (Number.isNaN(t.getTime())) return null;
+    day = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone }).format(t);
+  } else {
+    return null;
+  }
+  const [y, m, d] = day.split('-').map(Number);
+  const check = new Date(Date.UTC(y, m - 1, d));
+  return check.getUTCFullYear() === y && check.getUTCMonth() === m - 1 && check.getUTCDate() === d ? day : null;
+}

@@ -5685,6 +5685,13 @@ shipped.
 
 ### N178 — the client report reads the portal's zone-less dates as UTC: its period starts a day early, and it covers 17:00 to 16:59 PT
 
+**FIXED by fix/n178-client-range (2026-10-11), option (a), API only.** `calendarDay()` (`services/dateRange.ts`)
+reads the day each bound names: a bare date or a zone-less date-time gives its date part; an instant gives its
+day in site time. The PDF (reports and sessions), the download panel's preview and the download link all
+filter through `siteLocalDayRange`'s whole-day form. The printed period is the same days, and the file is
+dated in Pacific. So "Oct 11" is Oct 11 00:00 to 23:59:59 PT, including on both DST days
+(`scripts/test-n178-client-range.ts`, 12 checks).
+
 verified 2026-10-11, by reading the code and the database's zone. fix/pdf-polish does not change it.
 - **What the portal sends:** `buildFromTo` in `apps/web/components/client/DownloadPanel.tsx` sends
   zone-less strings.
@@ -5740,3 +5747,19 @@ verified 2026-10-11 on the fix/pdf-polish samples. Pre-existing and unchanged.
 - The activity log had the same defect, fixed with `width: PAGE_W - ML - 8` (its check L3).
 - **Fix:** the same 8 pt in `routes/clientPortal.ts`.
 - **Size XS. Tier 1** (clients see it).
+
+## New from N178 (fix/n178-client-range, 2026-10-11)
+
+### N181 — the local test database runs its sessions in Pacific; production's run in UTC
+
+verified 2026-10-11.
+- The local Postgres (Homebrew, port 55482) gives every session the machine's zone, America/Los_Angeles.
+  Production's database is `Etc/UTC` (read 2026-10-11; no role overrides it).
+- So a harness's SQL runs in a zone production never uses. A zone-less timestamp ("2026-10-11T00:00:00") casts
+  to a different instant. That hid N178 on its first sample run: the BASE report looked correct.
+- `scripts/test-n178-client-range.ts` runs with `PGOPTIONS='-c TimeZone=UTC'` and refuses any other session
+  zone. Every other database harness passed under both zones on 10-11, because none depends on the session
+  zone today.
+- **Fix:** the same guard in every database harness (a `SHOW TimeZone` check beside `refuseUnlessLocal`), or
+  `timezone = 'UTC'` in the local cluster's postgresql.conf.
+- **Size XS. Tier 0** (test only).
