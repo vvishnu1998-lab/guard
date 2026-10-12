@@ -5,9 +5,8 @@
  *   PGHOST=127.0.0.1 PGPORT=55482 PGUSER=tester PGDATABASE=lh_test \
  *     npx ts-node -P tsconfig.scripts.json scripts/test-letterhead-b3.ts     (from apps/api)
  *
- * Needs poppler (pdftotext, pdfimages, pdftoppm, pdfinfo) and git: the "before" side
- * of every identity check is routes/clientPortal.ts as it was at BASE (main before
- * B3), read from git and compiled beside the current one. LOCAL DATABASES ONLY; fake
+ * Needs poppler (pdftotext, pdfimages, pdftoppm, pdfinfo) and git. B0 reads
+ * routes/clientPortal.ts as it was at BASE (main before B3) from git. LOCAL DATABASES ONLY; fake
  * data on Star Guard's id and on an invented company. Sentry, email, S3 and Firebase
  * are stubbed.
  *
@@ -22,9 +21,13 @@
  *
  *   B0  the base route predates the letterhead; the current route looks it up
  *   B1  no letterhead (the lookup gives null, as on any failure): the same bytes as
- *       the BASE route, a 5-page report and one with continuation pages in every
- *       section; B1b the null copy really is the current route; B2 a control that
- *       must differ
+ *       the current route with no letterhead at all, a 5-page report and one with
+ *       continuation pages in every section; B1b the null copy really is the
+ *       current route; B2 a control that must differ. Until fix/pdf-polish B1
+ *       compared with the BASE route itself; that PR changed the report's body on
+ *       purpose (dates, N105, N177), the identity with 9298b6c was proven when B3
+ *       shipped (PR #100), and scripts/test-pdf-polish.ts holds the body changes
+ *       to the planned ones.
  *   B3  with Star Guard's full letterhead and logo the report differs and keeps its
  *       page count; B4 every page carries it with its own title and "n / 5" and the
  *       client footer; B5 one logo object; B6 the body words do not move; B7 the
@@ -114,12 +117,15 @@ async function frozen<T>(fn: () => Promise<T>): Promise<T> {
   try { return await fn(); } finally { (globalThis as { Date: unknown }).Date = RealDate; }
 }
 
-/** `apps/api/<rel>` as it was at BASE (or that source run through `edit`), compiled under the current file's path. */
-function loadBase(rel: string, edit?: (src: string) => string): any {
+/**
+ * `apps/api/<rel>` from the working tree run through `edit`, compiled under the
+ * current file's path. It is not put in require.cache, so nothing else sees it.
+ */
+function loadCurrent(rel: string, edit: (src: string) => string): any {
   const file = path.join(__dirname, '..', rel);
-  const src = execFileSync('git', ['show', `${BASE}:apps/api/${rel}`], { encoding: 'utf8' });
-  const edited = edit ? edit(src) : src;
-  if (edit && edited === src) throw new Error(`loadBase(${rel}): the edit changed nothing`);
+  const src = fs.readFileSync(file, 'utf8');
+  const edited = edit(src);
+  if (edited === src) throw new Error(`loadCurrent(${rel}): the edit changed nothing`);
   const js = ts.transpileModule(edited, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
   }).outputText;
@@ -130,6 +136,13 @@ function loadBase(rel: string, edit?: (src: string) => string): any {
   m.loaded = true;
   return m.exports;
 }
+
+/** The route as if it never looked a letterhead up: `lh` stays undefined, which every theme call reads as none. */
+const NO_LETTERHEAD = (src: string): string => {
+  const out = src.replace('const lh = await letterheadForSite(payload.site_id);', 'const lh = undefined;');
+  if (out === src) throw new Error('NO_LETTERHEAD: the lookup line is gone from routes/clientPortal.ts');
+  return out;
+};
 
 const LOGO = pngImage(400, 160);
 const FULL = {
@@ -312,9 +325,10 @@ async function main(): Promise<void> {
     const app = express();
     app.use(express.json());
     app.use('/api/client', (await import('../src/routes/clientPortal')).default);
-    // The route as it was at BASE, read from git, and a second copy of the CURRENT route whose
-    // letterhead lookup returns null (as it does on any failure). Both under their own prefixes.
-    app.use('/api/client-base', loadBase('src/routes/clientPortal.ts').default);
+    // The CURRENT route with no letterhead at all (`lh` never set, as before B3), and a second
+    // copy of it whose letterhead lookup returns null (as it does on any failure). Both under
+    // their own prefixes.
+    app.use('/api/client-plain', loadCurrent('src/routes/clientPortal.ts', NO_LETTERHEAD).default);
     let nullLookups = 0;
     {
       const cpPath = require.resolve('../src/routes/clientPortal');
@@ -347,28 +361,28 @@ async function main(): Promise<void> {
     });
 
     // ══════════════════════════════════════════════════════════════════════════
-    section(`B  GET /api/client/reports/pdf: no letterhead is the BASE (${BASE.slice(0, 7)}) report byte for byte; with one it is on every page and the body does not change`);
+    section('B  GET /api/client/reports/pdf: a null letterhead is no letterhead, byte for byte; with one it is on every page and the body does not change');
     {
       const baseSrc = execFileSync('git', ['show', `${BASE}:apps/api/src/routes/clientPortal.ts`], { encoding: 'utf8' });
       const curSrc = fs.readFileSync(path.join(__dirname, '..', 'src/routes/clientPortal.ts'), 'utf8');
       check(!baseSrc.includes('letterhead') && curSrc.includes('await letterheadForSite(payload.site_id)'),
         'B0 the base route predates the letterhead; the current one looks it up by the token\'s site');
     }
-    const docs: Record<string, { base: Buffer; nul: Buffer; cur: Buffer }> = {};
+    const docs: Record<string, { plain: Buffer; nul: Buffer; cur: Buffer }> = {};
     for (const [label, s] of [['small', small], ['large', large]] as const) {
-      const base = await getPdf(s, '/api/client-base');
+      const plain = await getPdf(s, '/api/client-plain');
       const nul = await getPdf(s, '/api/client-null');
       const cur = await getPdf(s);
-      docs[label] = { base: base.body, nul: nul.body, cur: cur.body };
-      const pages = base.status === 200 ? pdfPages(file(base.body, `b-${label}-base.pdf`)) : 0;
-      check(base.status === 200 && nul.status === 200 && base.type.startsWith('application/pdf') && base.body.equals(nul.body)
+      docs[label] = { plain: plain.body, nul: nul.body, cur: cur.body };
+      const pages = plain.status === 200 ? pdfPages(file(plain.body, `b-${label}-plain.pdf`)) : 0;
+      check(plain.status === 200 && nul.status === 200 && plain.type.startsWith('application/pdf') && plain.body.equals(nul.body)
         && (label === 'small' ? pages === 5 : pages > 5),
-        `B1 ${label} (${pages} pages): a lookup that gives null renders the base route's PDF byte for byte (${sha(base.body)} = ${sha(nul.body)}; ${base.status}/${nul.status})`);
+        `B1 ${label} (${pages} pages): a lookup that gives null renders what the route renders with no letterhead at all, byte for byte (${sha(plain.body)} = ${sha(nul.body)}; ${plain.status}/${nul.status})`);
     }
     check(nullLookups === 2, `B1b the null copy is the current route: its lookup ran once per report (${nullLookups})`);
     {
-      const mutant = loadBase('src/routes/clientPortal.ts',
-        (src) => src.replace(".text(siteName, ML, y);", ".text(siteName, ML, y + 1);"));
+      const mutant = loadCurrent('src/routes/clientPortal.ts',
+        (src) => NO_LETTERHEAD(src).replace(".text(siteName, ML, y);", ".text(siteName, ML, y + 1);"));
       const listening2: Server = await new Promise((resolve) => {
         const a2 = express(); a2.use(express.json()); a2.use('/api/client', mutant.default);
         const sv = a2.listen(0, '127.0.0.1', () => resolve(sv));
@@ -381,7 +395,7 @@ async function main(): Promise<void> {
         return Buffer.from(await (await fetch(`${origin2}${lj.url}`)).arrayBuffer());
       });
       await new Promise<void>((resolve) => listening2.close(() => resolve()));
-      check(m.length > 1000 && !m.equals(docs.small.base), 'B2 control: the base with the site name 1 pt lower DIFFERS');
+      check(m.length > 1000 && !m.equals(docs.small.plain), 'B2 control: the route with no letterhead and the site name 1 pt lower DIFFERS');
     }
 
     const fNul = file(docs.large.nul, 'b-large-null.pdf');
@@ -400,7 +414,7 @@ async function main(): Promise<void> {
         const sectionNo = nullSection(fNul, p);
         // The footer keeps the no-letterhead render's lead, site and period, word for word.
         const lead = nullLead(fNul, p, large.name);
-        if (!lead.startsWith(`${large.name} |`) || !/\d{2}\/\d{2}\/\d{4}/.test(lead)) missing.push(`p${p} no-letterhead lead "${lead}"`);
+        if (!lead.startsWith(`${large.name} |`) || !/[A-Z][a-z]{2} \d{1,2}, \d{4}/.test(lead)) missing.push(`p${p} no-letterhead lead "${lead}"`);
         for (const want of ['Star Guard', '1200 Example Avenue, Suite 300, San Jose, CA 95110',
           '(408) 555-0142  ·  dispatch@starguard.example  ·  www.starguard.example', 'License No. PPO 120456',
           `${lead} | Confidential — Star Guard`, 'Powered by NetraOps']) {

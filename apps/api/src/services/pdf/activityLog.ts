@@ -27,6 +27,7 @@ import {
   drawFooter, badge, stampPages,
   CONTENT_TOP, CONTENT_BOTTOM,
 } from './theme';
+import { monthDayYear } from './dates';
 import { ACTIVITY_PDF_ROW_CAP, type ActivityRow, type StatusKind } from '../../routes/activityLog';
 import type { Letterhead } from '../letterhead/types';
 
@@ -173,6 +174,11 @@ const TIME_LABEL = new Intl.DateTimeFormat('en-GB', {
   hour: '2-digit', minute: '2-digit', timeZone: SITE_TZ,
 });
 
+/** The Generated line's clock: 24-hour with seconds, as it always printed. */
+const GENERATED_TIME = new Intl.DateTimeFormat('en-GB', {
+  hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: SITE_TZ,
+});
+
 export interface ActivityPdfMeta {
   /** Site name, or 'All sites' when the export is not site-filtered. */
   siteLabel:   string;
@@ -202,6 +208,26 @@ export interface ActivityPdfMeta {
    */
   lh?: Letterhead | null;
 }
+
+// ── Timeline row layout ─────────────────────────────────────────────────────
+// Module scope and exported so the test reads these values, not a copy: it
+// carried its own `ML_ + 170` for COL_GUARD_X, which would have kept passing
+// against a column that had moved.
+export const COL_STATUS_X = ML + 60;
+/**
+ * x of the guard name: 14 pt clear of the widest badge, MISSED / ANSWERED
+ * LATE, whose measured box ends at 215.7. At ML + 170 that gap was 4.3 pt,
+ * which on the page read as the badge running into the name.
+ */
+export const COL_GUARD_X = ML + 180;
+/** The badge's top inside its row; theme.badge() draws it 14 pt tall. */
+export const BADGE_TOP = 1;
+/**
+ * y-offset of the detail line inside its row: 3 pt below the badge, which
+ * spans y+1..y+15. At 15 the line's cap height began exactly where the
+ * badge's fill ended, so the badge sat on the first letters.
+ */
+export const DETAIL_TOP = 18;
 
 /**
  * Render the feed to a PDF buffer.
@@ -237,26 +263,21 @@ export function renderActivityLogPdf(
   // Every sibling formatter in this file already passes the zone (DAY_KEY,
   // DAY_HEADER, TIME_FMT, and the Generated line below). This call was the
   // only one that did not, so it was an omission, not a choice.
-  const periodStr =
-    `${new Date(fromIso).toLocaleDateString('en-GB', { timeZone: SITE_TZ })}` +
-    ` – ${new Date(toIso).toLocaleDateString('en-GB', { timeZone: SITE_TZ })}`;
+  //
+  // Month by name, in US order (services/pdf/dates.ts): "Sep 1, 2026", not
+  // en-GB's "01/09/2026", which a US client reads as January 9.
+  const periodStr = `${monthDayYear(fromIso, SITE_TZ)} – ${monthDayYear(toIso, SITE_TZ)}`;
 
   // Group by Pacific-time day for the on-page sections.
   const DAY_KEY = new Intl.DateTimeFormat('en-CA', {
     year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'America/Los_Angeles',
   });
-  const DAY_HEADER = new Intl.DateTimeFormat('en-GB', {
-    weekday: 'long', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Los_Angeles',
+  // "TUESDAY, SEP 8, 2026": the same date style as the cover and the footer.
+  const DAY_HEADER = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/Los_Angeles',
   });
   const TIME_FMT = new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles',
-  });
-  // Clock-in on the Shift line: dated as well as timed, because a shift
-  // filter is the one case where the document may cover a single day that
-  // is not obvious from the period.
-  const SHIFT_CLOCK_FMT = new Intl.DateTimeFormat('en-GB', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', timeZone: SITE_TZ,
   });
 
   const byDay = new Map<string, ActivityRow[]>();
@@ -309,15 +330,20 @@ export function renderActivityLogPdf(
   //
   // The guard a reader actually wants is named on the Shift line below,
   // where it means something.
+  //
+  // Clock-in on the Shift line: dated as well as timed, because a shift
+  // filter is the one case where the document may cover a single day that
+  // is not obvious from the period.
   if (shift) {
     doc.text(
       `Shift       ${shift.guardName} \u00B7 ${shift.siteName} \u00B7 ` +
-      `${SHIFT_CLOCK_FMT.format(new Date(shift.clockedInAt))} PT`,
+      `${monthDayYear(shift.clockedInAt, SITE_TZ)}, ${TIME_FMT.format(new Date(shift.clockedInAt))} PT`,
       ML, y,
     );
     y += 15;
   }
-  doc.text(`Generated   ${new Date().toLocaleString('en-GB', { timeZone: 'America/Los_Angeles' })} PT`, ML, y);
+  const generatedAt = new Date();
+  doc.text(`Generated   ${monthDayYear(generatedAt, SITE_TZ)}, ${GENERATED_TIME.format(generatedAt)} PT`, ML, y);
   y += 22;
 
   doc.moveTo(ML, y).lineTo(MR, y).strokeColor(GRAY2).lineWidth(0.5).stroke();
@@ -393,8 +419,6 @@ export function renderActivityLogPdf(
 
   // ── Timeline: per-day sections ──────────────────────────────────────────
   const COL_TIME_X   = ML + 8;
-  const COL_STATUS_X = ML + 60;
-  const COL_GUARD_X  = ML + 170;
   const COL_SITE_X   = ML + 300;
   // Printing the site on all 823 rows of a single-site export says nothing
   // 822 times. Derived from the ROWS, not from meta.siteLabel: an export can
@@ -403,7 +427,9 @@ export function renderActivityLogPdf(
   const singleSite   = new Set(eventRows.map((r) => r.site_id)).size <= 1;
   // The freed 200pt goes to the guard name, which was clipped at 120pt with
   // lineBreak:false — silently, since a clipped name still looks like a name.
-  const COL_GUARD_W  = singleSite ? 250 : 120;
+  // Both widths end where they always did (x 470 and x 340, the latter 10 pt
+  // short of the site column) now that the column starts at ML + 180.
+  const COL_GUARD_W  = singleSite ? 240 : 110;
   // Detail text starts under the BADGE, not at the page margin. It used to
   // share x with the time column, and once the time column grew a second
   // line (the SCHED marker) the two collided: on the merged missed/answered
@@ -414,9 +440,9 @@ export function renderActivityLogPdf(
   const COL_DESC_X   = ML + 60;
   const COL_DESC_W   = MR - COL_DESC_X - 8;
   const ROW_H        = 18;
-  const ROW_DESC_H   = 26;
-  /** y-offset of the detail line inside its row. */
-  const DETAIL_TOP   = 15;
+  // 3 pt deeper with DETAIL_TOP (was 26). A floor only: one line of 8 pt
+  // detail already makes the row DETAIL_TOP + 9.25 + 3 = 30.25 pt.
+  const ROW_DESC_H   = 29;
 
   function ensureRoom(needed: number) {
     // CONTENT_BOTTOM (PAGE_H - 46), not the PAGE_H - 40 this used before.
@@ -521,7 +547,7 @@ export function renderActivityLogPdf(
         doc.fontSize(6).fillColor(MUTED).font('Helvetica')
            .text('SCHED', COL_TIME_X, y + 11, { lineBreak: false, width: 50 });
       }
-      badge(doc, COL_STATUS_X, y + 1, label, color);
+      badge(doc, COL_STATUS_X, y + BADGE_TOP, label, color);
       doc.fontSize(8).fillColor(TEXT).font('Helvetica')
          .text(r.guard_name, COL_GUARD_X, y + 3, { lineBreak: false, width: COL_GUARD_W });
       if (!singleSite) {
