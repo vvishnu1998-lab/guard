@@ -16,9 +16,10 @@
  * Sized so the first time a bug or misconfigured tier would wipe
  * many rows at once, we get an alert instead of the deletion.
  * D3: Sentry-only alert, no SendGrid — the retention email path is
- * being deleted this ship.
+ * being deleted this ship. ONE STEP IS EXEMPT, by an explicit `drain` on
+ * its entry — see the next section.
  *
- * ── THE CAP IS A DEADLOCK FOR ONE STEP, AND IT HAS A DATE ───────────────
+ * ── THE CAP WAS A DEADLOCK FOR ONE STEP, SO THAT STEP DRAINS ────────────
  *
  * `notifications` is the only high-volume table here: 16,010 rows, of which
  * 1,452 were past 30 days on 2026-09-19. While the step is in dry-run the due
@@ -27,21 +28,37 @@
  * night forever. The guardrail becomes the thing it was meant to guard
  * against.
  *
- * ENABLE THIS STEP BEFORE 2026-10-10.
+ * It crossed at the 2026-10-10 00:00Z run, the date this comment had read out
+ * of production in advance (due(D) = rows created before D minus 30 days, so
+ * every due count within 30 days is fixed by rows that already exist). On
+ * 2026-10-12 the table held 22,635 rows with 11,921 due: enabling the step as
+ * it stood would have halted on its first live night and on every night after.
  *
- * That date is computed, not projected. The due count on any day within 30
- * days is already determined by rows that exist now — due(D) = rows created
- * before D minus 30 days — so it was read straight out of production rather
- * than extrapolated: 8,648 on 10-08, 9,447 on 10-09, 10,149 on 10-10, which
- * is the first run whose candidate exceeds the cap.
+ * So the entry carries `drain: { anchor: 'created_at' }`. Over the cap,
+ * runSimpleStep deletes the oldest STEP_ROW_CAP rows by created_at then id
+ * and leaves the rest for the next run; dry, it reports would-delete =
+ * STEP_ROW_CAP. Either way the step records `drained` and `remaining` and
+ * leaves an INFO breadcrumb, never a warning: a backlog this step is
+ * expected to have is not an incident. At or under the cap a drain step does
+ * exactly what every other step does. Inflow measured 2026-09-27..10-11 was
+ * 247-426 rows a UTC day, so after one or two capped nights it stays far
+ * below the cap.
+ *
+ * WHAT THAT COSTS: for this step the cap is a rate limit, not an alarm. A bug
+ * that widened its predicate would delete STEP_ROW_CAP rows a night with no
+ * warning, where every other step would halt. That is accepted for
+ * notifications alone — 30-day in-app feed rows, no media pointer, no
+ * legal_hold column, no foreign key pointing at the table — and it is why
+ * `drain` is opt-in per entry rather than a property of the cap. Do not add
+ * it to a step whose backlog is not EXPECTED to exceed the cap.
  *
  * An earlier draft of this comment said 2026-10-26, sixteen days late and in
  * the unsafe direction, because it divided the table by its whole lifetime
  * and got ~232/day. The due set does not grow at the lifetime average; it
  * grows at the insertion rate of THIRTY DAYS AGO, and notifications have been
- * accelerating — the last seven days average 487/day. Any growth number in a
- * comment here should be a measured recent rate or, better, a date read out
- * of the data like the one above.
+ * accelerating — the seven days to 2026-09-19 averaged 487/day. Any growth
+ * number in a comment here should be a measured recent rate or, better, a
+ * date read out of the data like the one above.
  *
  * The other 28 steps are nowhere near the cap: the largest is revoked_tokens
  * at 103 due, and the largest table without an expires_at column is
@@ -185,6 +202,13 @@ interface StepResult {
    *  surviving row still references. Retrying changes nothing. */
   s3_skipped?: number;
   halted?:   boolean;
+  /** Present only when a `drain` step was over STEP_ROW_CAP on this run and
+   *  took the oldest STEP_ROW_CAP instead of halting. Absent means the step
+   *  did not drain: it was under the cap, or it is not a drain step. */
+  drained?:   boolean;
+  /** Candidates left for later runs: candidate − deleted when live,
+   *  candidate − STEP_ROW_CAP when dry. Only ever set alongside `drained`. */
+  remaining?: number;
   error?:    string;
 }
 
@@ -303,6 +327,12 @@ interface SimpleStep {
   /** Why this step sits where it does. FORCED means an FK; anything else is
    *  a preference and should say so. */
   why:   string;
+  /** OPT-IN. Over STEP_ROW_CAP, delete the oldest STEP_ROW_CAP rows by
+   *  `anchor` then id instead of halting. For a step whose backlog is
+   *  EXPECTED to exceed the cap, and nothing else — see the header.
+   *  `anchor` is interpolated exactly like `where`, under the same rule: a
+   *  literal in this file, never a caller value. */
+  drain?: { anchor: string };
 }
 
 /**
@@ -311,22 +341,43 @@ interface SimpleStep {
  * Same reasoning as the existing nine after PR #70: NOW() is re-evaluated at
  * DELETE time, so the two statements do not necessarily see the same set, and
  * `candidate` and `deleted` would describe different rows.
+ *
+ * A DRAIN STEP KEEPS THAT SHAPE. Its SELECT is ordered by the anchor, then
+ * id, so the batch it deletes over the cap is a prefix of the list it just
+ * counted — the oldest STEP_ROW_CAP — and goes to the DELETE by id like
+ * every other step. A `DELETE … WHERE id IN (SELECT … LIMIT n)` would
+ * re-evaluate NOW() and choose its own rows, which is the
+ * COUNT-then-DELETE-by-predicate split this function exists to avoid.
  */
 async function runSimpleStep(s: SimpleStep): Promise<StepResult> {
   try {
+    const orderBy = s.drain ? ` ORDER BY ${s.drain.anchor}, id` : '';
     const rowsQ = await pool.query<{ id: string }>(
-      `SELECT id FROM ${s.table} WHERE ${s.where}`,
+      `SELECT id FROM ${s.table} WHERE ${s.where}${orderBy}`,
     );
     const candidate = rowsQ.rows.length;
+    const ids       = rowsQ.rows.map((r) => r.id);
 
-    if (candidate > STEP_ROW_CAP) return haltStep(s.step, candidate);
-    if (!isStepLive(s.step))      return dryRunStep(s.step, candidate);
+    if (candidate > STEP_ROW_CAP && !s.drain) return haltStep(s.step, candidate);
+
+    // Under the cap the batch is the whole candidate set, which is the delete
+    // every other step does. Over it, only a drain step gets here.
+    const batch    = candidate > STEP_ROW_CAP ? ids.slice(0, STEP_ROW_CAP) : ids;
+    const draining = batch.length < candidate;
+    if (draining) noteDrain(s.step, candidate, batch.length);
+
+    if (!isStepLive(s.step)) {
+      const dry = dryRunStep(s.step, candidate, batch.length);
+      return draining ? { ...dry, drained: true, remaining: candidate - batch.length } : dry;
+    }
 
     const del = await pool.query(
       `DELETE FROM ${s.table} WHERE id = ANY($1::uuid[])`,
-      [rowsQ.rows.map((r) => r.id)],
+      [batch],
     );
-    return finishStep(s.step, candidate, del.rowCount ?? 0);
+    const deleted = del.rowCount ?? 0;
+    const done    = finishStep(s.step, candidate, deleted);
+    return draining ? { ...done, drained: true, remaining: candidate - deleted } : done;
   } catch (err) {
     return errorStep(s.step, err);
   }
@@ -606,9 +657,11 @@ const STEP_ORDER: readonly OrderedStep[] = [
     step:  'notifications',
     table: 'notifications',
     where: `created_at < NOW() - INTERVAL '${PURGE_DAYS.NOTIFICATIONS} days'`,
+    drain: { anchor: 'created_at' },
     why:   'PREFERRED — CASCADE child, not FK-forced in either direction. '
-         + 'THE ONLY HIGH-VOLUME STEP: 16,010 rows at ~232/day, 1,452 due. '
-         + 'See the STEP_ROW_CAP note in the header.',
+         + 'THE ONLY HIGH-VOLUME STEP, and the only drain step: over the cap '
+         + 'it deletes the oldest STEP_ROW_CAP by created_at, id instead of '
+         + 'halting. See the STEP_ROW_CAP note in the header.',
   },
   stepClockInVerifications365d,
 
@@ -1189,16 +1242,39 @@ function haltStep(step: string, candidate: number): StepResult {
   return { step, candidate, deleted: 0, live: isStepLive(step), halted: true };
 }
 
-function dryRunStep(step: string, candidate: number): StepResult {
+/**
+ * A drain step over the cap. INFO, NEVER WARNING — that is the whole
+ * difference from haltStep. A halt says "this many rows at once is
+ * suspicious"; a drain step is one whose backlog is expected, so a warning
+ * every night until it clears would be noise that teaches someone to mute
+ * the real halts. Called on dry and live nights alike, before the live check.
+ */
+function noteDrain(step: string, candidate: number, batch: number): void {
+  console.log(
+    `[retention.${step}] over cap: draining oldest ${batch} of ${candidate}, ` +
+    `${candidate - batch} left for later runs`,
+  );
+  Sentry.addBreadcrumb({
+    category: 'retention',
+    message:  `${step}: draining ${batch} of ${candidate}`,
+    data:     { candidate, batch, cap: STEP_ROW_CAP, live: isStepLive(step) },
+    level:    'info',
+  });
+}
+
+/** `wouldDelete` differs from `candidate` only for a drain step over the cap. */
+function dryRunStep(step: string, candidate: number, wouldDelete: number = candidate): StepResult {
   // Say WHICH gate held it. "would delete N" alone cannot distinguish a
   // deliberate dry night from a typo in RETENTION_LIVE_STEPS that silently
   // matched nothing — the two have identical output otherwise.
   const gate = globalDryRun() ? 'RETENTION_DRY_RUN' : 'not in RETENTION_LIVE_STEPS';
-  console.log(`[retention.${step}] dry-run (${gate}) would delete ${candidate}`);
+  console.log(`[retention.${step}] dry-run (${gate}) would delete ${wouldDelete}`);
   Sentry.addBreadcrumb({
     category: 'retention',
-    message:  `${step}: dry-run would delete ${candidate}`,
-    data:     { candidate, gate },
+    message:  `${step}: dry-run would delete ${wouldDelete}`,
+    data:     wouldDelete === candidate
+      ? { candidate, gate }
+      : { candidate, would_delete: wouldDelete, gate },
     level:    'info',
   });
   return { step, candidate, deleted: 0, live: false };
@@ -1249,6 +1325,7 @@ const RUN_SUMMARY_MSG = 'retention_run_summary';
 function emitRunSummary(results: StepResult[], durationMs: number): void {
   const haltedSteps  = results.filter((r) => r.halted).map((r) => r.step);
   const erroredSteps = results.filter((r) => r.error).map((r) => r.step);
+  const drainedSteps = results.filter((r) => r.drained).map((r) => r.step);
 
   // Per-step counts as structured data, keyed by step name — never
   // concatenated into the message.
@@ -1268,6 +1345,8 @@ function emitRunSummary(results: StepResult[], durationMs: number): void {
       ...(r.s3_deleted !== undefined
         ? { s3_deleted: r.s3_deleted, s3_failed: r.s3_failed, s3_skipped: r.s3_skipped }
         : {}),
+      // Same rule: only on a step that drained. Absent is "did not drain".
+      ...(r.drained ? { drained: true, remaining: r.remaining } : {}),
       ...(r.error ? { error: r.error } : {}),
     };
   }
@@ -1319,8 +1398,11 @@ function emitRunSummary(results: StepResult[], durationMs: number): void {
       steps_executed:  results.length - erroredSteps.length,
       steps_halted:    haltedSteps.length,
       steps_errored:   erroredSteps.length,
+      steps_drained:   drainedSteps.length,
       halted_steps:    haltedSteps,
       errored_steps:   erroredSteps,
+      // Extra, not a tag: a drain is expected and must never move any_halted.
+      drained_steps:   drainedSteps,
       // Names live here, never in a tag.
       requested_live:     requested,
       live_steps:         liveSteps,
