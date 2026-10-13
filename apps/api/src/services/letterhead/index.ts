@@ -15,6 +15,10 @@
  *
  * The text fields are read on every call; only logo bytes are cached
  * (./cache.ts), keyed by company and logo_updated_at.
+ *
+ * A caller that must not wait the whole fetch timeout (an email, B4) passes
+ * `logoWaitMs`: past it, the letterhead comes back without the logo and the
+ * fetch finishes into the cache for the next caller.
  */
 import { pool } from '../../db/pool';
 import { Sentry } from '../sentry';
@@ -28,6 +32,16 @@ export type { Letterhead } from './types';
 
 /** A report waits at most this long for a logo before rendering without it. */
 export const LOGO_FETCH_TIMEOUT_MS = 5000;
+
+export interface LookupOptions {
+  /**
+   * Stop waiting for a logo that is not cached yet after this long, and return
+   * the letterhead without it. The fetch is not cut short: it runs on under
+   * LOGO_FETCH_TIMEOUT_MS and fills the cache. Unset, the caller waits for the
+   * fetch, as every PDF does.
+   */
+  logoWaitMs?: number;
+}
 
 export const logoCache = new LogoCache({
   maxEntries: 32,
@@ -43,16 +57,16 @@ const SELECT = `
          c.logo_url, c.logo_updated_at
     FROM companies c`;
 
-export function letterheadForCompany(companyId: string): Promise<Letterhead | null> {
-  return lookup('company', companyId, `${SELECT} WHERE c.id = $1`);
+export function letterheadForCompany(companyId: string, opts: LookupOptions = {}): Promise<Letterhead | null> {
+  return lookup('company', companyId, `${SELECT} WHERE c.id = $1`, opts);
 }
 
-export function letterheadForSite(siteId: string): Promise<Letterhead | null> {
-  return lookup('site', siteId, `${SELECT} JOIN sites s ON s.company_id = c.id WHERE s.id = $1`);
+export function letterheadForSite(siteId: string, opts: LookupOptions = {}): Promise<Letterhead | null> {
+  return lookup('site', siteId, `${SELECT} JOIN sites s ON s.company_id = c.id WHERE s.id = $1`, opts);
 }
 
-export function letterheadForGuard(guardId: string): Promise<Letterhead | null> {
-  return lookup('guard', guardId, `${SELECT} JOIN guards g ON g.company_id = c.id WHERE g.id = $1`);
+export function letterheadForGuard(guardId: string, opts: LookupOptions = {}): Promise<Letterhead | null> {
+  return lookup('guard', guardId, `${SELECT} JOIN guards g ON g.company_id = c.id WHERE g.id = $1`, opts);
 }
 
 interface CompanyRow {
@@ -67,7 +81,7 @@ interface CompanyRow {
   logo_updated_at: Date | string | null;
 }
 
-async function lookup(via: 'company' | 'site' | 'guard', id: string, sql: string): Promise<Letterhead | null> {
+async function lookup(via: 'company' | 'site' | 'guard', id: string, sql: string, opts: LookupOptions): Promise<Letterhead | null> {
   if (typeof id !== 'string' || !UUID_RE.test(id)) return null;
   let row: CompanyRow | undefined;
   try {
@@ -86,11 +100,28 @@ async function lookup(via: 'company' | 'site' | 'guard', id: string, sql: string
     address: text(row.address),
     licenceNumber: text(row.licence_number),
     website: text(row.website),
-    logo: row.logo_url ? await logoFor(row.id, row.logo_url, row.logo_updated_at) : null,
+    logo: row.logo_url
+      ? await waitAtMost(logoFor(row.id, row.logo_url, row.logo_updated_at), opts.logoWaitMs, row.id)
+      : null,
   };
 }
 
 const text = (v: string | null): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
+
+/** The logo, or null if `ms` passes first; the fetch itself still settles into the cache. */
+function waitAtMost(logo: Promise<Buffer | null>, ms: number | undefined, companyId: string): Promise<Buffer | null> {
+  if (ms === undefined) return logo;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      console.warn('[letterhead] logo not ready in time; the company name stands in', { company_id: companyId, waited_ms: ms });
+      resolve(null);
+    }, ms);
+    logo.then(
+      (bytes) => { clearTimeout(timer); resolve(bytes); },
+      () => { clearTimeout(timer); resolve(null); },
+    );
+  });
+}
 
 function logoFor(companyId: string, logoUrl: string, updatedAt: Date | string | null): Promise<Buffer | null> {
   let stamp = 'unset';
