@@ -21,6 +21,7 @@ import { haversineDistance } from './geofence';
 import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
+import { monthDayYear } from './pdf/dates';
 
 // Central SendGrid failure accounting. Called from every sgMail.send catch
 // site so delivery failures are sliceable by workflow when triaging.
@@ -473,7 +474,7 @@ export function renderIncidentAlert(data: {
   company_name: string;
 }): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
-  const dateLabel  = fmtDateSite(data.reported_at, tz);
+  const dateLabel  = monthDayYear(data.reported_at, tz);
   const greetName  = firstName(data.client_name);
   // `reports.severity` is NULL-able and nothing writes it — every production
   // row is NULL, so this is the ONLY path incident alerts have ever taken.
@@ -507,7 +508,7 @@ export function renderIncidentAlert(data: {
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
-        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
+        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTClient(data.reported_at, tz)}</span>
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
@@ -532,15 +533,27 @@ export function renderIncidentAlert(data: {
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────
 
-// Site-scoped calendar date for the subject/header ("14 May 2026").
+// Site-scoped calendar date ("14 May 2026") for the operator templates.
 // en-GB to match fmtDTSite's "14 May 2026, 10:01 PM PDT" — keeps subject
 // and body day-month-year order consistent. Falls back to Pacific when the
-// caller hasn't yet been threaded through with a site tz.
+// caller hasn't yet been threaded through with a site tz. The two client
+// emails use monthDayYear and fmtDTClient instead (below).
 function fmtDateSite(dt: Date | string, tz: string = PACIFIC): string {
   return new Date(dt).toLocaleDateString('en-GB', {
     day: '2-digit', month: 'short', year: 'numeric',
     timeZone: tz,
   });
+}
+
+// The two client emails (incident alert, daily shift report) print dates in
+// the PDFs' month-name style, subjects included: "Oct 12, 2026"
+// (services/pdf/dates.ts), not en-GB's "12 Oct 2026", which a US client can
+// misread and which wrote September "Sept" in the subject and "Sep" in the
+// body. Times keep the emails' own 12-hour clock and zone:
+// "Oct 12, 2026, 2:14 AM PDT". The other templates keep fmtDateSite and
+// fmtDTSite until B5.
+function fmtDTClient(dt: Date | string, tz: string): string {
+  return `${monthDayYear(dt, tz)}, ${fmtTimeSite(dt, tz)}`;
 }
 
 // Site-scoped time-only ("10:01 PM PDT"). Used for the same-day collapse
@@ -882,9 +895,9 @@ export async function sendDailyShiftReport(shiftId: string): Promise<DailyReport
  * can render the same template against real shift data without invoking the
  * SendGrid path or writing daily_report_email_sent.
  *
- * All event timestamps render in America/Los_Angeles via fmtDTSite (PDT in
- * summer, PST in winter — abbreviation chosen by the runtime). Multi-tenant
- * per-site timezone support is logged as a separate follow-up.
+ * All event timestamps render in the site's zone (Pacific when it has none)
+ * via fmtDTClient, "Oct 12, 2026, 2:14 AM PDT" (PDT in summer, PST in
+ * winter — abbreviation chosen by the runtime).
  */
 export function renderDailyShiftReport(data: {
   site_name:       string;
@@ -907,7 +920,7 @@ export function renderDailyShiftReport(data: {
   pings_expected?:  number;
 }): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
-  const dateLabel  = fmtDateSite(data.scheduled_start, tz);
+  const dateLabel  = monthDayYear(data.scheduled_start, tz);
   const totalHours = data.hours
     ? formatHoursHHMM(data.hours.actual_hours)
     : (data.total_hours != null ? `${parseFloat(String(data.total_hours))}h` : '—');
@@ -918,8 +931,8 @@ export function renderDailyShiftReport(data: {
   const pingsLabel = (data.pings_expected ?? 0) > 0
     ? `${data.pings_submitted ?? 0}/${data.pings_expected}`
     : '—';
-  const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
-  const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
+  const clockIn    = data.clocked_in_at  ? fmtDTClient(data.clocked_in_at,  tz) : '—';
+  const clockOut   = data.clocked_out_at ? fmtDTClient(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
 
   const borderColors: Record<string, string> = {
@@ -932,7 +945,7 @@ export function renderDailyShiftReport(data: {
       r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description,
     );
     return `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
-      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTSite(r.reported_at, tz)}</span></p>
+      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTClient(r.reported_at, tz)}</span></p>
       <p style="margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
     </div>`;
   }).join('');
