@@ -25,7 +25,7 @@
  */
 import { Sentry } from '../sentry';
 import { checkImageDecodes } from '../imageDecode';
-import { letterheadForSite } from './index';
+import { letterheadForCompany, letterheadForSite } from './index';
 import { contactLines } from './text';
 import type { Letterhead } from './types';
 import { ES } from '../emailStyles';
@@ -81,6 +81,11 @@ export async function mailLetterheadForSite(siteId: string): Promise<MailLetterh
   return mailLetterhead(await letterheadForSite(siteId, { logoWaitMs: EMAIL_LOGO_WAIT_MS }));
 }
 
+/** The same, for an email about a company itself: its admins' alerts, its account emails (B5). */
+export async function mailLetterheadForCompany(companyId: string): Promise<MailLetterhead | null> {
+  return mailLetterhead(await letterheadForCompany(companyId, { logoWaitMs: EMAIL_LOGO_WAIT_MS }));
+}
+
 /** null in, null out. */
 export function mailLetterhead(lh: Letterhead | null): MailLetterhead | null {
   if (!lh) return null;
@@ -92,12 +97,16 @@ export function mailLetterhead(lh: Letterhead | null): MailLetterhead | null {
   };
 }
 
-/** The message with the letterhead's Reply-To and logo; with none, the same object. */
-export function withLetterhead<T extends object>(msg: T, m: MailLetterhead | null): T {
+/**
+ * The message with the letterhead's Reply-To and logo; with none, the same
+ * object. `replyTo: false` leaves the message's own Reply-To alone: an admin
+ * alert has none, and replies to it go nowhere new (decision D2a, B5).
+ */
+export function withLetterhead<T extends object>(msg: T, m: MailLetterhead | null, opts: { replyTo?: boolean } = {}): T {
   if (!m) return msg;
   return {
     ...msg,
-    ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+    ...(m.replyTo && opts.replyTo !== false ? { replyTo: m.replyTo } : {}),
     ...(m.logo ? { attachments: [m.logo.attachment] } : {}),
   };
 }
@@ -110,18 +119,37 @@ export function withLetterhead<T extends object>(msg: T, m: MailLetterhead | nul
  * (Outlook on Windows) cannot draw it at its native 256–2048 px.
  */
 export function mailHeaderHtml(m: MailLetterhead, title: string, subtitleHtml: string): string {
+  return `<div style="background:#ffffff;padding:24px 28px 18px 28px;border-bottom:1px solid #E5E7EB">
+      ${companyTable(m)}
+      <h1 style="margin:20px 0 0 0;font-size:22px;font-weight:700;color:#0B1526;letter-spacing:0">${esc(title)}</h1>
+      <p style="margin:4px 0 0 0;font-size:13px;color:#6B7280">${subtitleHtml}</p>
+    </div>`;
+}
+
+/**
+ * The company block alone, white, for an admin alert to stand its own
+ * coloured band under (decision D3a, B5): the company leads, and the band
+ * still says at a glance whether this is an alert, a warning or a notice.
+ */
+export function mailCompanyHtml(m: MailLetterhead): string {
+  return `<div style="background:#ffffff;padding:24px 28px">
+      ${companyTable(m)}
+    </div>`;
+}
+
+/** The logo (when it goes) and the company name with its contact lines beside it. */
+function companyTable(m: MailLetterhead): string {
   const logoCell = m.logo
     ? `<td style="padding:0 16px 0 0;vertical-align:middle"><img src="cid:${LOGO_CONTENT_ID}" width="${m.logo.width}" height="${m.logo.height}" alt="" style="display:block;border:0;width:${m.logo.width}px;height:${m.logo.height}px"></td>`
     : '';
   const lines = m.lines
     .map((l) => `<div style="font-size:12px;color:#6B7280;line-height:1.5">${esc(l)}</div>`)
     .join('');
-  return `<div style="background:#ffffff;padding:24px 28px 18px 28px;border-bottom:1px solid #E5E7EB">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse"><tr>${logoCell}<td style="vertical-align:middle"><div style="font-size:18px;font-weight:700;color:#0B1526;line-height:1.3">${esc(m.companyName)}</div>${lines}</td></tr></table>
-      <h1 style="margin:20px 0 0 0;font-size:22px;font-weight:700;color:#0B1526;letter-spacing:0">${esc(title)}</h1>
-      <p style="margin:4px 0 0 0;font-size:13px;color:#6B7280">${subtitleHtml}</p>
-    </div>`;
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse"><tr>${logoCell}<td style="vertical-align:middle"><div style="font-size:18px;font-weight:700;color:#0B1526;line-height:1.3">${esc(m.companyName)}</div>${lines}</td></tr></table>`;
 }
+
+/** The last line of every letterheaded email's footer. */
+export const POWERED_BY_HTML = '<div style="margin-top:10px;font-size:10px;color:#9CA3AF;letter-spacing:1px">Powered by NetraOps</div>';
 
 /**
  * The footer under a letterheaded email: today's lines, the reply line only
@@ -133,7 +161,7 @@ export function mailFooterHtml(m: MailLetterhead, tz: string): string {
   return `<div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${esc(tz)}).<br/>
       Provided by <strong style="color:#666">${esc(m.companyName)}</strong>.${reply}
-      <div style="margin-top:10px;font-size:10px;color:#9CA3AF;letter-spacing:1px">Powered by NetraOps</div>
+      ${POWERED_BY_HTML}
     </div>`;
 }
 

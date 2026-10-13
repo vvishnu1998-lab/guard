@@ -22,7 +22,10 @@ import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
 import { monthDayYear } from './pdf/dates';
-import { mailLetterheadForSite, mailHeaderHtml, mailFooterHtml, withLetterhead, type MailLetterhead } from './letterhead/email';
+import {
+  mailLetterheadForSite, mailLetterheadForCompany, mailHeaderHtml, mailCompanyHtml, mailFooterHtml, withLetterhead,
+  POWERED_BY_HTML, type MailLetterhead,
+} from './letterhead/email';
 import { ES, emailPage } from './emailStyles';
 
 // Central SendGrid failure accounting. Called from every sgMail.send catch
@@ -163,15 +166,19 @@ async function getActiveAdminEmails(companyId: string): Promise<string[]> {
 // Per-recipient send via Promise.allSettled so one bad address doesn't
 // stop delivery to the rest. Each failure is Sentry-tagged with the
 // recipient in `extra` so the issues list shows per-recipient bounces.
+// `build` gives the message with the company's letterhead or without it
+// (adminMessage), and each recipient gets sendLetterheadOrPlain's one plain
+// resend if SendGrid refuses the letterhead message (B5).
 async function sendToAdmins(
   adminEmails: string[],
-  msg: Omit<sgMail.MailDataRequired, 'to'>,
+  build: (mail: MailLetterhead | null) => Omit<sgMail.MailDataRequired, 'to'>,
+  mail: MailLetterhead | null,
   flow: string,
   extra: Record<string, unknown>,
 ): Promise<{ succeeded: number; failed: number }> {
   const results = await Promise.allSettled(
     adminEmails.map((email) =>
-      sgMail.send({ ...msg, to: email } as sgMail.MailDataRequired),
+      sendLetterheadOrPlain((m) => ({ ...build(m), to: email } as sgMail.MailDataRequired), mail, flow),
     ),
   );
   let succeeded = 0, failed = 0;
@@ -186,6 +193,24 @@ async function sendToAdmins(
     reportSendgridFailure(flow, err, { ...extra, recipient: adminEmails[i] });
   });
   return { succeeded, failed };
+}
+
+/**
+ * An admin alert's message for sendToAdmins, with the letterhead `m` or
+ * without it. Both are rendered here, before any send, so a render that
+ * throws reaches the caller as it always did. With a letterhead the logo
+ * travels inline and the message still has no Reply-To (D2a): an alert lands
+ * in the company's own admins' inboxes, and a reply is not a workflow.
+ */
+function adminMessage(
+  render: (mail: MailLetterhead | null) => { subject: string; html: string },
+  mail: MailLetterhead | null,
+): (m: MailLetterhead | null) => Omit<sgMail.MailDataRequired, 'to'> {
+  const plain = render(null);
+  const lettered = mail ? render(mail) : null;
+  return (m) => (m && lettered
+    ? withLetterhead({ from: FROM, subject: lettered.subject, html: lettered.html }, m, { replyTo: false })
+    : { from: FROM, subject: plain.subject, html: plain.html });
 }
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
@@ -1096,11 +1121,14 @@ export async function sendMissedShiftAlert(shiftId: string) {
     return;
   }
 
-  const { subject, html } = renderMissedShiftAlert(row);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderMissedShiftAlert(row, m), mail);
 
   const { succeeded, failed } = await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'missed_shift_alert',
     { shift_id: shiftId },
   );
@@ -1138,7 +1166,7 @@ export function renderMissedShiftAlert(row: {
   guard_phone:     string | null;
   last_login_at:   Date | string | null;
   upcoming_shifts_count: number | string;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
 
   // Minutes late computed at render time (cron fires at T+10 min minimum, but
@@ -1177,8 +1205,8 @@ export function renderMissedShiftAlert(row: {
 
   const html = emailPage(`
   <div style="${ES.card}">
-    <div style="${ES.hdr};background:#7F1D1D">
-      <div style="${ES.brand};color:#FCA5A5">NETRAOPS · ALERT</div>
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr};background:#7F1D1D">
+      <div style="${ES.brand};color:#FCA5A5">${mail ? 'ALERT' : 'NETRAOPS · ALERT'}</div>
       <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Missed Shift</h1>
       <p style="${ES.hdrP};color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${escapeHtml(guardTitle)} is ${minutesLate} min late</p>
     </div>
@@ -1207,7 +1235,7 @@ export function renderMissedShiftAlert(row: {
     </div>
     <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
   </div>`);
 
@@ -1260,6 +1288,7 @@ export interface UnstaffedPostRow {
 export function renderUnstaffedPostWarning(
   rows: UnstaffedPostRow[],
   now: Date = new Date(),
+  mail: MailLetterhead | null = null,
 ): { subject: string; html: string } {
   const n  = rows.length;
   const s_ = n === 1 ? '' : 's';
@@ -1335,8 +1364,8 @@ export function renderUnstaffedPostWarning(
 
   const html = emailPage(`
   <div style="${ES.card}">
-    <div style="${ES.hdr};background:#78350F">
-      <div style="${ES.brand};color:#FCD34D">NETRAOPS · WARNING</div>
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr};background:#78350F">
+      <div style="${ES.brand};color:#FCD34D">${mail ? 'WARNING' : 'NETRAOPS · WARNING'}</div>
       <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">No Guard Assigned</h1>
       <p style="${ES.hdrP};color:#FCD34D;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headline}</p>
     </div>
@@ -1358,7 +1387,7 @@ export function renderUnstaffedPostWarning(
     <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in each site's local time zone.<br/>
       Each shift is warned about once, about an hour before it starts.<br/>
-      NetraOps · Automated warning
+      ${mail ? `Automated warning${POWERED_BY_HTML}` : 'NetraOps · Automated warning'}
     </div>
   </div>`);
 
@@ -1411,11 +1440,15 @@ export async function sendUnstaffedPostWarning(
     return { succeeded: 0, failed: 0, admins: 0 };
   }
 
-  const { subject, html } = renderUnstaffedPostWarning(rows);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(companyId);
+  const now = new Date(); // one clock for both renders
+  const build = adminMessage((m) => renderUnstaffedPostWarning(rows, now, m), mail);
 
   const { succeeded, failed } = await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'unstaffed_post_warning',
     { company_id: companyId, shift_count: rows.length },
   );
@@ -1542,11 +1575,14 @@ export async function sendGeofenceBreachAlert(
     return;
   }
 
-  const { subject, html } = renderGeofenceBreachAlert(row, context);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderGeofenceBreachAlert(row, context, m), mail);
 
   const { succeeded, failed } = await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'geofence_breach_alert',
     { violation_id: violationId, kind: context.kind },
   );
@@ -1577,7 +1613,7 @@ export function renderGeofenceBreachAlert(row: {
   center_lng:       number | null;
   guard_name:       string;
   badge_number:     string;
-}, context: BreachAlertContext = { kind: 'ping' }): { subject: string; html: string } {
+}, context: BreachAlertContext = { kind: 'ping' }, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
   const distanceM =
     row.center_lat != null && row.center_lng != null
@@ -1642,8 +1678,8 @@ export function renderGeofenceBreachAlert(row: {
 
   const html = emailPage(`
   <div style="${ES.card}">
-    <div style="${ES.hdr};background:#7F1D1D">
-      <div style="${ES.brand};color:#FCA5A5">NETRAOPS · ALERT</div>
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr};background:#7F1D1D">
+      <div style="${ES.brand};color:#FCA5A5">${mail ? 'ALERT' : 'NETRAOPS · ALERT'}</div>
       <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headerTitle}</h1>
       <p style="${ES.hdrP};color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headerSub}</p>
     </div>
@@ -1674,7 +1710,7 @@ export function renderGeofenceBreachAlert(row: {
     </div>
     <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
   </div>`);
 
@@ -1739,10 +1775,13 @@ export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
     return;
   }
 
-  const { subject, html } = renderSwapAcceptedFyi(row);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderSwapAcceptedFyi(row, m), mail);
   await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'swap_accepted_fyi',
     { history_id: historyId },
   );
@@ -1760,7 +1799,7 @@ export function renderSwapAcceptedFyi(row: {
   to_badge:         string;
   is_same_site:     boolean;
   reason:           string | null;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
   const fromName = titleCase(row.from_guard_name);
   const toName   = titleCase(row.to_guard_name);
@@ -1777,8 +1816,8 @@ export function renderSwapAcceptedFyi(row: {
 
   const html = emailPage(`
   <div style="${ES.card}">
-    <div style="${ES.hdr}">
-      <div style="${ES.brand}">NETRAOPS</div>
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr}">
+      ${mail ? '' : `<div style="${ES.brand}">NETRAOPS</div>`}
       <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Coverage Swap</h1>
       <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${dayLabel}</p>
     </div>
@@ -1804,7 +1843,7 @@ export function renderSwapAcceptedFyi(row: {
     </div>
     <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
   </div>`);
 
@@ -1881,6 +1920,7 @@ export function renderHandoffFyi(
   row: HandoffFyiRow,
   kind: 'accepted' | 'completed' | 'nudge',
   nudgeMinutes = 0,
+  mail: MailLetterhead | null = null,
 ): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
   const fromName = titleCase(row.from_guard_name);
@@ -1911,8 +1951,8 @@ export function renderHandoffFyi(
 
   const html = emailPage(`
   <div style="${ES.card}">
-    <div style="${ES.hdr}">
-      <div style="${ES.brand}">NETRAOPS</div>
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr}">
+      ${mail ? '' : `<div style="${ES.brand}">NETRAOPS</div>`}
       <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headline}</h1>
       <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)}</p>
     </div>
@@ -1936,7 +1976,7 @@ export function renderHandoffFyi(
     </div>
     <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
   </div>`);
 
@@ -1966,8 +2006,10 @@ async function fanoutHandoffFyi(
     });
     return;
   }
-  const { subject, html } = renderHandoffFyi(row, kind, nudgeMinutes);
-  await sendToAdmins(admins, { from: FROM, subject, html }, flow, extra);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderHandoffFyi(row, kind, nudgeMinutes, m), mail);
+  await sendToAdmins(admins, build, mail, flow, extra);
 }
 
 export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
