@@ -23,6 +23,7 @@ import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatSche
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
 import { monthDayYear } from './pdf/dates';
 import { mailLetterheadForSite, mailHeaderHtml, mailFooterHtml, withLetterhead, type MailLetterhead } from './letterhead/email';
+import { ES, emailPage } from './emailStyles';
 
 // Central SendGrid failure accounting. Called from every sgMail.send catch
 // site so delivery failures are sliceable by workflow when triaging.
@@ -297,7 +298,7 @@ function escapeAttr(s: unknown): string {
 // literal <tr>/<span>/<div> text in the email. Each is an HTML fragment
 // assembled from already-escaped parts; the escaping happened inside them.
 //
-//   BASE_STYLE (x12 sites)   the stylesheet body, inside <style>…</style>
+//   ES.* (emailStyles.ts)    static style strings inside style attributes (N182)
 //   typeBadgeHtml(...)       returns a <span> badge
 //   sevSpan        :256      <span> or ''
 //   reportRows     :710      .map() -> <div class="rrow"> blocks
@@ -336,28 +337,10 @@ function typeBadgeHtml(type: string, severity?: string | null): string {
   return `<span style="background:${bg};color:#fff;padding:2px 7px;border-radius:3px;font-size:11px;font-weight:bold">${type.toUpperCase()}</span>${sevSpan}`;
 }
 
-// EXPORTED so the N79 check can assert the <style> block is emitted VERBATIM.
-// Today BASE_STYLE contains no & < >, so escaping it would be a silent
-// no-op — the check could not see the mistake. Add one child selector
-// (`.card > p`) and escaping it breaks every email, so the check compares
-// the emitted stylesheet against this constant rather than trusting that.
-export const BASE_STYLE = `
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;margin:0;padding:20px}
-  .card{background:#fff;border-radius:8px;max-width:640px;margin:0 auto;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-  .hdr{background:#0B1526;color:#F59E0B;padding:24px 28px}
-  .hdr h1{margin:0;font-size:22px;letter-spacing:3px}
-  .brand{font-size:11px;color:#F59E0B;letter-spacing:4px;font-weight:700;margin-bottom:6px}
-  .hdr p{margin:4px 0 0;color:#888;font-size:12px;letter-spacing:2px}
-  .body{padding:24px 28px}
-  .meta{color:#666;font-size:13px;margin-bottom:20px;border-bottom:1px solid #eee;padding-bottom:14px}
-  .kpi{display:inline-block;background:#f5f5f5;border-radius:6px;padding:10px 20px;margin:4px 8px 4px 0;text-align:center}
-  .kpi .n{font-size:26px;font-weight:700;color:#0B1526}
-  .kpi .l{font-size:10px;color:#999;letter-spacing:1px}
-  .rrow{border-left:3px solid;padding:10px 14px;margin:8px 0;background:#fafafa;border-radius:0 6px 6px 0}
-  .rrow p{margin:3px 0;font-size:13px}
-  .footer{background:#f5f5f5;padding:14px 28px;font-size:11px;color:#aaa;text-align:center}
-  a.btn{display:inline-block;background:#F59E0B;color:#0B1526;font-weight:700;padding:10px 20px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:13px;margin-top:16px}
-`;
+// N182: no email carries a <style> block any more. Gmail drops one, so its
+// classes styled nothing there. Each element now carries its old class rule
+// inline (services/emailStyles.ts, ES), and emailPage() stands in for the old
+// `body` rule.
 
 // ── The company letterhead on client emails (Phase B, B4) ─────────────────────
 //
@@ -549,23 +532,23 @@ export function renderIncidentAlert(data: {
   // none, these are the fragments of before, byte for byte.
   const header = mail
     ? mailHeaderHtml(mail, 'Incident Reported', `${escapeHtml(data.site_name)} · ${dateLabel}`)
-    : `<div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
+    : `<div style="${ES.hdr}">
+      <div style="${ES.brand}">NETRAOPS</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
     </div>`;
   const footer = mail
     ? mailFooterHtml(mail, tz)
-    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    : `<div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
       Reply to this email to contact ${escapeHtml(data.company_name)}.
     </div>`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
+  const html = emailPage(`
+  <div style="${ES.card}">
     ${header}
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
@@ -577,11 +560,11 @@ export function renderIncidentAlert(data: {
       <p style="margin:0;color:#333;font-size:14px;line-height:1.6;white-space:pre-wrap">${escapeHtml(data.description)}</p>
 
       <div style="text-align:center;margin-top:28px">
-        <a class="btn" href="${incidentUrl}">View Incident in Portal</a>
+        <a style="${ES.btn}" href="${incidentUrl}">View Incident in Portal</a>
       </div>
     </div>
     ${footer}
-  </div>`;
+  </div>`);
 
   const subject = data.severity
     ? `Incident Reported — ${data.site_name} — ${data.severity.toUpperCase()} — ${dateLabel}`
@@ -1011,9 +994,9 @@ export function renderDailyShiftReport(data: {
     const desc = escapeHtml(
       r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description,
     );
-    return `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
-      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTClient(r.reported_at, tz)}</span></p>
-      <p style="margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
+    return `<div style="${ES.rrow};border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
+      <p style="${ES.rrowP};margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTClient(r.reported_at, tz)}</span></p>
+      <p style="${ES.rrowP};margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
     </div>`;
   }).join('');
 
@@ -1028,31 +1011,31 @@ export function renderDailyShiftReport(data: {
   // letterhead, the fragments of before, byte for byte, without one.
   const header = mail
     ? mailHeaderHtml(mail, 'Shift Report', `${escapeHtml(data.site_name)} · ${dateLabel}`)
-    : `<div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
+    : `<div style="${ES.hdr}">
+      <div style="${ES.brand}">NETRAOPS</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
     </div>`;
   const footer = mail
     ? mailFooterHtml(mail, tz)
-    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    : `<div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
       Reply to this email to contact ${escapeHtml(data.company_name)}.
     </div>`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
+  const html = emailPage(`
+  <div style="${ES.card}">
     ${header}
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">Here is the shift summary for your site.</p>
 
       <div style="text-align:center;margin-bottom:22px">
-        <div class="kpi"><div class="n">${totalHours}</div><div class="l">HOURS</div></div>
-        <div class="kpi"><div class="n">${data.reports.length}</div><div class="l">REPORTS</div></div>
-        <div class="kpi"><div class="n">${data.tasks_completed}/${data.tasks_total}</div><div class="l">TASKS</div></div>
-        <div class="kpi"><div class="n">${pingsLabel}</div><div class="l">PINGS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${totalHours}</div><div style="${ES.kpiL}">HOURS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${data.reports.length}</div><div style="${ES.kpiL}">REPORTS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${data.tasks_completed}/${data.tasks_total}</div><div style="${ES.kpiL}">TASKS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${pingsLabel}</div><div style="${ES.kpiL}">PINGS</div></div>
       </div>
 
       ${data.hours ? `
@@ -1084,11 +1067,11 @@ export function renderDailyShiftReport(data: {
         : `<p style="color:#888;font-size:14px;margin-top:22px;font-style:italic">No reports filed during this shift.</p>`}
 
       <div style="text-align:center;margin-top:28px">
-        <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
+        <a style="${ES.btn}" href="${PORTAL}">View Full Report in Portal</a>
       </div>
     </div>
     ${footer}
-  </div>`;
+  </div>`);
 
   const subject = `Shift Report — ${data.site_name} — ${dateLabel}`;
   return { subject, html };
@@ -1222,14 +1205,14 @@ export function renderMissedShiftAlert(row: {
     ? `<tr><td style="padding:6px 0;color:#888;width:120px">Phone</td><td style="padding:6px 0"><a href="tel:${escapeAttr(row.guard_phone)}" style="color:#0B1526;text-decoration:underline">${escapeHtml(row.guard_phone)}</a></td></tr>`
     : '';
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:#7F1D1D">
-      <div class="brand" style="color:#FCA5A5">NETRAOPS · ALERT</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Missed Shift</h1>
-      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${escapeHtml(guardTitle)} is ${minutesLate} min late</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    <div style="${ES.hdr};background:#7F1D1D">
+      <div style="${ES.brand};color:#FCA5A5">NETRAOPS · ALERT</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Missed Shift</h1>
+      <p style="${ES.hdrP};color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${escapeHtml(guardTitle)} is ${minutesLate} min late</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#B91C1C;font-weight:600;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
         ⚠️ ${escapeHtml(guardTitle)} did not clock in. ${minutesLate} minutes past the scheduled start.
       </p>
@@ -1249,14 +1232,14 @@ export function renderMissedShiftAlert(row: {
       </p>
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${dashboardUrl}">Open in Admin Dashboard</a>
+        <a style="${ES.btn}" href="${dashboardUrl}">Open in Admin Dashboard</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       NetraOps · Automated alert
     </div>
-  </div>`;
+  </div>`);
 
   const subject = `⚠️ MISSED SHIFT — ${row.site_name} — ${guardTitle} is ${minutesLate} min late`;
   return { subject, html };
@@ -1380,14 +1363,14 @@ export function renderUnstaffedPostWarning(
     ? `${escapeHtml(rows[0].site_name)} starts within the hour with no guard assigned`
     : `${postCount} posts start within the hour with no guard assigned`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:#78350F">
-      <div class="brand" style="color:#FCD34D">NETRAOPS · WARNING</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">No Guard Assigned</h1>
-      <p style="color:#FCD34D;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headline}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    <div style="${ES.hdr};background:#78350F">
+      <div style="${ES.brand};color:#FCD34D">NETRAOPS · WARNING</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">No Guard Assigned</h1>
+      <p style="${ES.hdrP};color:#FCD34D;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headline}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#92400E;font-weight:600;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
         ⚠️ ${n} shift${s_} start${n === 1 ? 's' : ''} within the hour with nobody assigned. There is still time to cover ${n === 1 ? 'it' : 'them'}.
       </p>
@@ -1399,15 +1382,15 @@ export function renderUnstaffedPostWarning(
       </p>
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${ctaUrl}">${ctaLabel}</a>
+        <a style="${ES.btn}" href="${ctaUrl}">${ctaLabel}</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in each site's local time zone.<br/>
       Each shift is warned about once, about an hour before it starts.<br/>
       NetraOps · Automated warning
     </div>
-  </div>`;
+  </div>`);
 
   const subject = postCount === 1
     ? `⚠️ NO GUARD ASSIGNED — ${rows[0].site_name} starts in 1 hour`
@@ -1495,14 +1478,14 @@ export async function sendTempPasswordEmail(
     from: FROM,
     replyTo: REPLY_TO,
     subject: 'NetraOps password reset',
-    html: `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>PASSWORD RESET</h1>
-        <p>${label.toUpperCase()}</p>
+    html: emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">PASSWORD RESET</h1>
+        <p style="${ES.hdrP}">${label.toUpperCase()}</p>
       </div>
-      <div class="body">
+      <div style="${ES.body}">
         <p style="font-size:15px;color:#333;margin-bottom:20px">
           We received a request to reset your NetraOps <strong>${label}</strong> password.
         </p>
@@ -1519,8 +1502,8 @@ export async function sendTempPasswordEmail(
           If you didn't request this, contact your administrator immediately.
         </p>
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`,
+      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+    </div>`),
     });
     noteSendgridSuccess('temp_password');
   } catch (err: any) {
@@ -1687,14 +1670,14 @@ export function renderGeofenceBreachAlert(row: {
     ? `<p style="margin:16px 0 0 0;font-size:13px;color:#555"><strong style="color:#333">Photo at breach:</strong> <a href="${breachDeepLink}" style="color:#0B1526;text-decoration:underline">View in dashboard →</a></p>`
     : '';
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:#7F1D1D">
-      <div class="brand" style="color:#FCA5A5">NETRAOPS · ALERT</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headerTitle}</h1>
-      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headerSub}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    <div style="${ES.hdr};background:#7F1D1D">
+      <div style="${ES.brand};color:#FCA5A5">NETRAOPS · ALERT</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headerTitle}</h1>
+      <p style="${ES.hdrP};color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headerSub}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#B91C1C;font-weight:600;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
         ${headlineText}
       </p>
@@ -1716,14 +1699,14 @@ export function renderGeofenceBreachAlert(row: {
       </p>
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${deepLink}">Open Live Map</a>
+        <a style="${ES.btn}" href="${deepLink}">Open Live Map</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       NetraOps · Automated alert
     </div>
-  </div>`;
+  </div>`);
 
   return { subject, html };
 }
@@ -1822,14 +1805,14 @@ export function renderSwapAcceptedFyi(row: {
 
   const dashboardUrl = `${WEB_BASE}/admin/shifts/${row.shift_id}`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Coverage Swap</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${dayLabel}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    <div style="${ES.hdr}">
+      <div style="${ES.brand}">NETRAOPS</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Coverage Swap</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${dayLabel}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
       <p style="color:#555;font-size:14px;margin:0 0 18px 0">
         A guard-initiated shift swap was accepted. No action required.
@@ -1846,14 +1829,14 @@ export function renderSwapAcceptedFyi(row: {
       ${reasonBlock}
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
+        <a style="${ES.btn}" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       NetraOps · Automated alert
     </div>
-  </div>`;
+  </div>`);
 
   const subject = `Coverage swap: ${fromName} → ${toName}`;
   return { subject, html };
@@ -1956,14 +1939,14 @@ export function renderHandoffFyi(
     extraRow    = row.accepted_at ? `<tr><td style="padding:6px 0;color:#888">Accepted at</td><td style="padding:6px 0">${fmtTimeSite(row.accepted_at, tz)} ${tz}</td></tr>` : '';
   }
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headline}</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    <div style="${ES.hdr}">
+      <div style="${ES.brand}">NETRAOPS</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headline}</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
       <p style="color:#555;font-size:14px;margin:0 0 18px 0">${primaryLine}</p>
 
@@ -1978,14 +1961,14 @@ export function renderHandoffFyi(
       ${reasonBlock}
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
+        <a style="${ES.btn}" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       NetraOps · Automated alert
     </div>
-  </div>`;
+  </div>`);
 
   const subject = kind === 'accepted'
     ? `Handoff accepted: ${fromName} → ${toName}`
@@ -2047,14 +2030,14 @@ export function renderGuardWelcome(data: {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>GUARD ACCOUNT</p>
+  const html = emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">GUARD ACCOUNT</p>
       </div>
-      <div class="body">
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.guard_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
@@ -2073,8 +2056,8 @@ export function renderGuardWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>
         ${contact}
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Guard Account', html };
 }
 
@@ -2126,14 +2109,14 @@ export function renderPrimaryAdminWelcome(data: {
   company_name: string;
   temp_password: string;
 }) {
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>ADMIN ACCOUNT</p>
+  const html = emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">ADMIN ACCOUNT</p>
       </div>
-      <div class="body">
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
@@ -2152,8 +2135,8 @@ export function renderPrimaryAdminWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 24px">You can manage guards, sites, shifts, monitor real-time activity, and review reports.</p>
         <p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Admin Account', html };
 }
 
@@ -2197,14 +2180,14 @@ export function renderSecondaryAdminWelcome(data: {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>ADMIN ACCOUNT</p>
+  const html = emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">ADMIN ACCOUNT</p>
       </div>
-      <div class="body">
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
@@ -2222,8 +2205,8 @@ export function renderSecondaryAdminWelcome(data: {
         <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
         ${contact}
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Admin Account', html };
 }
 
@@ -2285,14 +2268,14 @@ export function renderClientWelcome(data: {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>CLIENT PORTAL</p>
+  const html = emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">CLIENT PORTAL</p>
       </div>
-      <div class="body">
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.client_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:12px">
@@ -2314,8 +2297,8 @@ export function renderClientWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 24px">You can view live guard activity, daily shift reports, incident reports, and geofence alerts.</p>
         ${contact}
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Client Portal Access', html };
 }
 

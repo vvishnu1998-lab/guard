@@ -28,6 +28,7 @@ import { checkImageDecodes } from '../imageDecode';
 import { letterheadForSite } from './index';
 import { contactLines } from './text';
 import type { Letterhead } from './types';
+import { ES } from '../emailStyles';
 
 /** What the header's <img src="cid:…"> and the attachment's content_id share. */
 export const LOGO_CONTENT_ID = 'company-logo';
@@ -129,7 +130,7 @@ export function mailHeaderHtml(m: MailLetterhead, title: string, subtitleHtml: s
 export function mailFooterHtml(m: MailLetterhead, tz: string): string {
   const reply = m.replyTo ? `<br/>
       Reply to this email to contact ${esc(m.companyName)}.` : '';
-  return `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+  return `<div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${esc(tz)}).<br/>
       Provided by <strong style="color:#666">${esc(m.companyName)}</strong>.${reply}
       <div style="margin-top:10px;font-size:10px;color:#9CA3AF;letter-spacing:1px">Powered by NetraOps</div>
