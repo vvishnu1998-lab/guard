@@ -2047,6 +2047,67 @@ function accountMessage(
     : { to, from: FROM, replyTo: REPLY_TO, subject: plain.subject, html: plain.html });
 }
 
+/** The sign-in details every welcome carries, as before (escaped here). */
+function credentialsHtml(email: string, tempPassword: string): string {
+  return `<h3 style="font-size:14px;color:#333;margin:20px 0 8px">Login credentials</h3>
+        <ul style="color:#555;font-size:13px;margin:0 0 8px;padding-left:20px">
+          <li>Email: ${escapeHtml(email)}</li>
+          <li>Temporary password: <strong style="font-family:'SF Mono','Menlo',monospace">${escapeHtml(tempPassword)}</strong></li>
+        </ul>
+        <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
+          <em>You'll be required to change this password on first login.</em>
+        </p>`;
+}
+
+/**
+ * A welcome's one contact line under the company's letterhead (N184, Vishnu
+ * 2026-10-13). It names the same route as the footer: the footer prints its
+ * reply line exactly when `mail.replyTo` is set, so the body says "reply"
+ * then; otherwise it names the company's primary admin, and failing that,
+ * NetraOps support (where the Reply-To still goes).
+ */
+function welcomeContactHtml(mail: MailLetterhead, primaryAdminEmail: string | null): string {
+  const company = escapeHtml(mail.companyName);
+  const line = (inner: string) => `<p style="color:#555;font-size:13px;margin-top:20px">${inner}</p>`;
+  if (mail.replyTo) return line(`Questions? Reply to this email to reach ${company}.`);
+  if (primaryAdminEmail) {
+    return line(`Questions? Contact ${company} at <a href="mailto:${escapeAttr(primaryAdminEmail)}" style="color:#F59E0B">${escapeHtml(primaryAdminEmail)}</a>.`);
+  }
+  return line(`Questions? Contact NetraOps support at <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a>.`);
+}
+
+/**
+ * A welcome the company sends under its letterhead (N184): the company's
+ * subject and header, a first-name greeting, no "Welcome to NetraOps" heading,
+ * one contact line (welcomeContactHtml) and the letterhead's footer. `title` is
+ * text (mailHeaderHtml escapes it); the *Html arguments are markup the caller
+ * escaped.
+ */
+function letteredWelcome(mail: MailLetterhead, w: {
+  subject: string;
+  title: string;
+  subtitleHtml: string;
+  name: string | null;
+  introHtml: string;
+  bodyHtml: string;
+  primaryAdminEmail: string | null;
+}): { subject: string; html: string } {
+  const html = emailPage(`
+    <div style="${ES.card}">
+      ${mailHeaderHtml(mail, w.title, w.subtitleHtml)}
+      <div style="${ES.body}">
+        <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(firstName(w.name))},</p>
+        <p style="color:#555;font-size:14px;margin-bottom:20px">
+          ${w.introHtml}
+        </p>
+        ${w.bodyHtml}
+        ${welcomeContactHtml(mail, w.primaryAdminEmail)}
+      </div>
+      ${mailFooterHtml(mail, null)}
+    </div>`);
+  return { subject: w.subject, html };
+}
+
 // ── Welcome emails ───────────────────────────────────────────────────────────
 //
 // Fired from the four account-creation route handlers on new-account INSERT.
@@ -2054,7 +2115,8 @@ function accountMessage(
 // company invites guards, clients and its other admins, so those three carry
 // its letterhead (D1a, B5) and send replies to its contact email when it has
 // a usable one (D2a, the B4 rule); NetraOps onboards the primary admin, so
-// that one stays NetraOps'.
+// that one stays NetraOps'. Under a letterhead each is the company's own
+// email (N184): its subject and header, one contact line (letteredWelcome).
 // Send fns catch internally, Sentry-tag, and re-throw so the caller's fire-
 // and-forget .catch() can capture at the route site (matches the pattern
 // used by sendTempPasswordEmail and sendIncidentAlert).
@@ -2066,16 +2128,30 @@ export function renderGuardWelcome(data: {
   primary_admin_email: string | null;
   temp_password: string;
 }, mail: MailLetterhead | null = null) {
+  if (mail) {
+    return letteredWelcome(mail, {
+      subject:           `Welcome to ${mail.companyName}: your guard account`,
+      title:             `Welcome to ${mail.companyName}`,
+      subtitleHtml:      'Guard account',
+      name:              data.guard_name,
+      introHtml:         `${escapeHtml(mail.companyName)} has created your guard account. You'll use the NetraOps app for your shifts.`,
+      bodyHtml: `${credentialsHtml(data.guard_email, data.temp_password)}
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Download the NetraOps app</h3>
+        <p style="color:#555;font-size:13px;margin:0 0 4px">iOS: Coming to App Store soon — contact your admin for TestFlight access</p>
+        <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>`,
+      primaryAdminEmail: data.primary_admin_email,
+    });
+  }
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = emailPage(`
     <div style="${ES.card}">
-      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Guard Account') : `<div style="${ES.hdr}">
+      <div style="${ES.hdr}">
         <div style="${ES.brand}">NetraOps</div>
         <h1 style="${ES.hdrH1}">WELCOME</h1>
         <p style="${ES.hdrP}">GUARD ACCOUNT</p>
-      </div>`}
+      </div>
       <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.guard_name)},</p>
@@ -2095,7 +2171,7 @@ export function renderGuardWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>
         ${contact}
       </div>
-      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
+      <div style="${ES.footer}">NetraOps</div>
     </div>`);
   return { subject: '[NetraOps] Welcome — Your Guard Account', html };
 }
@@ -2218,16 +2294,29 @@ export function renderSecondaryAdminWelcome(data: {
   primary_admin_email: string | null;
   temp_password: string;
 }, mail: MailLetterhead | null = null) {
+  if (mail) {
+    return letteredWelcome(mail, {
+      subject:           `${mail.companyName}: your admin account`,
+      title:             'Your admin account',
+      subtitleHtml:      'Admin portal',
+      name:              data.admin_name,
+      introHtml:         `${escapeHtml(data.creator_name)} has made you an admin of ${escapeHtml(mail.companyName)}.`,
+      bodyHtml: `${credentialsHtml(data.admin_email, data.temp_password)}
+        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Access the admin portal</h3>
+        <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>`,
+      primaryAdminEmail: data.primary_admin_email,
+    });
+  }
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = emailPage(`
     <div style="${ES.card}">
-      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Admin Account') : `<div style="${ES.hdr}">
+      <div style="${ES.hdr}">
         <div style="${ES.brand}">NetraOps</div>
         <h1 style="${ES.hdrH1}">WELCOME</h1>
         <p style="${ES.hdrP}">ADMIN ACCOUNT</p>
-      </div>`}
+      </div>
       <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
@@ -2246,7 +2335,7 @@ export function renderSecondaryAdminWelcome(data: {
         <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
         ${contact}
       </div>
-      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
+      <div style="${ES.footer}">NetraOps</div>
     </div>`);
   return { subject: '[NetraOps] Welcome — Your Admin Account', html };
 }
@@ -2308,16 +2397,28 @@ export function renderClientWelcome(data: {
   primary_admin_email: string | null;
   temp_password: string;
 }, mail: MailLetterhead | null = null) {
+  if (mail) {
+    return letteredWelcome(mail, {
+      subject:           `${mail.companyName}: your client portal account`,
+      title:             'Welcome to your client portal',
+      subtitleHtml:      data.site_names ? escapeHtml(data.site_names) : 'Client portal',
+      name:              data.client_name,
+      introHtml:         `${escapeHtml(mail.companyName)} has set up a client portal account for you. Sign in to see live guard activity, daily shift reports, incident reports and geofence alerts for your sites.`,
+      bodyHtml: `${credentialsHtml(data.client_email, data.temp_password)}
+        <p style="color:#555;font-size:14px;margin:0 0 16px">Sign in at <a href="https://app.netraops.com/client" style="color:#6699FF;text-decoration:none">app.netraops.com/client</a></p>`,
+      primaryAdminEmail: data.primary_admin_email,
+    });
+  }
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = emailPage(`
     <div style="${ES.card}">
-      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Client Portal') : `<div style="${ES.hdr}">
+      <div style="${ES.hdr}">
         <div style="${ES.brand}">NetraOps</div>
         <h1 style="${ES.hdrH1}">WELCOME</h1>
         <p style="${ES.hdrP}">CLIENT PORTAL</p>
-      </div>`}
+      </div>
       <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.client_name)},</p>
@@ -2340,7 +2441,7 @@ export function renderClientWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 24px">You can view live guard activity, daily shift reports, incident reports, and geofence alerts.</p>
         ${contact}
       </div>
-      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
+      <div style="${ES.footer}">NetraOps</div>
     </div>`);
   return { subject: '[NetraOps] Welcome — Your Client Portal Access', html };
 }
