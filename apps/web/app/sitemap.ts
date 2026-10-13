@@ -10,6 +10,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${base}/demo`, changeFrequency: 'monthly', priority: 0.7 },
     // Linked from the homepage testimonial; no nav or footer link.
     { url: `${base}/customers/starnet`, changeFrequency: 'monthly', priority: 0.6 },
+    // The one URL for getting the guard app (emails, QR codes, in-app notices,
+    // the video all point here). Static page, crawlable, must not move.
+    { url: `${base}/app`, changeFrequency: 'yearly', priority: 0.6 },
     { url: `${base}/support`, changeFrequency: 'monthly', priority: 0.5 },
     { url: `${base}/security`, changeFrequency: 'monthly', priority: 0.5 },
     { url: `${base}/privacy`, changeFrequency: 'yearly', priority: 0.3 },
