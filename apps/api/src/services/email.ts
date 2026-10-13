@@ -676,7 +676,8 @@ export class DailyReportDeliveryError extends Error {
 }
 
 export async function sendDailyShiftReport(shiftId: string): Promise<DailyReportOutcome> {
-  // Reply-To is the shared support address — client replies route to
+  // Reply-To is the company's contact email when its letterhead has one (B4);
+  // otherwise the shared support address, so client replies route to
   // NetraOps support rather than the per-tenant primary admin.
   const shiftResult = await pool.query(
     `SELECT sh.id, sh.scheduled_start, sh.scheduled_end, sh.site_id,
@@ -873,25 +874,32 @@ export async function sendDailyShiftReport(shiftId: string): Promise<DailyReport
     pings_expected:  pingsExpected,
   };
 
+  // The letterhead of the company that runs the site, looked up once per
+  // shift and only for a shift that is sent (B4). null sends today's email.
+  const mail = await mailLetterheadForSite(sh.site_id);
+
   // One message per recipient (the greeting is personalized), sent in
   // parallel. The render runs inside the async callback so a throw rejects
   // only that recipient's promise (see sendIncidentAlert).
   const outcomes = await Promise.allSettled(
     recipients.map(async (r) => {
-      let rendered: { subject: string; html: string };
-      try {
-        rendered = renderDailyShiftReport({ ...report, client_name: r.name });
-      } catch (err) {
-        throw new EmailRenderError(err);
-      }
-      const sendOpts: sgMail.MailDataRequired = {
-        to:      r.email,
-        from:    FROM,
-        replyTo: REPLY_TO,
-        subject: rendered.subject,
-        html:    rendered.html,
+      const build = (m: MailLetterhead | null): sgMail.MailDataRequired => {
+        let rendered: { subject: string; html: string };
+        try {
+          rendered = renderDailyShiftReport({ ...report, client_name: r.name }, m);
+        } catch (err) {
+          throw new EmailRenderError(err);
+        }
+        const sendOpts: sgMail.MailDataRequired = {
+          to:      r.email,
+          from:    FROM,
+          replyTo: REPLY_TO,
+          subject: rendered.subject,
+          html:    rendered.html,
+        };
+        return withLetterhead(sendOpts, m);
       };
-      await sgMail.send(sendOpts);
+      await sendLetterheadOrPlain(build, mail, 'daily_shift_report');
     }),
   );
 
@@ -955,7 +963,8 @@ export async function sendDailyShiftReport(shiftId: string): Promise<DailyReport
  *
  * All event timestamps render in the site's zone (Pacific when it has none)
  * via fmtDTClient, "Oct 12, 2026, 2:14 AM PDT" (PDT in summer, PST in
- * winter — abbreviation chosen by the runtime).
+ * winter — abbreviation chosen by the runtime). With a letterhead (`mail`,
+ * B4) the company's header and footer stand where NetraOps' do.
  */
 export function renderDailyShiftReport(data: {
   site_name:       string;
@@ -976,7 +985,7 @@ export function renderDailyShiftReport(data: {
   pings_submitted?: number;
   /** Trackable 30-min windows for the session, per services/pingWindows.ts. */
   pings_expected?:  number;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
   const dateLabel  = monthDayYear(data.scheduled_start, tz);
   const totalHours = data.hours
@@ -1015,13 +1024,26 @@ export function renderDailyShiftReport(data: {
        </p>`
     : '';
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
+  // As in renderIncidentAlert: the company's header and footer with a
+  // letterhead, the fragments of before, byte for byte, without one.
+  const header = mail
+    ? mailHeaderHtml(mail, 'Shift Report', `${escapeHtml(data.site_name)} · ${dateLabel}`)
+    : `<div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
       <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
-    </div>
+    </div>`;
+  const footer = mail
+    ? mailFooterHtml(mail, tz)
+    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in the site's local time zone (${tz}).<br/>
+      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
+      Reply to this email to contact ${escapeHtml(data.company_name)}.
+    </div>`;
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    ${header}
     <div class="body">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">Here is the shift summary for your site.</p>
@@ -1065,11 +1087,7 @@ export function renderDailyShiftReport(data: {
         <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in the site's local time zone (${tz}).<br/>
-      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
-      Reply to this email to contact ${escapeHtml(data.company_name)}.
-    </div>
+    ${footer}
   </div>`;
 
   const subject = `Shift Report — ${data.site_name} — ${dateLabel}`;
