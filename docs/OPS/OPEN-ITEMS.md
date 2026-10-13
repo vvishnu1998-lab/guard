@@ -5316,7 +5316,7 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
-- **Status 2026-10-12 (B5, built on `feat/letterhead-b5`):** the admin alerts and the guard, client and
+- **Status 2026-10-13 (B5, SHIPPED as `dde311c`, PR #106):** the admin alerts and the guard, client and
   secondary-admin welcomes carry the company's letterhead with B4's fallbacks: an empty profile leaves the
   name, and a lookup that fails sends the email of before, but for B5's dates and its "Do not reply" line
   (`scripts/test-letterhead-b5.ts`, A5, A8, W5, W6). With B5, every email that carries a letterhead has the
@@ -5861,7 +5861,7 @@ verified 2026-10-12 by Vishnu, in Gmail, on the B4 test email (STATE.md, #105).
   B4 did for the dates. `scripts/check-email-escaping.ts` asserts the stylesheet verbatim, and
   `_incidentAlert.test.ts` byte-compares against a baseline.
 - **Size S. Tier 1** (client-visible; ships through the deploy gate with B5).
-- **Status 2026-10-12 (B5, built on `feat/letterhead-b5`): FIXED in code, not yet shipped.** Every template,
+- **Status 2026-10-13 (B5, SHIPPED as `dde311c`, PR #106): CLOSED. Vishnu verified it in Gmail on all 8 B5 test emails.** Every template,
   client and admin, carries its styles inline and no `<style>` block (D4a). The swap and handoff notices'
   navy is inline too, so no title depends on the block. `scripts/test-letterhead-b5.ts` P holds every element
   of all 18 renders to the declarations main's block and its own style gave it, and Gmail's view of main
@@ -5871,7 +5871,7 @@ verified 2026-10-12 by Vishnu, in Gmail, on the B4 test email (STATE.md, #105).
 
 ## New from Phase B, stage B5 (2026-10-12)
 
-**Status: BUILT 2026-10-12 on `feat/letterhead-b5` (7 commits on `c83ddc8`), not yet merged.** B5 puts the
+**Status: SHIPPED 2026-10-13 as `dde311c` (PR #106, by OVERRIDE; see STATE.md).** B5 puts the
 company's letterhead on the admin alerts and on the account emails the company sends. It also fixes N182
 and moves every email to month-name dates.
 
@@ -5948,10 +5948,15 @@ SendGrid's support article "[Message clipped] Emails Sent to Gmail Inboxes" name
   102 KB of HTML at which the article says Gmail generally clips.
 - **Earlier copies with the same subject, ruled out.** The message started its own thread: its thread id is
   its own id.
-- **Non-ASCII characters in the HTML: matches, not proven.** The article says these may make Gmail clip
-  because of character encoding, and recommends HTML entities instead. Our HTML part is
-  `text/html; charset=iso-8859-1`, quoted-printable. It carries "·" as `=B7` in the "site · date" line and
-  in the contact line.
+- **Non-ASCII characters in the HTML: DISPROVED by B5's test batch (2026-10-13).** Test #1 went out as
+  `iso-8859-1` quoted-printable with "·" as `=B7` and was not clipped. Its ASCII-only twin, #8, was not
+  clipped either.
+- **What clipped in the batch:** only #7, the incident alert without a letterhead (STATE.md, #106).
+  - 1, 3, 4, 5, 6 and 8 were not clipped.
+  - #6 is single-part with the NetraOps header, so neither the single-part structure nor the NetraOps header
+    explains it.
+  - **Cause unknown; affects only the incident alert without a letterhead. PARKED, low priority, no more
+    test sends (Vishnu, 2026-10-13): N185.**
 
 **Also in the message:**
 - `multipart/related`, holding that HTML part and the logo; there is no text/plain part.
@@ -5964,9 +5969,88 @@ SendGrid's support article "[Message clipped] Emails Sent to Gmail Inboxes" name
 `&middot;`. B5's test batch will show whether its own emails clip, and "Show original" gives each one's
 charset.
 
-**Not verified:**
-- How Gmail and Apple Mail show B5's emails. Outlook is not covered at all.
-- After the merge, with Vishnu's approval: one batch of seven real sends to his Gmail. They are the incident
-  alert, the daily report, the missed shift, the coverage swap, the client welcome, the password reset (with
-  a dummy password) and the incident alert without a letterhead. Star Guard's profile is set for the test
-  and cleared after.
+**VERIFIED in Gmail (Vishnu, 2026-10-13):** all 8 test emails render correctly (STATE.md, #106).
+- The batch was the incident alert, the daily report, the missed shift, the coverage swap, the client welcome,
+  the password reset (with a dummy password), the incident alert without a letterhead, and an ASCII-only
+  control of the first.
+- Star Guard's profile was set for the test and cleared after.
+- **Still not verified:** Apple Mail and Outlook, for B5's emails.
+
+### N183 — the push guards miss `git -C <dir> push`
+
+verified 2026-10-13. `.claude/settings.json` denies `Bash(git push*)` (a prefix rule) and
+`.claude/hooks/guard.sh` blocks any command containing the substring `git push`. The command
+`git -C ~/guard-wt/letterhead-b5 push -u origin feat/letterhead-b5` matches neither. On 2026-10-13 only the
+auto-mode classifier stopped it, as "Out-of-Place Publication".
+- **The same shape** defeats any guard keyed on `git push` and its neighbours: `git -c k=v push` and
+  `git --git-dir=… push`.
+- **Fix (Vishnu, 2026-10-13, with the next code change):** match `push` as git's subcommand after any global
+  options, in guard.sh and the deny list. Remove the two exact-command allow rules for
+  `feat/letterhead-b5` from `.claude/settings.local.json` in the same change.
+- **Test:** guard.sh blocks `git push …`, `git -C <dir> push …`, `git -c k=v push …` and
+  `git --git-dir=<d> push …`, and allows `git -C <dir> log`, `git -C <dir> ls-remote origin` and
+  `git -C <dir> rev-parse HEAD`.
+- **Status 2026-10-13: BUILT on `feat/n184-welcomes`.** guard.sh tokenizes the command and blocks git's push
+  subcommand after any of git's own options. The deny list adds `Bash(git -C * push*)`, `Bash(git -c * push*)` and
+  `Bash(git --* push*)`; the first was tested live (it denies `git -C <dir> push`, lets `git -C <dir> log` run, and
+  without it the same push reached the shell). `scripts/ops/test-guard-hook.sh`: 31/31, and main's hook misses the
+  9 `git <options> push` shapes.
+- **After it merges no agent can push at all:** guard.sh blocks every push shape before any permission rule, and a
+  deny rule beats any allow rule. How a PR reaches GitHub after that is Vishnu's decision (pending, 2026-10-13).
+- **Size XS. Tier 1** (agent guardrails).
+
+### N184 — the company's welcome emails name two contact routes and say "Welcome" twice
+
+verified 2026-10-13 by Vishnu, on B5 test #5, the client welcome with Star Guard's letterhead.
+- **Two routes:** the footer says "Reply to this email to contact Star Guard", but the body says "Questions?
+  Contact NetraOps Support: support@netraops.com".
+  - The body falls back to NetraOps support when the company has no active primary admin; the test passed
+    none.
+  - When the company has one, the body names that admin instead: a second route to the company.
+- **Repeated title:** the header's title is "Welcome" and the body opens "Welcome to NetraOps".
+- **Same pattern:** the guard and secondary-admin welcomes with a letterhead.
+- **Wording APPROVED (Vishnu, 2026-10-13), the three-tier contact line included. Built with the next code PR:**
+  - **Client welcome:**
+    - Subject: "Star Guard: your client portal account".
+    - Header: "Welcome to your client portal", with the site names under it, or "Client portal" when there
+      are none.
+    - Body: no "Welcome to NetraOps" heading. "Hi Jordan," then "Star Guard has set up a client portal
+      account for you. Sign in to see live guard activity, daily shift reports, incident reports and geofence
+      alerts for your sites."
+    - Then the sign-in details and "Sign in at app.netraops.com/client".
+  - **Guard welcome:**
+    - Subject: "Welcome to Star Guard: your guard account".
+    - Header: "Welcome to Star Guard" over "Guard account".
+    - Body: "Star Guard has created your guard account. You'll use the NetraOps app for your shifts."
+  - **Secondary-admin welcome:**
+    - Subject: "Star Guard: your admin account".
+    - Header: "Your admin account" over "Admin portal".
+    - Body: "{creator} has made you an admin of Star Guard."
+  - **One contact line in each, the same route as the footer:**
+    - the company has a usable contact email: "Questions? Reply to this email to reach Star Guard.";
+    - otherwise, an active primary admin: "Questions? Contact Star Guard at {admin email}.";
+    - otherwise: "Questions? Contact NetraOps support at support@netraops.com."
+  - **Unchanged:** the primary-admin welcome, the password reset, and any welcome sent without a letterhead.
+- **Status 2026-10-13: BUILT on `feat/n184-welcomes`.** `scripts/test-letterhead-b5.ts` W covers the new wording
+  and all three contact tiers (118/118), and E2 the escaping. `check-email-escaping.ts` covers 16 templates, including the three
+  letterhead welcomes. 10 mutation controls were each caught by their intended check. Every welcome without a letterhead,
+  the primary-admin welcome and the password reset are byte-identical to `dde311c`.
+- **Size S. Tier 1** (every new user of a company with a letterhead sees it).
+
+### N185 — Gmail clips the incident alert sent without a letterhead; cause unknown (PARKED, low priority)
+
+verified 2026-10-13 by Vishnu, on B5's 8-email test batch (STATE.md, #106).
+- **Seen:** Gmail shows "[Message clipped]" under the footer of test #7, the incident alert without a
+  letterhead (single-part `text/html`, 8,908 bytes). The other seven are not clipped.
+- **Ruled out:**
+  - size: #7 is the smallest of the batch;
+  - non-ASCII characters and the `iso-8859-1` charset: #1 carries them and is not clipped;
+  - threading: every test had its own subject and thread;
+  - the single-part structure and the NetraOps header: #6 has both and is not clipped.
+- **History:** B4's test email on 2026-10-12 (`1a132fe449f83678`) was also clipped. It was the lettered
+  incident alert, still carrying the `<style>` block that B5 removed; the lettered alert is no longer clipped.
+- **Impact:** the full email reads after "View entire message". Today it is only the alert to a site whose
+  company has no letterhead.
+- **Decision (Vishnu, 2026-10-13):** cause unknown, affecting only the no-letterhead incident alert. Parked as
+  low priority, with no more test sends for it.
+- **Size: unknown. Tier 1** (a fix would be a merge to main; cosmetic, client-visible).
