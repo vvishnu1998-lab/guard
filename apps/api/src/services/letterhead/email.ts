@@ -154,13 +154,16 @@ export const POWERED_BY_HTML = '<div style="margin-top:10px;font-size:10px;color
 /**
  * The footer under a letterheaded email: today's lines, the reply line only
  * when replies really reach the company (1a), and "Powered by NetraOps".
+ * `tz` null drops the time zone line, for an email that shows no times (an
+ * account email, B5).
  */
-export function mailFooterHtml(m: MailLetterhead, tz: string): string {
+export function mailFooterHtml(m: MailLetterhead, tz: string | null): string {
   const reply = m.replyTo ? `<br/>
       Reply to this email to contact ${esc(m.companyName)}.` : '';
+  const zone = tz === null ? '' : `All times shown in the site's local time zone (${esc(tz)}).<br/>
+      `;
   return `<div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in the site's local time zone (${esc(tz)}).<br/>
-      Provided by <strong style="color:#666">${esc(m.companyName)}</strong>.${reply}
+      ${zone}Provided by <strong style="color:#666">${esc(m.companyName)}</strong>.${reply}
       ${POWERED_BY_HTML}
     </div>`;
 }

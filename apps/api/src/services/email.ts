@@ -1505,7 +1505,7 @@ export async function sendTempPasswordEmail(
           If you didn't request this, contact your administrator immediately.
         </p>
       </div>
-      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+      <div style="${ES.footer}">NetraOps</div>
     </div>`),
     });
     noteSendgridSuccess('temp_password');
@@ -2024,10 +2024,33 @@ export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number
   await fanoutHandoffFyi(historyId, 'nudge', 'handoff_nudge', { history_id: historyId, minutes_late: minutesLate }, minutesLate);
 }
 
+/**
+ * An account email's message with the company's letterhead `m` or without it
+ * (sendLetterheadOrPlain's plain resend). Both versions are rendered here,
+ * before any send, so a render that throws reaches the caller as it always
+ * did. withLetterhead swaps REPLY_TO for the company's contact email when the
+ * letterhead has a usable one.
+ */
+function accountMessage(
+  to: string,
+  render: (mail: MailLetterhead | null) => { subject: string; html: string },
+  mail: MailLetterhead | null,
+): (m: MailLetterhead | null) => sgMail.MailDataRequired {
+  const plain = render(null);
+  const lettered = mail ? render(mail) : null;
+  return (m) => (m && lettered
+    ? withLetterhead({ to, from: FROM, replyTo: REPLY_TO, subject: lettered.subject, html: lettered.html }, m)
+    : { to, from: FROM, replyTo: REPLY_TO, subject: plain.subject, html: plain.html });
+}
+
 // ── Welcome emails ───────────────────────────────────────────────────────────
 //
 // Fired from the four account-creation route handlers on new-account INSERT.
-// Customer-facing: Reply-To is REPLY_TO (support inbox) on all four.
+// Customer-facing: Reply-To is REPLY_TO (support inbox) on all four. The
+// company invites guards, clients and its other admins, so those three carry
+// its letterhead (D1a, B5) and send replies to its contact email when it has
+// a usable one (D2a, the B4 rule); NetraOps onboards the primary admin, so
+// that one stays NetraOps'.
 // Send fns catch internally, Sentry-tag, and re-throw so the caller's fire-
 // and-forget .catch() can capture at the route site (matches the pattern
 // used by sendTempPasswordEmail and sendIncidentAlert).
@@ -2038,17 +2061,17 @@ export function renderGuardWelcome(data: {
   company_name: string;
   primary_admin_email: string | null;
   temp_password: string;
-}) {
+}, mail: MailLetterhead | null = null) {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = emailPage(`
     <div style="${ES.card}">
-      <div style="${ES.hdr}">
+      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Guard Account') : `<div style="${ES.hdr}">
         <div style="${ES.brand}">NetraOps</div>
         <h1 style="${ES.hdrH1}">WELCOME</h1>
         <p style="${ES.hdrP}">GUARD ACCOUNT</p>
-      </div>
+      </div>`}
       <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.guard_name)},</p>
@@ -2068,7 +2091,7 @@ export function renderGuardWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>
         ${contact}
       </div>
-      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
     </div>`);
   return { subject: '[NetraOps] Welcome — Your Guard Account', html };
 }
@@ -2097,15 +2120,17 @@ export async function sendGuardWelcomeEmail(args: {
     console.warn(`[email] sendGuardWelcomeEmail: no company found for company_id=${args.company_id}`);
     return;
   }
-  const { subject, html } = renderGuardWelcome({
+  // The company's letterhead (D1a, B5). null sends the NetraOps email.
+  const mail = await mailLetterheadForCompany(args.company_id);
+  const build = accountMessage(args.guard_email, (m) => renderGuardWelcome({
     guard_name:          args.guard_name,
     guard_email:         args.guard_email,
     company_name:        row.company_name ?? 'NetraOps',
     primary_admin_email: row.primary_admin_email,
     temp_password:       args.temp_password,
-  });
+  }, m), mail);
   try {
-    await sgMail.send({ to: args.guard_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    await sendLetterheadOrPlain(build, mail, 'welcome_guard');
     console.log(`[email] sendGuardWelcomeEmail: SUCCESS — delivered to ${args.guard_email}`);
     noteSendgridSuccess('welcome_guard');
   } catch (err: any) {
@@ -2147,7 +2172,7 @@ export function renderPrimaryAdminWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 24px">You can manage guards, sites, shifts, monitor real-time activity, and review reports.</p>
         <p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>
       </div>
-      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+      <div style="${ES.footer}">NetraOps</div>
     </div>`);
   return { subject: '[NetraOps] Welcome — Your Admin Account', html };
 }
@@ -2188,17 +2213,17 @@ export function renderSecondaryAdminWelcome(data: {
   creator_name: string;
   primary_admin_email: string | null;
   temp_password: string;
-}) {
+}, mail: MailLetterhead | null = null) {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = emailPage(`
     <div style="${ES.card}">
-      <div style="${ES.hdr}">
+      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Admin Account') : `<div style="${ES.hdr}">
         <div style="${ES.brand}">NetraOps</div>
         <h1 style="${ES.hdrH1}">WELCOME</h1>
         <p style="${ES.hdrP}">ADMIN ACCOUNT</p>
-      </div>
+      </div>`}
       <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
@@ -2217,7 +2242,7 @@ export function renderSecondaryAdminWelcome(data: {
         <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
         ${contact}
       </div>
-      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
     </div>`);
   return { subject: '[NetraOps] Welcome — Your Admin Account', html };
 }
@@ -2250,16 +2275,18 @@ export async function sendSecondaryAdminWelcomeEmail(args: {
     console.warn(`[email] sendSecondaryAdminWelcomeEmail: no company found for company_id=${args.company_id}`);
     return;
   }
-  const { subject, html } = renderSecondaryAdminWelcome({
+  // The company's letterhead (D1a, B5). null sends the NetraOps email.
+  const mail = await mailLetterheadForCompany(args.company_id);
+  const build = accountMessage(args.admin_email, (m) => renderSecondaryAdminWelcome({
     admin_name:          args.admin_name,
     admin_email:         args.admin_email,
     company_name:        row.company_name ?? 'NetraOps',
     creator_name:        row.creator_name ?? 'A NetraOps admin',
     primary_admin_email: row.primary_admin_email,
     temp_password:       args.temp_password,
-  });
+  }, m), mail);
   try {
-    await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    await sendLetterheadOrPlain(build, mail, 'welcome_admin_secondary');
     console.log(`[email] sendSecondaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
     noteSendgridSuccess('welcome_admin_secondary');
   } catch (err: any) {
@@ -2276,17 +2303,17 @@ export function renderClientWelcome(data: {
   site_names: string;
   primary_admin_email: string | null;
   temp_password: string;
-}) {
+}, mail: MailLetterhead | null = null) {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
   const html = emailPage(`
     <div style="${ES.card}">
-      <div style="${ES.hdr}">
+      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Client Portal') : `<div style="${ES.hdr}">
         <div style="${ES.brand}">NetraOps</div>
         <h1 style="${ES.hdrH1}">WELCOME</h1>
         <p style="${ES.hdrP}">CLIENT PORTAL</p>
-      </div>
+      </div>`}
       <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.client_name)},</p>
@@ -2309,7 +2336,7 @@ export function renderClientWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 24px">You can view live guard activity, daily shift reports, incident reports, and geofence alerts.</p>
         ${contact}
       </div>
-      <div style="${ES.footer}">NetraOps — Do not reply to this email</div>
+      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
     </div>`);
   return { subject: '[NetraOps] Welcome — Your Client Portal Access', html };
 }
@@ -2346,16 +2373,18 @@ export async function sendClientWelcomeEmail(args: {
     return;
   }
   const siteNames = sitesResult.rows.map((r) => r.name).join(', ');
-  const { subject, html } = renderClientWelcome({
+  // The company's letterhead (D1a, B5). null sends the NetraOps email.
+  const mail = await mailLetterheadForCompany(args.company_id);
+  const build = accountMessage(args.client_email, (m) => renderClientWelcome({
     client_name:         args.client_name,
     client_email:        args.client_email,
     company_name:        co.company_name ?? 'NetraOps',
     site_names:          siteNames,
     primary_admin_email: co.primary_admin_email,
     temp_password:       args.temp_password,
-  });
+  }, m), mail);
   try {
-    await sgMail.send({ to: args.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    await sendLetterheadOrPlain(build, mail, 'welcome_client');
     console.log(`[email] sendClientWelcomeEmail: SUCCESS — delivered to ${args.client_email}`);
     noteSendgridSuccess('welcome_client');
   } catch (err: any) {
