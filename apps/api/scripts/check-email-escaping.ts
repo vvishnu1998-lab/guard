@@ -41,11 +41,11 @@ const POISON_LH = mailLetterhead({ companyName: POISON, contactEmail: POISON, ph
 type Case = { name: string; out: { subject: string; html: string }; markup: string[]; subjectHasPoison: boolean };
 
 const cases: Case[] = [
-  { name: 'incidentAlert', markup: ['<style>', '<div class="card"', '<span style="background:'], subjectHasPoison: true,
+  { name: 'incidentAlert', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px', '<span style="background:'], subjectHasPoison: true,
     out: E.renderIncidentAlert({ report_id:'r1', description:POISON, severity:'high', reported_at:D,
       site_name:POISON, site_tz:'America/Los_Angeles', client_name:POISON, company_name:POISON }) },
 
-  { name: 'dailyShiftReport', markup: ['<style>', 'class="rrow"', '<table'], subjectHasPoison: true,
+  { name: 'dailyShiftReport', markup: ['<table role="presentation" width="100%"', 'border-left:3px solid;padding:10px 14px', '<table'], subjectHasPoison: true,
     out: E.renderDailyShiftReport({ site_name:POISON, site_tz:'America/Los_Angeles', scheduled_start:D,
       guard_name:POISON, badge_number:POISON, client_name:POISON, company_name:POISON,
       clocked_in_at:D, clocked_out_at:D, total_hours:8,
@@ -53,11 +53,11 @@ const cases: Case[] = [
       reports:[{ report_type:'incident', severity:'high', description:POISON, reported_at:D }],
       tasks_completed:1, tasks_total:2, pings_submitted:3, pings_expected:4 }) },
 
-  { name: 'incidentAlert+letterhead', markup: ['<style>', '<table role="presentation"', '<h1 style=', '<div class="footer"'], subjectHasPoison: true,
+  { name: 'incidentAlert+letterhead', markup: ['<table role="presentation" width="100%"', '<table role="presentation"', '<h1 style=', '<div style="background:#f5f5f5;padding:14px 28px'], subjectHasPoison: true,
     out: E.renderIncidentAlert({ report_id:'r1', description:POISON, severity:'high', reported_at:D,
       site_name:POISON, site_tz:'America/Los_Angeles', client_name:POISON, company_name:POISON }, POISON_LH) },
 
-  { name: 'dailyShiftReport+letterhead', markup: ['<style>', '<table role="presentation"', 'class="rrow"', '<div class="footer"'], subjectHasPoison: true,
+  { name: 'dailyShiftReport+letterhead', markup: ['<table role="presentation" width="100%"', '<table role="presentation"', 'border-left:3px solid;padding:10px 14px', '<div style="background:#f5f5f5;padding:14px 28px'], subjectHasPoison: true,
     out: E.renderDailyShiftReport({ site_name:POISON, site_tz:'America/Los_Angeles', scheduled_start:D,
       guard_name:POISON, badge_number:POISON, client_name:POISON, company_name:POISON,
       clocked_in_at:D, clocked_out_at:D, total_hours:8,
@@ -65,44 +65,44 @@ const cases: Case[] = [
       reports:[{ report_type:'incident', severity:'high', description:POISON, reported_at:D }],
       tasks_completed:1, tasks_total:2, pings_submitted:3, pings_expected:4 }, POISON_LH) },
 
-  { name: 'missedShiftAlert', markup: ['<style>', '<tr>', '<a class="btn"'], subjectHasPoison: true,
+  { name: 'missedShiftAlert', markup: ['<table role="presentation" width="100%"', '<tr>', '<a style="display:inline-block;background:#F59E0B'], subjectHasPoison: true,
     out: E.renderMissedShiftAlert({ id:'s1', scheduled_start:D, scheduled_end:D, site_name:POISON,
       site_tz:'America/Los_Angeles', site_address:POISON, guard_name:POISON, badge_number:POISON,
       guard_phone:POISON, last_login_at:D, upcoming_shifts_count:2 }) },
 
-  { name: 'unstaffedPostWarning', markup: ['<style>', '<tr', '<a class="btn"'], subjectHasPoison: true,
+  { name: 'unstaffedPostWarning', markup: ['<table role="presentation" width="100%"', '<tr', '<a style="display:inline-block;background:#F59E0B'], subjectHasPoison: true,
     out: E.renderUnstaffedPostWarning([{ id:'s1', site_id:'si1', site_name:POISON, site_address:POISON,
       site_tz:'America/Los_Angeles', scheduled_start:D, scheduled_end:D }], D) },
 
-  { name: 'geofenceBreachAlert', markup: ['<style>', '<tr>', '<code style='], subjectHasPoison: true,
+  { name: 'geofenceBreachAlert', markup: ['<table role="presentation" width="100%"', '<tr>', '<code style='], subjectHasPoison: true,
     out: E.renderGeofenceBreachAlert({ id:'v1', shift_session_id:'ss1', occurred_at:D,
       violation_lat:37.1, violation_lng:-122.1, photo_url:'https://x/y.jpg', site_name:POISON,
       site_tz:'America/Los_Angeles', site_address:POISON, center_lat:37.0, center_lng:-122.0,
       guard_name:POISON, badge_number:POISON }, { kind:'ping' }) },
 
-  { name: 'swapAcceptedFyi', markup: ['<style>', '<tr>', '<div style="background:#F3F4F6'], subjectHasPoison: true,
+  { name: 'swapAcceptedFyi', markup: ['<table role="presentation" width="100%"', '<tr>', '<div style="background:#F3F4F6'], subjectHasPoison: true,
     out: E.renderSwapAcceptedFyi({ shift_id:'s1', scheduled_start:D, scheduled_end:D, site_name:POISON,
       site_tz:'America/Los_Angeles', from_guard_name:POISON, from_badge:POISON, to_guard_name:POISON,
       to_badge:POISON, is_same_site:true, reason:POISON }) },
 
-  { name: 'handoffFyi(nudge)', markup: ['<style>', '<span style="background:', '<tr>'], subjectHasPoison: true,
+  { name: 'handoffFyi(nudge)', markup: ['<table role="presentation" width="100%"', '<span style="background:', '<tr>'], subjectHasPoison: true,
     out: E.renderHandoffFyi({ history_id:'h1', shift_id:'s1', reason:POISON, accepted_at:D, handoff_at:D,
       duration_hours:4, from_guard_name:POISON, from_badge:POISON, to_guard_name:POISON, to_badge:POISON,
       site_name:POISON, site_tz:'America/Los_Angeles', company_id:'c1' }, 'nudge', 12) },
 
-  { name: 'guardWelcome', markup: ['<style>', '<div class="card"', '<ul style='], subjectHasPoison: false,
+  { name: 'guardWelcome', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px', '<ul style='], subjectHasPoison: false,
     out: E.renderGuardWelcome({ guard_name:POISON, guard_email:POISON, company_name:POISON,
       primary_admin_email:POISON, temp_password:'Abc23xyz' }) },
 
-  { name: 'primaryAdminWelcome', markup: ['<style>', '<div class="card"'], subjectHasPoison: false,
+  { name: 'primaryAdminWelcome', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px'], subjectHasPoison: false,
     out: E.renderPrimaryAdminWelcome({ admin_name:POISON, admin_email:POISON, company_name:POISON,
       temp_password:'Abc23xyz' } as any) },
 
-  { name: 'secondaryAdminWelcome', markup: ['<style>', '<div class="card"'], subjectHasPoison: false,
+  { name: 'secondaryAdminWelcome', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px'], subjectHasPoison: false,
     out: E.renderSecondaryAdminWelcome({ admin_name:POISON, admin_email:POISON, company_name:POISON,
       creator_name:POISON, primary_admin_email:POISON, temp_password:'Abc23xyz' } as any) },
 
-  { name: 'clientWelcome', markup: ['<style>', '<div class="card"'], subjectHasPoison: false,
+  { name: 'clientWelcome', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px'], subjectHasPoison: false,
     out: E.renderClientWelcome({ client_name:POISON, client_email:POISON, company_name:POISON,
       site_names:POISON, primary_admin_email:POISON, temp_password:'Abc23xyz' } as any) },
 ];
@@ -134,12 +134,12 @@ for (const c of cases) {
 
   // 4 — THE OVER-ESCAPING CHECK: markup must still be markup.
   //
-  // The stylesheet is compared VERBATIM rather than by looking for `<style>`.
-  // BASE_STYLE currently contains no & < >, so escapeHtml(BASE_STYLE) is a
-  // silent no-op and a `<style>` presence check cannot see it. One CSS child
-  // selector (`.card > p`) would change that, and the mistake would ship.
-  if (!html.includes(E.BASE_STYLE))
-    fail(c.name, 'STYLESHEET ALTERED: the <style> block is not BASE_STYLE verbatim — it was escaped');
+  // N182: no template carries a <style> block or a class any more. Gmail
+  // drops the block, so every style is inline (services/emailStyles.ts). The
+  // page table and the card's inline style below are the markers that each
+  // template still opens with real tags.
+  if (/<style[\s>]/i.test(html) || /\sclass="/.test(html))
+    fail(c.name, 'N182: a <style> block or a class attribute is back; Gmail ignores both');
 
   for (const tag of c.markup)
     if (!html.includes(tag)) fail(c.name, `MARKUP DESTROYED: ${JSON.stringify(tag)} is no longer a tag — a markup hole was escaped`);

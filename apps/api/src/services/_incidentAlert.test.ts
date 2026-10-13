@@ -34,7 +34,9 @@
  *     c70153a BEFORE the fix was written, so this genuinely pins the old
  *     output rather than blessing the new one. Since B4 (2026-10-12) the
  *     baseline's three date strings are rewritten to the month-name style
- *     ("Sep 22, 2026") before the compare; nothing else may differ.
+ *     ("Sep 22, 2026") before the compare. Since B5 (N182) the markup is
+ *     inline-styled, so the compare is on the visible text (tags stripped);
+ *     scripts/test-letterhead-b5.ts holds the look pixel-identical.
  *
  * Same convention as the sibling tests: no test framework is installed in
  * apps/api, so this is a standalone ts-node script using node:assert.
@@ -165,7 +167,7 @@ check('subject drops the severity segment', () => {
   assert.strictEqual(nullOut.subject, 'Incident Reported — Test Site — Sep 22, 2026');
 });
 
-console.log('renderIncidentAlert — severity "high" (byte-compare vs main@c70153a, dates rewritten)');
+console.log('renderIncidentAlert — severity "high" (text-compare vs main@c70153a, dates rewritten)');
 
 // B4 (2026-10-12) moved this email's dates to the PDFs' month-name style. The
 // baseline is NOT re-captured: it still pins c70153a's bytes, and these three
@@ -181,7 +183,14 @@ check('baseline snapshot exists', () => {
   assert.ok(fs.existsSync(SNAPSHOT), `missing ${SNAPSHOT}`);
 });
 
-check('html and subject are byte-identical to the pre-fix renderer, but for the dates', () => {
+// The visible text: a <style> element's CSS is not text, then tags out and
+// whitespace collapsed. Entities stay as they are, so escaping is still
+// compared exactly.
+const visibleText = (html: string): string => html
+  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+  .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+check('the subject and the visible text are the pre-fix renderer\'s, but for the dates', () => {
   const baseline = JSON.parse(fs.readFileSync(SNAPSHOT, 'utf8')) as {
     subject: string; html: string;
   };
@@ -194,11 +203,12 @@ check('html and subject are byte-identical to the pre-fix renderer, but for the 
   const actual = renderIncidentAlert({ ...BASE, severity: 'high' });
 
   assert.strictEqual(actual.subject, expected.subject, 'subject drifted');
-  assert.strictEqual(
-    Buffer.compare(Buffer.from(actual.html, 'utf8'), Buffer.from(expected.html, 'utf8')),
-    0,
-    'html drifted',
-  );
+  assert.strictEqual(visibleText(actual.html), visibleText(expected.html), 'text drifted');
+});
+
+check('N182: no <style> block and no class attribute', () => {
+  const actual = renderIncidentAlert({ ...BASE, severity: 'high' });
+  assert.ok(!/<style[\s>]/i.test(actual.html) && !/\sclass="/.test(actual.html), 'a <style> block or a class is back');
 });
 
 console.log('');

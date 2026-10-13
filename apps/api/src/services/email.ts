@@ -22,7 +22,11 @@ import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
 import { monthDayYear } from './pdf/dates';
-import { mailLetterheadForSite, mailHeaderHtml, mailFooterHtml, withLetterhead, type MailLetterhead } from './letterhead/email';
+import {
+  mailLetterheadForSite, mailLetterheadForCompany, mailHeaderHtml, mailCompanyHtml, mailFooterHtml, withLetterhead,
+  POWERED_BY_HTML, type MailLetterhead,
+} from './letterhead/email';
+import { ES, emailPage } from './emailStyles';
 
 // Central SendGrid failure accounting. Called from every sgMail.send catch
 // site so delivery failures are sliceable by workflow when triaging.
@@ -160,17 +164,22 @@ async function getActiveAdminEmails(companyId: string): Promise<string[]> {
 }
 
 // Per-recipient send via Promise.allSettled so one bad address doesn't
-// stop delivery to the rest. Each failure is Sentry-tagged with the
-// recipient in `extra` so the issues list shows per-recipient bounces.
+// stop delivery to the rest. Each failure is logged with its recipient and
+// counted by reportSendgridFailure, which reports per flow, not per
+// recipient (its `extra` argument is unused).
+// `build` gives the message with the company's letterhead or without it
+// (adminMessage), and each recipient gets sendLetterheadOrPlain's one plain
+// resend if SendGrid refuses the letterhead message (B5).
 async function sendToAdmins(
   adminEmails: string[],
-  msg: Omit<sgMail.MailDataRequired, 'to'>,
+  build: (mail: MailLetterhead | null) => Omit<sgMail.MailDataRequired, 'to'>,
+  mail: MailLetterhead | null,
   flow: string,
   extra: Record<string, unknown>,
 ): Promise<{ succeeded: number; failed: number }> {
   const results = await Promise.allSettled(
     adminEmails.map((email) =>
-      sgMail.send({ ...msg, to: email } as sgMail.MailDataRequired),
+      sendLetterheadOrPlain((m) => ({ ...build(m), to: email } as sgMail.MailDataRequired), mail, flow),
     ),
   );
   let succeeded = 0, failed = 0;
@@ -185,6 +194,24 @@ async function sendToAdmins(
     reportSendgridFailure(flow, err, { ...extra, recipient: adminEmails[i] });
   });
   return { succeeded, failed };
+}
+
+/**
+ * An admin alert's message for sendToAdmins, with the letterhead `m` or
+ * without it. Both are rendered here, before any send, so a render that
+ * throws reaches the caller as it always did. With a letterhead the logo
+ * travels inline and the message still has no Reply-To (D2a): an alert lands
+ * in the company's own admins' inboxes, and a reply is not a workflow.
+ */
+function adminMessage(
+  render: (mail: MailLetterhead | null) => { subject: string; html: string },
+  mail: MailLetterhead | null,
+): (m: MailLetterhead | null) => Omit<sgMail.MailDataRequired, 'to'> {
+  const plain = render(null);
+  const lettered = mail ? render(mail) : null;
+  return (m) => (m && lettered
+    ? withLetterhead({ from: FROM, subject: lettered.subject, html: lettered.html }, m, { replyTo: false })
+    : { from: FROM, subject: plain.subject, html: plain.html });
 }
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
@@ -218,25 +245,8 @@ function fmtDT(dt: Date | string): string {
   }) + ' UTC';
 }
 
-// Pacific-time formatter for operator alerts (currently used only by the
-// missed-shift email). Hardcoded to America/Los_Angeles — works for Starnet
-// because William Pen Hotel is in SF. Multi-tenant support requires a
-// per-site timezone column (logged as a separate follow-up). Output looks
-// like "17 May 2026, 10:01 PM PDT" / "PST" with the abbreviation chosen by
-// the runtime per DST.
+// The zone every email falls back to when a site has none.
 const PACIFIC = 'America/Los_Angeles';
-
-function fmtDTSite(dt: Date | string, tz: string = PACIFIC): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    day: 'numeric', month: 'short', year: 'numeric',
-    hour: 'numeric', minute: '2-digit', hour12: true,
-    timeZone: tz,
-    timeZoneName: 'short',
-  }).formatToParts(new Date(dt));
-  const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  return `${pick('day')} ${pick('month')} ${pick('year')}, ` +
-         `${pick('hour')}:${pick('minute')} ${pick('dayPeriod')} ${pick('timeZoneName')}`;
-}
 
 // Coarse "X units ago" for human readability in operator alerts.
 // Null → "Never" (used for guards who have never logged in).
@@ -297,10 +307,13 @@ function escapeAttr(s: unknown): string {
 // literal <tr>/<span>/<div> text in the email. Each is an HTML fragment
 // assembled from already-escaped parts; the escaping happened inside them.
 //
-//   BASE_STYLE (x12 sites)   the stylesheet body, inside <style>…</style>
+//   ES.* (emailStyles.ts)    static style strings inside style attributes (N182)
+//   header, footer, mail*Html(mail), POWERED_BY_HTML
+//                            the company letterhead (B4, B5); letterhead/email.ts
+//                            escapes the company's values itself
 //   typeBadgeHtml(...)       returns a <span> badge
 //   sevSpan        :256      <span> or ''
-//   reportRows     :710      .map() -> <div class="rrow"> blocks
+//   reportRows     :710      .map() -> report row <div> blocks
 //   incidentNote   :719      <p> or ''
 //   phoneRow       :910      <tr>…<a href="tel:…"> or ''
 //   blocks        :1024      .map() -> per-site <tr> groups
@@ -336,28 +349,10 @@ function typeBadgeHtml(type: string, severity?: string | null): string {
   return `<span style="background:${bg};color:#fff;padding:2px 7px;border-radius:3px;font-size:11px;font-weight:bold">${type.toUpperCase()}</span>${sevSpan}`;
 }
 
-// EXPORTED so the N79 check can assert the <style> block is emitted VERBATIM.
-// Today BASE_STYLE contains no & < >, so escaping it would be a silent
-// no-op — the check could not see the mistake. Add one child selector
-// (`.card > p`) and escaping it breaks every email, so the check compares
-// the emitted stylesheet against this constant rather than trusting that.
-export const BASE_STYLE = `
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;margin:0;padding:20px}
-  .card{background:#fff;border-radius:8px;max-width:640px;margin:0 auto;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-  .hdr{background:#0B1526;color:#F59E0B;padding:24px 28px}
-  .hdr h1{margin:0;font-size:22px;letter-spacing:3px}
-  .brand{font-size:11px;color:#F59E0B;letter-spacing:4px;font-weight:700;margin-bottom:6px}
-  .hdr p{margin:4px 0 0;color:#888;font-size:12px;letter-spacing:2px}
-  .body{padding:24px 28px}
-  .meta{color:#666;font-size:13px;margin-bottom:20px;border-bottom:1px solid #eee;padding-bottom:14px}
-  .kpi{display:inline-block;background:#f5f5f5;border-radius:6px;padding:10px 20px;margin:4px 8px 4px 0;text-align:center}
-  .kpi .n{font-size:26px;font-weight:700;color:#0B1526}
-  .kpi .l{font-size:10px;color:#999;letter-spacing:1px}
-  .rrow{border-left:3px solid;padding:10px 14px;margin:8px 0;background:#fafafa;border-radius:0 6px 6px 0}
-  .rrow p{margin:3px 0;font-size:13px}
-  .footer{background:#f5f5f5;padding:14px 28px;font-size:11px;color:#aaa;text-align:center}
-  a.btn{display:inline-block;background:#F59E0B;color:#0B1526;font-weight:700;padding:10px 20px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:13px;margin-top:16px}
-`;
+// N182: no email carries a <style> block any more. Gmail drops one, so its
+// classes styled nothing there. Each element now carries its old class rule
+// inline (services/emailStyles.ts, ES), and emailPage() stands in for the old
+// `body` rule.
 
 // ── The company letterhead on client emails (Phase B, B4) ─────────────────────
 //
@@ -549,39 +544,39 @@ export function renderIncidentAlert(data: {
   // none, these are the fragments of before, byte for byte.
   const header = mail
     ? mailHeaderHtml(mail, 'Incident Reported', `${escapeHtml(data.site_name)} · ${dateLabel}`)
-    : `<div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
+    : `<div style="${ES.hdr}">
+      <div style="${ES.brand}">NETRAOPS</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
     </div>`;
   const footer = mail
     ? mailFooterHtml(mail, tz)
-    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    : `<div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
       Reply to this email to contact ${escapeHtml(data.company_name)}.
     </div>`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
+  const html = emailPage(`
+  <div style="${ES.card}">
     ${header}
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
-        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTClient(data.reported_at, tz)}</span>
+        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
       <p style="margin:0;color:#333;font-size:14px;line-height:1.6;white-space:pre-wrap">${escapeHtml(data.description)}</p>
 
       <div style="text-align:center;margin-top:28px">
-        <a class="btn" href="${incidentUrl}">View Incident in Portal</a>
+        <a style="${ES.btn}" href="${incidentUrl}">View Incident in Portal</a>
       </div>
     </div>
     ${footer}
-  </div>`;
+  </div>`);
 
   const subject = data.severity
     ? `Incident Reported — ${data.site_name} — ${data.severity.toUpperCase()} — ${dateLabel}`
@@ -591,26 +586,13 @@ export function renderIncidentAlert(data: {
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────
 
-// Site-scoped calendar date ("14 May 2026") for the operator templates.
-// en-GB to match fmtDTSite's "14 May 2026, 10:01 PM PDT" — keeps subject
-// and body day-month-year order consistent. Falls back to Pacific when the
-// caller hasn't yet been threaded through with a site tz. The two client
-// emails use monthDayYear and fmtDTClient instead (below).
-function fmtDateSite(dt: Date | string, tz: string = PACIFIC): string {
-  return new Date(dt).toLocaleDateString('en-GB', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    timeZone: tz,
-  });
-}
-
-// The two client emails (incident alert, daily shift report) print dates in
-// the PDFs' month-name style, subjects included: "Oct 12, 2026"
-// (services/pdf/dates.ts), not en-GB's "12 Oct 2026", which a US client can
-// misread and which wrote September "Sept" in the subject and "Sep" in the
-// body. Times keep the emails' own 12-hour clock and zone:
-// "Oct 12, 2026, 2:14 AM PDT". The other templates keep fmtDateSite and
-// fmtDTSite until B5.
-function fmtDTClient(dt: Date | string, tz: string): string {
+// Every email prints dates in the PDFs' month-name style, subjects included:
+// "Oct 12, 2026" (services/pdf/dates.ts monthDayYear), not en-GB's
+// "12 Oct 2026", which a US reader can misread and which wrote September
+// "Sept" in a subject and "Sep" in a body (B4 for the client emails, B5 for
+// the rest). Times keep the emails' own 12-hour clock and zone:
+// "Oct 12, 2026, 2:14 AM PDT".
+function fmtDTSite(dt: Date | string, tz: string): string {
   return `${monthDayYear(dt, tz)}, ${fmtTimeSite(dt, tz)}`;
 }
 
@@ -962,7 +944,7 @@ export async function sendDailyShiftReport(shiftId: string): Promise<DailyReport
  * SendGrid path or writing daily_report_email_sent.
  *
  * All event timestamps render in the site's zone (Pacific when it has none)
- * via fmtDTClient, "Oct 12, 2026, 2:14 AM PDT" (PDT in summer, PST in
+ * via fmtDTSite, "Oct 12, 2026, 2:14 AM PDT" (PDT in summer, PST in
  * winter — abbreviation chosen by the runtime). With a letterhead (`mail`,
  * B4) the company's header and footer stand where NetraOps' do.
  */
@@ -998,8 +980,8 @@ export function renderDailyShiftReport(data: {
   const pingsLabel = (data.pings_expected ?? 0) > 0
     ? `${data.pings_submitted ?? 0}/${data.pings_expected}`
     : '—';
-  const clockIn    = data.clocked_in_at  ? fmtDTClient(data.clocked_in_at,  tz) : '—';
-  const clockOut   = data.clocked_out_at ? fmtDTClient(data.clocked_out_at, tz) : 'In progress';
+  const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
+  const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
 
   const borderColors: Record<string, string> = {
@@ -1011,9 +993,9 @@ export function renderDailyShiftReport(data: {
     const desc = escapeHtml(
       r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description,
     );
-    return `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
-      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTClient(r.reported_at, tz)}</span></p>
-      <p style="margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
+    return `<div style="${ES.rrow};border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
+      <p style="${ES.rrowP};margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTSite(r.reported_at, tz)}</span></p>
+      <p style="${ES.rrowP};margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
     </div>`;
   }).join('');
 
@@ -1028,31 +1010,31 @@ export function renderDailyShiftReport(data: {
   // letterhead, the fragments of before, byte for byte, without one.
   const header = mail
     ? mailHeaderHtml(mail, 'Shift Report', `${escapeHtml(data.site_name)} · ${dateLabel}`)
-    : `<div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
+    : `<div style="${ES.hdr}">
+      <div style="${ES.brand}">NETRAOPS</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
     </div>`;
   const footer = mail
     ? mailFooterHtml(mail, tz)
-    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    : `<div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
       Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
       Reply to this email to contact ${escapeHtml(data.company_name)}.
     </div>`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
+  const html = emailPage(`
+  <div style="${ES.card}">
     ${header}
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">Here is the shift summary for your site.</p>
 
       <div style="text-align:center;margin-bottom:22px">
-        <div class="kpi"><div class="n">${totalHours}</div><div class="l">HOURS</div></div>
-        <div class="kpi"><div class="n">${data.reports.length}</div><div class="l">REPORTS</div></div>
-        <div class="kpi"><div class="n">${data.tasks_completed}/${data.tasks_total}</div><div class="l">TASKS</div></div>
-        <div class="kpi"><div class="n">${pingsLabel}</div><div class="l">PINGS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${totalHours}</div><div style="${ES.kpiL}">HOURS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${data.reports.length}</div><div style="${ES.kpiL}">REPORTS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${data.tasks_completed}/${data.tasks_total}</div><div style="${ES.kpiL}">TASKS</div></div>
+        <div style="${ES.kpi}"><div style="${ES.kpiN}">${pingsLabel}</div><div style="${ES.kpiL}">PINGS</div></div>
       </div>
 
       ${data.hours ? `
@@ -1084,11 +1066,11 @@ export function renderDailyShiftReport(data: {
         : `<p style="color:#888;font-size:14px;margin-top:22px;font-style:italic">No reports filed during this shift.</p>`}
 
       <div style="text-align:center;margin-top:28px">
-        <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
+        <a style="${ES.btn}" href="${PORTAL}">View Full Report in Portal</a>
       </div>
     </div>
     ${footer}
-  </div>`;
+  </div>`);
 
   const subject = `Shift Report — ${data.site_name} — ${dateLabel}`;
   return { subject, html };
@@ -1143,11 +1125,14 @@ export async function sendMissedShiftAlert(shiftId: string) {
     return;
   }
 
-  const { subject, html } = renderMissedShiftAlert(row);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderMissedShiftAlert(row, m), mail);
 
   const { succeeded, failed } = await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'missed_shift_alert',
     { shift_id: shiftId },
   );
@@ -1185,7 +1170,7 @@ export function renderMissedShiftAlert(row: {
   guard_phone:     string | null;
   last_login_at:   Date | string | null;
   upcoming_shifts_count: number | string;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
 
   // Minutes late computed at render time (cron fires at T+10 min minimum, but
@@ -1204,11 +1189,11 @@ export function renderMissedShiftAlert(row: {
 
   // Same-day collapse: if scheduled_start and scheduled_end fall on the
   // same site-local calendar day, drop the redundant end-date prefix.
-  // "14 May 2026, 6:29 AM PDT → 10:29 AM PDT" vs cross-midnight
-  // "14 May 2026, 11:25 PM PDT → 15 May 2026, 8:00 AM PDT".
+  // "May 14, 2026, 6:29 AM PDT → 10:29 AM PDT" vs cross-midnight
+  // "May 14, 2026, 11:25 PM PDT → May 15, 2026, 8:00 AM PDT".
   // Comparison is on the site-local date string so DST and UTC offset don't
   // cause edge-case mis-grouping.
-  const sameDay = fmtDateSite(row.scheduled_start, tz) === fmtDateSite(row.scheduled_end, tz);
+  const sameDay = monthDayYear(row.scheduled_start, tz) === monthDayYear(row.scheduled_end, tz);
   const scheduledLabel = sameDay
     ? `${fmtDTSite(row.scheduled_start, tz)} → ${fmtTimeSite(row.scheduled_end, tz)}`
     : `${fmtDTSite(row.scheduled_start, tz)} → ${fmtDTSite(row.scheduled_end, tz)}`;
@@ -1222,14 +1207,14 @@ export function renderMissedShiftAlert(row: {
     ? `<tr><td style="padding:6px 0;color:#888;width:120px">Phone</td><td style="padding:6px 0"><a href="tel:${escapeAttr(row.guard_phone)}" style="color:#0B1526;text-decoration:underline">${escapeHtml(row.guard_phone)}</a></td></tr>`
     : '';
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:#7F1D1D">
-      <div class="brand" style="color:#FCA5A5">NETRAOPS · ALERT</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Missed Shift</h1>
-      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${escapeHtml(guardTitle)} is ${minutesLate} min late</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr};background:#7F1D1D">
+      <div style="${ES.brand};color:#FCA5A5">${mail ? 'ALERT' : 'NETRAOPS · ALERT'}</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Missed Shift</h1>
+      <p style="${ES.hdrP};color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${escapeHtml(guardTitle)} is ${minutesLate} min late</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#B91C1C;font-weight:600;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
         ⚠️ ${escapeHtml(guardTitle)} did not clock in. ${minutesLate} minutes past the scheduled start.
       </p>
@@ -1249,14 +1234,14 @@ export function renderMissedShiftAlert(row: {
       </p>
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${dashboardUrl}">Open in Admin Dashboard</a>
+        <a style="${ES.btn}" href="${dashboardUrl}">Open in Admin Dashboard</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
-  </div>`;
+  </div>`);
 
   const subject = `⚠️ MISSED SHIFT — ${row.site_name} — ${guardTitle} is ${minutesLate} min late`;
   return { subject, html };
@@ -1307,6 +1292,7 @@ export interface UnstaffedPostRow {
 export function renderUnstaffedPostWarning(
   rows: UnstaffedPostRow[],
   now: Date = new Date(),
+  mail: MailLetterhead | null = null,
 ): { subject: string; html: string } {
   const n  = rows.length;
   const s_ = n === 1 ? '' : 's';
@@ -1340,7 +1326,7 @@ export function renderUnstaffedPostWarning(
     // redundant end-date unless the shift crosses midnight in site-local
     // time. Compared on the site-local date string so DST and UTC offset
     // cannot mis-group it.
-    const sameDay = fmtDateSite(r.scheduled_start, tz) === fmtDateSite(r.scheduled_end, tz);
+    const sameDay = monthDayYear(r.scheduled_start, tz) === monthDayYear(r.scheduled_end, tz);
     const when = sameDay
       ? `${fmtDTSite(r.scheduled_start, tz)} → ${fmtTimeSite(r.scheduled_end, tz)}`
       : `${fmtDTSite(r.scheduled_start, tz)} → ${fmtDTSite(r.scheduled_end, tz)}`;
@@ -1380,14 +1366,14 @@ export function renderUnstaffedPostWarning(
     ? `${escapeHtml(rows[0].site_name)} starts within the hour with no guard assigned`
     : `${postCount} posts start within the hour with no guard assigned`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:#78350F">
-      <div class="brand" style="color:#FCD34D">NETRAOPS · WARNING</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">No Guard Assigned</h1>
-      <p style="color:#FCD34D;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headline}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr};background:#78350F">
+      <div style="${ES.brand};color:#FCD34D">${mail ? 'WARNING' : 'NETRAOPS · WARNING'}</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">No Guard Assigned</h1>
+      <p style="${ES.hdrP};color:#FCD34D;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headline}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#92400E;font-weight:600;background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
         ⚠️ ${n} shift${s_} start${n === 1 ? 's' : ''} within the hour with nobody assigned. There is still time to cover ${n === 1 ? 'it' : 'them'}.
       </p>
@@ -1399,15 +1385,15 @@ export function renderUnstaffedPostWarning(
       </p>
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${ctaUrl}">${ctaLabel}</a>
+        <a style="${ES.btn}" href="${ctaUrl}">${ctaLabel}</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in each site's local time zone.<br/>
       Each shift is warned about once, about an hour before it starts.<br/>
-      NetraOps · Automated warning
+      ${mail ? `Automated warning${POWERED_BY_HTML}` : 'NetraOps · Automated warning'}
     </div>
-  </div>`;
+  </div>`);
 
   const subject = postCount === 1
     ? `⚠️ NO GUARD ASSIGNED — ${rows[0].site_name} starts in 1 hour`
@@ -1458,11 +1444,15 @@ export async function sendUnstaffedPostWarning(
     return { succeeded: 0, failed: 0, admins: 0 };
   }
 
-  const { subject, html } = renderUnstaffedPostWarning(rows);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(companyId);
+  const now = new Date(); // one clock for both renders
+  const build = adminMessage((m) => renderUnstaffedPostWarning(rows, now, m), mail);
 
   const { succeeded, failed } = await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'unstaffed_post_warning',
     { company_id: companyId, shift_count: rows.length },
   );
@@ -1495,14 +1485,14 @@ export async function sendTempPasswordEmail(
     from: FROM,
     replyTo: REPLY_TO,
     subject: 'NetraOps password reset',
-    html: `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>PASSWORD RESET</h1>
-        <p>${label.toUpperCase()}</p>
+    html: emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">PASSWORD RESET</h1>
+        <p style="${ES.hdrP}">${label.toUpperCase()}</p>
       </div>
-      <div class="body">
+      <div style="${ES.body}">
         <p style="font-size:15px;color:#333;margin-bottom:20px">
           We received a request to reset your NetraOps <strong>${label}</strong> password.
         </p>
@@ -1519,8 +1509,8 @@ export async function sendTempPasswordEmail(
           If you didn't request this, contact your administrator immediately.
         </p>
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`,
+      <div style="${ES.footer}">NetraOps</div>
+    </div>`),
     });
     noteSendgridSuccess('temp_password');
   } catch (err: any) {
@@ -1589,11 +1579,14 @@ export async function sendGeofenceBreachAlert(
     return;
   }
 
-  const { subject, html } = renderGeofenceBreachAlert(row, context);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderGeofenceBreachAlert(row, context, m), mail);
 
   const { succeeded, failed } = await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'geofence_breach_alert',
     { violation_id: violationId, kind: context.kind },
   );
@@ -1624,7 +1617,7 @@ export function renderGeofenceBreachAlert(row: {
   center_lng:       number | null;
   guard_name:       string;
   badge_number:     string;
-}, context: BreachAlertContext = { kind: 'ping' }): { subject: string; html: string } {
+}, context: BreachAlertContext = { kind: 'ping' }, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
   const distanceM =
     row.center_lat != null && row.center_lng != null
@@ -1687,14 +1680,14 @@ export function renderGeofenceBreachAlert(row: {
     ? `<p style="margin:16px 0 0 0;font-size:13px;color:#555"><strong style="color:#333">Photo at breach:</strong> <a href="${breachDeepLink}" style="color:#0B1526;text-decoration:underline">View in dashboard →</a></p>`
     : '';
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr" style="background:#7F1D1D">
-      <div class="brand" style="color:#FCA5A5">NETRAOPS · ALERT</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headerTitle}</h1>
-      <p style="color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headerSub}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr};background:#7F1D1D">
+      <div style="${ES.brand};color:#FCA5A5">${mail ? 'ALERT' : 'NETRAOPS · ALERT'}</div>
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headerTitle}</h1>
+      <p style="${ES.hdrP};color:#FCA5A5;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${headerSub}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#B91C1C;font-weight:600;background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:12px 16px;margin:0 0 22px 0">
         ${headlineText}
       </p>
@@ -1716,14 +1709,14 @@ export function renderGeofenceBreachAlert(row: {
       </p>
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${deepLink}">Open Live Map</a>
+        <a style="${ES.btn}" href="${deepLink}">Open Live Map</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
-  </div>`;
+  </div>`);
 
   return { subject, html };
 }
@@ -1786,10 +1779,13 @@ export async function sendSwapAcceptedFyi(historyId: string): Promise<void> {
     return;
   }
 
-  const { subject, html } = renderSwapAcceptedFyi(row);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderSwapAcceptedFyi(row, m), mail);
   await sendToAdmins(
     admins,
-    { from: FROM, subject, html },
+    build,
+    mail,
     'swap_accepted_fyi',
     { history_id: historyId },
   );
@@ -1807,11 +1803,11 @@ export function renderSwapAcceptedFyi(row: {
   to_badge:         string;
   is_same_site:     boolean;
   reason:           string | null;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
   const fromName = titleCase(row.from_guard_name);
   const toName   = titleCase(row.to_guard_name);
-  const dayLabel = fmtDateSite(row.scheduled_start, tz);
+  const dayLabel = monthDayYear(row.scheduled_start, tz);
   const timeRange = `${fmtTimeSite(row.scheduled_start, tz)} → ${fmtTimeSite(row.scheduled_end, tz)}`;
   const sameSiteBadge = row.is_same_site
     ? '<span style="background:#DCFCE7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">SAME SITE</span>'
@@ -1822,14 +1818,14 @@ export function renderSwapAcceptedFyi(row: {
 
   const dashboardUrl = `${WEB_BASE}/admin/shifts/${row.shift_id}`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Coverage Swap</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${dayLabel}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr}">
+      ${mail ? '' : `<div style="${ES.brand}">NETRAOPS</div>`}
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Coverage Swap</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)} · ${dayLabel}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
       <p style="color:#555;font-size:14px;margin:0 0 18px 0">
         A guard-initiated shift swap was accepted. No action required.
@@ -1846,14 +1842,14 @@ export function renderSwapAcceptedFyi(row: {
       ${reasonBlock}
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
+        <a style="${ES.btn}" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
-  </div>`;
+  </div>`);
 
   const subject = `Coverage swap: ${fromName} → ${toName}`;
   return { subject, html };
@@ -1928,6 +1924,7 @@ export function renderHandoffFyi(
   row: HandoffFyiRow,
   kind: 'accepted' | 'completed' | 'nudge',
   nudgeMinutes = 0,
+  mail: MailLetterhead | null = null,
 ): { subject: string; html: string } {
   const tz = row.site_tz ?? PACIFIC;
   const fromName = titleCase(row.from_guard_name);
@@ -1956,14 +1953,14 @@ export function renderHandoffFyi(
     extraRow    = row.accepted_at ? `<tr><td style="padding:6px 0;color:#888">Accepted at</td><td style="padding:6px 0">${fmtTimeSite(row.accepted_at, tz)} ${tz}</td></tr>` : '';
   }
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
-      <div class="brand">NETRAOPS</div>
-      <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headline}</h1>
-      <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)}</p>
+  const html = emailPage(`
+  <div style="${ES.card}">
+    ${mail ? mailCompanyHtml(mail) : ''}<div style="${ES.hdr}">
+      ${mail ? '' : `<div style="${ES.brand}">NETRAOPS</div>`}
+      <h1 style="${ES.hdrH1};letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">${headline}</h1>
+      <p style="${ES.hdrP};color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(row.site_name)}</p>
     </div>
-    <div class="body">
+    <div style="${ES.body}">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">FYI —</p>
       <p style="color:#555;font-size:14px;margin:0 0 18px 0">${primaryLine}</p>
 
@@ -1978,14 +1975,14 @@ export function renderHandoffFyi(
       ${reasonBlock}
 
       <div style="text-align:center;margin-top:24px">
-        <a class="btn" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
+        <a style="${ES.btn}" href="${dashboardUrl}">Open Shift in Admin Dashboard</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+    <div style="${ES.footer};text-align:left;padding:18px 28px;line-height:1.7;color:#888">
       All times shown in the site's local time zone (${tz}).<br/>
-      NetraOps · Automated alert
+      ${mail ? `Automated alert${POWERED_BY_HTML}` : 'NetraOps · Automated alert'}
     </div>
-  </div>`;
+  </div>`);
 
   const subject = kind === 'accepted'
     ? `Handoff accepted: ${fromName} → ${toName}`
@@ -2013,8 +2010,10 @@ async function fanoutHandoffFyi(
     });
     return;
   }
-  const { subject, html } = renderHandoffFyi(row, kind, nudgeMinutes);
-  await sendToAdmins(admins, { from: FROM, subject, html }, flow, extra);
+  // The company's letterhead (B5): the logo and the company block; no Reply-To (D2a).
+  const mail = await mailLetterheadForCompany(row.company_id);
+  const build = adminMessage((m) => renderHandoffFyi(row, kind, nudgeMinutes, m), mail);
+  await sendToAdmins(admins, build, mail, flow, extra);
 }
 
 export async function sendHandoffAcceptedFyi(historyId: string): Promise<void> {
@@ -2029,10 +2028,33 @@ export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number
   await fanoutHandoffFyi(historyId, 'nudge', 'handoff_nudge', { history_id: historyId, minutes_late: minutesLate }, minutesLate);
 }
 
+/**
+ * An account email's message with the company's letterhead `m` or without it
+ * (sendLetterheadOrPlain's plain resend). Both versions are rendered here,
+ * before any send, so a render that throws reaches the caller as it always
+ * did. withLetterhead swaps REPLY_TO for the company's contact email when the
+ * letterhead has a usable one.
+ */
+function accountMessage(
+  to: string,
+  render: (mail: MailLetterhead | null) => { subject: string; html: string },
+  mail: MailLetterhead | null,
+): (m: MailLetterhead | null) => sgMail.MailDataRequired {
+  const plain = render(null);
+  const lettered = mail ? render(mail) : null;
+  return (m) => (m && lettered
+    ? withLetterhead({ to, from: FROM, replyTo: REPLY_TO, subject: lettered.subject, html: lettered.html }, m)
+    : { to, from: FROM, replyTo: REPLY_TO, subject: plain.subject, html: plain.html });
+}
+
 // ── Welcome emails ───────────────────────────────────────────────────────────
 //
 // Fired from the four account-creation route handlers on new-account INSERT.
-// Customer-facing: Reply-To is REPLY_TO (support inbox) on all four.
+// Customer-facing: Reply-To is REPLY_TO (support inbox) on all four. The
+// company invites guards, clients and its other admins, so those three carry
+// its letterhead (D1a, B5) and send replies to its contact email when it has
+// a usable one (D2a, the B4 rule); NetraOps onboards the primary admin, so
+// that one stays NetraOps'.
 // Send fns catch internally, Sentry-tag, and re-throw so the caller's fire-
 // and-forget .catch() can capture at the route site (matches the pattern
 // used by sendTempPasswordEmail and sendIncidentAlert).
@@ -2043,18 +2065,18 @@ export function renderGuardWelcome(data: {
   company_name: string;
   primary_admin_email: string | null;
   temp_password: string;
-}) {
+}, mail: MailLetterhead | null = null) {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>GUARD ACCOUNT</p>
-      </div>
-      <div class="body">
+  const html = emailPage(`
+    <div style="${ES.card}">
+      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Guard Account') : `<div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">GUARD ACCOUNT</p>
+      </div>`}
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.guard_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
@@ -2073,8 +2095,8 @@ export function renderGuardWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>
         ${contact}
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Guard Account', html };
 }
 
@@ -2102,15 +2124,17 @@ export async function sendGuardWelcomeEmail(args: {
     console.warn(`[email] sendGuardWelcomeEmail: no company found for company_id=${args.company_id}`);
     return;
   }
-  const { subject, html } = renderGuardWelcome({
+  // The company's letterhead (D1a, B5). null sends the NetraOps email.
+  const mail = await mailLetterheadForCompany(args.company_id);
+  const build = accountMessage(args.guard_email, (m) => renderGuardWelcome({
     guard_name:          args.guard_name,
     guard_email:         args.guard_email,
     company_name:        row.company_name ?? 'NetraOps',
     primary_admin_email: row.primary_admin_email,
     temp_password:       args.temp_password,
-  });
+  }, m), mail);
   try {
-    await sgMail.send({ to: args.guard_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    await sendLetterheadOrPlain(build, mail, 'welcome_guard');
     console.log(`[email] sendGuardWelcomeEmail: SUCCESS — delivered to ${args.guard_email}`);
     noteSendgridSuccess('welcome_guard');
   } catch (err: any) {
@@ -2126,14 +2150,14 @@ export function renderPrimaryAdminWelcome(data: {
   company_name: string;
   temp_password: string;
 }) {
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>ADMIN ACCOUNT</p>
+  const html = emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">ADMIN ACCOUNT</p>
       </div>
-      <div class="body">
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
@@ -2152,8 +2176,8 @@ export function renderPrimaryAdminWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 24px">You can manage guards, sites, shifts, monitor real-time activity, and review reports.</p>
         <p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      <div style="${ES.footer}">NetraOps</div>
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Admin Account', html };
 }
 
@@ -2193,18 +2217,18 @@ export function renderSecondaryAdminWelcome(data: {
   creator_name: string;
   primary_admin_email: string | null;
   temp_password: string;
-}) {
+}, mail: MailLetterhead | null = null) {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>ADMIN ACCOUNT</p>
-      </div>
-      <div class="body">
+  const html = emailPage(`
+    <div style="${ES.card}">
+      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Admin Account') : `<div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">ADMIN ACCOUNT</p>
+      </div>`}
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.admin_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:20px">
@@ -2222,8 +2246,8 @@ export function renderSecondaryAdminWelcome(data: {
         <p style="margin:0 0 16px"><a href="https://app.netraops.com/admin" style="color:#F59E0B;text-decoration:none">app.netraops.com/admin</a></p>
         ${contact}
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Admin Account', html };
 }
 
@@ -2255,16 +2279,18 @@ export async function sendSecondaryAdminWelcomeEmail(args: {
     console.warn(`[email] sendSecondaryAdminWelcomeEmail: no company found for company_id=${args.company_id}`);
     return;
   }
-  const { subject, html } = renderSecondaryAdminWelcome({
+  // The company's letterhead (D1a, B5). null sends the NetraOps email.
+  const mail = await mailLetterheadForCompany(args.company_id);
+  const build = accountMessage(args.admin_email, (m) => renderSecondaryAdminWelcome({
     admin_name:          args.admin_name,
     admin_email:         args.admin_email,
     company_name:        row.company_name ?? 'NetraOps',
     creator_name:        row.creator_name ?? 'A NetraOps admin',
     primary_admin_email: row.primary_admin_email,
     temp_password:       args.temp_password,
-  });
+  }, m), mail);
   try {
-    await sgMail.send({ to: args.admin_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    await sendLetterheadOrPlain(build, mail, 'welcome_admin_secondary');
     console.log(`[email] sendSecondaryAdminWelcomeEmail: SUCCESS — delivered to ${args.admin_email}`);
     noteSendgridSuccess('welcome_admin_secondary');
   } catch (err: any) {
@@ -2281,18 +2307,18 @@ export function renderClientWelcome(data: {
   site_names: string;
   primary_admin_email: string | null;
   temp_password: string;
-}) {
+}, mail: MailLetterhead | null = null) {
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
     : `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact NetraOps Support: <a href="mailto:${REPLY_TO}" style="color:#F59E0B">${REPLY_TO}</a></p>`;
-  const html = `<style>${BASE_STYLE}</style>
-    <div class="card">
-      <div class="hdr">
-        <div class="brand">NetraOps</div>
-        <h1>WELCOME</h1>
-        <p>CLIENT PORTAL</p>
-      </div>
-      <div class="body">
+  const html = emailPage(`
+    <div style="${ES.card}">
+      ${mail ? mailHeaderHtml(mail, 'Welcome', 'Client Portal') : `<div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">WELCOME</h1>
+        <p style="${ES.hdrP}">CLIENT PORTAL</p>
+      </div>`}
+      <div style="${ES.body}">
         <h2 style="font-size:18px;color:#333;margin:0 0 12px">Welcome to NetraOps</h2>
         <p style="color:#333;margin-bottom:16px">Hi ${escapeHtml(data.client_name)},</p>
         <p style="color:#555;font-size:14px;margin-bottom:12px">
@@ -2314,8 +2340,8 @@ export function renderClientWelcome(data: {
         <p style="color:#555;font-size:13px;margin:0 0 24px">You can view live guard activity, daily shift reports, incident reports, and geofence alerts.</p>
         ${contact}
       </div>
-      <div class="footer">NetraOps — Do not reply to this email</div>
-    </div>`;
+      ${mail ? mailFooterHtml(mail, null) : `<div style="${ES.footer}">NetraOps</div>`}
+    </div>`);
   return { subject: '[NetraOps] Welcome — Your Client Portal Access', html };
 }
 
@@ -2351,16 +2377,18 @@ export async function sendClientWelcomeEmail(args: {
     return;
   }
   const siteNames = sitesResult.rows.map((r) => r.name).join(', ');
-  const { subject, html } = renderClientWelcome({
+  // The company's letterhead (D1a, B5). null sends the NetraOps email.
+  const mail = await mailLetterheadForCompany(args.company_id);
+  const build = accountMessage(args.client_email, (m) => renderClientWelcome({
     client_name:         args.client_name,
     client_email:        args.client_email,
     company_name:        co.company_name ?? 'NetraOps',
     site_names:          siteNames,
     primary_admin_email: co.primary_admin_email,
     temp_password:       args.temp_password,
-  });
+  }, m), mail);
   try {
-    await sgMail.send({ to: args.client_email, from: FROM, replyTo: REPLY_TO, subject, html });
+    await sendLetterheadOrPlain(build, mail, 'welcome_client');
     console.log(`[email] sendClientWelcomeEmail: SUCCESS — delivered to ${args.client_email}`);
     noteSendgridSuccess('welcome_client');
   } catch (err: any) {

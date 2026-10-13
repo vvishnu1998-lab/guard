@@ -5316,7 +5316,12 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
-- **Status 2026-10-12 (B4, built on `feat/letterhead-b4`):** the incident alert and the daily shift report carry
+- **Status 2026-10-12 (B5, built on `feat/letterhead-b5`):** the admin alerts and the guard, client and
+  secondary-admin welcomes carry the company's letterhead with B4's fallbacks: an empty profile leaves the
+  name, and a lookup that fails sends the email of before, but for B5's dates and its "Do not reply" line
+  (`scripts/test-letterhead-b5.ts`, A5, A8, W5, W6). With B5, every email that carries a letterhead has the
+  fallback.
+- **Status 2026-10-12 (B4, SHIPPED as `c83ddc8`, PR #105; verified in Gmail):** the incident alert and the daily shift report carry
   the letterhead of the company that runs the site, the logo as an inline (CID) attachment. A logo that is
   missing, does not decode, weighs over 256 KB or is not ready within 2 s leaves the company name, and a
   lookup that fails sends the email as before, but for B4's new dates (`scripts/test-letterhead-b4.ts`, A and
@@ -5772,7 +5777,8 @@ verified 2026-10-11.
 
 ## New from Phase B, stage B4 (2026-10-12)
 
-**Status: BUILT 2026-10-12 on `feat/letterhead-b4` (6 commits on `d6c8b7d`), not yet merged.** B4 puts the
+**Status: SHIPPED 2026-10-12 as `c83ddc8` (PR #105, by OVERRIDE; see STATE.md), and VERIFIED in Gmail that
+evening.** B4 puts the
 letterhead of the company that runs a site on the two client emails:
 - the incident alert (#10, `POST /api/reports`);
 - the daily shift report (#9, the 09:00 PT job).
@@ -5811,9 +5817,156 @@ letterhead of the company that runs a site on the two client emails:
 **STARNET:** its logo is a 118,381-byte JPEG (an S3 HEAD on 2026-10-12, with Vishnu's approval), under the
 cap, so its clients' emails will carry it.
 
-**Not verified:** how Gmail, Outlook and Apple Mail show SendGrid's inline image; SendGrid does not
-document the MIME it builds.
-- Vishnu opened a multipart/related copy in Apple Mail (2026-10-12). The logo renders inline at the top,
-  the Reply-To is the company's, and there is no attachment chip at the bottom, only the paperclip in the
-  header.
-- After the merge, one real Star Guard test email to Vishnu's own address, with his approval.
+**VERIFIED in Gmail (Vishnu, 2026-10-12), from the raw message of the one approved test send.** It was the
+incident alert for Star Guard's "test site", sent through the deployed code (`railway ssh` on the guard service)
+at 19:01:26 PT: SendGrid 202, `pCYXxHJRRB-pkLG838rKdQ`; Gmail message `1a132fe449f83678`. For the test,
+Star Guard carried a test logo and Vishnu's Gmail as its contact email; both were removed at 19:06 (STATE.md,
+#105).
+- SendGrid builds `multipart/related`: that is the message's top-level Content-Type.
+- The logo part is `image/png` with `Content-ID: <company-logo>` and `Content-Disposition: inline;
+  filename="logo.png"`. The HTML references `cid:company-logo` once.
+- The Reply-To is the company's contact email. The footer reads "Provided by Star Guard", "Reply to this
+  email to contact Star Guard" and "Powered by NetraOps".
+- SPF, DKIM (netraops.com and sendgrid.info) and DMARC pass. The message was delivered to the Inbox (the
+  Updates tab), not to spam.
+- Apple Mail, on a multipart/related copy opened locally (Vishnu, 2026-10-12): the logo renders inline at
+  the top, the Reply-To is the company's, and there is no attachment chip at the bottom, only the paperclip
+  in the header.
+- **Still not verified:** Outlook (desktop and Outlook.com).
+
+### N182 — Gmail drops the email templates' `<style>` block: client emails lose their body padding and button
+
+verified 2026-10-12 by Vishnu, in Gmail, on the B4 test email (STATE.md, #105).
+- **What he saw:** `.body`'s padding and `a.btn`'s styling were not applied. The body text sits left of the
+  header and footer, and the portal button renders as a plain link. The B4 header and footer were fine:
+  their styles are inline. Confirmed in Gmail's normal view, not only in print view (Vishnu, 2026-10-12).
+- **Also seen, cause not established:** Gmail shows "[Message clipped] View entire message" under the footer
+  of that 14.7 KB message (msg `1a132fe449f83678`). Investigate read-only with the B5 work; don't guess.
+- **Where:** every template in `services/email.ts` (12 of them) opens with `<style>${BASE_STYLE}</style>` and
+  lays itself out through classes. Gmail applied none of that block. Why Gmail drops it is not established.
+- **Classes that depend on the block:** `.card`; `.hdr` with `.brand`, `.hdr h1` and `.hdr p`; `.body`;
+  `.meta`; `.kpi` with `.n` and `.l`; `.rrow` with `p`; `.footer`; and `a.btn`.
+- **Likely, not yet seen (Vishnu, 2026-10-12):** a header whose navy background comes only from the
+  `.hdr` class has a title whose white colour is inline, so with the block dropped it shows white on white.
+  That covers the coverage-swap notice and the three handoff notices (admins), and the no-letterhead
+  fallback of the incident alert and the daily report. Re-read 2026-10-12:
+  - the missed-shift, unstaffed-post and geofence-breach alerts set their band colour inline, so their
+    titles stay readable;
+  - the welcome and password emails' titles have no colour, so they read black on white.
+  STARNET's admins received a coverage-swap notice on 2026-10-11 at 16:46 PT.
+- **Fix (Vishnu, 2026-10-12):** inline the `.body`, `.btn`, `.kpi` and `.rrow` styles in all client email
+  templates (the incident alert, the daily shift report and the client welcome). Bundle with B5, not its own
+  PR.
+- **Moves with it:** inlining changes the no-letterhead email too, so B5's identity checks re-pin on it, as
+  B4 did for the dates. `scripts/check-email-escaping.ts` asserts the stylesheet verbatim, and
+  `_incidentAlert.test.ts` byte-compares against a baseline.
+- **Size S. Tier 1** (client-visible; ships through the deploy gate with B5).
+- **Status 2026-10-12 (B5, built on `feat/letterhead-b5`): FIXED in code, not yet shipped.** Every template,
+  client and admin, carries its styles inline and no `<style>` block (D4a). The swap and handoff notices'
+  navy is inline too, so no title depends on the block. `scripts/test-letterhead-b5.ts` P holds every element
+  of all 18 renders to the declarations main's block and its own style gave it, and Gmail's view of main
+  differs in all 18. `check-email-escaping.ts` and `_incidentAlert.test.ts` were re-pinned. Gmail itself is
+  checked with B5's post-merge test batch. "[Message clipped]": the cause is not established, but one
+  documented trigger matches (B5's section, below).
+
+## New from Phase B, stage B5 (2026-10-12)
+
+**Status: BUILT 2026-10-12 on `feat/letterhead-b5` (7 commits on `c83ddc8`), not yet merged.** B5 puts the
+company's letterhead on the admin alerts and on the account emails the company sends. It also fixes N182
+and moves every email to month-name dates.
+
+**Vishnu's decisions (2026-10-12):**
+- **D1a:** the company's letterhead goes on the guard, client and secondary-admin welcomes, because the
+  company invites those people. The primary-admin welcome (NetraOps onboarding the customer) and the password
+  reset (a security email from the product) stay NetraOps'.
+- **D2a:**
+  - Admin alerts get no Reply-To, as before.
+  - Lettered account emails follow B4: the company's contact email when it is usable, otherwise support@.
+    The NetraOps ones keep support@.
+  - The "Do not reply" line goes.
+- **D3a:** on an admin alert, the company block sits on top and the coloured band carries the title (red
+  alert, amber warning, navy notice), without "NETRAOPS ·".
+- **D4a:** N182 by hand. Every style goes inline through shared constants, with no `<style>` block, the page
+  as a full-width grey table, and no new dependency.
+- **D5b:** read the clipped message through the Gmail connector, read-only, and stop if it is unavailable.
+- **No Outlook address** for the test batch.
+
+**What changes:**
+- **Admin alerts** (missed shift, unstaffed post, geofence breach, coverage swap, and handoff accepted,
+  completed and nudge):
+  - The company block (logo inline by CID, name, contact lines) sits above the coloured band.
+  - The band's label loses "NETRAOPS": "ALERT", "WARNING", and none on the swap and handoff notices.
+  - The footer ends "Powered by NetraOps".
+  - There is one lookup per alert, by company, and no Reply-To.
+- **Welcomes** (guard, client, secondary admin):
+  - B4's white header: "Welcome", then "Guard Account", "Client Portal" or "Admin Account".
+  - A footer without the time zone line: "Provided by {company}", the reply line when replies reach the
+    company, then "Powered by NetraOps".
+  - Reply-To as D2a. The body and the subject are unchanged.
+- **All five account emails:** "NetraOps — Do not reply to this email" now reads "NetraOps". Their
+  Reply-To always reached a mailbox.
+- **N182:** no email carries a `<style>` block or a class attribute. Each element carries its old class rule
+  inline, then its own style (`services/emailStyles.ts`). A client that honoured the block sees the same
+  email, and Gmail now sees it too.
+- **Dates:** every email prints "Oct 12, 2026" and "Oct 12, 2026, 8:45 AM PDT". No day-first date is left.
+- **No letterhead:** an alert or welcome whose lookup fails is the email of before, but for those dates and
+  the "Do not reply" line (`scripts/test-letterhead-b5.ts`, T, A5, W6).
+
+**A letterhead never stops an email** (N167, as in B4):
+- B4's logo fallbacks apply.
+- If SendGrid refuses a letterhead message with a 400, that recipient gets the plain one, once.
+- Sentry gets `letterhead_email_refused` at most once an hour per flow.
+
+**STARNET** (read-only check, 2026-10-12, booleans and a count only):
+- It has a logo (the 118,381-byte JPEG, under the cap), a contact email that qualifies as a Reply-To, and 2
+  active admins.
+- After the deploy, its admins' alerts carry its letterhead.
+- A welcome it sends a new guard, client or admin takes its Reply-To, so replies go to STARNET, not
+  support@.
+
+**Tested:**
+- `scripts/test-letterhead-b5.ts`: 111 checks, no database and no network, against `c83ddc8`. In all 18
+  renders, every element's inline declarations are, in order, what main's block and inline style gave it.
+- 23 mutation controls, each caught by its intended check.
+- D24's database harness: fix mode 45/0, and its 13 mutants failed as predicted.
+- B4's harness 59/59; `check-email-escaping.ts` (13 templates); `_incidentAlert.test.ts`;
+  `_sendgridFailure.test.ts`; `check:types`.
+- A one-off headless-Chrome comparison at 720 px found all 18 renders pixel-identical between main (with
+  its block) and the N182 commit `bf5ec98`. Main with its block stripped (Gmail's view) differed in every
+  one.
+
+**Found:**
+- `reportSendgridFailure` ignores its `extra` argument. So a failed admin alert reaches Sentry per flow,
+  without the recipient, which appears only in the log line. `sendToAdmins`' comment said otherwise and is
+  corrected.
+
+**"[Message clipped]" (N182): cause NOT established; one documented trigger matches.** The raw message
+`1a132fe449f83678` was read through the Gmail connector, read-only (D5b). One connector failed to
+authenticate. The other closed the connection at first and answered on a retry. Nothing was changed for it.
+SendGrid's support article "[Message clipped] Emails Sent to Gmail Inboxes" names three causes:
+- **Size, ruled out.** The whole message is 14,747 bytes (Gmail's estimate, logo included), far under the
+  102 KB of HTML at which the article says Gmail generally clips.
+- **Earlier copies with the same subject, ruled out.** The message started its own thread: its thread id is
+  its own id.
+- **Non-ASCII characters in the HTML: matches, not proven.** The article says these may make Gmail clip
+  because of character encoding, and recommends HTML entities instead. Our HTML part is
+  `text/html; charset=iso-8859-1`, quoted-printable. It carries "·" as `=B7` in the "site · date" line and
+  in the contact line.
+
+**Also in the message:**
+- `multipart/related`, holding that HTML part and the logo; there is no text/plain part.
+- The HTML has no `<html>` or `<body>`. It opens with the `<style>` block and ends with SendGrid's
+  open-tracking pixel, after the card.
+- Click tracking rewrote the button's link. Vishnu: both kinds of tracking are on, and links go to
+  `u61978011.ct.sendgrid.net`.
+
+**Next (Vishnu's call):** a controlled send would settle it, for example the same alert with "·" written as
+`&middot;`. B5's test batch will show whether its own emails clip, and "Show original" gives each one's
+charset.
+
+**Not verified:**
+- How Gmail and Apple Mail show B5's emails. Outlook is not covered at all.
+- After the merge, with Vishnu's approval: one batch of seven real sends to his Gmail. They are the incident
+  alert, the daily report, the missed shift, the coverage swap, the client welcome, the password reset (with
+  a dummy password) and the incident alert without a letterhead. Star Guard's profile is set for the test
+  and cleared after.

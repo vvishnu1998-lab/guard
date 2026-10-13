@@ -264,6 +264,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-12 — PR #105, B4: the security company's letterhead on the two client emails, by OVERRIDE — verified 2026-10-12 19:02 PT; Gmail verified 19:25 PT
+
+| thing | value |
+|---|---|
+| merge | PR #105 merged as `c83ddc8` at **18:45:05 PT by OVERRIDE**. Vishnu opened it at 18:39:53 PT; the auto-mode classifier had refused both `gh pr create` and the GitHub tool from the session. Vishnu: "Read CI once. If green + CLEAN with pins holding (head a967394, main d6c8b7d), merge (OVERRIDE)." One read at 18:45:01: 5/5 SUCCESS, CLEAN, both pins held. Then one call, `gh pr merge 105 --merge --match-head-commit a967394…`. The merge tree equals the head's tree (`d27fcf7a`). |
+| Railway | `420878c2-26fe-4d88-9526-ea6b9469f2dc` **SUCCESS** at 18:46:29 PT from `c83ddc8`. |
+| web | Vercel production on `c83ddc8`: success at 18:46:54 PT. |
+| health | `/health` commit `c83ddc8`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`f0c408d4`, from #104's `d6c8b7d`) served its last request at 18:46:18.1 and stopped at 18:46:39.6 PT. The new one served its first at 18:46:25.4, so they overlapped with no gap. Over its whole life (17:27 to 18:46) the old one served 770 requests, 0 at 499 or above. To 19:01 the new one served 364 requests with 0 5xx. It had 17 GET 499s at 18:49–18:50 (client aborts, no writes). Its other 4xx were the 401 control, a 404 on `GET /` and a 401 on `/api/chat/rooms`. Sentry, 18:41–19:02 PT: API, none; mobile, none new. |
+| restart window | 18:45:05–18:46:40, with no STARNET write (a ping and a device check-in in the 15 minutes before). After it, on `420878c2`, all 201: GRD0032's clock-in (18:47:35) and its verification, its reports (18:50:09, 19:00:39) and its 19:00:11 ping. The 19:00 cron tick ran there: 9 notifications and one missed ping, GRD0013's 18:30 window (N168). |
+| visible change | The incident alert and the daily shift report carry the company's letterhead: the logo inline by Content-ID, the name and contact lines, and "Powered by NetraOps". They take the company's Reply-To when it has one, and print month-name dates. STARNET's first are its 09:00 PT daily reports on 2026-10-13. |
+| test email | Vishnu approved one send. At 18:45:36 PT he saved a test logo and his own Gmail as contact email on Star Guard, whose profile had been empty. The first one-off aborted on a wrong site id (the session's error), with nothing sent. At 19:01:16 a dry run of the corrected one-off, through `railway ssh` on the guard service, matched what was expected. At 19:01:26 one email went to Vishnu's Gmail: SendGrid 202, `pCYXxHJRRB-pkLG838rKdQ`. **Gmail (Vishnu, read from the raw message `1a132fe449f83678`):** top-level `multipart/related`; the logo part `image/png` with `Content-ID: <company-logo>` and `Content-Disposition: inline; filename="logo.png"`; one `cid:company-logo` reference in the HTML; Reply-To his Gmail; the footer's "Provided by Star Guard", reply line and "Powered by NetraOps"; SPF, DKIM (netraops.com and sendgrid.info) and DMARC pass; delivered to the Inbox (Updates tab), not spam. At 19:06:42 Vishnu removed the logo (DELETE 200; the S3 object was deleted, with no failure logged) and at 19:06:53 cleared the contact email (PATCH 200). Star Guard's profile is empty again; `logo_updated_at` now reads 19:06:42. |
+
+---
+
 ## Shipped 2026-10-11 — PR #103, N178: the client report covers whole days in Pacific, by OVERRIDE — verified 2026-10-11 22:32 PT
 
 | thing | value |

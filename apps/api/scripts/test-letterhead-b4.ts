@@ -11,12 +11,15 @@
  * id; every address is @example.invalid or .example. BASE is main before B4,
  * read from git and compiled under the current path, so it sees the same stubs.
  *
- *   A  no letterhead (the lookup fails, or finds no company): BASE's payload,
- *      byte for byte, but for the dates, rewritten as listed, each as often as
- *      listed. The incident alert and the daily report.
+ *   A  no letterhead (the lookup fails, or finds no company): BASE's addresses
+ *      and subject, and BASE's visible text, but for the dates, rewritten as
+ *      listed, each as often as listed. The incident alert and the daily report.
+ *      (Byte for byte until B5: N182 then inlined every style on purpose, and
+ *      scripts/test-letterhead-b5.ts holds every element's styles to BASE's.)
  *   D  the dates: "Oct 12, 2026" in subjects and bodies, in the site's zone
- *      under a UTC and a Pacific process; no day-first date left; the other
- *      nine templates byte-identical to BASE.
+ *      under a UTC and a Pacific process; no day-first date left. (D5, the
+ *      other nine templates byte-identical to BASE, moved to B5's harness when
+ *      B5 changed them on purpose.)
  *   L  Star Guard's full letterhead and logo: header, footer, Reply-To, one
  *      inline attachment (content_id, through the real @sendgrid/helpers), the
  *      logo box, a JPEG logo, one lookup per alert and per shift.
@@ -261,6 +264,10 @@ async function run(over: Partial<World>, fn: (mod: any) => Promise<unknown>, mod
 const incident = (mod: any) => mod.sendIncidentAlert(REPORT, SITE);
 const daily = (mod: any) => mod.sendDailyShiftReport(SHIFT);
 const payload = (m: Msg) => JSON.stringify(m);
+/** Everything but the html, which B5 (N182) inlined: addresses, subject, attachments. */
+const envelope = (m: Msg) => JSON.stringify({ ...m, html: undefined });
+/** The visible text: a <style> element's CSS is not text; tags out, whitespace collapsed. */
+const visibleText = (html: string) => html.replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 const sentryNamed = <E extends { what: unknown }>(r: { sentry: E[] }, name: string): E[] => r.sentry.filter((e) => e.what === name);
 
 /** BASE's message with this list of date strings rewritten; each must occur exactly as often as listed. */
@@ -314,10 +321,11 @@ async function main(): Promise<void> {
     const none = await run({ company: null }, fn);
     const want = rewrite(base.delivered[0], dates as Rewrite[]);
     check(want.problems.length === 0, `A1 ${name}: every listed date rewrite occurs exactly as often as listed in BASE's message${want.problems.length ? ` (${want.problems.join('; ')})` : ''}`);
-    check(failed.delivered.length === 1 && payload(failed.delivered[0]) === payload(want.msg),
-      `A2 ${name}: a lookup that fails sends BASE's payload byte for byte (dates rewritten)`);
-    check(none.delivered.length === 1 && payload(none.delivered[0]) === payload(want.msg),
-      `A3 ${name}: a site whose company has no row sends the same`);
+    check(failed.delivered.length === 1 && envelope(failed.delivered[0]) === envelope(want.msg)
+      && visibleText(failed.delivered[0].html) === visibleText(want.msg.html),
+      `A2 ${name}: a lookup that fails sends BASE's addresses, subject and visible text (dates rewritten)`);
+    check(none.delivered.length === 1 && payload(none.delivered[0]) === payload(failed.delivered[0]),
+      `A3 ${name}: a site whose company has no row sends the same payload`);
     check(Object.keys(failed.delivered[0] ?? {}).join() === 'to,from,replyTo,subject,html' && failed.delivered[0]?.replyTo === SUPPORT,
       `A4 ${name}: no attachments key, Reply-To ${SUPPORT}`);
     check(sentryNamed(failed, 'letterhead_lookup_failed').length === 1, `A5 ${name}: the failed lookup is a Sentry warning, once`);
@@ -353,26 +361,9 @@ async function main(): Promise<void> {
     process.env.TZ = 'UTC';
     check(zones[0] === 'Incident Reported — S — Oct 12, 2026 | Incident Reported — S — Oct 13, 2026 | true | true' && zones[0] === zones[1],
       `D4 dated in the site's zone, the same under a UTC and a Pacific process (${zones[0]})`);
-    // The other nine templates are BASE's, byte for byte (B5 is theirs).
-    const D = T('2026-03-01T16:00:00Z');
-    const others: Array<[string, (E: any) => { subject: string; html: string }]> = [
-      ['missedShiftAlert', (E) => E.renderMissedShiftAlert({ id: 's1', scheduled_start: D, scheduled_end: D, site_name: 'Site', site_tz: 'America/Los_Angeles', site_address: 'Addr', guard_name: 'g n', badge_number: 'GRD1', guard_phone: '555', last_login_at: D, upcoming_shifts_count: 2 })],
-      ['unstaffedPostWarning', (E) => E.renderUnstaffedPostWarning([{ id: 's1', site_id: 'si1', site_name: 'Site', site_address: 'Addr', site_tz: 'America/Los_Angeles', scheduled_start: D, scheduled_end: D }], D)],
-      ['geofenceBreachAlert', (E) => E.renderGeofenceBreachAlert({ id: 'v1', shift_session_id: 'ss1', occurred_at: D, violation_lat: 37.1, violation_lng: -122.1, photo_url: 'https://x/y.jpg', site_name: 'Site', site_tz: 'America/Los_Angeles', site_address: 'Addr', center_lat: 37, center_lng: -122, guard_name: 'g n', badge_number: 'GRD1' }, { kind: 'ping' })],
-      ['swapAcceptedFyi', (E) => E.renderSwapAcceptedFyi({ shift_id: 's1', scheduled_start: D, scheduled_end: D, site_name: 'Site', site_tz: 'America/Los_Angeles', from_guard_name: 'a', from_badge: 'GRD1', to_guard_name: 'b', to_badge: 'GRD2', is_same_site: true, reason: 'r' })],
-      ['handoffFyi', (E) => E.renderHandoffFyi({ history_id: 'h1', shift_id: 's1', reason: 'r', accepted_at: D, handoff_at: D, duration_hours: 4, from_guard_name: 'a', from_badge: 'GRD1', to_guard_name: 'b', to_badge: 'GRD2', site_name: 'Site', site_tz: 'America/Los_Angeles', company_id: 'c1' }, 'nudge', 12)],
-      ['guardWelcome', (E) => E.renderGuardWelcome({ guard_name: 'g n', guard_email: 'g@example.invalid', company_name: 'Star Guard', primary_admin_email: 'a@example.invalid', temp_password: 'Abc23xyz' })],
-      ['primaryAdminWelcome', (E) => E.renderPrimaryAdminWelcome({ admin_name: 'a', admin_email: 'a@example.invalid', company_name: 'Star Guard', temp_password: 'Abc23xyz' })],
-      ['secondaryAdminWelcome', (E) => E.renderSecondaryAdminWelcome({ admin_name: 'a', admin_email: 'a@example.invalid', company_name: 'Star Guard', creator_name: 'c', primary_admin_email: 'p@example.invalid', temp_password: 'Abc23xyz' })],
-      ['clientWelcome', (E) => E.renderClientWelcome({ client_name: 'c', client_email: 'c@example.invalid', company_name: 'Star Guard', site_names: 'Site', primary_admin_email: 'p@example.invalid', temp_password: 'Abc23xyz' })],
-    ];
-    const moved: string[] = [];
-    await frozen(async () => {
-      for (const [name, render] of others) {
-        if (JSON.stringify(render(CUR)) !== JSON.stringify(render(BASEMOD))) moved.push(name);
-      }
-    });
-    check(others.length === 9 && moved.length === 0, `D5 the other nine templates are BASE's byte for byte${moved.length ? ` (moved: ${moved.join(', ')})` : ''}`);
+    // D5 (the other nine templates byte-identical to BASE) moved to
+    // scripts/test-letterhead-b5.ts: B5 changed every template on purpose
+    // (N182 inline styles, month-name dates, letterheads).
   }
 
   section('L — Star Guard\'s full letterhead and logo');
@@ -496,7 +487,7 @@ async function main(): Promise<void> {
     check(html.includes(`>${esc}</div>`) && html.includes(`<strong style="color:#666">${esc}</strong>`) && html.includes(`License No. ${esc}`)
       && !html.includes('<Site') && !html.includes('&amp;amp;') && !html.includes('&amp;lt;'),
       'E1 the name, address, phone, website and licence are escaped once, in the header and the footer');
-    check(['<table role="presentation"', '<h1 style=', '<div class="footer"', '<div class="body">'].every((t) => html.includes(t)),
+    check(['<table role="presentation"', '<h1 style=', '<div style="background:#f5f5f5;padding:14px 28px', '<div style="padding:24px 28px">'].every((t) => html.includes(t)),
       'E2 the markup survived (no fragment was escaped)');
   }
 
