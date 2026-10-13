@@ -10,6 +10,7 @@
 #     DATABASE_URL=... psql -c 'DROP ...'      prefix is DATABASE_URL=, not psql
 #     cd /tmp && git push origin main          prefix is cd
 #     bash -c 'railway up'                     prefix is bash
+#     git -C /some/dir push                    prefix is git -C (N183)
 #
 # This hook reads the whole command string and matches ANYWHERE in it, so those
 # shapes are caught. It is intentionally blunt: false positives are cheap
@@ -55,5 +56,41 @@ case "$COMMAND" in
   *"vercel "*)                      block "vercel " ;;
   *"--set"*)                        block "--set" ;;
 esac
+
+# git's own options before the subcommand (N183): `git -C <dir> push`,
+# `git -c k=v push`, `git --git-dir=<d> push`, `/usr/bin/git push`, a doubled
+# space. The case above matches only the literal "git push", and the deny
+# list only commands that start with it; on 2026-10-13 `git -C <dir> push`
+# passed both. This finds git anywhere in the command (lists, pipes and
+# `bash -c "..."` strings included), steps over its options, and blocks when
+# the subcommand is push. The program uses only double quotes, since it sits
+# inside single quotes; a command it cannot tokenize falls back to a plain
+# word check, so it fails closed.
+if printf '%s' "$COMMAND" | python3 -c '
+import re, shlex, sys
+TAKES_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+def tokens(s):
+    lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    return list(lex)
+def pushes(s, depth=0):
+    try:
+        toks = tokens(s)
+    except ValueError:
+        return re.search(r"\bgit\b.*\bpush\b", s, re.S) is not None
+    for i, t in enumerate(toks):
+        if depth < 3 and any(c.isspace() for c in t) and pushes(t, depth + 1):
+            return True
+        if t == "git" or t.endswith("/git"):
+            j = i + 1
+            while j < len(toks) and toks[j].startswith("-"):
+                j += 2 if toks[j] in TAKES_VALUE else 1
+            if j < len(toks) and toks[j] == "push":
+                return True
+    return False
+sys.exit(0 if pushes(sys.stdin.read()) else 1)
+'; then
+  block "git <options> push"
+fi
 
 exit 0
