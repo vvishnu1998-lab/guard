@@ -93,7 +93,7 @@ const cases: Case[] = [
       duration_hours:4, from_guard_name:POISON, from_badge:POISON, to_guard_name:POISON, to_badge:POISON,
       site_name:POISON, site_tz:'America/Los_Angeles', company_id:'c1' }, 'nudge', 12) },
 
-  { name: 'guardWelcome', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px', '<ul style='], subjectHasPoison: false,
+  { name: 'guardWelcome', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px', '<ul style=', 'href="https://www.netraops.com/app?src=welcome_email"', '>GET THE APP</a>'], subjectHasPoison: false,
     out: E.renderGuardWelcome({ guard_name:POISON, guard_email:POISON, company_name:POISON,
       primary_admin_email:POISON, temp_password:'Abc23xyz' }) },
 
@@ -113,7 +113,7 @@ const cases: Case[] = [
   // header and the intro. POISON_LH has no usable contact email, so the contact
   // line names the (poisoned) primary admin; POISON_LH_REPLY has one, so it says
   // "reply" with the company's name.
-  { name: 'guardWelcome+letterhead', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<ul style=', '<div style="background:#f5f5f5;padding:14px 28px'], subjectHasPoison: true,
+  { name: 'guardWelcome+letterhead', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<ul style=', '<div style="background:#f5f5f5;padding:14px 28px', 'href="https://www.netraops.com/app?src=welcome_email"', '>GET THE APP</a>'], subjectHasPoison: true,
     out: E.renderGuardWelcome({ guard_name:POISON, guard_email:POISON, company_name:POISON,
       primary_admin_email:POISON, temp_password:'Abc23xyz' }, POISON_LH) },
 

@@ -38,6 +38,12 @@
  *   S  SendGrid refuses a letterhead message (400): each recipient gets one
  *      plain resend; other failures are reported as before.
  *   E  a poisoned profile is escaped in the company block and the footer.
+ *   G  the guard welcome's "Get the NetraOps app" block (E1): the one URL, a button and
+ *      a typed link with click tracking off, no store or platform named, a text/plain
+ *      part and the click-tracking override on every send path (letterhead, no
+ *      letterhead, plain resend after a 400), and no other email changed. The block is
+ *      the one part of the guard welcome that is not BASE's, so P, T and W6 cut it out
+ *      of both sides and keep pinning every other element and word.
  */
 import Module from 'node:module';
 import fs from 'node:fs';
@@ -45,6 +51,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import ts from 'typescript';
 import { pngImage } from './image-fixtures';
+import { APP_LINK_TEXT, WELCOME_APP_URL, appBlockHtml, appBlockText } from '../src/services/emailAppBlock';
 
 /** main before B5: PR #105's merge. */
 const BASE = 'c83ddc888e75af30bca0102713cc45d36e4c9f78';
@@ -132,7 +139,7 @@ function loadBase(rel: string): any {
 
 // ── The world the stubs answer from ──────────────────────────────────────────
 type Row = Record<string, unknown>;
-type Msg = { to: unknown; from: unknown; replyTo?: unknown; subject: string; html: string; attachments?: Array<Record<string, unknown>> };
+type Msg = { to: unknown; from: unknown; replyTo?: unknown; subject: string; html: string; text?: string; trackingSettings?: unknown; attachments?: Array<Record<string, unknown>> };
 interface World {
   company: Row | null | 'throw';
   admins: string[];
@@ -281,6 +288,13 @@ const sentryNamed = <E extends { what: unknown }>(r: { sentry: E[] }, name: stri
 const payload = (m: Msg | undefined) => JSON.stringify(m);
 /** Everything but the html: addresses, subject, attachments. */
 const envelope = (m: Msg | undefined) => JSON.stringify({ ...m, html: undefined });
+/** E1: the guard welcome's app block is the one part that is not BASE's. Each side's block is cut out and
+ *  replaced by the same marker, so P, T and W6 still pin every other element and word of that email. */
+const BASE_APP_BLOCK = /<h3 [^>]*>Download the NetraOps app<\/h3>\s*<p [^>]*>iOS: [^<]*<\/p>\s*<p [^>]*>Android: [^<]*<\/p>/;
+const CUR_APP_BLOCK = /<h3 [^>]*>Get the NetraOps app<\/h3>[\s\S]*?right app store for your phone\.<\/p>/;
+const cutAppBlock = (html: string, re: RegExp) => html.replace(re, '<p style="margin:0">APP BLOCK</p>');
+/** The message without what E1 adds to the guard welcome alone (the text part and the tracking override). */
+const envelopeNoE1 = (m: Msg | undefined) => JSON.stringify({ ...m, html: undefined, text: undefined, trackingSettings: undefined });
 /** The visible text: a <style> element's CSS is not text; tags out, whitespace collapsed. */
 const visibleText = (html: string) => html.replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 const cidCount = (html: string) => html.split('cid:company-logo').length - 1;
@@ -454,7 +468,7 @@ const ALERTS: Array<{ name: string; flow: string; send: (E: any) => Promise<unkn
 /** N184 (Vishnu, 2026-10-13): the company's subject, header and intro; the body part each keeps. */
 const WELCOMES: Array<{ name: string; to: string; subject: string; title: string; sub: string; hi: string; intro: string; keeps: string; send: (E: any) => Promise<unknown> }> = [
   { name: 'guard welcome', to: 'alex.rivera@example.invalid', subject: 'Welcome to Star Guard: your guard account', title: 'Welcome to Star Guard', sub: 'Guard account',
-    hi: 'Hi Alex,', intro: 'Star Guard has created your guard account. You\'ll use the NetraOps app for your shifts.', keeps: 'Download the NetraOps app',
+    hi: 'Hi Alex,', intro: 'Star Guard has created your guard account. You\'ll use the NetraOps app for your shifts.', keeps: 'Get the NetraOps app',
     send: (E) => E.sendGuardWelcomeEmail({ guard_id: GUARD, guard_name: 'alex rivera', guard_email: 'alex.rivera@example.invalid', company_id: STAR_GUARD, temp_password: TEMP }) },
   { name: 'secondary-admin welcome', to: 'pat.lee@example.invalid', subject: 'Star Guard: your admin account', title: 'Your admin account', sub: 'Admin portal',
     hi: 'Hi Pat,', intro: 'chris doe has made you an admin of Star Guard.', keeps: 'Access the admin portal app.netraops.com/admin',
@@ -499,7 +513,8 @@ async function main(): Promise<void> {
   const pairs: Array<[string, string, string, Rewrite[], string, string]> = await frozen(async () => RENDERS.map(([name, fn, rw]) => {
     const b = fn(BASEMOD);
     const c = fn(CUR);
-    return [name, b.html, c.html, rw, b.subject, c.subject];
+    const cut = name === 'welcome-guard';
+    return [name, cut ? cutAppBlock(b.html, BASE_APP_BLOCK) : b.html, cut ? cutAppBlock(c.html, CUR_APP_BLOCK) : c.html, rw, b.subject, c.subject];
   }));
   const lettered = await frozen(async () => LETTERED.map(([name, fn]) => [name, fn()] as const));
   pairs.push(['password-reset', prBase.html, pr.html, noReply, prBase.subject, pr.subject]);
@@ -633,9 +648,10 @@ async function main(): Promise<void> {
       `W5c ${w.name}: no contact email and no primary admin: the contact line names NetraOps support, where the Reply-To goes`);
     const failed = await run({ company: 'throw' }, w.send);
     const fm = failed.delivered[0];
-    const want = base.delivered[0] && rewritten(visibleText(base.delivered[0].html), noReply);
-    check(fm !== undefined && want !== undefined && want.problems.length === 0 && envelope(fm) === envelope(base.delivered[0])
-      && visibleText(fm.html) === want.text && fm.replyTo === SUPPORT,
+    const g = w.name === 'guard welcome';
+    const want = base.delivered[0] && rewritten(visibleText(g ? cutAppBlock(base.delivered[0].html, BASE_APP_BLOCK) : base.delivered[0].html), noReply);
+    check(fm !== undefined && want !== undefined && want.problems.length === 0 && (g ? envelopeNoE1 : envelope)(fm) === (g ? envelopeNoE1 : envelope)(base.delivered[0])
+      && visibleText(g ? cutAppBlock(fm.html, CUR_APP_BLOCK) : fm.html) === want.text && fm.replyTo === SUPPORT,
       `W6 ${w.name}: a lookup that fails sends BASE's email but for "${NO_REPLY}" → "NetraOps"`);
   }
   for (const n of NETRAOPS_ONLY) {
@@ -655,6 +671,89 @@ async function main(): Promise<void> {
       }
     }
     check(everything.length === 15 && everything.every((h) => !h.includes('Do not reply')), `W8 "Do not reply" is gone from all ${everything.length} account emails sent`);
+  }
+
+  section('G — the guard welcome\'s app block (E1)');
+  {
+    const count = (s: string, sub: string) => s.split(sub).length - 1;
+    const NO_CLICK = JSON.stringify({ clickTracking: { enable: false, enableText: false } });
+    // The three ways this email is really sent: with the letterhead; without it (lookup failed); and the
+    // plain resend after SendGrid refuses the letterhead message (400).
+    const sent: Array<[string, Msg | undefined]> = [
+      ['lettered', (await run({}, WELCOMES[0].send)).delivered[0]],
+      ['no letterhead', (await run({ company: 'throw' }, WELCOMES[0].send)).delivered[0]],
+      ['plain resend after a 400', (await run({ sendgrid: (m: Msg) => (m.attachments ? 400 : 'ok') }, WELCOMES[0].send)).delivered[0]],
+    ];
+    // Brand names are case-sensitive: the block says "the right app store", a generic noun, on purpose.
+    const NAMES = /App Store|Play Store|Google Play|Android|iOS|iPhone|Coming to|Download the NetraOps app/;
+    // Widened to string: the constant's literal type would turn a wrong tag into a compile error (TS2367) instead of this failure.
+    check((WELCOME_APP_URL as string) === 'https://www.netraops.com/app?src=welcome_email',
+      'G1 the URL is the owner\'s one URL with the registered tag: https://www.netraops.com/app?src=welcome_email');
+    for (const [label, m] of sent) {
+      const html = m?.html ?? '';
+      check(m !== undefined && html.includes(appBlockHtml()) && count(html, `href="${WELCOME_APP_URL}"`) === 2 && count(html, 'clicktracking="off"') === 2
+        && html.includes('>GET THE APP</a>') && html.includes(`>${APP_LINK_TEXT}</a>`) && count(html, '<h3 ') === 2,
+        `G2 ${label}: the block is there once: a button and a typed link to the one URL, both with click tracking off`);
+      check(!NAMES.test(html) && !/testflight/i.test(html) && !NAMES.test(m?.text ?? '') && !/testflight/i.test(m?.text ?? ''),
+        `G3 ${label}: no store, platform, TestFlight or "Coming soon" wording anywhere in the email`);
+      check(html.includes('bgcolor="#F59E0B"') && html.includes('mso-padding-alt:16px 32px') && html.includes('padding:16px 32px')
+        && html.includes('color:#0B1526') && !/\sclass="/.test(html) && !/<style[\s>]/i.test(html) && !/<img /i.test(appBlockHtml()),
+        `G4 ${label}: an amber button, navy text, padding 16/32 (mso-padding-alt too); inline styles only; no image in the block`);
+      const text = m?.text ?? '';
+      const lines = text.split('\n');
+      check(typeof m?.text === 'string' && lines.includes(WELCOME_APP_URL) && lines.includes('Open this link on your phone:')
+        && appBlockText().every((l) => lines.includes(l)) && text.includes(`Temporary password: ${TEMP}`) && text.endsWith('\n')
+        && !/[<>]|&amp;|&lt;/.test(text),
+        `G5 ${label}: a text/plain part: the URL alone on its own line, the credentials, no markup`);
+      check(NO_CLICK === JSON.stringify(m?.trackingSettings),
+        `G6 ${label}: SendGrid click tracking is off for the message (the override travels on every send path)`);
+    }
+    check(sent.every(([, m]) => !!m?.text) && appBlockText().every((l) => l.length <= 78),
+      'G7 every line of the text block is 78 characters or fewer');
+    check(/^[\x20-\x7E\n]*$/.test(appBlockHtml() + appBlockText().join('\n') + WELCOME_APP_URL),
+      'G8 the block (markup and text) is ASCII: a non-ASCII character in this message is a clip candidate (N185)');
+    check(!/&/.test(appBlockHtml()) && !/&/.test(appBlockText().join('\n')),
+      'G9 no "&" in the block: the URL has one query parameter, and a bare & is what check-email-escaping rejects');
+
+    // The text part says what the HTML says: the same contact route, in each of the three worlds.
+    const worlds: Array<[string, Partial<World>, string]> = [
+      ['reply (company contact email)', {}, 'Questions? Reply to this email to reach Star Guard.'],
+      ['primary admin', { company: { ...FULL_ROW, contact_email: null } }, `Questions? Contact Star Guard at ${ADMINS[0]}.`],
+      ['NetraOps support', { company: { ...FULL_ROW, contact_email: null }, primaryAdmin: null }, `Questions? Contact NetraOps support at ${SUPPORT}.`],
+    ];
+    const stripTags = (h: string) => h.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ');
+    for (const [label, over, sentence] of worlds) {
+      const m = (await run(over, WELCOMES[0].send)).delivered[0];
+      check(stripTags(m?.html ?? '').includes(sentence) && (m?.text ?? '').split('\n').includes(sentence),
+        `G10 ${label}: the HTML and the text part name the same contact route ("${sentence}")`);
+    }
+    const noLetterhead = (await run({ company: 'throw' }, WELCOMES[0].send)).delivered[0];
+    check((noLetterhead?.text ?? '').includes(`Questions? Contact your Company Admin: ${ADMINS[0]}`) && visibleText(noLetterhead?.html ?? '').includes(`Questions? Contact your Company Admin: ${ADMINS[0]}`),
+      'G11 no letterhead: the HTML and the text part both name the Company Admin');
+
+    // Text is not HTML: a name with markup characters is escaped once in the HTML and printed raw in the text,
+    // and a name with a line break stays on one line.
+    const data = { guard_name: POISON, guard_email: 'x@example.invalid', company_name: POISON, primary_admin_email: null, temp_password: TEMP };
+    const plainR = CUR.renderGuardWelcome(data);
+    const lettR = CUR.renderGuardWelcome(data, PNG_MAIL());
+    const unesc = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+    const htmlGreeting = /Hi ([^,]+),/.exec(stripTags(lettR.html))?.[1] ?? '';
+    check(plainR.text.includes(`Hi ${POISON},`) && plainR.text.includes(`by ${POISON}.`) && !/&amp;|&lt;|&quot;/.test(plainR.text)
+      && htmlGreeting !== '' && lettR.text.includes(`Hi ${unesc(htmlGreeting)},`) && !/&amp;|&lt;|&quot;/.test(lettR.text),
+      'G12 a poisoned name is raw in the text part (it is not HTML) and still escaped once in the HTML');
+    check(plainR.html.includes('&amp;') && !plainR.html.includes('&amp;amp;') && !/<Site/.test(plainR.html),
+      'G13 ...and the HTML of the same render is escaped once');
+    const split = CUR.renderGuardWelcome({ ...data, guard_name: 'Ana\nBell\r\nOps', company_name: 'Co\nName' });
+    check(split.text.includes('Hi Ana Bell Ops,') && split.text.includes('by Co Name.') && !/Ana\nBell/.test(split.text),
+      'G14 a name or company with a line break stays on one line in the text part');
+
+    // Nothing else changed: no other email gets a text part, a tracking override or the block.
+    const others: Array<[string, Msg | undefined]> = [];
+    for (const w of [...WELCOMES.slice(1), ...NETRAOPS_ONLY]) {
+      for (const over of [{}, { company: 'throw' as const }]) others.push([w.name, (await run(over, w.send)).delivered[0]]);
+    }
+    check(others.length === 8 && others.every(([, m]) => m !== undefined && !('text' in m) && !('trackingSettings' in m) && !m.html.includes('src=welcome_email')),
+      `G15 ${others.length} sends of the other account emails (secondary admin, client, primary admin, password reset), with and without a letterhead: no text part, no tracking override, no app block`);
   }
 
   section('S — SendGrid refuses a letterhead message');
