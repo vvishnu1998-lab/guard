@@ -15,7 +15,7 @@
  *      and subject, and BASE's visible text, but for the dates, rewritten as
  *      listed, each as often as listed. The incident alert and the daily report.
  *      (Byte for byte until B5: N182 then inlined every style on purpose, and
- *      scripts/test-letterhead-b5.ts holds the look pixel-identical to BASE.)
+ *      scripts/test-letterhead-b5.ts holds every element's styles to BASE's.)
  *   D  the dates: "Oct 12, 2026" in subjects and bodies, in the site's zone
  *      under a UTC and a Pacific process; no day-first date left. (D5, the
  *      other nine templates byte-identical to BASE, moved to B5's harness when

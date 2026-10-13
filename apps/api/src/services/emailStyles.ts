@@ -8,7 +8,8 @@
  * each element carries its rule inline, followed by its own inline style,
  * which wins where both set a property, as it did over the class. So a client
  * that honoured the block sees the same email, and Gmail now sees it too
- * (scripts/test-letterhead-b5.ts compares the two renders pixel by pixel).
+ * (scripts/test-letterhead-b5.ts holds every element to the declarations the
+ * block and its own style gave it).
  *
  * Descendant rules (".hdr h1", ".kpi .n", ".rrow p") are applied to those
  * descendants by hand.
