@@ -49,6 +49,16 @@ const nextConfig = {
         destination: '/privacy',
         permanent: true,
       },
+      // app.netraops.com serves the whole site (it is the host portal links in
+      // emails use), but the guard app has ONE canonical URL on www. Limited to
+      // this single path on purpose: /admin, /client and /vishnu links on the
+      // app host must keep working.
+      {
+        source: '/app',
+        has: [{ type: 'host', value: 'app.netraops.com' }],
+        destination: 'https://www.netraops.com/app',
+        permanent: true,
+      },
     ];
   },
 };
