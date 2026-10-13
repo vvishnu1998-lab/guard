@@ -27,6 +27,7 @@ import {
   POWERED_BY_HTML, type MailLetterhead,
 } from './letterhead/email';
 import { ES, emailPage } from './emailStyles';
+import { NO_CLICK_TRACKING, appBlockHtml, appBlockText } from './emailAppBlock';
 
 // Central SendGrid failure accounting. Called from every sgMail.send catch
 // site so delivery failures are sliceable by workflow when triaging.
@@ -2034,17 +2035,42 @@ export async function sendHandoffNudgeFyi(historyId: string, minutesLate: number
  * before any send, so a render that throws reaches the caller as it always
  * did. withLetterhead swaps REPLY_TO for the company's contact email when the
  * letterhead has a usable one.
+ *
+ * A render that returns a `text` part (E1: the guard welcome) gets it sent as
+ * the text/plain alternative, together with SendGrid click tracking turned off
+ * for that message. A render with no `text` (the other welcomes) produces
+ * exactly the message it always did: same keys, same values. Both branches,
+ * the letterhead one and sendLetterheadOrPlain's plain resend after a 400,
+ * go through here, so neither can lose the text part or the override.
  */
 function accountMessage(
   to: string,
-  render: (mail: MailLetterhead | null) => { subject: string; html: string },
+  render: (mail: MailLetterhead | null) => { subject: string; html: string; text?: string },
   mail: MailLetterhead | null,
 ): (m: MailLetterhead | null) => sgMail.MailDataRequired {
   const plain = render(null);
   const lettered = mail ? render(mail) : null;
+  const textPart = (r: { text?: string }) => (r.text !== undefined ? { text: r.text, trackingSettings: NO_CLICK_TRACKING } : {});
   return (m) => (m && lettered
-    ? withLetterhead({ to, from: FROM, replyTo: REPLY_TO, subject: lettered.subject, html: lettered.html }, m)
-    : { to, from: FROM, replyTo: REPLY_TO, subject: plain.subject, html: plain.html });
+    ? withLetterhead({ to, from: FROM, replyTo: REPLY_TO, subject: lettered.subject, html: lettered.html, ...textPart(lettered) }, m)
+    : { to, from: FROM, replyTo: REPLY_TO, subject: plain.subject, html: plain.html, ...textPart(plain) });
+}
+
+/** One line of text/plain: a name or company is one line, so control characters become spaces. */
+function oneLine(s: unknown): string {
+  return String(s ?? '').replace(/[\u0000-\u001F\u007F]+/g, ' ').trim();
+}
+
+/**
+ * welcomeContactHtml's sentence for the text/plain part. It must name the same
+ * route (the harness compares the two): reply, else the primary admin, else
+ * NetraOps support.
+ */
+function welcomeContactText(mail: MailLetterhead, primaryAdminEmail: string | null): string {
+  const company = oneLine(mail.companyName);
+  if (mail.replyTo) return `Questions? Reply to this email to reach ${company}.`;
+  if (primaryAdminEmail) return `Questions? Contact ${company} at ${oneLine(primaryAdminEmail)}.`;
+  return `Questions? Contact NetraOps support at ${REPLY_TO}.`;
 }
 
 /** The sign-in details every welcome carries, as before (escaped here). */
@@ -2129,18 +2155,37 @@ export function renderGuardWelcome(data: {
   temp_password: string;
 }, mail: MailLetterhead | null = null) {
   if (mail) {
-    return letteredWelcome(mail, {
+    const lettered = letteredWelcome(mail, {
       subject:           `Welcome to ${mail.companyName}: your guard account`,
       title:             `Welcome to ${mail.companyName}`,
       subtitleHtml:      'Guard account',
       name:              data.guard_name,
       introHtml:         `${escapeHtml(mail.companyName)} has created your guard account. You'll use the NetraOps app for your shifts.`,
       bodyHtml: `${credentialsHtml(data.guard_email, data.temp_password)}
-        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Download the NetraOps app</h3>
-        <p style="color:#555;font-size:13px;margin:0 0 4px">iOS: Coming to App Store soon — contact your admin for TestFlight access</p>
-        <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>`,
+        ${appBlockHtml()}`,
       primaryAdminEmail: data.primary_admin_email,
     });
+    const company = oneLine(mail.companyName);
+    return {
+      ...lettered,
+      text: [
+        `Hi ${oneLine(firstName(data.guard_name))},`,
+        '',
+        `${company} has created your guard account. You'll use the NetraOps app for your shifts.`,
+        '',
+        'Login credentials',
+        `Email: ${oneLine(data.guard_email)}`,
+        `Temporary password: ${oneLine(data.temp_password)}`,
+        "You'll be required to change this password on first login.",
+        '',
+        ...appBlockText(),
+        '',
+        welcomeContactText(mail, data.primary_admin_email),
+        '',
+        company,
+        'Powered by NetraOps',
+      ].join('\n') + '\n',
+    };
   }
   const contact = data.primary_admin_email
     ? `<p style="color:#555;font-size:13px;margin-top:20px">Questions? Contact your Company Admin: <a href="mailto:${escapeAttr(data.primary_admin_email)}" style="color:#F59E0B">${escapeHtml(data.primary_admin_email)}</a></p>`
@@ -2166,14 +2211,32 @@ export function renderGuardWelcome(data: {
         <p style="color:#DC2626;font-size:13px;font-weight:600;margin:0 0 24px">
           <em>You'll be required to change this password on first login.</em>
         </p>
-        <h3 style="font-size:14px;color:#333;margin:20px 0 8px">Download the NetraOps app</h3>
-        <p style="color:#555;font-size:13px;margin:0 0 4px">iOS: Coming to App Store soon — contact your admin for TestFlight access</p>
-        <p style="color:#555;font-size:13px;margin:0 0 8px">Android: Coming to Play Store soon</p>
+        ${appBlockHtml()}
         ${contact}
       </div>
       <div style="${ES.footer}">NetraOps</div>
     </div>`);
-  return { subject: '[NetraOps] Welcome — Your Guard Account', html };
+  const text = [
+    'Welcome to NetraOps',
+    '',
+    `Hi ${oneLine(data.guard_name)},`,
+    '',
+    `An account has been created for you on NetraOps by ${oneLine(data.company_name)}.`,
+    '',
+    'Login credentials',
+    `Email: ${oneLine(data.guard_email)}`,
+    `Temporary password: ${oneLine(data.temp_password)}`,
+    "You'll be required to change this password on first login.",
+    '',
+    ...appBlockText(),
+    '',
+    data.primary_admin_email
+      ? `Questions? Contact your Company Admin: ${oneLine(data.primary_admin_email)}`
+      : `Questions? Contact NetraOps Support: ${REPLY_TO}`,
+    '',
+    'NetraOps',
+  ].join('\n') + '\n';
+  return { subject: '[NetraOps] Welcome — Your Guard Account', html, text };
 }
 
 export async function sendGuardWelcomeEmail(args: {
