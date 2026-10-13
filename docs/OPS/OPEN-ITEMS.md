@@ -4834,6 +4834,12 @@ Before the deadline, with time for guards to install:
 Suggested act-by date: **2026-11-14**, two weeks ahead, since each guard has to act on their
 own phone. Unrelated to F2, which is lifted (`FREEZES.md`). **Size S, Tier 2.**
 
+**Update 2026-10-13 (store-links rollout; sources named per line):**
+- **The app is on the App Store now.** Public iTunes lookup (read by me, 2026-10-13): "Netraops", Calvern LLC, **version 1.0.17, released 2026-10-12 17:19:30Z**. The "Pending Developer Release" row in `STATE.md` is history.
+- **Probably the same binary as build 48** (UNVERIFIED: the Build row on the 1.0.17 version page in App Store Connect settles it; the lookup shows only the version). If so, a guard's TestFlight copy has nothing newer to update to: the store page should show **Open**, not Update, and Apple documents no automatic swap. Do not write guard copy around an Update button.
+- **Expiry is 90 days from upload, not 60:** earliest lapse **Fri 2026-11-27 17:21 PST** (`EXPIRIES.md` E16). The act-by date stays 2026-11-14.
+- **Plan (Vishnu, 2026-10-13):** a pilot on Vishnu's own iPhone first (open the store link, note the button, tap it; record whether the login and an offline item survive and which update id shows after one restart); delete-first as the baseline with a safe-to-switch gate (off shift, sync everything, password known, at least 4 hours to the next shift); the admin-relayed text is the primary channel; never press Expire Build; never use RESEND WELCOME (it rotates the password and revokes sessions). See N186: the store listing is US-only until Vishnu fixes it.
+
 ## New from the Railway deploy-trigger and build review (2026-09-29)
 
 Read-only: `railway environment config --json`, `railway deployment list --json`,
@@ -6064,3 +6070,42 @@ verified 2026-10-13 by Vishnu, on B5's 8-email test batch (STATE.md, #106).
 - **Decision (Vishnu, 2026-10-13):** cause unknown, affecting only the no-letterhead incident alert. Parked as
   low priority, with no more test sends for it.
 - **Size: unknown. Tier 1** (a fix would be a merge to main; cosmetic, client-visible).
+
+## New from the store-links rollout (2026-10-13)
+
+The audit register is `docs/OPS/audits/store-links/phase1_register.csv` (518 rows, 209 negatives). Items below say who verified what.
+
+### N186 — The iOS listing is available in the US storefront only (Vishnu fixing it in App Store Connect)
+
+verified 2026-10-13 by me, read-only and public: the iTunes lookup for id 6769264985 returns the app for `us` and **zero results for ca, gb, au, in, mx, de, fr, jp, ph, sg and ae**; `apps.apple.com/{ca,gb,in}/app/id6769264985` return 404 while `/us` resolves 200 (the region-less URL of record redirects to `/us/…`). About 27 hours after the 17:19Z release, longer than Apple's own 24-hour window, so it reads as availability, not lag. A guard whose Apple ID is in another storefront cannot install after deleting TestFlight, which matters before any delete-first wave (N153).
+- **Decision (Vishnu, 2026-10-13):** he sets territory availability in App Store Connect himself.
+- **To close:** re-run the lookup per storefront Vishnu intends; each returns 1. **Size S. Tier 2** (a console change, Vishnu).
+
+### N187 — Store badge artwork: both badges ship together, in one PR
+
+verified 2026-10-13 by me: PR #108 ships `/app` with **text links** and no badge artwork. **Decision (Vishnu, 2026-10-13): merge with text links now; wire both badges in one follow-up PR once Google's file lands; never ship the Apple badge alone.**
+- Apple: the black US-UK SVG from Apple's badge bundle is in the store-app worktree, **uncommitted on purpose**, sha256 `a26fc5b38380272c92e9019a2eb8b45542a66814b3e2b203772db8904b9fb99f` (10,804 bytes, 119.66 x 40, scanned clean), with a provenance record beside it.
+- Google: **pending Partner Marketing Hub approval** (about 1 business day, per Vishnu). Needed: the unaltered file, source, sha256, natural size, and a measured *visible* height (Google's must be at least Apple's; Apple's at least 40 px). Re-read the Hub's current legal line.
+- `STORE_ARTWORK` in `apps/web/lib/storeLinks.ts` is empty until then; `check:store-links` prints "NOT YET (text link)".
+- **Nit for this PR (Vishnu, 2026-10-13, after his iPhone test of #108):** hide the "No Google Play on your phone, or it won't install? Ask your company admin." line on iOS. It sits outside `#store-links`, so the platform marker does not reach it: put it inside the group or give it its own `group-data-[platform=ios]:hidden`.
+- **Apple campaign attribution:** `APPLE_PROVIDER_TOKEN` is empty. It exists only after Vishnu creates the first campaign link in App Store Connect; until then the App Store link is the bare URL of record. Apple hides a campaign under 5 users, so with about 24 iPhone guards most per-placement rows will be blank: count with `/app` page views.
+- **Size S. Tier 1** (a web PR).
+
+### N188 — Store-links rollout: what still has to link to `/app`
+
+verified 2026-10-13: after #108 **only the sitemap links to `/app`**. Each below is its own PR, merged and verified before the next opens; the order and the `src` tag for each placement are in `apps/web/lib/storeLinks.ts`.
+- **E1, the guard welcome email** (the P0: every new guard and every RESEND WELCOME still gets "Coming to App Store soon — contact your admin for TestFlight access", in two copies in `email.ts`). Built; copy approved by Vishnu 2026-10-13. **One test email was sent to Vishnu only at 15:44:33 PT** (SendGrid sandbox 200, then 202, message id `jQuYi7CIT6C51lzCXQM6qA`, through `railway run` and a guarded one-off script: hard-coded recipient, dry-run by default); his Gmail check (Show original: the two links are literal and not rewritten to a SendGrid host; the text part; the button) is pending.
+- **W2, the public site:** step 02, nav, three footers, FAQ ("iPhone or Android phone"), `/portal`, `/admin/login`, `/support`, `/data-deletion`, `/demo`.
+- **W3, the admin Guards page:** the "Guard added" banner, the credentials banner and COPY text (the failed-email hand-off carries no app line), a Guard app panel with a QR.
+- **M1, the guard app (`batch/mobile-19`, JS-only, OTA):** Profile About rows, a login helper line, per-platform store copy so the iOS bundle never contains "Google Play" (Apple 2.3.10), and an OTA-export grep for it.
+- **Migration (N153):** the pilot, the admin-relayed message, the in-app card (after the pilot), a one-time push, an owner-only email.
+- **Video and text channels:** the description link and pinned comment (needs YouTube Advanced access), signatures, the support@ canned reply.
+- **Size M overall. Tier 1 for each web/API PR; Tier 2 for anything sent to guards.**
+
+### N189 — Observed during the store-links audit, UNVERIFIED (agent-read; check before acting)
+
+Not verified by me; each came from an audit agent reading source and was re-opened by a second agent, and none was tested live.
+- **Web Analytics sees full URLs.** `apps/web/app/layout.tsx` mounts `<Analytics />` with no `beforeSend`; the script posts `location.href`. `PreviewBootstrap` removes the admin client-preview token (`?preview=…`) from the address only after mount, so the token may reach the analytics beacon. `/privacy` names no analytics provider. The Vercel plan is itself unverified (N24). A `beforeSend` that maps `/app?src=x` to a path and drops every other query would fix both. **Size S. Tier 1.**
+- **`apps/mobile/maestro/smoke.yaml` holds a plaintext test login** (values not recorded here), and says it runs against prod. If that account is live, rotate it (Tier 2). The Google Maps key restrictions are not in the repo: check, in Cloud Console, that the Android restriction allows the Play app-signing SHA-1, not only the EAS upload certificate.
+- **Claims that outrun the code:** `docs/app-store-submission.md:21` advertises Face ID / Touch ID sign-in and `/privacy` §4 repeats it conditionally, but `apps/mobile` has no biometric call; the live listing text was not read. The iOS listing name is "Netraops" (public lookup) while the brand and Play are "NetraOps"; `/terms` and `/privacy` do not name Calvern LLC, the store publisher (`/data-deletion` does). Wording is a Vishnu / counsel call.
+- **Size S each. Tier 1 unless noted.**

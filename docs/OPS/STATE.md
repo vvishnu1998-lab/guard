@@ -264,6 +264,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-13 — PR #108, /app: the one URL for the guard app (a static page, the `src` tag registry, the app-host redirect), by OVERRIDE — `check:app-page` passes against www ~15:08 PT; iPhone tap PASSED (Vishnu); Search Console: Vishnu, the evening of 10-13, not a blocker
+
+| thing | value |
+|---|---|
+| merge | PR #108 merged as `875a75d` at **15:04:58 PT (22:04:58Z) by OVERRIDE**. Vishnu: "OVERRIDE — merge #108 now. After deploy: run check:app-page against www, confirm /app loads on my iPhone (I'll tap it), then Search Console URL Inspection." Prechecks: head `c9f538a` directly on `b9335d6`, MERGEABLE/CLEAN, 5 of 5 checks green (the three required contexts, Vercel, Vercel Preview Comments). `gh pr merge --merge --match-head-commit c9f538a…`. Before it, 15:04:47 PT: 3 STARNET sessions open, last ping 15:01:38 PT, control counts matching. |
+| Railway | `45b817a2-3654-4d03-a3c1-9c0479774f92` **SUCCESS** at 15:07:16 PT from `875a75d` (pending 15:05:02). |
+| web | Vercel production on `875a75d`: success at 15:08:00 PT. |
+| health | `/health` commit `875a75d`, first seen 15:07:18 PT by a 10 s poll; `/health/crons` 20 jobs, `stale: []`. `/app` returned 200 from 15:08:01 PT (it was 404 at 15:05:09). |
+| restart window | 15:04:58–15:07:18 PT (merge to the first poll that saw the new commit; the container switch itself was NOT timed, so no overlap figure). STARNET, counts via `postgres-readonly`: **1 location ping and 1 notification landed**; 0 session starts or ends, 0 breaks, 0 checkpoint scans, 0 device claims, 0 guard auth events; the 3 open sessions stayed open. Control: 1 platform-wide ping, 0 platform-wide auth events. From 15:07:18 to ~15:08 PT: 0 of each. Not captured: the old container's last request (Railway logs were not read). |
+| verification | `APP_BASE=https://www.netraops.com npm run check:app-page` (from `apps/web`): every assertion passes, including 9 user agents (Googlebot Smartphone, Slackbot, WhatsApp, facebookexternalhit, none) getting one byte-identical 200 with no Location and no `Vary: User-Agent`, and `app.netraops.com/app?src=welcome_email` → 308 → the www URL with the query kept. **Control:** the same script, run against production before the merge, failed 404 on every check. **iPhone (Vishnu, 2026-10-13 afternoon PT): pass**: the App Store link only, no Google Play, no QR, and the button opens the NetraOps listing. Search Console URL Inspection: Vishnu, the evening of 2026-10-13 (no Chrome extension was connected to the session, so it could not be run from it); he said not to block on it. |
+| visible change | `/app` exists: a light tile with **text links** ("Available on the App Store" / "Available on Google Play"; no badge artwork yet: both badges ship together in one follow-up PR, Google's file is gated behind Partner Marketing Hub approval), a desktop-only QR, OG/Twitter card, canonical, `MobileApplication` JSON-LD with no rating/review/offers, and a sitemap entry. On a confident iPhone only the App Store link shows; on Android only Google Play; everyone else (iPad in desktop mode, crawlers with JavaScript, no JavaScript) sees both. No redirect anywhere. **Nothing links to `/app` yet** except the sitemap. |
+| audit | The Phase 1 register (518 rows) and negatives (209) are in `docs/OPS/audits/store-links/`. |
+
+---
+
 ## Shipped 2026-10-13 — PR #106, B5: the company letterhead on the admin alerts and account emails, every style inline (N182), month-name dates, by OVERRIDE — verified 2026-10-13 12:06 PT; Gmail verified ~12:40 PT
 
 | thing | value |
