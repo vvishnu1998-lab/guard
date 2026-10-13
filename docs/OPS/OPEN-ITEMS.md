@@ -3786,7 +3786,7 @@ decision first.
 
 ### N105 — the client-facing site-security PDF renders every date in UTC
 
-**FIXED by fix/pdf-polish (2026-10-11).** All five go through `services/pdf/dates.ts` in site time, and
+**SHIPPED 2026-10-11 as `c1a364f` (PR #101, by OVERRIDE; see STATE.md).** All five go through `services/pdf/dates.ts` in site time, and
 the report is the same bytes from a UTC process and a Pacific one (`scripts/test-pdf-polish.ts`, C1
 and C2). The extraction called for below was not needed: `scripts/test-letterhead-b3.ts` already renders
 this route over HTTP into a buffer. The severity coercion noted at the end is unchanged. N178 is a
@@ -5316,6 +5316,11 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
+- **Status 2026-10-12 (B4, built on `feat/letterhead-b4`):** the incident alert and the daily shift report carry
+  the letterhead of the company that runs the site, the logo as an inline (CID) attachment. A logo that is
+  missing, does not decode, weighs over 256 KB or is not ready within 2 s leaves the company name, and a
+  lookup that fails sends the email as before, but for B4's new dates (`scripts/test-letterhead-b4.ts`, A and
+  N). B5 is the last email stage.
 - **Status 2026-10-11 (B3, SHIPPED as `c278689`, PR #100):** the client's site security report now carries
   the letterhead of the company that runs the site (`letterheadForSite`). A lookup that fails leaves the
   PDF as it would be with no letterhead (`scripts/test-letterhead-b3.ts`, B1). STARNET's logo renders
@@ -5632,7 +5637,7 @@ letterhead up by the download token's site (`letterheadForSite`).
 
 ### N177 — the client report's hours total runs into its label from 100 hours up
 
-**FIXED by fix/pdf-polish (2026-10-11):** a total wider than "00.0" pushes the label right by the
+**SHIPPED 2026-10-11 as `c1a364f` (PR #101, by OVERRIDE; see STATE.md):** a total wider than "00.0" pushes the label right by the
 difference. Below 100 h nothing moves (`scripts/test-pdf-polish.ts`, C4: 110.2 h clears its label; 23.6 h
 and 7.9 h do not move).
 
@@ -5664,7 +5669,8 @@ verified 2026-10-11.
 
 ## New from the PDF polish pass (fix/pdf-polish, 2026-10-11)
 
-**Status:** this PR is the one small PR after B3 and before B4 (Vishnu, 2026-10-11). It polishes the two
+**Status: SHIPPED 2026-10-11 as `c1a364f` (PR #101, by OVERRIDE; see STATE.md).** It was the one small PR after
+B3 and before B4 (Vishnu, 2026-10-11). It polishes the two
 client-facing PDFs, the activity log and the site security report:
 - **Dates:** every date spells its month, in US order ("Sep 8, 2026"). en-GB's "11/10/2026" reads as
   November 10 to a US client. One style per document; times stay 24-hour.
@@ -5685,7 +5691,7 @@ shipped.
 
 ### N178 — the client report reads the portal's zone-less dates as UTC: its period starts a day early, and it covers 17:00 to 16:59 PT
 
-**FIXED by fix/n178-client-range (2026-10-11), option (a), API only.** `calendarDay()` (`services/dateRange.ts`)
+**SHIPPED 2026-10-11 as `edb2a45` (PR #103, by OVERRIDE; see STATE.md), option (a), API only.** `calendarDay()` (`services/dateRange.ts`)
 reads the day each bound names: a bare date or a zone-less date-time gives its date part; an instant gives its
 day in site time. The PDF (reports and sessions), the download panel's preview and the download link all
 filter through `siteLocalDayRange`'s whole-day form. The printed period is the same days, and the file is
@@ -5763,3 +5769,51 @@ verified 2026-10-11.
 - **Fix:** the same guard in every database harness (a `SHOW TimeZone` check beside `refuseUnlessLocal`), or
   `timezone = 'UTC'` in the local cluster's postgresql.conf.
 - **Size XS. Tier 0** (test only).
+
+## New from Phase B, stage B4 (2026-10-12)
+
+**Status: BUILT 2026-10-12 on `feat/letterhead-b4` (6 commits on `d6c8b7d`), not yet merged.** B4 puts the
+letterhead of the company that runs a site on the two client emails:
+- the incident alert (#10, `POST /api/reports`);
+- the daily shift report (#9, the 09:00 PT job).
+
+**Vishnu's decisions (2026-10-12):**
+- The logo travels as an inline CID attachment, never as a URL.
+- The company's brand leads; NetraOps appears only as "Powered by NetraOps".
+- The Reply-To is the company's contact email when it has one, and the footer's reply line is printed only
+  then (1a).
+- The email logo is capped at 256 KB (2a).
+- N167 applies, and with no letterhead nothing changes.
+
+**What changes:**
+- **Header:** white, with the logo in a 180×60 box, the company name and its contact lines, then the title
+  and "site · date". The footer keeps its lines and ends "Powered by NetraOps". One helper,
+  `services/letterhead/email.ts`, serves both emails.
+- **Dates:** both emails, subjects included, print "Oct 12, 2026" and "Oct 12, 2026, 2:14 AM PDT", the
+  PDFs' month-name style (Vishnu, 2026-10-12). The other templates keep the day-first style until B5.
+- **No letterhead, no change but those dates:** a lookup that fails sends today's payload byte for byte,
+  with only the listed date strings rewritten (`scripts/test-letterhead-b4.ts`, A).
+
+**A letterhead never stops an email.**
+- A logo that is missing, corrupt, over 256 KB or not ready within 2 s leaves the name. The fetch finishes
+  into the cache, and PDFs still wait up to 5 s.
+- If SendGrid refuses a letterhead message with a 400, the same email goes once more without the
+  letterhead, and Sentry gets `letterhead_email_refused` at most once an hour.
+
+**Found:**
+- **SendGrid field name:** `@sendgrid/helpers` passes attachment objects to the API as they are, so the
+  field must be `content_id`. A camelCase `contentId` would reach the API under a name it does not
+  define.
+- **A false footer line:** the footer has always said "Reply to this email to contact {company}", while
+  replies go to support@netraops.com. Letterhead emails print the line only when the Reply-To is the
+  company's. The no-letterhead email keeps it, as the no-change rule requires.
+
+**STARNET:** its logo is a 118,381-byte JPEG (an S3 HEAD on 2026-10-12, with Vishnu's approval), under the
+cap, so its clients' emails will carry it.
+
+**Not verified:** how Gmail, Outlook and Apple Mail show SendGrid's inline image; SendGrid does not
+document the MIME it builds.
+- Vishnu opened a multipart/related copy in Apple Mail (2026-10-12). The logo renders inline at the top,
+  the Reply-To is the company's, and there is no attachment chip at the bottom, only the paperclip in the
+  header.
+- After the merge, one real Star Guard test email to Vishnu's own address, with his approval.
