@@ -22,6 +22,7 @@ import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
 import { monthDayYear } from './pdf/dates';
+import { mailLetterheadForSite, mailHeaderHtml, mailFooterHtml, withLetterhead, type MailLetterhead } from './letterhead/email';
 
 // Central SendGrid failure accounting. Called from every sgMail.send catch
 // site so delivery failures are sliceable by workflow when triaging.
@@ -358,6 +359,43 @@ export const BASE_STYLE = `
   a.btn{display:inline-block;background:#F59E0B;color:#0B1526;font-weight:700;padding:10px 20px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:13px;margin-top:16px}
 `;
 
+// ── The company letterhead on client emails (Phase B, B4) ─────────────────────
+//
+// A letterhead never stops an email (N167). sendLetterheadOrPlain() sends the
+// message `build` makes with the letterhead. If SendGrid refuses it outright
+// (400: something in the Reply-To or the inline logo it will not take), the
+// same email goes once more as it went before letterheads, `build(null)`, and
+// Sentry hears about it at most once an hour per flow (the counting rule
+// above). Every other failure, and a failure of that plain resend, rejects as
+// before and is reported by the caller. With no letterhead it is one send of
+// today's message. `build` renders, so it runs inside the caller's async
+// callback: a render that throws rejects only that recipient.
+const LETTERHEAD_REFUSED_CAPTURE_MS = 60 * 60 * 1000;
+const letterheadRefusedAt = new Map<string, number>();
+
+async function sendLetterheadOrPlain(
+  build: (mail: MailLetterhead | null) => sgMail.MailDataRequired,
+  mail: MailLetterhead | null,
+  flow: string,
+): Promise<unknown> {
+  if (!mail) return sgMail.send(build(null));
+  try {
+    return await sgMail.send(build(mail));
+  } catch (err: any) {
+    if (sendgridStatus(err) !== '400') throw err;
+    console.warn(`[email] ${flow}: SendGrid refused the letterhead message (400); sending it without the letterhead`, err?.response?.body);
+    const now = Date.now();
+    if (now - (letterheadRefusedAt.get(flow) ?? 0) >= LETTERHEAD_REFUSED_CAPTURE_MS) {
+      letterheadRefusedAt.set(flow, now);
+      Sentry.captureMessage('letterhead_email_refused', {
+        level: 'warning',
+        tags: { flow: 'letterhead', email_flow: flow, status: '400' },
+      });
+    }
+    return sgMail.send(build(null));
+  }
+}
+
 // ── Email Type 1 — Incident Alert ─────────────────────────────────────────────
 
 const INCIDENT_SEVERITY_COLORS: Record<string, string> = {
@@ -370,7 +408,8 @@ export async function sendIncidentAlert(
 ) {
   // Fan out to EVERY active client linked to this site via the v36
   // client_sites junction — not just clients.site_id, which misses multi-site
-  // secondary sites (Finding #2). Reply-To is the shared support address —
+  // secondary sites (Finding #2). Reply-To is the company's contact email when
+  // its letterhead has one (B4); otherwise the shared support address, so
   // client replies route to NetraOps support rather than the per-tenant admin.
   const result = await pool.query(
     `SELECT s.name AS site_name,
@@ -399,6 +438,10 @@ export async function sendIncidentAlert(
   // site_name / site_tz / company_name are identical across rows.
   const { site_name, site_tz, company_name } = result.rows[0];
 
+  // The letterhead of the company that runs the site, looked up once per
+  // alert (B4). null, on any lookup failure, sends today's email unchanged.
+  const mail = await mailLetterheadForSite(siteId);
+
   // Render per-recipient (personalized greeting) and send in parallel. One bad
   // recipient must not suppress the others, so we don't throw — each send failure
   // goes to reportSendgridFailure, which counts it and rate-limits its Sentry
@@ -412,22 +455,27 @@ export async function sendIncidentAlert(
   // its own tag rather than through reportSendgridFailure.
   const outcomes = await Promise.allSettled(
     result.rows.map(async (row) => {
-      let rendered: { subject: string; html: string };
-      try {
-        rendered = renderIncidentAlert({
-          report_id:    report.id,
-          description:  report.description,
-          severity:     report.severity,
-          reported_at:  report.reported_at,
-          site_name,
-          site_tz,
-          client_name:  row.client_name,
-          company_name,
-        });
-      } catch (err) {
-        throw new EmailRenderError(err);
-      }
-      return sgMail.send({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject: rendered.subject, html: rendered.html });
+      // This recipient's message, with the letterhead `m` or with none (the
+      // plain resend). sendLetterheadOrPlain calls it inside this callback.
+      const build = (m: MailLetterhead | null): sgMail.MailDataRequired => {
+        let rendered: { subject: string; html: string };
+        try {
+          rendered = renderIncidentAlert({
+            report_id:    report.id,
+            description:  report.description,
+            severity:     report.severity,
+            reported_at:  report.reported_at,
+            site_name,
+            site_tz,
+            client_name:  row.client_name,
+            company_name,
+          }, m);
+        } catch (err) {
+          throw new EmailRenderError(err);
+        }
+        return withLetterhead({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject: rendered.subject, html: rendered.html }, m);
+      };
+      return sendLetterheadOrPlain(build, mail, 'incident_alert');
     }),
   );
 
@@ -458,9 +506,10 @@ export async function sendIncidentAlert(
 /**
  * Pure renderer for the incident alert email. Exported for testability —
  * mirrors the renderDailyShiftReport / renderMissedShiftAlert pattern.
- * Client-property tone: NetraOps-branded header, personalized greeting via
- * firstName(client_name), full description (no truncation), Pacific-time
- * timestamp, branded footer with company attribution + reply-to-company.
+ * Client-property tone: personalized greeting via firstName(client_name),
+ * full description (no truncation), site-time timestamp. With a letterhead
+ * (`mail`, B4) the company's header and footer stand where NetraOps' do;
+ * without one, the NetraOps header and footer of before, byte for byte.
  */
 export function renderIncidentAlert(data: {
   report_id:   string;
@@ -472,7 +521,7 @@ export function renderIncidentAlert(data: {
   site_tz?:    string | null;
   client_name: string | null;
   company_name: string;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
   const dateLabel  = monthDayYear(data.reported_at, tz);
   const greetName  = firstName(data.client_name);
@@ -496,13 +545,26 @@ export function renderIncidentAlert(data: {
   const portalBase = PORTAL.replace(/\/$/, '');
   const incidentUrl = `${portalBase}?report=${encodeURIComponent(data.report_id)}`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
+  // With a letterhead the company's header and footer replace NetraOps'; with
+  // none, these are the fragments of before, byte for byte.
+  const header = mail
+    ? mailHeaderHtml(mail, 'Incident Reported', `${escapeHtml(data.site_name)} · ${dateLabel}`)
+    : `<div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
       <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
-    </div>
+    </div>`;
+  const footer = mail
+    ? mailFooterHtml(mail, tz)
+    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in the site's local time zone (${tz}).<br/>
+      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
+      Reply to this email to contact ${escapeHtml(data.company_name)}.
+    </div>`;
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    ${header}
     <div class="body">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
@@ -518,11 +580,7 @@ export function renderIncidentAlert(data: {
         <a class="btn" href="${incidentUrl}">View Incident in Portal</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in the site's local time zone (${tz}).<br/>
-      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
-      Reply to this email to contact ${escapeHtml(data.company_name)}.
-    </div>
+    ${footer}
   </div>`;
 
   const subject = data.severity
