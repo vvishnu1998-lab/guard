@@ -10,14 +10,17 @@
 #     DATABASE_URL=... psql -c 'DROP ...'      prefix is DATABASE_URL=, not psql
 #     cd /tmp && git push origin main          prefix is cd
 #     bash -c 'railway up'                     prefix is bash
+#     git -C /some/dir push                    prefix is git -C (N183)
 #
 # This hook reads the whole command string and matches ANYWHERE in it, so those
 # shapes are caught. It is intentionally blunt: false positives are cheap
 # (rephrase the command), a false negative writes to production.
 #
 # Contract: tool input JSON on stdin. Exit 2 blocks the call and shows the
-# reason. Exit 0 allows. Any other exit is treated as non-blocking by the
-# harness, so every failure path here must exit 0 or 2 deliberately.
+# reason. Exit 0 allows, or, with a JSON "ask" decision on stdout, makes Claude
+# Code ask Vishnu first (a git push, N183). Any other exit is treated as
+# non-blocking by the harness, so every failure path here must exit 0 or 2
+# deliberately.
 
 set -uo pipefail
 
@@ -46,14 +49,64 @@ block() {
   exit 2
 }
 
+# A git push is a question for Vishnu, not a hard block (his decision,
+# 2026-10-13): the "ask" decision makes Claude Code prompt him in the app,
+# and the Claude Code docs say a hook's "ask" prompts even in auto mode, where
+# the classifier can still refuse the call but cannot approve it silently.
+# Reached only after every hard block below, so a command that pushes AND
+# does something blocked is still blocked.
+ask_push() {
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"guard.sh: %s needs Vishnu to approve it (N183)"}}\n' "$1"
+  exit 0
+}
+
 case "$COMMAND" in
   *"DATABASE_URL="*)                block "DATABASE_URL=" ;;
   *"postgres.railway.internal"*)    block "postgres.railway.internal" ;;
-  *"git push"*)                     block "git push" ;;
   *"railway up"*)                   block "railway up" ;;
   *"eas "*)                         block "eas " ;;
   *"vercel "*)                      block "vercel " ;;
   *"--set"*)                        block "--set" ;;
 esac
+
+case "$COMMAND" in
+  *"git push"*)                     ask_push "a git push" ;;
+esac
+
+# git's own options before the subcommand (N183): `git -C <dir> push`,
+# `git -c k=v push`, `git --git-dir=<d> push`, `/usr/bin/git push`, a doubled
+# space. The case above matches only the literal "git push", and the deny
+# list only commands that start with it; on 2026-10-13 `git -C <dir> push`
+# passed both. This finds git anywhere in the command (lists, pipes and
+# `bash -c "..."` strings included), steps over its options, and asks when
+# the subcommand is push. The program uses only double quotes, since it sits
+# inside single quotes; a command it cannot tokenize falls back to a plain
+# word check, so it fails closed.
+if printf '%s' "$COMMAND" | python3 -c '
+import re, shlex, sys
+TAKES_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+def tokens(s):
+    lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    return list(lex)
+def pushes(s, depth=0):
+    try:
+        toks = tokens(s)
+    except ValueError:
+        return re.search(r"\bgit\b.*\bpush\b", s, re.S) is not None
+    for i, t in enumerate(toks):
+        if depth < 3 and any(c.isspace() for c in t) and pushes(t, depth + 1):
+            return True
+        if t == "git" or t.endswith("/git"):
+            j = i + 1
+            while j < len(toks) and toks[j].startswith("-"):
+                j += 2 if toks[j] in TAKES_VALUE else 1
+            if j < len(toks) and toks[j] == "push":
+                return True
+    return False
+sys.exit(0 if pushes(sys.stdin.read()) else 1)
+'; then
+  ask_push "a git push"
+fi
 
 exit 0

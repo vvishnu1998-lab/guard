@@ -36,6 +36,9 @@ const D = new Date('2026-03-01T16:00:00Z');
 // take (so no reply line). Logo null: the attachment is not text.
 const POISON_LH = mailLetterhead({ companyName: POISON, contactEmail: POISON, phone: POISON, address: POISON,
   licenceNumber: POISON, website: POISON, logo: null });
+// The same, with a contact email SendGrid takes: the welcome's contact line then says "reply" (N184).
+const POISON_LH_REPLY = mailLetterhead({ companyName: POISON, contactEmail: 'ops@example.com', phone: POISON, address: POISON,
+  licenceNumber: POISON, website: POISON, logo: null });
 
 /** Tags that must still be TAGS after escaping. Per-template. */
 type Case = { name: string; out: { subject: string; html: string }; markup: string[]; subjectHasPoison: boolean };
@@ -105,6 +108,22 @@ const cases: Case[] = [
   { name: 'clientWelcome', markup: ['<table role="presentation" width="100%"', '<div style="background:#fff;border-radius:8px'], subjectHasPoison: false,
     out: E.renderClientWelcome({ client_name:POISON, client_email:POISON, company_name:POISON,
       site_names:POISON, primary_admin_email:POISON, temp_password:'Abc23xyz' } as any) },
+
+  // N184: under a letterhead the company's name is in the subject (raw), the
+  // header and the intro. POISON_LH has no usable contact email, so the contact
+  // line names the (poisoned) primary admin; POISON_LH_REPLY has one, so it says
+  // "reply" with the company's name.
+  { name: 'guardWelcome+letterhead', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<ul style=', '<div style="background:#f5f5f5;padding:14px 28px'], subjectHasPoison: true,
+    out: E.renderGuardWelcome({ guard_name:POISON, guard_email:POISON, company_name:POISON,
+      primary_admin_email:POISON, temp_password:'Abc23xyz' }, POISON_LH) },
+
+  { name: 'secondaryAdminWelcome+letterhead', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<ul style=', '<a href="mailto:'], subjectHasPoison: true,
+    out: E.renderSecondaryAdminWelcome({ admin_name:POISON, admin_email:POISON, company_name:POISON,
+      creator_name:POISON, primary_admin_email:POISON, temp_password:'Abc23xyz' } as any, POISON_LH) },
+
+  { name: 'clientWelcome+letterhead', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<ul style=', '<div style="background:#f5f5f5;padding:14px 28px'], subjectHasPoison: true,
+    out: E.renderClientWelcome({ client_name:POISON, client_email:POISON, company_name:POISON,
+      site_names:POISON, primary_admin_email:POISON, temp_password:'Abc23xyz' } as any, POISON_LH_REPLY) },
 ];
 
 console.log(`[check-email-escaping] ${cases.length} templates, poison = ${POISON}\n`);

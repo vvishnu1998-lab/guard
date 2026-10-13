@@ -5,11 +5,16 @@
       "Bash(railway redeploy*)",
       "Bash(eas *)",
       "Bash(vercel *)",
-      "Bash(git push*)",
       "Bash(psql *DATABASE_URL*)",
       "Bash(*postgres.railway.internal*)",
       "Bash(railway variables --set*)",
       "Bash(railway variable set*)"
+    ],
+    "ask": [
+      "Bash(git push*)",
+      "Bash(git -C * push*)",
+      "Bash(git -c * push*)",
+      "Bash(git --* push*)"
     ]
   },
   "hooks": {

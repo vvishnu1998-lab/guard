@@ -31,7 +31,10 @@
  *   W  account emails (D1a, D2a): the company's guard, secondary-admin and
  *      client welcomes carry its letterhead and send replies to it; the
  *      primary-admin welcome and the password reset stay NetraOps', with no
- *      lookup. No "Do not reply" anywhere.
+ *      lookup. No "Do not reply" anywhere. Under a letterhead each welcome is
+ *      the company's own (N184): its subject, header and intro, and one
+ *      contact line naming the footer's route (reply; else the primary admin;
+ *      else NetraOps support).
  *   S  SendGrid refuses a letterhead message (400): each recipient gets one
  *      plain resend; other failures are reported as before.
  *   E  a poisoned profile is escaped in the company block and the footer.
@@ -133,6 +136,8 @@ type Msg = { to: unknown; from: unknown; replyTo?: unknown; subject: string; htm
 interface World {
   company: Row | null | 'throw';
   admins: string[];
+  /** The company's active primary admin, as the welcome senders read it. */
+  primaryAdmin: string | null;
   logo: Buffer;
   /** 'ok', or the status SendGrid rejects this message with. */
   sendgrid: (msg: Msg) => 'ok' | number;
@@ -170,7 +175,7 @@ const post = (id: string, site: string): Row => ({
 });
 
 function world(over: Partial<World> = {}): World {
-  return { company: FULL_ROW, admins: ADMINS, logo: LOGO, sendgrid: () => 'ok', ...over };
+  return { company: FULL_ROW, admins: ADMINS, primaryAdmin: ADMINS[0], logo: LOGO, sendgrid: () => 'ok', ...over };
 }
 let W: World = world();
 let stamp = 0;
@@ -203,8 +208,8 @@ inject('../src/db/pool', {
       if (/FROM geofence_violations v/.test(q)) return { rows: [BREACH_ROW] };
       if (/FROM shift_swap_requests ssr/.test(q) && /is_same_site/.test(q)) return { rows: [SWAP_ROW] };
       if (/FROM shift_swap_requests ssr/.test(q) && /duration_hours/.test(q)) return { rows: [HANDOFF_ROW] };
-      if (/creator\.name AS creator_name/.test(q)) return { rows: [{ company_name: 'Star Guard', creator_name: 'chris doe', primary_admin_email: ADMINS[0] }] };
-      if (/SELECT co\.name AS company_name, ca\.email AS primary_admin_email FROM companies co/.test(q)) return { rows: [{ company_name: 'Star Guard', primary_admin_email: ADMINS[0] }] };
+      if (/creator\.name AS creator_name/.test(q)) return { rows: [{ company_name: 'Star Guard', creator_name: 'chris doe', primary_admin_email: W.primaryAdmin }] };
+      if (/SELECT co\.name AS company_name, ca\.email AS primary_admin_email FROM companies co/.test(q)) return { rows: [{ company_name: 'Star Guard', primary_admin_email: W.primaryAdmin }] };
       if (/^SELECT name AS company_name FROM companies WHERE id = \$1/.test(q.trim())) return { rows: [{ company_name: 'Star Guard' }] };
       if (/^SELECT name FROM sites WHERE id = ANY/.test(q.trim())) return { rows: [{ name: 'Harbor Point Plaza' }] };
       throw new Error('unexpected SQL in the B5 harness: ' + q.slice(0, 90));
@@ -446,12 +451,17 @@ const ALERTS: Array<{ name: string; flow: string; send: (E: any) => Promise<unkn
   { name: 'handoff completed', flow: 'handoff_completed_fyi', send: (E) => E.sendHandoffCompletedFyi(HISTORY), label: null, foot: 'Automated alert', dates: 0 },
   { name: 'handoff nudge', flow: 'handoff_nudge', send: (E) => E.sendHandoffNudgeFyi(HISTORY, 12), label: null, foot: 'Automated alert', dates: 0 },
 ];
-const WELCOMES: Array<{ name: string; to: string; sub: string; send: (E: any) => Promise<unknown> }> = [
-  { name: 'guard welcome', to: 'alex.rivera@example.invalid', sub: 'Guard Account',
+/** N184 (Vishnu, 2026-10-13): the company's subject, header and intro; the body part each keeps. */
+const WELCOMES: Array<{ name: string; to: string; subject: string; title: string; sub: string; hi: string; intro: string; keeps: string; send: (E: any) => Promise<unknown> }> = [
+  { name: 'guard welcome', to: 'alex.rivera@example.invalid', subject: 'Welcome to Star Guard: your guard account', title: 'Welcome to Star Guard', sub: 'Guard account',
+    hi: 'Hi Alex,', intro: 'Star Guard has created your guard account. You\'ll use the NetraOps app for your shifts.', keeps: 'Download the NetraOps app',
     send: (E) => E.sendGuardWelcomeEmail({ guard_id: GUARD, guard_name: 'alex rivera', guard_email: 'alex.rivera@example.invalid', company_id: STAR_GUARD, temp_password: TEMP }) },
-  { name: 'secondary-admin welcome', to: 'pat.lee@example.invalid', sub: 'Admin Account',
+  { name: 'secondary-admin welcome', to: 'pat.lee@example.invalid', subject: 'Star Guard: your admin account', title: 'Your admin account', sub: 'Admin portal',
+    hi: 'Hi Pat,', intro: 'chris doe has made you an admin of Star Guard.', keeps: 'Access the admin portal app.netraops.com/admin',
     send: (E) => E.sendSecondaryAdminWelcomeEmail({ admin_id: ADMIN_ID, admin_name: 'pat lee', admin_email: 'pat.lee@example.invalid', company_id: STAR_GUARD, creator_admin_id: CREATOR_ID, temp_password: TEMP }) },
-  { name: 'client welcome', to: 'jordan.lee@example.invalid', sub: 'Client Portal',
+  { name: 'client welcome', to: 'jordan.lee@example.invalid', subject: 'Star Guard: your client portal account', title: 'Welcome to your client portal', sub: 'Harbor Point Plaza',
+    hi: 'Hi Jordan,', intro: 'Star Guard has set up a client portal account for you. Sign in to see live guard activity, daily shift reports, incident reports and geofence alerts for your sites.',
+    keeps: 'Sign in at app.netraops.com/client',
     send: (E) => E.sendClientWelcomeEmail({ client_id: CLIENT_ID, client_name: 'jordan lee', client_email: 'jordan.lee@example.invalid', company_id: STAR_GUARD, site_ids: [SITE], temp_password: TEMP }) },
 ];
 const NETRAOPS_ONLY: Array<{ name: string; send: (E: any) => Promise<unknown> }> = [
@@ -588,14 +598,14 @@ async function main(): Promise<void> {
       'A8 an empty profile: the company name alone above the band, no logo, no Reply-To');
   }
 
-  section('W — account emails (D1a, D2a)');
+  section('W — account emails (D1a, D2a, N184)');
   for (const w of WELCOMES) {
     const r = await run({}, w.send);
     const m = r.delivered[0];
     const html = m?.html ?? '';
     check(r.delivered.length === 1 && m?.to === w.to && html.includes('>Star Guard</div>') && FULL_LINES.every((l) => html.includes(`>${l}</div>`))
-      && html.includes('>Welcome</h1>') && html.includes(`>${w.sub}</p>`) && !html.includes('>WELCOME</h1>') && !html.includes('>NetraOps</div>'),
-      `W1 ${w.name}: Star Guard's header ("Welcome", "${w.sub}") replaces NetraOps'`);
+      && html.includes(`>${w.title}</h1>`) && html.includes(`>${w.sub}</p>`) && !html.includes('>WELCOME</h1>') && !html.includes('>NetraOps</div>'),
+      `W1 ${w.name}: Star Guard's header ("${w.title}", "${w.sub}") replaces NetraOps'`);
     check(html.includes('Provided by <strong style="color:#666">Star Guard</strong>.') && html.includes('Reply to this email to contact Star Guard.')
       && html.includes('Powered by NetraOps') && !html.includes('time zone'),
       `W2 ${w.name}: the footer says who sent it, that replies reach Star Guard, "Powered by NetraOps"; no time zone line`);
@@ -603,14 +613,24 @@ async function main(): Promise<void> {
       && r.lookups.length === 1 && r.lookups[0].params[0] === STAR_GUARD,
       `W3 ${w.name}: Reply-To the company's contact email; the logo inline; one lookup for Star Guard`);
     const base = await run({}, w.send, BASEMOD);
-    const body = (h: string) => { const t = visibleText(h); return t.slice(t.indexOf('Welcome to NetraOps'), t.lastIndexOf('NetraOps')); };
-    const plainBody = (h: string) => { const t = visibleText(h); return t.slice(t.indexOf('Welcome to NetraOps'), t.indexOf('Provided by')); };
-    check(base.delivered.length === 1 && body(base.delivered[0].html).trim() === plainBody(html).trim() && m?.subject === base.delivered[0].subject,
-      `W4 ${w.name}: the body and the subject are BASE's`);
+    const text = visibleText(html);
+    const questions = (t: string) => t.split('Questions?').length - 1;
+    check(m?.subject === w.subject && text.includes(`${w.hi} ${w.intro}`) && !text.includes('Welcome to NetraOps')
+      && text.includes('Login credentials Email:') && text.includes(`Temporary password: ${TEMP}`) && text.includes(w.keeps),
+      `W4 ${w.name} (N184): subject "${w.subject}"; "${w.hi}" and the intro; no "Welcome to NetraOps"; the sign-in details and "${w.keeps}" kept`);
+    check(questions(text) === 1 && text.includes('Questions? Reply to this email to reach Star Guard.'),
+      `W5 ${w.name} (N184): one contact line, "reply" — the route the footer names`);
     const noContact = await run({ company: { ...FULL_ROW, contact_email: null } }, w.send);
     const nm = noContact.delivered[0];
-    check(nm?.replyTo === SUPPORT && !nm.html.includes('Reply to this email') && nm.attachments?.length === 1,
-      `W5 ${w.name}: a company without a contact email: Reply-To ${SUPPORT}, no reply line, still its letterhead`);
+    const nt = visibleText(nm?.html ?? '');
+    check(nm?.replyTo === SUPPORT && !nm.html.includes('Reply to this email') && nm.attachments?.length === 1
+      && questions(nt) === 1 && (nm?.html ?? '').includes(`Questions? Contact Star Guard at <a href="mailto:${ADMINS[0]}" style="color:#F59E0B">${ADMINS[0]}</a>.`),
+      `W5b ${w.name}: no contact email: Reply-To ${SUPPORT}, no reply line; the contact line names the primary admin`);
+    const nobody = await run({ company: { ...FULL_ROW, contact_email: null }, primaryAdmin: null }, w.send);
+    const bt = visibleText(nobody.delivered[0]?.html ?? '');
+    check(nobody.delivered[0]?.replyTo === SUPPORT && questions(bt) === 1
+      && (nobody.delivered[0]?.html ?? '').includes(`Questions? Contact NetraOps support at <a href="mailto:${SUPPORT}" style="color:#F59E0B">${SUPPORT}</a>.`),
+      `W5c ${w.name}: no contact email and no primary admin: the contact line names NetraOps support, where the Reply-To goes`);
     const failed = await run({ company: 'throw' }, w.send);
     const fm = failed.delivered[0];
     const want = base.delivered[0] && rewritten(visibleText(base.delivered[0].html), noReply);
@@ -671,6 +691,12 @@ async function main(): Promise<void> {
       check(html.includes(`>${esc}</div>`) && html.includes(`License No. ${esc}`) && !html.includes('<Site') && !html.includes('&amp;amp;') && !html.includes('&amp;lt;'),
         `E1 ${name}: the name, address, phone, website and licence are escaped once`);
     }
+    // email.ts escapes text nodes for &, < and > (quotes are safe there); the letterhead also escapes ".
+    const escText = `O'Brien &amp; Sons &lt;Site "A"&gt;`;
+    const welcome = (await run({ company: poisoned }, WELCOMES[2].send)).delivered[0];
+    check(welcome?.subject === `${POISON}: your client portal account` && (welcome?.html ?? '').includes(`${escText} has set up a client portal account`)
+      && (welcome?.html ?? '').includes(`Questions? Reply to this email to reach ${escText}.`),
+      'E2 client welcome (N184): the company name is raw in the subject (text) and escaped once in the intro and the contact line');
   }
 
   finished = true;
