@@ -164,8 +164,9 @@ async function getActiveAdminEmails(companyId: string): Promise<string[]> {
 }
 
 // Per-recipient send via Promise.allSettled so one bad address doesn't
-// stop delivery to the rest. Each failure is Sentry-tagged with the
-// recipient in `extra` so the issues list shows per-recipient bounces.
+// stop delivery to the rest. Each failure is logged with its recipient and
+// counted by reportSendgridFailure, which reports per flow, not per
+// recipient (its `extra` argument is unused).
 // `build` gives the message with the company's letterhead or without it
 // (adminMessage), and each recipient gets sendLetterheadOrPlain's one plain
 // resend if SendGrid refuses the letterhead message (B5).
@@ -307,9 +308,12 @@ function escapeAttr(s: unknown): string {
 // assembled from already-escaped parts; the escaping happened inside them.
 //
 //   ES.* (emailStyles.ts)    static style strings inside style attributes (N182)
+//   header, footer, mail*Html(mail), POWERED_BY_HTML
+//                            the company letterhead (B4, B5); letterhead/email.ts
+//                            escapes the company's values itself
 //   typeBadgeHtml(...)       returns a <span> badge
 //   sevSpan        :256      <span> or ''
-//   reportRows     :710      .map() -> <div class="rrow"> blocks
+//   reportRows     :710      .map() -> report row <div> blocks
 //   incidentNote   :719      <p> or ''
 //   phoneRow       :910      <tr>…<a href="tel:…"> or ''
 //   blocks        :1024      .map() -> per-site <tr> groups
