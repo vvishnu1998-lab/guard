@@ -32,7 +32,9 @@
  *   - severity 'high' is BYTE-IDENTICAL to the pre-fix renderer. The baseline
  *     in __snapshots__/incidentAlert.high.json was captured from main at
  *     c70153a BEFORE the fix was written, so this genuinely pins the old
- *     output rather than blessing the new one.
+ *     output rather than blessing the new one. Since B4 (2026-10-12) the
+ *     baseline's three date strings are rewritten to the month-name style
+ *     ("Sep 22, 2026") before the compare; nothing else may differ.
  *
  * Same convention as the sibling tests: no test framework is installed in
  * apps/api, so this is a standalone ts-node script using node:assert.
@@ -134,9 +136,9 @@ check('emits no severity badge span', () => {
 });
 
 check('keeps the timestamp span', () => {
-  // fmtDTSite output for the fixed instant in America/Los_Angeles.
+  // fmtDTClient output for the fixed instant in America/Los_Angeles (B4).
   assert.ok(
-    nullOut.html.includes('22 Sep 2026'),
+    nullOut.html.includes('Sep 22, 2026, 7:19 PM PDT'),
     'html lost the timestamp span',
   );
 });
@@ -160,24 +162,40 @@ check('leaks neither NULL nor undefined into the subject', () => {
 });
 
 check('subject drops the severity segment', () => {
-  assert.strictEqual(nullOut.subject, 'Incident Reported — Test Site — 22 Sept 2026');
+  assert.strictEqual(nullOut.subject, 'Incident Reported — Test Site — Sep 22, 2026');
 });
 
-console.log('renderIncidentAlert — severity "high" (byte-compare vs main@c70153a)');
+console.log('renderIncidentAlert — severity "high" (byte-compare vs main@c70153a, dates rewritten)');
+
+// B4 (2026-10-12) moved this email's dates to the PDFs' month-name style. The
+// baseline is NOT re-captured: it still pins c70153a's bytes, and these three
+// rewrites, each required to occur exactly as often as listed, are the only
+// difference allowed. Anything else that moved fails the byte compare below.
+const DATE_REWRITES: Array<{ field: 'subject' | 'html'; from: string; to: string; times: number }> = [
+  { field: 'subject', from: '22 Sept 2026', to: 'Sep 22, 2026', times: 1 },
+  { field: 'html', from: 'Test Site · 22 Sept 2026', to: 'Test Site · Sep 22, 2026', times: 1 },
+  { field: 'html', from: '22 Sep 2026, 7:19 PM PDT', to: 'Sep 22, 2026, 7:19 PM PDT', times: 1 },
+];
 
 check('baseline snapshot exists', () => {
   assert.ok(fs.existsSync(SNAPSHOT), `missing ${SNAPSHOT}`);
 });
 
-check('html and subject are byte-identical to the pre-fix renderer', () => {
+check('html and subject are byte-identical to the pre-fix renderer, but for the dates', () => {
   const baseline = JSON.parse(fs.readFileSync(SNAPSHOT, 'utf8')) as {
     subject: string; html: string;
   };
+  const expected = { ...baseline };
+  for (const r of DATE_REWRITES) {
+    const n = expected[r.field].split(r.from).length - 1;
+    assert.strictEqual(n, r.times, `date rewrite ${JSON.stringify(r.from)} found ${n} time(s) in the baseline ${r.field}`);
+    expected[r.field] = expected[r.field].split(r.from).join(r.to);
+  }
   const actual = renderIncidentAlert({ ...BASE, severity: 'high' });
 
-  assert.strictEqual(actual.subject, baseline.subject, 'subject drifted');
+  assert.strictEqual(actual.subject, expected.subject, 'subject drifted');
   assert.strictEqual(
-    Buffer.compare(Buffer.from(actual.html, 'utf8'), Buffer.from(baseline.html, 'utf8')),
+    Buffer.compare(Buffer.from(actual.html, 'utf8'), Buffer.from(expected.html, 'utf8')),
     0,
     'html drifted',
   );

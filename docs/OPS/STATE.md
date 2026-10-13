@@ -264,16 +264,32 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-11 — PR #103, N178: the client report covers whole days in Pacific, by OVERRIDE — verified 2026-10-11 22:32 PT
+
+| thing | value |
+|---|---|
+| merge | PR #103 merged as `edb2a45` at **22:15:05 PT by OVERRIDE**. Vishnu: "OVERRIDE: open PR, wait for CI green + CLEAN, merge immediately, pinned head, no retry." The PR was opened at 22:10:43. At 22:15:00 the CI state was read once: 5/5 SUCCESS, CLEAN, head `1bc1c9e`, `main` `147430b`. Then one call, `gh pr merge 103 --merge --match-head-commit 1bc1c9e…`. The merge tree equals the head's tree (`e300011d`). |
+| Railway | `5987ea3c-4eaf-44fa-b728-bb61cc0fa267` **SUCCESS** at 22:16:08 PT from `edb2a45`. |
+| web | Vercel production on `edb2a45`: success at 22:16:43 PT. |
+| health | `/health` commit `edb2a45`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`ff81a87c`) served its last request at 22:16:03.95 and stopped at 22:16:21.6 PT. Over its whole life (21:51 to 22:16) it served 442 requests, 0 at 499 or above. The new deployment served 170 requests by 22:31, none at 499 or above; its only 4xx were the 401 control and the known GET `/api/inspections/session/:id` 404. Sentry, 22:12–22:32 PT: API, no issues; mobile, no new issues. |
+| restart window | 22:15:05–22:16:22, with no STARNET write (4 pings and 3 reports in the 15 minutes before). The old container issued two upload URLs (`POST /api/uploads/presign`, 22:15:38 and 22:15:42), and no submission followed them. From 22:15 to 22:45 PT the only guard submissions from any tenant were the 22:30 wave's three STARNET pings: no report, clock-in, clock-out, clock-in check, inspection, scan, task or dead letter (the newest of `offline_dead_letters`' 6 rows is from Oct 9). Whose the two were is unknown; no request failed. The 22:30 wave was the write-path control: GRD0001, GRD0027 and GRD0030 pinged (22:30:13–22:30:37), all 201 on `5987ea3c`. |
+| visible change | Client reports: "Oct 11" is Oct 11 00:00 to 23:59:59 PT, whatever form the portal sends the range in. The printed period is the days counted, the download panel's preview counts the same days, and the file is dated in Pacific. A daily report downloaded after 17:00 PT used to print "Oct 10 – Oct 11" and file the evening's reports under the next day. |
+
+---
+
 ## Shipped 2026-10-11 — PR #102, the nightly purge drains notifications in batches instead of halting at the row cap, by OVERRIDE — verified 2026-10-11 21:41 PT by the session that merged it
 
 | thing | value |
 |---|---|
 | merge | PR #102 merged as `147430b` at **21:35:08 PT by OVERRIDE**: Vishnu waived the ping gate. Head `b72ebae`. |
-| Railway | `9229e025-b631-4c26-87e6-0a505d0e0277` **SUCCESS** from `147430b`; `/health` reported `147430b` at 21:36:22.7 PT. At 21:50:03 PT a second deployment from the same commit, `ff81a87c-723a-4e46-848b-38ef21d51bdd`, replaced it (SUCCESS; `/health` `147430b` when re-checked at 21:51). It has no GitHub deployment record, so it was not a push; its cause is not recorded. |
+| Railway | `9229e025-b631-4c26-87e6-0a505d0e0277` **SUCCESS** from `147430b`; `/health` reported `147430b` at 21:36:22.7 PT. |
+| retention switches + redeploy (Vishnu, by OVERRIDE, between ping waves) | ~21:47 PT: Vishnu set two Railway variables on guard/production with `--skip-deploys`: `RETENTION_LIVE_STEPS=admin_client_previews,revoked_tokens,notifications` and `RETENTION_DRY_RUN=false`. ~21:49: his first `railway redeploy` failed (the CLI rejected `--environment`), and nothing restarted. ~21:50: `railway redeploy --service guard --yes` restarted it as `ff81a87c-723a-4e46-848b-38ef21d51bdd` (created 21:50:03.8 PT, Railway reason `redeploy`, same image `147430b`), so the container picked up the new variables. 21:53: he verified `/health` on `147430b` and that `printenv` shows both variables. The switch: `9229e025` served its last request at 21:51:03.9 and stopped at 21:51:30.2, and `ff81a87c` served its first at 21:51:25.6, so they overlapped with no gap. 0 5xx and 0 499 on either from 21:44 to 21:58 (96 + 31 requests). Over their whole lives `9229e025` served 123 requests and `ff81a87c` 442, none at 499 or above. No STARNET write landed 21:47–21:52. First live purge: 2026-10-13 00:00Z, those three steps only. |
+| first live purge | 2026-10-13 00:00Z (Mon 17:00 PT) on `5987ea3c` (release `edb2a45`): `dry_run=false`, live = admin_client_previews, revoked_tokens, notifications. Deleted 10,427 of 15,747 candidates in 0.3 s. **notifications** 10,000 of 12,464 due (drained; 2,464 left for later runs; the oldest remaining row is 2026-09-09 18:00:01.7Z, just after the predicted batch end). **admin_client_previews** 7 of 7. **revoked_tokens** 420, read from the Railway log line because Sentry scrubs this step. 29/29 steps ran: 0 halted, 0 errored, no unknown live steps, S3 0 deleted and 0 failed. The other 26 steps stayed dry (step1_ping_photos would delete 2,561, clock_in_photo_30d 271). The 2026-10-11 prediction was 12,461 → 10,000, 7, and ≈420–425. Sentry: only the info-level summary (NETRAOPS-API-C). |
 | web | Vercel production on `147430b`: success at 21:37:01 PT, per its GitHub deployment record. |
 | switchover | The old deployment (`ee2dd3a4`) served its last request at 21:36:19.9 PT; the merging session measured a 2.76 s gap to the new one. |
 | restart window | 21:33:08–21:41:22.7 PT: 0 STARNET writes (control: the 21:00 and 21:30 waves found 8 pings and 12 notifications), 0 5xx, 0 upstream errors, and 20/20 heartbeats ok. |
-| visible change | None. The purge is still a dry run, because RETENTION_DRY_RUN and RETENTION_LIVE_STEPS are unset in production. The next check is the 2026-10-13 00:00Z run summary: notifications `drained: true`, about 2.5k remaining, `any_halted: false`. |
+| visible change | None at the merge: the purge was still a dry run, because RETENTION_DRY_RUN and RETENTION_LIVE_STEPS were unset in production. The next check was the 2026-10-13 00:00Z run summary: notifications `drained: true`, about 2.5k remaining, `any_halted: false`. Vishnu turned three steps live at ~21:47 PT; see "retention switches + redeploy" and "first live purge" above. |
 | note | The remote branch `fix/retention-notifications-drain` was not deleted: `--delete-branch` failed locally. Deleting it is Vishnu's call. |
 
 ---

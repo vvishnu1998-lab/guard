@@ -187,9 +187,11 @@ const MUTATIONS: Record<string, { what: string; edits: Array<[string, string]> }
   M6: { what: 'flagged only when EVERY recipient got it', edits: [['  if (delivered === 0) {', '  if (delivered < recipients.length) {']] },
   M7: { what: 'one multi-recipient send instead of one message per recipient',
     edits: [['    recipients.map(async (r) => {', '    [recipients[0]].map(async (r) => {'], ['        to:      r.email,', '        to:      recipients.map((x) => x.email) as any,']] },
+  // M8 and M11 re-pointed at B4's code (2026-10-12): the render now runs in
+  // `build`, inside the async callback; each mutant still moves it outside.
   M8: { what: 'daily report rendered outside the async callback',
-    edits: [['    recipients.map(async (r) => {\n      let rendered: { subject: string; html: string };\n      try {\n        rendered = renderDailyShiftReport({ ...report, client_name: r.name });\n      } catch (err) {\n        throw new EmailRenderError(err);\n      }\n',
-      '    recipients.map((r) => ({ r, rendered: renderDailyShiftReport({ ...report, client_name: r.name }) })).map(async ({ r, rendered }) => {\n']] },
+    edits: [['    recipients.map(async (r) => {\n      const build = (m: MailLetterhead | null): sgMail.MailDataRequired => {\n',
+      '    recipients.map((r) => { renderDailyShiftReport({ ...report, client_name: r.name }, mail); return r; }).map(async (r) => {\n      const build = (m: MailLetterhead | null): sgMail.MailDataRequired => {\n']] },
   M9: { what: 'client-access gate dropped', edits: [["  if (sh.client_access_disabled_at) return skip('client_access_disabled', 'client access disabled');\n", '']] },
   M10: { what: 'inactive-company gate dropped', edits: [["  if (!sh.company_active) return skip('company_inactive', 'company inactive');\n", '']] },
   M12: { what: 'daily-report render failure also sent to the SendGrid failure reporter',
@@ -198,9 +200,10 @@ const MUTATIONS: Record<string, { what: string; edits: Array<[string, string]> }
     edits: [['      console.error(`[email] sendIncidentAlert: RENDER FAILED for ${email} (report=${report.id})`);\n',
       "      console.error(`[email] sendIncidentAlert: RENDER FAILED for ${email} (report=${report.id})`);\n      reportSendgridFailure('incident_alert', o.reason, { report_id: report.id });\n"]] },
   M11: { what: 'incident alert rendered synchronously in the .map again',
-    edits: [['    result.rows.map(async (row) => {\n      let rendered: { subject: string; html: string };\n      try {\n        rendered = renderIncidentAlert({',
-      '    result.rows.map((row) => {\n      let rendered: { subject: string; html: string };\n      {\n        rendered = renderIncidentAlert({'],
-      ['      } catch (err) {\n        throw new EmailRenderError(err);\n      }\n      return sgMail.send({ to: row.client_email', '      }\n      return sgMail.send({ to: row.client_email']] },
+    edits: [['    result.rows.map(async (row) => {\n      // This recipient',
+      '    result.rows.map((row) => {\n      // This recipient'],
+      ["      return sendLetterheadOrPlain(build, mail, 'incident_alert');",
+      '      const msg = build(mail);\n      return sgMail.send(msg);']] },
 };
 
 if (MODE === 'main') {

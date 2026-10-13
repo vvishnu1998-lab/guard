@@ -21,6 +21,8 @@ import { haversineDistance } from './geofence';
 import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
+import { monthDayYear } from './pdf/dates';
+import { mailLetterheadForSite, mailHeaderHtml, mailFooterHtml, withLetterhead, type MailLetterhead } from './letterhead/email';
 
 // Central SendGrid failure accounting. Called from every sgMail.send catch
 // site so delivery failures are sliceable by workflow when triaging.
@@ -357,6 +359,43 @@ export const BASE_STYLE = `
   a.btn{display:inline-block;background:#F59E0B;color:#0B1526;font-weight:700;padding:10px 20px;border-radius:6px;text-decoration:none;letter-spacing:1px;font-size:13px;margin-top:16px}
 `;
 
+// ── The company letterhead on client emails (Phase B, B4) ─────────────────────
+//
+// A letterhead never stops an email (N167). sendLetterheadOrPlain() sends the
+// message `build` makes with the letterhead. If SendGrid refuses it outright
+// (400: something in the Reply-To or the inline logo it will not take), the
+// same email goes once more as it went before letterheads, `build(null)`, and
+// Sentry hears about it at most once an hour per flow (the counting rule
+// above). Every other failure, and a failure of that plain resend, rejects as
+// before and is reported by the caller. With no letterhead it is one send of
+// today's message. `build` renders, so it runs inside the caller's async
+// callback: a render that throws rejects only that recipient.
+const LETTERHEAD_REFUSED_CAPTURE_MS = 60 * 60 * 1000;
+const letterheadRefusedAt = new Map<string, number>();
+
+async function sendLetterheadOrPlain(
+  build: (mail: MailLetterhead | null) => sgMail.MailDataRequired,
+  mail: MailLetterhead | null,
+  flow: string,
+): Promise<unknown> {
+  if (!mail) return sgMail.send(build(null));
+  try {
+    return await sgMail.send(build(mail));
+  } catch (err: any) {
+    if (sendgridStatus(err) !== '400') throw err;
+    console.warn(`[email] ${flow}: SendGrid refused the letterhead message (400); sending it without the letterhead`, err?.response?.body);
+    const now = Date.now();
+    if (now - (letterheadRefusedAt.get(flow) ?? 0) >= LETTERHEAD_REFUSED_CAPTURE_MS) {
+      letterheadRefusedAt.set(flow, now);
+      Sentry.captureMessage('letterhead_email_refused', {
+        level: 'warning',
+        tags: { flow: 'letterhead', email_flow: flow, status: '400' },
+      });
+    }
+    return sgMail.send(build(null));
+  }
+}
+
 // ── Email Type 1 — Incident Alert ─────────────────────────────────────────────
 
 const INCIDENT_SEVERITY_COLORS: Record<string, string> = {
@@ -369,7 +408,8 @@ export async function sendIncidentAlert(
 ) {
   // Fan out to EVERY active client linked to this site via the v36
   // client_sites junction — not just clients.site_id, which misses multi-site
-  // secondary sites (Finding #2). Reply-To is the shared support address —
+  // secondary sites (Finding #2). Reply-To is the company's contact email when
+  // its letterhead has one (B4); otherwise the shared support address, so
   // client replies route to NetraOps support rather than the per-tenant admin.
   const result = await pool.query(
     `SELECT s.name AS site_name,
@@ -398,6 +438,10 @@ export async function sendIncidentAlert(
   // site_name / site_tz / company_name are identical across rows.
   const { site_name, site_tz, company_name } = result.rows[0];
 
+  // The letterhead of the company that runs the site, looked up once per
+  // alert (B4). null, on any lookup failure, sends today's email unchanged.
+  const mail = await mailLetterheadForSite(siteId);
+
   // Render per-recipient (personalized greeting) and send in parallel. One bad
   // recipient must not suppress the others, so we don't throw — each send failure
   // goes to reportSendgridFailure, which counts it and rate-limits its Sentry
@@ -411,22 +455,27 @@ export async function sendIncidentAlert(
   // its own tag rather than through reportSendgridFailure.
   const outcomes = await Promise.allSettled(
     result.rows.map(async (row) => {
-      let rendered: { subject: string; html: string };
-      try {
-        rendered = renderIncidentAlert({
-          report_id:    report.id,
-          description:  report.description,
-          severity:     report.severity,
-          reported_at:  report.reported_at,
-          site_name,
-          site_tz,
-          client_name:  row.client_name,
-          company_name,
-        });
-      } catch (err) {
-        throw new EmailRenderError(err);
-      }
-      return sgMail.send({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject: rendered.subject, html: rendered.html });
+      // This recipient's message, with the letterhead `m` or with none (the
+      // plain resend). sendLetterheadOrPlain calls it inside this callback.
+      const build = (m: MailLetterhead | null): sgMail.MailDataRequired => {
+        let rendered: { subject: string; html: string };
+        try {
+          rendered = renderIncidentAlert({
+            report_id:    report.id,
+            description:  report.description,
+            severity:     report.severity,
+            reported_at:  report.reported_at,
+            site_name,
+            site_tz,
+            client_name:  row.client_name,
+            company_name,
+          }, m);
+        } catch (err) {
+          throw new EmailRenderError(err);
+        }
+        return withLetterhead({ to: row.client_email, from: FROM, replyTo: REPLY_TO, subject: rendered.subject, html: rendered.html }, m);
+      };
+      return sendLetterheadOrPlain(build, mail, 'incident_alert');
     }),
   );
 
@@ -457,9 +506,10 @@ export async function sendIncidentAlert(
 /**
  * Pure renderer for the incident alert email. Exported for testability —
  * mirrors the renderDailyShiftReport / renderMissedShiftAlert pattern.
- * Client-property tone: NetraOps-branded header, personalized greeting via
- * firstName(client_name), full description (no truncation), Pacific-time
- * timestamp, branded footer with company attribution + reply-to-company.
+ * Client-property tone: personalized greeting via firstName(client_name),
+ * full description (no truncation), site-time timestamp. With a letterhead
+ * (`mail`, B4) the company's header and footer stand where NetraOps' do;
+ * without one, the NetraOps header and footer of before, byte for byte.
  */
 export function renderIncidentAlert(data: {
   report_id:   string;
@@ -471,9 +521,9 @@ export function renderIncidentAlert(data: {
   site_tz?:    string | null;
   client_name: string | null;
   company_name: string;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
-  const dateLabel  = fmtDateSite(data.reported_at, tz);
+  const dateLabel  = monthDayYear(data.reported_at, tz);
   const greetName  = firstName(data.client_name);
   // `reports.severity` is NULL-able and nothing writes it — every production
   // row is NULL, so this is the ONLY path incident alerts have ever taken.
@@ -495,19 +545,32 @@ export function renderIncidentAlert(data: {
   const portalBase = PORTAL.replace(/\/$/, '');
   const incidentUrl = `${portalBase}?report=${encodeURIComponent(data.report_id)}`;
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
+  // With a letterhead the company's header and footer replace NetraOps'; with
+  // none, these are the fragments of before, byte for byte.
+  const header = mail
+    ? mailHeaderHtml(mail, 'Incident Reported', `${escapeHtml(data.site_name)} · ${dateLabel}`)
+    : `<div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Incident Reported</h1>
       <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
-    </div>
+    </div>`;
+  const footer = mail
+    ? mailFooterHtml(mail, tz)
+    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in the site's local time zone (${tz}).<br/>
+      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
+      Reply to this email to contact ${escapeHtml(data.company_name)}.
+    </div>`;
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    ${header}
     <div class="body">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
-        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
+        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTClient(data.reported_at, tz)}</span>
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
@@ -517,11 +580,7 @@ export function renderIncidentAlert(data: {
         <a class="btn" href="${incidentUrl}">View Incident in Portal</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in the site's local time zone (${tz}).<br/>
-      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
-      Reply to this email to contact ${escapeHtml(data.company_name)}.
-    </div>
+    ${footer}
   </div>`;
 
   const subject = data.severity
@@ -532,15 +591,27 @@ export function renderIncidentAlert(data: {
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────
 
-// Site-scoped calendar date for the subject/header ("14 May 2026").
+// Site-scoped calendar date ("14 May 2026") for the operator templates.
 // en-GB to match fmtDTSite's "14 May 2026, 10:01 PM PDT" — keeps subject
 // and body day-month-year order consistent. Falls back to Pacific when the
-// caller hasn't yet been threaded through with a site tz.
+// caller hasn't yet been threaded through with a site tz. The two client
+// emails use monthDayYear and fmtDTClient instead (below).
 function fmtDateSite(dt: Date | string, tz: string = PACIFIC): string {
   return new Date(dt).toLocaleDateString('en-GB', {
     day: '2-digit', month: 'short', year: 'numeric',
     timeZone: tz,
   });
+}
+
+// The two client emails (incident alert, daily shift report) print dates in
+// the PDFs' month-name style, subjects included: "Oct 12, 2026"
+// (services/pdf/dates.ts), not en-GB's "12 Oct 2026", which a US client can
+// misread and which wrote September "Sept" in the subject and "Sep" in the
+// body. Times keep the emails' own 12-hour clock and zone:
+// "Oct 12, 2026, 2:14 AM PDT". The other templates keep fmtDateSite and
+// fmtDTSite until B5.
+function fmtDTClient(dt: Date | string, tz: string): string {
+  return `${monthDayYear(dt, tz)}, ${fmtTimeSite(dt, tz)}`;
 }
 
 // Site-scoped time-only ("10:01 PM PDT"). Used for the same-day collapse
@@ -605,7 +676,8 @@ export class DailyReportDeliveryError extends Error {
 }
 
 export async function sendDailyShiftReport(shiftId: string): Promise<DailyReportOutcome> {
-  // Reply-To is the shared support address — client replies route to
+  // Reply-To is the company's contact email when its letterhead has one (B4);
+  // otherwise the shared support address, so client replies route to
   // NetraOps support rather than the per-tenant primary admin.
   const shiftResult = await pool.query(
     `SELECT sh.id, sh.scheduled_start, sh.scheduled_end, sh.site_id,
@@ -802,25 +874,32 @@ export async function sendDailyShiftReport(shiftId: string): Promise<DailyReport
     pings_expected:  pingsExpected,
   };
 
+  // The letterhead of the company that runs the site, looked up once per
+  // shift and only for a shift that is sent (B4). null sends today's email.
+  const mail = await mailLetterheadForSite(sh.site_id);
+
   // One message per recipient (the greeting is personalized), sent in
   // parallel. The render runs inside the async callback so a throw rejects
   // only that recipient's promise (see sendIncidentAlert).
   const outcomes = await Promise.allSettled(
     recipients.map(async (r) => {
-      let rendered: { subject: string; html: string };
-      try {
-        rendered = renderDailyShiftReport({ ...report, client_name: r.name });
-      } catch (err) {
-        throw new EmailRenderError(err);
-      }
-      const sendOpts: sgMail.MailDataRequired = {
-        to:      r.email,
-        from:    FROM,
-        replyTo: REPLY_TO,
-        subject: rendered.subject,
-        html:    rendered.html,
+      const build = (m: MailLetterhead | null): sgMail.MailDataRequired => {
+        let rendered: { subject: string; html: string };
+        try {
+          rendered = renderDailyShiftReport({ ...report, client_name: r.name }, m);
+        } catch (err) {
+          throw new EmailRenderError(err);
+        }
+        const sendOpts: sgMail.MailDataRequired = {
+          to:      r.email,
+          from:    FROM,
+          replyTo: REPLY_TO,
+          subject: rendered.subject,
+          html:    rendered.html,
+        };
+        return withLetterhead(sendOpts, m);
       };
-      await sgMail.send(sendOpts);
+      await sendLetterheadOrPlain(build, mail, 'daily_shift_report');
     }),
   );
 
@@ -882,9 +961,10 @@ export async function sendDailyShiftReport(shiftId: string): Promise<DailyReport
  * can render the same template against real shift data without invoking the
  * SendGrid path or writing daily_report_email_sent.
  *
- * All event timestamps render in America/Los_Angeles via fmtDTSite (PDT in
- * summer, PST in winter — abbreviation chosen by the runtime). Multi-tenant
- * per-site timezone support is logged as a separate follow-up.
+ * All event timestamps render in the site's zone (Pacific when it has none)
+ * via fmtDTClient, "Oct 12, 2026, 2:14 AM PDT" (PDT in summer, PST in
+ * winter — abbreviation chosen by the runtime). With a letterhead (`mail`,
+ * B4) the company's header and footer stand where NetraOps' do.
  */
 export function renderDailyShiftReport(data: {
   site_name:       string;
@@ -905,9 +985,9 @@ export function renderDailyShiftReport(data: {
   pings_submitted?: number;
   /** Trackable 30-min windows for the session, per services/pingWindows.ts. */
   pings_expected?:  number;
-}): { subject: string; html: string } {
+}, mail: MailLetterhead | null = null): { subject: string; html: string } {
   const tz         = data.site_tz ?? PACIFIC;
-  const dateLabel  = fmtDateSite(data.scheduled_start, tz);
+  const dateLabel  = monthDayYear(data.scheduled_start, tz);
   const totalHours = data.hours
     ? formatHoursHHMM(data.hours.actual_hours)
     : (data.total_hours != null ? `${parseFloat(String(data.total_hours))}h` : '—');
@@ -918,8 +998,8 @@ export function renderDailyShiftReport(data: {
   const pingsLabel = (data.pings_expected ?? 0) > 0
     ? `${data.pings_submitted ?? 0}/${data.pings_expected}`
     : '—';
-  const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
-  const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
+  const clockIn    = data.clocked_in_at  ? fmtDTClient(data.clocked_in_at,  tz) : '—';
+  const clockOut   = data.clocked_out_at ? fmtDTClient(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
 
   const borderColors: Record<string, string> = {
@@ -932,7 +1012,7 @@ export function renderDailyShiftReport(data: {
       r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description,
     );
     return `<div class="rrow" style="border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
-      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTSite(r.reported_at, tz)}</span></p>
+      <p style="margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTClient(r.reported_at, tz)}</span></p>
       <p style="margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
     </div>`;
   }).join('');
@@ -944,13 +1024,26 @@ export function renderDailyShiftReport(data: {
        </p>`
     : '';
 
-  const html = `<style>${BASE_STYLE}</style>
-  <div class="card">
-    <div class="hdr">
+  // As in renderIncidentAlert: the company's header and footer with a
+  // letterhead, the fragments of before, byte for byte, without one.
+  const header = mail
+    ? mailHeaderHtml(mail, 'Shift Report', `${escapeHtml(data.site_name)} · ${dateLabel}`)
+    : `<div class="hdr">
       <div class="brand">NETRAOPS</div>
       <h1 style="letter-spacing:0;font-size:24px;color:#fff;margin-top:6px">Shift Report</h1>
       <p style="color:#F59E0B;letter-spacing:0;font-size:13px;margin:6px 0 0 0">${escapeHtml(data.site_name)} · ${dateLabel}</p>
-    </div>
+    </div>`;
+  const footer = mail
+    ? mailFooterHtml(mail, tz)
+    : `<div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
+      All times shown in the site's local time zone (${tz}).<br/>
+      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
+      Reply to this email to contact ${escapeHtml(data.company_name)}.
+    </div>`;
+
+  const html = `<style>${BASE_STYLE}</style>
+  <div class="card">
+    ${header}
     <div class="body">
       <p style="font-size:15px;color:#333;margin:0 0 4px 0">Hi ${escapeHtml(greetName)},</p>
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">Here is the shift summary for your site.</p>
@@ -994,11 +1087,7 @@ export function renderDailyShiftReport(data: {
         <a class="btn" href="${PORTAL}">View Full Report in Portal</a>
       </div>
     </div>
-    <div class="footer" style="text-align:left;padding:18px 28px;line-height:1.7;color:#888">
-      All times shown in the site's local time zone (${tz}).<br/>
-      Provided by <strong style="color:#666">${escapeHtml(data.company_name)}</strong>.<br/>
-      Reply to this email to contact ${escapeHtml(data.company_name)}.
-    </div>
+    ${footer}
   </div>`;
 
   const subject = `Shift Report — ${data.site_name} — ${dateLabel}`;
