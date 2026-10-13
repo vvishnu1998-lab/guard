@@ -5987,16 +5987,26 @@ auto-mode classifier stopped it, as "Out-of-Place Publication".
 - **Fix (Vishnu, 2026-10-13, with the next code change):** match `push` as git's subcommand after any global
   options, in guard.sh and the deny list. Remove the two exact-command allow rules for
   `feat/letterhead-b5` from `.claude/settings.local.json` in the same change.
-- **Test:** guard.sh blocks `git push …`, `git -C <dir> push …`, `git -c k=v push …` and
-  `git --git-dir=<d> push …`, and allows `git -C <dir> log`, `git -C <dir> ls-remote origin` and
-  `git -C <dir> rev-parse HEAD`.
-- **Status 2026-10-13: BUILT on `feat/n184-welcomes`.** guard.sh tokenizes the command and blocks git's push
-  subcommand after any of git's own options. The deny list adds `Bash(git -C * push*)`, `Bash(git -c * push*)` and
-  `Bash(git --* push*)`; the first was tested live (it denies `git -C <dir> push`, lets `git -C <dir> log` run, and
-  without it the same push reached the shell). `scripts/ops/test-guard-hook.sh`: 31/31, and main's hook misses the
-  9 `git <options> push` shapes.
-- **After it merges no agent can push at all:** guard.sh blocks every push shape before any permission rule, and a
-  deny rule beats any allow rule. How a PR reaches GitHub after that is Vishnu's decision (pending, 2026-10-13).
+- **Test:** guard.sh stops `git push …`, `git -C <dir> push …`, `git -c k=v push …` and
+  `git --git-dir=<d> push …` (it asks; see the decision below), and allows `git -C <dir> log`,
+  `git -C <dir> ls-remote origin` and `git -C <dir> rev-parse HEAD`.
+- **Decision (Vishnu, 2026-10-13): a push ASKS him rather than being blocked.** So no agent push is silent, and
+  he stays out of the terminal.
+- **Status 2026-10-13: BUILT on `feat/n184-welcomes`.**
+  - guard.sh tokenizes the command and finds git's push subcommand after any of git's own options, in lists,
+    pipes and `bash -c "…"` strings.
+  - For every push shape it answers with a PreToolUse "ask" decision. The Claude Code docs say a hook's "ask"
+    prompts the user even in auto mode: the classifier can still refuse, but nothing approves the push silently.
+  - guard.sh's hard blocks (the production database and Railway paths, `eas`, `vercel`, `--set`) are checked
+    first, so a command that pushes and does something blocked is still blocked.
+  - The push rules moved from the deny list to an `ask` list: `Bash(git push*)`, `Bash(git -C * push*)`,
+    `Bash(git -c * push*)` and `Bash(git --* push*)`. Deny would beat any approval.
+  - `Bash(git -C * push*)` was tested live as a deny rule: it caught `git -C <dir> push`, let `git -C <dir> log` run,
+    and without it the same push reached the shell.
+  - `scripts/ops/test-guard-hook.sh`: 34/34. Main's hook gets all 14 push asks wrong: 9 shapes slip through and 5
+    are hard-blocked.
+- **The exact-command allow rules** for this branch's push and PR are removed from `.claude/settings.local.json`
+  once this is live in `~/guard`. "ask" replaces them.
 - **Size XS. Tier 1** (agent guardrails).
 
 ### N184 — the company's welcome emails name two contact routes and say "Welcome" twice
