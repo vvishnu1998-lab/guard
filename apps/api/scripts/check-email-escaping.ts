@@ -22,6 +22,7 @@
  *      in an inbox subject is a worse bug than the one being fixed.
  */
 import * as E from '../src/services/email';
+import { mailLetterhead } from '../src/services/letterhead/email';
 
 const POISON = `O'Brien & Sons <Site "A">`;
 const ESCAPED = `O'Brien &amp; Sons &lt;Site &quot;A&quot;&gt;`;
@@ -30,6 +31,11 @@ const ESCAPED_TEXT = `O'Brien &amp; Sons &lt;Site "A"&gt;`;   // text nodes leav
 let failures = 0;
 const fail = (t: string, m: string) => { failures++; console.log(`  FAIL  [${t}] ${m}`); };
 const D = new Date('2026-03-01T16:00:00Z');
+
+// B4: every letterhead field poisoned, and a contact email SendGrid would not
+// take (so no reply line). Logo null: the attachment is not text.
+const POISON_LH = mailLetterhead({ companyName: POISON, contactEmail: POISON, phone: POISON, address: POISON,
+  licenceNumber: POISON, website: POISON, logo: null });
 
 /** Tags that must still be TAGS after escaping. Per-template. */
 type Case = { name: string; out: { subject: string; html: string }; markup: string[]; subjectHasPoison: boolean };
@@ -46,6 +52,18 @@ const cases: Case[] = [
       hours:{ scheduled_hours:8, actual_hours:8, break_hours:0.5, violation_hours:0 } as any,
       reports:[{ report_type:'incident', severity:'high', description:POISON, reported_at:D }],
       tasks_completed:1, tasks_total:2, pings_submitted:3, pings_expected:4 }) },
+
+  { name: 'incidentAlert+letterhead', markup: ['<style>', '<table role="presentation"', '<h1 style=', '<div class="footer"'], subjectHasPoison: true,
+    out: E.renderIncidentAlert({ report_id:'r1', description:POISON, severity:'high', reported_at:D,
+      site_name:POISON, site_tz:'America/Los_Angeles', client_name:POISON, company_name:POISON }, POISON_LH) },
+
+  { name: 'dailyShiftReport+letterhead', markup: ['<style>', '<table role="presentation"', 'class="rrow"', '<div class="footer"'], subjectHasPoison: true,
+    out: E.renderDailyShiftReport({ site_name:POISON, site_tz:'America/Los_Angeles', scheduled_start:D,
+      guard_name:POISON, badge_number:POISON, client_name:POISON, company_name:POISON,
+      clocked_in_at:D, clocked_out_at:D, total_hours:8,
+      hours:{ scheduled_hours:8, actual_hours:8, break_hours:0.5, violation_hours:0 } as any,
+      reports:[{ report_type:'incident', severity:'high', description:POISON, reported_at:D }],
+      tasks_completed:1, tasks_total:2, pings_submitted:3, pings_expected:4 }, POISON_LH) },
 
   { name: 'missedShiftAlert', markup: ['<style>', '<tr>', '<a class="btn"'], subjectHasPoison: true,
     out: E.renderMissedShiftAlert({ id:'s1', scheduled_start:D, scheduled_end:D, site_name:POISON,
