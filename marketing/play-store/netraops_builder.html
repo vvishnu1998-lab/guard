@@ -78,6 +78,7 @@
 
 <div class="max-w-[1900px] mx-auto pb-20 p-4">
     <div id="file-warning" class="hidden bg-amber-400 text-[#050A18] font-bold text-sm px-4 py-2 rounded mb-4">Exports from file:// may render wrong fonts. Serve over http.</div>
+    <div id="target-panel"></div>
     <div class="text-sm text-slate-400 mb-4 font-semibold">1. Upload 5 screenshots. 2. Adjust settings. 3. Export.</div>
     <div id="controls-panel"></div>
     <div id="previews-panel"></div>
@@ -256,8 +257,14 @@ function handleUpload(index, file) {
     reader.readAsDataURL(file);
 }
 
-function updateControls() { document.getElementById('controls-panel').innerHTML = buildControls(); }
-function updatePreviews() { document.getElementById('previews-panel').innerHTML = buildVersionC() + buildVersionB(); }
+// Dispatch on the selected store. The Play branch calls exactly what it always
+// called, so the Play frames render from unchanged code.
+function updateControls() {
+    document.getElementById('controls-panel').innerHTML = (currentTarget === 'ios') ? buildControlsIOS() : buildControls();
+}
+function updatePreviews() {
+    document.getElementById('previews-panel').innerHTML = (currentTarget === 'ios') ? buildVersionD() : (buildVersionC() + buildVersionB());
+}
 
 window.copySettings = function() {
     const settings = {
@@ -580,6 +587,313 @@ async function downloadAll() {
     if(state.errorMsg) updateControls();
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// APP STORE TARGET -- Version D "Navy & Gold", 6.9-inch display, 1320x2868
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A separate design for the App Store, deliberately unlike the Play set: solid
+// navy where Play has a diagonal gradient, an upright phone where Play tilts,
+// gold headlines where Play's are white, and reworded copy.
+//
+// Everything below is ADDITIVE. The Play target keeps its own state, its own
+// settings key, its own frames and its own export path, and its exports are
+// byte-identical to before (SHA-256 against a baseline taken from main).
+//
+// Version D frames use inline styles only -- no Tailwind utilities -- so an
+// export never depends on the CDN having loaded.
+//
+// Frame: 440x956 logical, exported at pixelRatio 3 = 1320x2868.
+
+const D_W = 440, D_H = 956, D_PX = 3;
+const D_OUT_W = D_W * D_PX, D_OUT_H = D_H * D_PX;               // 1320 x 2868
+const D_NAVY = '#0B1526', D_GOLD = '#C9A84C', D_TITANIUM = '#2E3546';
+const D_SAFE_X = 32;                 // side safe margin -> content width 376
+const D_HEAD_EDGE = 56;              // headline block distance from its frame edge
+const D_PHONE_EDGE = 44;             // phone distance from the opposite frame edge
+const D_GAP = 36;                    // headline <-> phone; the two never get closer
+const D_TITLE_PX = 56, D_TITLE_LH = 56, D_SUB_PX = 20, D_SUB_LH = 26, D_TITLE_SUB_GAP = 12;
+const D_HEAD_H = D_TITLE_LH + D_TITLE_SUB_GAP + D_SUB_LH;      // 94
+const D_RING = 1, D_TI = 2, D_BEZEL = 8;                       // gold, titanium, black
+const D_FRAME_EDGE = D_RING + D_TI + D_BEZEL;                  // 11 per side
+
+// Measured on the 1320x2868 sources and stored as fractions of screen width so
+// they scale with the screen box:
+//  * Display corner radius 165 px (55 pt). Every source pixel this radius hides
+//    is uniform background -- max deviation 0 in all five captures -- so the
+//    rounded display crops no app content.
+//  * Dynamic Island 375 x 111 px (125 x 37 pt), centred horizontally and on the
+//    status-bar glyph line (rows 74-118, centre 96). Its footprint, x 472-848
+//    y 40-152, is pure background in all five sources: it covers nothing, and
+//    clears the clock (ends x 345) and the icons (start x 937).
+const D_SCREEN_RADIUS_K = 165 / 1320;
+const D_ISLAND_W_K = 375 / 1320, D_ISLAND_H_K = 111 / 1320, D_ISLAND_CY_K = 96 / 1320;
+
+// Frame 1 is the hero and stays top; frames 2-5 alternate top, bottom, top, bottom.
+const IOS_DEFAULTS = {
+    usePng: false,
+    screens: [
+        { title: 'NETRAOPS',       sub: 'Guard management, done right.',     placement: 'top' },
+        { title: 'ON POST',        sub: 'Every shift verified by location.', placement: 'top' },
+        { title: 'THE WEEK AHEAD', sub: 'Shifts at a glance.',               placement: 'bottom' },
+        { title: 'FILE IT FAST',   sub: 'Reports in seconds, with photos.',  placement: 'top' },
+        { title: 'ONE TAP AWAY',   sub: 'Direct line to your admin.',        placement: 'bottom' }
+    ]
+};
+
+const iosState = {
+    usePng: IOS_DEFAULTS.usePng, showGuides: false, errorMsg: '',
+    screens: ['Login', 'Home', 'Schedule', 'Reports', 'Chat'].map((name, i) => Object.assign(
+        { name, img: '', ratio: 2868 / 1320, srcW: 0, srcH: 0 }, IOS_DEFAULTS.screens[i]))
+};
+
+// ── Persistence (separate keys per target; images are never stored) ─────────
+const IOS_LS_KEY = 'netraops_builder_ios_v1';
+const TARGET_LS_KEY = 'netraops_builder_target_v1';
+var currentTarget = 'play';
+
+function saveIOS() {
+    try {
+        localStorage.setItem(IOS_LS_KEY, JSON.stringify({
+            usePng: iosState.usePng,
+            screens: iosState.screens.map(sc => ({ title: sc.title, sub: sc.sub, placement: sc.placement }))
+        }));
+    } catch (e) { /* private mode, quota, blocked storage -- the tool still works */ }
+}
+
+function loadIOS() {
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(IOS_LS_KEY) || 'null'); } catch (e) { return; }
+    if (!saved || typeof saved !== 'object') return;
+    if (typeof saved.usePng === 'boolean') iosState.usePng = saved.usePng;
+    if (Array.isArray(saved.screens)) saved.screens.forEach((s, i) => {
+        const sc = iosState.screens[i]; if (!s || !sc) return;
+        if (typeof s.title === 'string') sc.title = s.title;
+        if (typeof s.sub === 'string') sc.sub = s.sub;
+        if (s.placement === 'top' || s.placement === 'bottom') sc.placement = s.placement;
+    });
+}
+
+window.resetIOS = function() {
+    iosState.usePng = IOS_DEFAULTS.usePng;
+    iosState.screens.forEach((sc, i) => Object.assign(sc, IOS_DEFAULTS.screens[i]));
+    try { localStorage.removeItem(IOS_LS_KEY); } catch (e) {}
+    updateControls(); updatePreviews();
+};
+
+function loadTarget() {
+    try { const t = localStorage.getItem(TARGET_LS_KEY); if (t === 'play' || t === 'ios') currentTarget = t; } catch (e) {}
+}
+
+window.setTarget = function(t) {
+    if (t !== 'play' && t !== 'ios') return;
+    currentTarget = t;
+    try { localStorage.setItem(TARGET_LS_KEY, t); } catch (e) {}
+    renderTargetBar(); updateControls(); updatePreviews();
+};
+
+function renderTargetBar() {
+    const btn = (t, label) => {
+        const on = currentTarget === t;
+        return `<button data-target="${t}" onclick="setTarget('${t}')" class="btn" style="${on ? '' : 'background:#334155;color:#cbd5e1;'}">${label}</button>`;
+    };
+    document.getElementById('target-panel').innerHTML =
+        `<div class="flex items-center gap-3 mb-4"><span class="text-sm text-slate-400 font-semibold">Target</span>
+            ${btn('play', 'Google Play 1080x1920')}${btn('ios', 'App Store 6.9-inch 1320x2868')}</div>`;
+}
+
+// ── Upload ──────────────────────────────────────────────────────────────────
+function handleUploadIOS(index, file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const src = e.target.result;
+        const img = new Image();
+        img.onload = () => {
+            const sc = iosState.screens[index];
+            sc.img = src;
+            sc.srcW = img.naturalWidth; sc.srcH = img.naturalHeight;
+            sc.ratio = img.naturalHeight / img.naturalWidth;   // the screen box takes THIS ratio
+            updateControls(); updatePreviews();
+        };
+        img.src = src;
+    };
+    reader.readAsDataURL(file);
+}
+
+// ── Geometry ────────────────────────────────────────────────────────────────
+// The device is upright and centred. Its height is whatever remains after the
+// headline block, the gap and both edge margins; the screen width then follows
+// from the screenshot's own ratio, so background-size 100% 100% is exact.
+function geomD(ratio, placement) {
+    const headAtBottom = placement === 'bottom';
+    const zoneH = D_H - D_HEAD_EDGE - D_HEAD_H - D_GAP - D_PHONE_EDGE;   // 726: the phone's zone
+    const zoneY = headAtBottom ? D_PHONE_EDGE : (D_HEAD_EDGE + D_HEAD_H + D_GAP);
+    let screenH = zoneH - 2 * D_FRAME_EDGE;                              // 704
+    let screenW = screenH / ratio;
+    // A much wider capture would push the device past the side margins: shrink
+    // to the safe width instead, and centre it vertically in its zone.
+    const maxOuterW = D_W - 2 * D_SAFE_X;
+    if (screenW + 2 * D_FRAME_EDGE > maxOuterW) { screenW = maxOuterW - 2 * D_FRAME_EDGE; screenH = screenW * ratio; }
+    const outerW = screenW + 2 * D_FRAME_EDGE, outerH = screenH + 2 * D_FRAME_EDGE;
+    const outerX = (D_W - outerW) / 2, outerY = zoneY + (zoneH - outerH) / 2;
+    const islandW = screenW * D_ISLAND_W_K, islandH = screenW * D_ISLAND_H_K;
+    return {
+        outerX, outerY, outerW, outerH, screenW, screenH,
+        screenX: outerX + D_FRAME_EDGE, screenY: outerY + D_FRAME_EDGE,
+        screenR: screenW * D_SCREEN_RADIUS_K,
+        islandW, islandH, islandX: (screenW - islandW) / 2, islandY: screenW * D_ISLAND_CY_K - islandH / 2,
+        headY: headAtBottom ? (D_H - D_HEAD_EDGE - D_HEAD_H) : D_HEAD_EDGE,
+        cx: D_W / 2, cy: outerY + outerH / 2
+    };
+}
+
+// ── Frame ───────────────────────────────────────────────────────────────────
+function frameD(sc, i) {
+    const g = geomD(sc.ratio, sc.placement);
+    const r = g.screenR;
+    // ONE soft radial cyan glow, centred on the phone, sitting behind it. The
+    // phone hides the middle of any glow, so the ellipse is sized to extend well
+    // past the device and the stops are set for what remains VISIBLE: about
+    // 12% cyan at the phone's flanks, fading to ~1% in the frame corners. A first
+    // cut at 300x470 lifted the visible background by only ~6 levels -- present
+    // in the CSS, invisible in the export.
+    const glow = `radial-gradient(330px 560px at ${g.cx}px ${g.cy}px, rgba(0,200,255,0.30) 0%, rgba(0,200,255,0.16) 45%, rgba(0,200,255,0.05) 75%, rgba(0,200,255,0) 100%)`;
+    const guides = !iosState.showGuides ? '' : `
+        <div style="position:absolute;left:${D_SAFE_X}px;top:${D_PHONE_EDGE}px;width:${D_W - 2 * D_SAFE_X}px;height:${D_H - 2 * D_PHONE_EDGE}px;outline:1px dashed rgba(255,80,80,0.8);z-index:9;pointer-events:none;"></div>
+        <div style="position:absolute;left:${D_SAFE_X}px;top:${g.headY}px;width:${D_W - 2 * D_SAFE_X}px;height:${D_HEAD_H}px;outline:1px solid rgba(255,200,0,0.8);z-index:9;pointer-events:none;"></div>
+        <div style="position:absolute;left:${g.screenX}px;top:${g.screenY}px;width:${g.screenW}px;height:${g.screenH}px;outline:1px solid rgba(0,255,120,0.8);z-index:9;pointer-events:none;"></div>`;
+    return `<div id="D_${i}" style="position:relative;width:${D_W}px;height:${D_H}px;overflow:hidden;background:${D_NAVY};">
+        <div style="position:absolute;left:0;top:0;width:${D_W}px;height:${D_H}px;background:${glow};z-index:0;"></div>
+        <div style="position:absolute;left:${D_SAFE_X}px;top:${g.headY}px;width:${D_W - 2 * D_SAFE_X}px;height:${D_HEAD_H}px;text-align:center;z-index:3;">
+            <div class="d-title" style="font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:${D_TITLE_PX}px;line-height:${D_TITLE_LH}px;letter-spacing:0.02em;color:${D_GOLD};white-space:nowrap;">${esc(sc.title)}</div>
+            <div class="d-sub" style="margin-top:${D_TITLE_SUB_GAP}px;font-family:'Inter',sans-serif;font-weight:600;font-size:${D_SUB_PX}px;line-height:${D_SUB_LH}px;color:rgba(255,255,255,0.85);white-space:nowrap;">${esc(sc.sub)}</div>
+        </div>
+        <div class="d-device" style="position:absolute;left:${g.outerX}px;top:${g.outerY}px;width:${g.outerW}px;height:${g.outerH}px;border-radius:${r + D_FRAME_EDGE}px;background:${D_GOLD};box-shadow:0 12px 28px rgba(0,0,0,0.35);z-index:2;">
+            <div style="position:absolute;left:${D_RING}px;top:${D_RING}px;right:${D_RING}px;bottom:${D_RING}px;border-radius:${r + D_TI + D_BEZEL}px;background:${D_TITANIUM};">
+                <div style="position:absolute;left:${D_TI}px;top:${D_TI}px;right:${D_TI}px;bottom:${D_TI}px;border-radius:${r + D_BEZEL}px;background:#000;">
+                    <div class="d-screen" style="position:absolute;left:${D_BEZEL}px;top:${D_BEZEL}px;width:${g.screenW}px;height:${g.screenH}px;border-radius:${r}px;overflow:hidden;background-color:#000;${sc.img ? `background-image:url('${sc.img}');` : ''}background-size:100% 100%;background-position:0 0;background-repeat:no-repeat;">
+                        <div class="d-island" style="position:absolute;left:${g.islandX}px;top:${g.islandY}px;width:${g.islandW}px;height:${g.islandH}px;border-radius:${g.islandH / 2}px;background:#000;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        ${guides}
+    </div>`;
+}
+
+function buildVersionD() {
+    let html = `<div class="mb-12"><div class="flex items-center mb-2"><h3 class="text-xl font-bold text-white border-l-4 border-[#C9A84C] pl-3">Version D: Navy &amp; Gold &mdash; App Store 6.9-inch</h3><button id="dl-btn-D" class="btn text-[10px] ml-4 bg-slate-700" onclick="downloadAppStore()">Download App Store (5)</button></div>
+    <div class="flex gap-4 overflow-x-auto pb-4 no-scrollbar">`;
+    iosState.screens.forEach((sc, i) => {
+        html += `<div class="flex-none flex flex-col items-center gap-2">${frameD(sc, i)}
+            <button class="btn w-full bg-slate-700 text-white" onclick="exportSingleIOS(${i})">Export Frame</button></div>`;
+    });
+    return html + `</div></div>`;
+}
+
+function buildControlsIOS() {
+    let html = `<div class="bg-slate-800 p-6 rounded-xl mb-8 border border-slate-700 shadow-lg">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="font-bold text-xl">App Store Controls <span class="text-slate-400 text-sm font-normal ml-2">(${iosState.screens.filter(s => s.img).length}/5 uploaded &middot; exports ${D_OUT_W}x${D_OUT_H})</span></h2>
+            <div class="flex gap-4 items-center">
+                <label class="text-sm flex items-center gap-2 text-cyan-400 font-bold"><input type="checkbox" ${iosState.showGuides ? 'checked' : ''} onchange="iosState.showGuides=this.checked; updatePreviews();"> Show Guides</label>
+                <label class="text-sm flex items-center gap-2"><input type="checkbox" ${iosState.usePng ? 'checked' : ''} onchange="iosState.usePng=this.checked; saveIOS();"> Use PNG</label>
+                <button class="btn bg-slate-700 text-white" onclick="resetIOS()">Reset to Defaults</button>
+                <button id="dl-btn-D-top" class="btn" onclick="downloadAppStore()">Download App Store (5)</button>
+            </div>
+        </div>`;
+    if (iosState.errorMsg) html += `<div class="bg-red-500 text-white p-2 text-sm rounded mb-4">${esc(iosState.errorMsg)}</div>`;
+    html += `<div class="grid grid-cols-5 gap-4">`;
+    iosState.screens.forEach((sc, i) => {
+        const size = sc.img ? `${sc.srcW}x${sc.srcH}` + ((sc.srcW === 1320 && sc.srcH === 2868) ? '' : ' &mdash; not 1320x2868; the screen box follows its ratio') : 'no image';
+        html += `<div class="bg-slate-900 p-4 rounded-lg border border-slate-700 text-xs">
+            <h3 class="font-bold mb-2 text-sm uppercase" style="color:${D_GOLD}">Frame ${i + 1}: ${sc.name}</h3>
+            <div class="mb-3 flex flex-col gap-1">
+                <input type="text" value="${esc(sc.title)}" oninput="iosState.screens[${i}].title=this.value; saveIOS(); updatePreviews()" class="text-xs p-1 text-black rounded font-bold" placeholder="Power word">
+                <input type="text" value="${esc(sc.sub)}" oninput="iosState.screens[${i}].sub=this.value; saveIOS(); updatePreviews()" class="text-xs p-1 text-black rounded" placeholder="Supporting phrase">
+                <label class="flex items-center gap-2 mt-1">Headline
+                    <select onchange="iosState.screens[${i}].placement=this.value; saveIOS(); updatePreviews()" class="text-xs p-1 text-black rounded">
+                        <option value="top" ${sc.placement === 'top' ? 'selected' : ''}>Top</option>
+                        <option value="bottom" ${sc.placement === 'bottom' ? 'selected' : ''}>Bottom</option>
+                    </select></label>
+            </div>
+            <label class="block mb-2"><input type="file" class="w-full text-xs text-slate-300" accept="image/*" onchange="handleUploadIOS(${i}, this.files[0])"></label>
+            <div class="text-slate-500 text-[10px]">${size}</div>
+        </div>`;
+    });
+    return html + `</div></div>`;
+}
+
+// ── Export ──────────────────────────────────────────────────────────────────
+// Off-screen clone and a warm-up pass, as the Play path does. The result is then
+// flattened onto an OPAQUE canvas: a {alpha:false} context makes Chromium write
+// PNG colour type 2 (RGB) rather than 6 (RGBA), so neither JPEG nor PNG output
+// can carry an alpha channel. The size is asserted on the ENCODED file, and a
+// file of the wrong size is refused rather than saved -- App Store Connect
+// would reject it anyway.
+async function captureNodeIOS(nodeId, filename, returnBlob = false) {
+    const node = document.getElementById(nodeId);
+    if (!node) return null;
+    await ensureFontsReady();
+    const clone = node.cloneNode(true);
+    const container = document.createElement('div');
+    container.style.position = 'fixed'; container.style.top = '-10000px'; container.style.left = '0';
+    container.style.width = D_W + 'px'; container.style.height = D_H + 'px';
+    container.appendChild(clone); document.body.appendChild(container);
+    const usePng = iosState.usePng, ext = usePng ? 'png' : 'jpg';
+    const options = { pixelRatio: D_PX, width: D_W, height: D_H, backgroundColor: D_NAVY, style: { transform: 'none' } };
+    try {
+        await htmlToImage.toCanvas(clone, options);
+        const src = await htmlToImage.toCanvas(clone, options);
+        if (src.width !== D_OUT_W || src.height !== D_OUT_H) throw new Error(`rendered ${src.width}x${src.height}, expected ${D_OUT_W}x${D_OUT_H}`);
+        const flat = document.createElement('canvas');
+        flat.width = src.width; flat.height = src.height;
+        const ctx = flat.getContext('2d', { alpha: false });
+        ctx.fillStyle = D_NAVY; ctx.fillRect(0, 0, flat.width, flat.height);
+        ctx.drawImage(src, 0, 0);
+        const blob = await new Promise(res => flat.toBlob(res, usePng ? 'image/png' : 'image/jpeg', 0.95));
+        if (!blob) throw new Error('the encoder returned no data');
+        const bmp = await createImageBitmap(blob);
+        const w = bmp.width, h = bmp.height;
+        if (bmp.close) bmp.close();
+        if (w !== D_OUT_W || h !== D_OUT_H) throw new Error(`encoded ${w}x${h}, expected ${D_OUT_W}x${D_OUT_H}`);
+        if (returnBlob) return { blob, filename: `${filename}.${ext}` };
+        saveAs(blob, `${filename}.${ext}`);
+        return null;
+    } catch (e) {
+        iosState.errorMsg = `Export of ${filename} refused: ${e.message}`;
+        updateControls();
+        return null;
+    } finally {
+        document.body.removeChild(container);
+    }
+}
+
+async function exportSingleIOS(i) {
+    iosState.errorMsg = ''; updateControls();
+    await captureNodeIOS(`D_${i}`, `NetraOps_iOS_D_${fileNames[i]}`, false);
+}
+
+async function downloadAppStore() {
+    iosState.errorMsg = ''; updateControls();
+    const zip = new JSZip();
+    let n = 0;
+    const btns = () => document.querySelectorAll('#dl-btn-D, #dl-btn-D-top');
+    for (let i = 0; i < 5; i++) {
+        btns().forEach(b => b.innerText = `Rendering ${i + 1}/5...`);
+        const r = await captureNodeIOS(`D_${i}`, `NetraOps_iOS_D_${fileNames[i]}`, true);
+        if (r && r.blob) { zip.file(r.filename, r.blob); n++; }
+        await new Promise(res => setTimeout(res, 150));
+    }
+    btns().forEach(b => b.innerText = 'Download App Store (5)');
+    if (n !== 5) {
+        iosState.errorMsg = iosState.errorMsg || `Only ${n}/5 frames exported; the zip was not saved.`;
+        updateControls();
+        return;
+    }
+    saveAs(await zip.generateAsync({ type: 'blob' }), 'NetraOps_AppStore_6.9in.zip');
+}
+
 // The fonts are inlined, so a file:// export no longer loses them -- but
 // anything else loaded by URL still cannot be fetched from this origin
 // (Tailwind's CDN, and any asset added later). Exports stay enabled; this is a
@@ -589,6 +903,9 @@ if (location.protocol === 'file:') {
 }
 
 loadSettings();
+loadIOS();
+loadTarget();
+renderTargetBar();
 updateControls();
 updatePreviews();
 </script>
