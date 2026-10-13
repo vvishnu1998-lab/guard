@@ -219,25 +219,8 @@ function fmtDT(dt: Date | string): string {
   }) + ' UTC';
 }
 
-// Pacific-time formatter for operator alerts (currently used only by the
-// missed-shift email). Hardcoded to America/Los_Angeles — works for Starnet
-// because William Pen Hotel is in SF. Multi-tenant support requires a
-// per-site timezone column (logged as a separate follow-up). Output looks
-// like "17 May 2026, 10:01 PM PDT" / "PST" with the abbreviation chosen by
-// the runtime per DST.
+// The zone every email falls back to when a site has none.
 const PACIFIC = 'America/Los_Angeles';
-
-function fmtDTSite(dt: Date | string, tz: string = PACIFIC): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    day: 'numeric', month: 'short', year: 'numeric',
-    hour: 'numeric', minute: '2-digit', hour12: true,
-    timeZone: tz,
-    timeZoneName: 'short',
-  }).formatToParts(new Date(dt));
-  const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-  return `${pick('day')} ${pick('month')} ${pick('year')}, ` +
-         `${pick('hour')}:${pick('minute')} ${pick('dayPeriod')} ${pick('timeZoneName')}`;
-}
 
 // Coarse "X units ago" for human readability in operator alerts.
 // Null → "Never" (used for guards who have never logged in).
@@ -553,7 +536,7 @@ export function renderIncidentAlert(data: {
       <p style="color:#555;font-size:14px;margin:0 0 22px 0">An incident was reported at your site.</p>
 
       <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:6px;padding:14px 16px;margin-bottom:22px">
-        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTClient(data.reported_at, tz)}</span>
+        ${sevBadge}<span style="color:#666;font-size:13px;margin-left:12px">${fmtDTSite(data.reported_at, tz)}</span>
       </div>
 
       <h3 style="margin:0 0 8px 0;font-size:15px;color:#333;font-weight:600;letter-spacing:0">Description</h3>
@@ -574,26 +557,13 @@ export function renderIncidentAlert(data: {
 
 // ── Email Type 2 — Daily Shift Report ────────────────────────────────────────
 
-// Site-scoped calendar date ("14 May 2026") for the operator templates.
-// en-GB to match fmtDTSite's "14 May 2026, 10:01 PM PDT" — keeps subject
-// and body day-month-year order consistent. Falls back to Pacific when the
-// caller hasn't yet been threaded through with a site tz. The two client
-// emails use monthDayYear and fmtDTClient instead (below).
-function fmtDateSite(dt: Date | string, tz: string = PACIFIC): string {
-  return new Date(dt).toLocaleDateString('en-GB', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    timeZone: tz,
-  });
-}
-
-// The two client emails (incident alert, daily shift report) print dates in
-// the PDFs' month-name style, subjects included: "Oct 12, 2026"
-// (services/pdf/dates.ts), not en-GB's "12 Oct 2026", which a US client can
-// misread and which wrote September "Sept" in the subject and "Sep" in the
-// body. Times keep the emails' own 12-hour clock and zone:
-// "Oct 12, 2026, 2:14 AM PDT". The other templates keep fmtDateSite and
-// fmtDTSite until B5.
-function fmtDTClient(dt: Date | string, tz: string): string {
+// Every email prints dates in the PDFs' month-name style, subjects included:
+// "Oct 12, 2026" (services/pdf/dates.ts monthDayYear), not en-GB's
+// "12 Oct 2026", which a US reader can misread and which wrote September
+// "Sept" in a subject and "Sep" in a body (B4 for the client emails, B5 for
+// the rest). Times keep the emails' own 12-hour clock and zone:
+// "Oct 12, 2026, 2:14 AM PDT".
+function fmtDTSite(dt: Date | string, tz: string): string {
   return `${monthDayYear(dt, tz)}, ${fmtTimeSite(dt, tz)}`;
 }
 
@@ -945,7 +915,7 @@ export async function sendDailyShiftReport(shiftId: string): Promise<DailyReport
  * SendGrid path or writing daily_report_email_sent.
  *
  * All event timestamps render in the site's zone (Pacific when it has none)
- * via fmtDTClient, "Oct 12, 2026, 2:14 AM PDT" (PDT in summer, PST in
+ * via fmtDTSite, "Oct 12, 2026, 2:14 AM PDT" (PDT in summer, PST in
  * winter — abbreviation chosen by the runtime). With a letterhead (`mail`,
  * B4) the company's header and footer stand where NetraOps' do.
  */
@@ -981,8 +951,8 @@ export function renderDailyShiftReport(data: {
   const pingsLabel = (data.pings_expected ?? 0) > 0
     ? `${data.pings_submitted ?? 0}/${data.pings_expected}`
     : '—';
-  const clockIn    = data.clocked_in_at  ? fmtDTClient(data.clocked_in_at,  tz) : '—';
-  const clockOut   = data.clocked_out_at ? fmtDTClient(data.clocked_out_at, tz) : 'In progress';
+  const clockIn    = data.clocked_in_at  ? fmtDTSite(data.clocked_in_at,  tz) : '—';
+  const clockOut   = data.clocked_out_at ? fmtDTSite(data.clocked_out_at, tz) : 'In progress';
   const greetName  = firstName(data.client_name);
 
   const borderColors: Record<string, string> = {
@@ -995,7 +965,7 @@ export function renderDailyShiftReport(data: {
       r.description.length > 300 ? r.description.slice(0, 300) + '…' : r.description,
     );
     return `<div style="${ES.rrow};border-left-color:${borderColors[r.report_type] ?? '#ccc'}">
-      <p style="${ES.rrowP};margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTClient(r.reported_at, tz)}</span></p>
+      <p style="${ES.rrowP};margin:0 0 6px 0">${typeBadgeHtml(r.report_type, r.severity)} <span style="color:#888;font-size:12px;margin-left:6px">${fmtDTSite(r.reported_at, tz)}</span></p>
       <p style="${ES.rrowP};margin:0;color:#333;font-size:13px;line-height:1.55">${desc}</p>
     </div>`;
   }).join('');
@@ -1187,11 +1157,11 @@ export function renderMissedShiftAlert(row: {
 
   // Same-day collapse: if scheduled_start and scheduled_end fall on the
   // same site-local calendar day, drop the redundant end-date prefix.
-  // "14 May 2026, 6:29 AM PDT → 10:29 AM PDT" vs cross-midnight
-  // "14 May 2026, 11:25 PM PDT → 15 May 2026, 8:00 AM PDT".
+  // "May 14, 2026, 6:29 AM PDT → 10:29 AM PDT" vs cross-midnight
+  // "May 14, 2026, 11:25 PM PDT → May 15, 2026, 8:00 AM PDT".
   // Comparison is on the site-local date string so DST and UTC offset don't
   // cause edge-case mis-grouping.
-  const sameDay = fmtDateSite(row.scheduled_start, tz) === fmtDateSite(row.scheduled_end, tz);
+  const sameDay = monthDayYear(row.scheduled_start, tz) === monthDayYear(row.scheduled_end, tz);
   const scheduledLabel = sameDay
     ? `${fmtDTSite(row.scheduled_start, tz)} → ${fmtTimeSite(row.scheduled_end, tz)}`
     : `${fmtDTSite(row.scheduled_start, tz)} → ${fmtDTSite(row.scheduled_end, tz)}`;
@@ -1323,7 +1293,7 @@ export function renderUnstaffedPostWarning(
     // redundant end-date unless the shift crosses midnight in site-local
     // time. Compared on the site-local date string so DST and UTC offset
     // cannot mis-group it.
-    const sameDay = fmtDateSite(r.scheduled_start, tz) === fmtDateSite(r.scheduled_end, tz);
+    const sameDay = monthDayYear(r.scheduled_start, tz) === monthDayYear(r.scheduled_end, tz);
     const when = sameDay
       ? `${fmtDTSite(r.scheduled_start, tz)} → ${fmtTimeSite(r.scheduled_end, tz)}`
       : `${fmtDTSite(r.scheduled_start, tz)} → ${fmtDTSite(r.scheduled_end, tz)}`;
@@ -1794,7 +1764,7 @@ export function renderSwapAcceptedFyi(row: {
   const tz = row.site_tz ?? PACIFIC;
   const fromName = titleCase(row.from_guard_name);
   const toName   = titleCase(row.to_guard_name);
-  const dayLabel = fmtDateSite(row.scheduled_start, tz);
+  const dayLabel = monthDayYear(row.scheduled_start, tz);
   const timeRange = `${fmtTimeSite(row.scheduled_start, tz)} → ${fmtTimeSite(row.scheduled_end, tz)}`;
   const sameSiteBadge = row.is_same_site
     ? '<span style="background:#DCFCE7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;letter-spacing:1px">SAME SITE</span>'
