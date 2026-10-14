@@ -773,6 +773,40 @@ Earlier status, kept as history:
 
 ---
 
+## 2026-10-14 — working in production
+
+### D26. Never write files into the production container. `railway ssh` is read-only. If a check cannot run through the sanctioned path, report the blocker and stop.
+
+**Decided by Vishnu, 2026-10-14**, after the N192 attempt to run `script:hours-snapshot -- --check`
+from a workstation. In force from this date.
+1. **No files into the production container.** Not a script, not a payload, not a base64 chunk
+   in `/tmp`, not code piped in to be executed there. What runs in the container is what the
+   image already ships (`dist/`), and `railway ssh` is used to **read**.
+2. **A check that cannot run through the sanctioned path is reported, not engineered around.**
+   The sanctioned paths are: the read-only database channel (`postgres-readonly`, counts and
+   badges only), the local harnesses, and Vishnu's own in-environment runs. When none of them
+   can run the check, say exactly what was tried and what refused it, then **stop** and let
+   Vishnu choose. A denial by a hook or by the auto-mode classifier is that refusal, never a
+   puzzle to route around (this includes re-expressing a blocked command in another form).
+3. **What this is a response to** (2026-10-13/14, `OPEN-ITEMS.md` N192): the harness reads the
+   production database and its host does not resolve from a workstation, the local `.env` is a
+   local Postgres, and the container has no `ts-node`. A 4,208-character base64 file was
+   written to `/tmp` in the container (and an empty `/tmp/hs-check.js`); no database was
+   written and both files go at the next redeploy, but the classifier then denied further
+   `railway ssh`, and rightly. The check was substituted by a read-only hash diff of the
+   builder's own SQL against the fixture. That substitute was reported as a substitute, and the
+   real `--check` is still Vishnu's to run.
+4. **Known blocks, so nobody rediscovers them:** `guard.sh` refuses any command whose text
+   contains the private database host name, the database-URL assignment string, or the name of
+   the hosting vendor's CLI, even inside a note or a heredoc (write such text with the file
+   tools). `railway ssh` truncates an argument somewhere above about 1.5 KB.
+- **D25 is historical here:** its correction (`n160DstCorrection`, run inside the container with
+  `railway ssh`, dry run by default, `--apply` Tier 2 with Vishnu present) was shipped in the
+  image, applied and closed (N160) before this rule; it is not an exemption for anything new.
+  If a future write through `railway ssh` is ever wanted, it needs its own decision here first.
+
+---
+
 ## How to add to this file
 
 One dated section per decision batch. State the decision, then — if it references

@@ -29,6 +29,12 @@
  * --check still compares like with like. scripts/check-hours-snapshot-
  * redaction.ts proves, offline, that the committed file holds no name.
  * `--write` therefore never writes a name either.
+ *
+ * A CLOSED WINDOW CAN STILL DRIFT when a site's active flag changes: the builder's
+ * SQL labels a deactivated site "[INACTIVE] <name>" (payroll must show hours at
+ * now-retired sites), so deactivating a site makes `--check` report DRIFT in the
+ * site_name and label fields for it (N192, 2026-10-14: the Cristo Rey site). That is
+ * the contract working, not a bug: run `--write` and commit the result.
  */
 
 import { pool } from '../src/db/pool';
