@@ -15,6 +15,7 @@
     "check:app-page": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-app-page.ts",
     "check:guard-handoff": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-guard-handoff.ts",
     "check:change-password": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-change-password.ts",
+    "check:fonts": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-fonts.ts",
     "check:password-hold": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-password-hold.ts"
   },
   "dependencies": {

@@ -1,28 +1,8 @@
 import type { Metadata } from 'next';
-import { Inter, Barlow_Condensed, DM_Sans } from 'next/font/google';
+import type { CSSProperties } from 'react';
 import { Analytics } from '@vercel/analytics/react';
+import { FONT_VARIABLES } from './fonts';
 import './globals.css';
-
-const inter = Inter({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700', '800', '900'],
-  variable: '--font-inter',
-  display: 'swap',
-});
-
-const barlowCondensed = Barlow_Condensed({
-  subsets: ['latin'],
-  weight: ['500', '700'],
-  variable: '--font-display',
-  display: 'swap',
-});
-
-const dmSans = DM_Sans({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
-  variable: '--font-dm-sans',
-  display: 'swap',
-});
 
 const SITE_DESCRIPTION =
   'Real-time security guard management: GPS patrol tracking, geofence compliance, photo-verified clock-ins, and automated shift reports for security companies.';
@@ -50,8 +30,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${barlowCondensed.variable} ${dmSans.variable}`} style={{ scrollBehavior: 'smooth' }}>
-      <body className={inter.className}>
+    <html lang="en" style={{ ...FONT_VARIABLES, scrollBehavior: 'smooth' } as CSSProperties}>
+      <body style={{ fontFamily: 'var(--font-inter)', fontStyle: 'normal' }}>
         {children}
         <Analytics />
       </body>
