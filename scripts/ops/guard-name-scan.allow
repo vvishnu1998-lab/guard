@@ -1,0 +1,21 @@
+# Reviewed exceptions for scripts/ops/scan-guard-names.py (N191). Format: path-or-*:token
+# A hit here was READ and judged not to be a guard's name in the repo's sense.
+#
+# Placeholder / fixture names that are plain examples (not a person in the data):
+apps/api/scripts/test-letterhead-b4.ts:sam        # fixture "sam ortiz" with an example.invalid address
+apps/api/scripts/test-letterhead-b5.ts:sam
+apps/web/app/admin/guards/page.tsx:james          # the form placeholder "e.g. James Wilson"
+apps/web/app/vishnu/companies/page.tsx:john       # placeholder "e.g. John Smith"
+apps/web/components/marketing/ContactForm.tsx:john
+simulate-guards.js:john                           # a simulation script's fake "John Smith"
+# A customer's client contact (not a guard), the owner's own public channel name, and a base64 font:
+.claude/skills/netraops-invariants/SKILL.md:sai
+docs/OPS/OPEN-ITEMS.md:sai
+docs/OPS/POLICY.md:sai
+docs/OPS/audits/store-links/phase1_register.csv:sai
+docs/OPS/audits/store-links/phase1_register.csv:reddy
+marketing/play-store/netraops_builder.html:sai
+# A test client's e-mail local part in audit notes and one replay script (N191 lists it for Vishnu's decision):
+apps/api/scripts/test-idor-replay.ts:david
+audit/VERIFICATION.md:david
+audit/WEEK1.md:david

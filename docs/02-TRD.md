@@ -377,7 +377,7 @@ Both classes manifest the same way for **disaster recovery from a Railway backup
 
 **Finding**: [apps/api/package.json:8](apps/api/package.json:8) start script is `"start": "node dist/index.js"`. The `db:migrate` script exists alongside but is not chained.
 
-**The May 16, 2026 incident** (teaching example): a production deploy of `main` shipped code referencing `sites.ping_interval_minutes` (added by `schema_v14.sql`, commit `5a21320`) before the migration ran on Railway. Railway's start command is just `npm start`, which does not invoke `db:migrate`. The mobile app showed "No scheduled shift" for an active James Vince shift while the admin portal showed it as active. Resolution: manually running `railway run npm run db:migrate` from the developer machine populated the column; the next API restart picked up the new schema.
+**The May 16, 2026 incident** (teaching example): a production deploy of `main` shipped code referencing `sites.ping_interval_minutes` (added by `schema_v14.sql`, commit `5a21320`) before the migration ran on Railway. Railway's start command is just `npm start`, which does not invoke `db:migrate`. The mobile app showed "No scheduled shift" for an active guard shift while the admin portal showed it as active. Resolution: manually running `railway run npm run db:migrate` from the developer machine populated the column; the next API restart picked up the new schema.
 
 **Why this matters**: the bug shipped to production was not the schema — it was the assumption that the production environment auto-runs migrations. It does not. Every schema change is one manual operator step away from causing a partial outage.
 

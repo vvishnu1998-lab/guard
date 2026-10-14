@@ -12,7 +12,7 @@
  * quality 0.9, and upload that.
  *
  * That is how 25 of 274 objects under report/ ended up over 800 KB, and how
- * vamshi's 919 KB photo became an S3 orphan on 2026-08-22: S3 accepted it
+ * a guard's 919 KB photo became an S3 orphan on 2026-08-22: S3 accepted it
  * (MAX_UPLOAD_BYTES is 5 MiB), Postgres refused it (chk_file_size was
  * 800 KB), and nothing deleted the object. Because both catches were
  * silent, there is no record anywhere of WHY compression failed on those

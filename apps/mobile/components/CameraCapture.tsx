@@ -261,7 +261,7 @@ export default function CameraCapture({
     let attempts = 0;
     try {
       // Night-shift captures intermittently fail in the native layer
-      // ("Image could not be captured" — low-light AE; Nandu's Cristo Rey
+      // ("Image could not be captured" — low-light AE; one guard's Cristo Rey
       // overnight, 2026-08-20, six missed windows). One silent retry after
       // a short beat clears the transient cases with no UX change on
       // success — the guard just sees the shutter take a moment longer.

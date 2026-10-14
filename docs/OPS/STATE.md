@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #112, DEVICES.md is badge-only (docs; a Railway restart, by OVERRIDE) — verified 2026-10-13 18:05 PT
+
+| thing | value |
+|---|---|
+| merge | PR #112 merged as `f01ffc7` at **18:03:28 PT (01:03:28Z, 2026-10-14) by OVERRIDE**. Vishnu: "OVERRIDE — merge #112." Prechecks at 01:03:20Z: head `35b0dd7` containing main `3f11595`, MERGEABLE/CLEAN, 5 of 5 checks green, 3 files (`DEVICES.md`, `STATE.md`, `OPEN-ITEMS.md`). `gh pr merge --merge --match-head-commit 35b0dd7…`. Before it, 01:03:21Z: 3 STARNET sessions open, last ping 01:01:56Z, control counts matching. |
+| Railway | `70f396af-5d80-482b-9b6e-1c5c6c37a94a` **SUCCESS** at 01:04:37Z (18:04:37 PT) from `f01ffc7` (pending 01:03:33Z). |
+| web | Vercel production on `f01ffc7`: success at 01:04:58Z. |
+| health | `/health` commit `f01ffc7`, first seen 01:04:47Z by a 10 s poll; `/health/crons` 20 jobs, `stale: []`. |
+| restart window | 01:03:28Z to 01:04:47Z. STARNET, counts via `postgres-readonly`: **0 location pings, 0 session starts or ends, 0 breaks, 0 notifications, 0 guard auth events**, and 0 of each from 01:04:47Z to my read; the 3 open sessions stayed open. Control: 0 platform-wide pings and auth events. The last STARNET ping before the merge was 01:01:56Z, and pings land about every 30 minutes, so probably none was due inside the window: the zeros show nothing in flight was lost, not that a ping would survive a restart. |
+| verification | The file has 0 guard names (the diff added none; the 5 removed lines were the table rows). A docs-only change: nothing in the app changed, so no behavioural check applies. |
+| visible change | None to users. `DEVICES.md` is keyed by badge; the names remain in git history. N191 (the other files with names) is in the next PR. |
+
+---
+
 ## Shipped 2026-10-13 — PR #111, the Apple badge on /app (Google Play as a same-height text link; the iPhone nit), by OVERRIDE — verified 2026-10-13 17:53 PT; `check:app-page` passes against www; an iPhone tap on the badge: Vishnu, pending
 
 | thing | value |

@@ -169,8 +169,8 @@ export async function sendReminder(
  * Did the guard already answer this window?
  *
  * A deliberate, line-for-line copy of missedPingCron's anyPingInWindow.
- * Without it this job nagged for windows that HAD been answered: reddy
- * (Star Guard, session fd3ee9ac) pinged the 15:00 window at 15:01:03 with
+ * Without it this job nagged for windows that HAD been answered: a
+ * Star Guard guard (session fd3ee9ac) pinged the 15:00 window at 15:01:03 with
  * submitted_late=false, missed_pings correctly held no row for it, and at
  * 15:30 the reminder still fired "Submit your 15:00 ping now." Nothing
  * between windowJustClosed and claimWindow had ever looked at
@@ -229,7 +229,7 @@ runJob('pingReminder', '* * * * *', async () => {
   // it is a function of that session's cadence. The old ±60s tolerance meant a
   // single skipped cron minute lost the reminder outright and never retried
   // — see schema_v57's header for the 2026-08-24 04:00Z case, where the gap
-  // cost Naveen his ping AND flagged him for missing it.
+  // cost a guard their ping AND flagged them for missing it.
   //
   // A window stays eligible for recoveryMs after it closes, so a later tick
   // still fires. The once-per-window claim below is what makes widening this

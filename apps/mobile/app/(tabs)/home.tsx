@@ -144,7 +144,7 @@ export default function HomeScreen() {
   const [showInstructions, setShowInstructions] = useState(false);
 
   // Walk-test 2026-07-09 BUG D: outbound handoff visibility. After the
-  // requester (Deepak/James) sends a handoff, they had no way to see the
+  // requester sends a handoff, they had no way to see the
   // pending state without navigating into the shift detail's HISTORY.
   // Home surfaces it directly.
   interface OutboundHandoff {

@@ -7,7 +7,7 @@
  *
  *   T+10 min  → guard push  "You're 10 min late — please clock in"
  *   T+15 min  → guard push  "You're 15 min late — please clock in"
- *   T+30 min  → admin email "James has not clocked in for [site]"
+ *   T+30 min  → admin email "<guard> has not clocked in for [site]"
  *
  * Dedup lives on three schema_v37 columns on shifts:
  *   late_10_reminder_sent_at
@@ -202,7 +202,7 @@ runJob('lateClockInReminder', '*/5 * * * *', async () => {
       }
 
       // T+30 rung — admin email. Uses the existing sendMissedShiftAlert
-      // renderer (same "James is X min late" tone). Dedup independent
+      // renderer (same "<guard> is X min late" tone). Dedup independent
       // from missedShiftAlert.ts's own missed_alert_sent_at column so
       // a shift can fire BOTH the T+10 admin email (that cron) AND the
       // T+30 rung email (this cron) — they're framed as "detected

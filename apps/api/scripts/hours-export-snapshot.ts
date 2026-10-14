@@ -20,10 +20,20 @@
  *
  * It also asserts the aggregate invariant that the handoff split exists to
  * preserve: Σ by_guard == Σ by_site == overall, for every hours field.
+ *
+ * THE FIXTURE IS REDACTED (N191). The repo is public and POLICY.md lets guard
+ * data out as "guard_id, company_id, badge, counts only", so every dataset goes
+ * through redactHoursExport() right after it is built: guard names become
+ * "Guard <badge>" and the labels built from them follow. The redaction is
+ * applied to the LIVE build before it is asserted, compared or written, so
+ * --check still compares like with like. scripts/check-hours-snapshot-
+ * redaction.ts proves, offline, that the committed file holds no name.
+ * `--write` therefore never writes a name either.
  */
 
 import { pool } from '../src/db/pool';
 import { buildHoursExport, type HoursExportDataset } from '../src/services/hoursExport';
+import { redactHoursExport } from './hoursExportRedact';
 
 const START = '2026-07-01';
 const END   = '2026-08-23';
@@ -53,9 +63,9 @@ function assertAggregateInvariant(slug: string, d: HoursExportDataset): string[]
 async function collect(): Promise<Record<string, HoursExportDataset>> {
   const out: Record<string, HoursExportDataset> = {};
   for (const t of TENANTS) {
-    out[t.slug] = await buildHoursExport({
+    out[t.slug] = redactHoursExport(await buildHoursExport({
       company_id: t.company_id, start_date: START, end_date: END,
-    });
+    }));
   }
   return out;
 }

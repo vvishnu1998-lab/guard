@@ -88,7 +88,7 @@ The five docs-surfaced findings plus operator-side launch tasks. Each item has a
 
 ### 3.1 Migration runner doesn't auto-run on Railway deploys
 
-**The incident**: On 2026-05-16, a production deploy of `main` shipped code referencing `sites.ping_interval_minutes` before the migration that added it ran. Railway's start command is `npm start`, which does not invoke `db:migrate`. Mobile showed "No scheduled shift" for an active James Vince shift while the admin portal showed it as active. Resolution: manually running `railway run npm run db:migrate` from the developer machine.
+**The incident**: On 2026-05-16, a production deploy of `main` shipped code referencing `sites.ping_interval_minutes` before the migration that added it ran. Railway's start command is `npm start`, which does not invoke `db:migrate`. Mobile showed "No scheduled shift" for an active guard shift while the admin portal showed it as active. Resolution: manually running `railway run npm run db:migrate` from the developer machine.
 
 **Permanent fix — BLOCKED. DO NOT APPLY YET. See N43.**
 

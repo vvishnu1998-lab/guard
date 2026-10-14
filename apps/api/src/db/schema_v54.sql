@@ -59,7 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires
 --   routes/reports.ts       MAX_PHOTO_KB     = 800     (what the API accepts)
 --
 -- A photo between 800 KB and 5 MiB uploaded to S3 cleanly and was then
--- rejected by Postgres, which is how vamshi's 919 KB photo became an S3
+-- rejected by Postgres, which is how a guard's 919 KB photo became an S3
 -- orphan on 2026-08-22 while its report kept the other three.
 --
 -- 5120 KB is chosen to equal MAX_UPLOAD_BYTES exactly, so the row can hold
