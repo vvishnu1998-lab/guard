@@ -11,5 +11,5 @@
     "strict": true,
     "noEmit": true
   },
-  "include": ["./**/*.ts", "../lib/shiftFormat.ts", "../lib/bulkShiftCopy.ts", "../lib/adminApi.ts", "../lib/formatHours.ts", "../lib/payableHours.ts", "../lib/storeLinks.ts", "../lib/guardAppHandoff.ts"]
+  "include": ["./**/*.ts", "../lib/shiftFormat.ts", "../lib/bulkShiftCopy.ts", "../lib/adminApi.ts", "../lib/formatHours.ts", "../lib/payableHours.ts", "../lib/storeLinks.ts", "../lib/guardAppHandoff.ts", "../lib/csvPreamble.ts"]
 }

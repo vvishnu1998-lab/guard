@@ -18,6 +18,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { adminFetch, adminGet, adminPatch, adminPost, triggerBlobDownload } from '../../../../lib/adminApi';
+import { csvPreambleOf, withCsvPreamble } from '../../../../lib/csvPreamble';
 import { fmtTime } from '../../../../lib/shiftFormat';
 import { formatHoursHHMM } from '../../../../lib/formatHours';
 
@@ -1095,7 +1096,11 @@ function SiteDetailPageInner() {
   // round. Repetition is deliberate — Excel sorts and filters a flat column
   // correctly, whereas a label printed once per group breaks the moment
   // anyone re-sorts the sheet.
-  function exportScansCsv() {
+  //
+  // B7: the company letterhead above the scans (lib/csvPreamble.ts). The lines
+  // are the API's, fetched when the button is pressed; if they cannot be had,
+  // the file is exactly what it was before.
+  async function exportScansCsv() {
     // Exports exactly the rounds on screen — filters included. That is the
     // contract this function already stated ("the export must be exactly the
     // rows on screen"); now that filters exist, honouring it means exporting
@@ -1120,9 +1125,15 @@ function SiteDetailPageInner() {
         ].map(csvField).join(','),
       ),
     );
+    let preamble: string[] | null = null;
+    try {
+      preamble = csvPreambleOf(await adminGet<unknown>('/api/admin/company'));
+    } catch {
+      // No letterhead: the export goes ahead without one.
+    }
     // BOM so Excel decodes UTF-8 names correctly (this file's whole purpose
     // is being opened in Excel by a property manager).
-    const csv = '\uFEFF' + [header, ...rows].join('\r\n') + '\r\n';
+    const csv = '\uFEFF' + withCsvPreamble(preamble, [header, ...rows].join('\r\n') + '\r\n');
     const filename = `checkpoint-scans_${slugify(site.name)}_${scanFrom}_to_${scanTo}.csv`;
     triggerBlobDownload(new Blob([csv], { type: 'text/csv;charset=utf-8' }), filename);
   }
