@@ -59,6 +59,8 @@ def main() -> int:
     for p in files:
         if not p or os.path.splitext(p)[1].lower() in SKIP_EXT or p.endswith('package-lock.json') or not os.path.exists(p):
             continue
+        if p == 'scripts/ops/guard-name-scan.allow':
+            continue  # it lists the reviewed tokens, so it would hit itself
         try:
             if os.path.getsize(p) > 4_000_000:
                 continue
