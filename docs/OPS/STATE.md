@@ -264,6 +264,60 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## State of the world, end of the 2026-10-13 session (2026-10-14 ~01:45Z): the guard-app store links are live; the public repo was cleaned; nothing has been sent to any guard
+
+**`main` is `b4e72a7`.** Seven PRs merged in about three hours, **every one by OVERRIDE** (Vishnu present, STARNET restart-window counts taken each time: **0 STARNET writes in all seven windows**, with the standing caveat that probably no ping was due inside any of them; the 2 to 3 open STARNET sessions stayed open throughout).
+
+| PR | merge commit | merged (UTC) | what |
+|---|---|---|---|
+| #108 | `875a75d` | 10-13 22:04:58 | `/app`: the one static URL for the guard app |
+| #109 | `14413dd` | 10-13 22:50:59 | the guard welcome email's "Get the NetraOps app" block (E1) |
+| #110 | `5ed59e5` | 10-14 00:43:45 | the admin Guards page hands the guard the link (banner, COPY text, QR panel) |
+| #111 | `3f11595` | 10-14 00:51:12 | Apple's badge on `/app`, Google Play as a same-height text link |
+| #112 | `f01ffc7` | 10-14 01:03:28 | `DEVICES.md` badge-only |
+| #113 | `e943426` | 10-14 01:17:14 | every remaining guard name out of the public repo (N191) |
+| #114 | `b4e72a7` | 10-14 01:27:21 | `/app` says which password applies (D2) |
+
+**Live and verified in production:** `check:app-page` against www passes every assertion (one byte-identical page for 9 user agents, the served Apple badge equals the store's file, the platform wording, the sign-in sentence); the welcome email's real path (Vishnu, Star Guard test tenant: delivered, rendered, GET THE APP opens `/app`; **Outlook put the first message in Junk**); `/health` on `b4e72a7`, `/health/crons` 20 jobs, no stale job.
+
+**NOT seen:** the admin Guards page in production (it needs a login) and a real COPY click; a **real-phone scan** of the admin QR; a tap on the Apple badge on an iPhone and Safari's rendering of the SVG; Search Console URL Inspection; Google's current legal line (the footer credit is UNVERIFIED).
+
+**The public repo.** `vvishnu1998-lab/guard` is **PUBLIC**. N190: per-badge shift data was on PR #110's branch for about 44 minutes before a force-push (approved by Vishnu, 2026-10-14 00:40:41Z) replaced it; the old commits stay reachable by SHA until GitHub purges them (a Support request is drafted at `~/guard-private/github-support-purge-request.md`, **Vishnu files it**). N191: guard names were in 43 files; they are gone from the tree (a one-way-hash scan, `scripts/ops/scan-guard-names.py`: 0 un-reviewed hits, 277 before), and **remain in git history**. Whether to make the repo private is Vishnu's decision: nothing in the code needs it public, but branch protection, required reviewers and CODEOWNERS are GitHub Pro features on a private repo (the plan could not be read: the token lacks the `user` scope), and secret scanning and push protection would switch off.
+
+**The hours-export snapshot `--check` FAILS today (a pre-existing drift, not caused by N191), and the harness itself could not be run from here.** The local `.env` points at a local Postgres; `railway run` cannot resolve the private database host; `railway ssh` has no `ts-node` in the container, and after I had written a 4,208-character base64 file to `/tmp` in the production container (no database write) the auto-mode classifier denied further `railway ssh` commands, so I stopped. **Left behind: `/tmp/hs.b64` (4,208 bytes) and an empty `/tmp/hs-check.js` in the production container; they go away at the next redeploy.** Instead the builder's own SQL was run through the read-only channel as a hash diff against the committed fixture, so no name or bulk data left the database: **Star Guard 42 of 42 session rows identical; STARNET 18 of 18 identical only after one change: the Cristo Rey site is now INACTIVE, so the builder's SQL labels it `[INACTIVE] 23000 Cristo Rey Los Altos` (11 of the 18 rows, plus the matching `by_site` and `by_guard_site` aggregates), and the fixture, written before the site was deactivated, does not have the prefix.** So the real `--check` would report DRIFT on exactly those fields and nothing else. See N192.
+
+**The migration kit** (`docs/OPS/MIGRATION-TESTFLIGHT-TO-STORE.md`, v2) is a DRAFT; **nothing has been sent to any guard.** D1 to D4 were decided 2026-10-14 (Vishnu accepted all four as recommended), so **H6 is done; H1 to H5 remain**: the storefront lookup per wave day (the iOS listing is US-only until Vishnu fixes App Store Connect, N186), Play production verified live and installable on a non-tester Android phone, the pilot (his own phones, a Star Guard test shift, including the queue-flush test), his word-for-word approval of each message, and a confirmed phone number for every badge. The by-badge sheet is private (`~/guard-private/`). **Dates:** act-by 2026-11-14, last supported day Fri 11-13, Plan B decision Mon 11-16 12:00 PT, earliest TestFlight build-48 lapse **Fri 2026-11-27 17:21 PST**.
+
+**The Star Guard test guard (GRD0029)** was deactivated by Vishnu 2026-10-14 (read-only check: `is_active = false`).
+
+**Still on Vishnu** (the list I gave him at the end of this session):
+1. Merge the docs PR carrying this section (docs-only; Railway restarts).
+2. File the GitHub Support purge request; decide private vs public (check the GitHub plan and the Vercel and Railway app access first).
+3. Decide the hours-snapshot drift (N192): regenerate the fixture in the environment (`--write`) or have me regenerate it offline from the verified rows.
+4. Check on devices: tap the Apple badge on an iPhone; re-read `/app` on a phone; scan the admin QR with a real phone; open the admin Guards page in production and try ADD GUARD and COPY.
+5. Search Console URL Inspection for `/app`.
+6. App Store Connect: fix territory availability (N186); read the Build row on 1.0.17 and the exact TestFlight expiry; optionally mint the first campaign link (the Apple `pt` token).
+7. Play Console: Production status and countries, the internal track and testers, the signing certificate (hard stop H2); download Google's badge file from the Partner Marketing Hub (then a small PR).
+8. The migration pilot and hard stops H1, H3, H4, H5; answers to the open questions in the runbook (who uses the possibly shared badge, whether the dormant build-46 guards still work for STARNET, the sender's name for the texts, an Android phone for pilot 2B).
+9. N191's deliberate leftovers: customer contact names, a test client's e-mail, his own e-mail addresses in the repo, the fixture's historical badge-level times.
+10. N189's unverified items from the audit (a plaintext test login in the Maestro smoke file: rotate it if live; the Web Analytics `beforeSend`; claims in docs that outrun the code).
+
+---
+
+## Shipped 2026-10-14 — PR #114, `/app` says which password applies (D2), by OVERRIDE — verified 2026-10-13 18:30 PT
+
+| thing | value |
+|---|---|
+| merge | PR #114 merged as `b4e72a7` at **18:27:21 PT (01:27:21Z, 2026-10-14) by OVERRIDE**. Vishnu: "OVERRIDE — merge #114. Re-read the live /app page after deploy." Prechecks at 01:27:13Z: head `f892e5c` containing main `e943426`, MERGEABLE/CLEAN, 5 of 5 checks green, 5 files (the page, `check-app-page.ts`, the runbook, STATE, OPEN-ITEMS). `gh pr merge --merge --match-head-commit f892e5c…`. Before it, 01:27:14Z: 2 STARNET sessions open, last ping 01:01:56Z, control counts matching. |
+| Railway | `d988f2ca-af90-4bb5-9fb4-2d9eb3794f74` **SUCCESS** at 01:29:37Z (18:29:37 PT) from `b4e72a7` (pending 01:27:25Z). |
+| web | Vercel production on `b4e72a7`: success at 01:28:59Z; the new sentence was in the served HTML from 01:29:03Z. |
+| health | `/health` commit `b4e72a7`, first seen 01:29:46Z by a 10 s poll; `/health/crons` 20 jobs, `stale: []`. |
+| restart window | 01:27:21Z to 01:29:46Z. STARNET, counts via `postgres-readonly`: **0 location pings, 0 session starts or ends, 0 breaks, 0 notifications, 0 guard auth events**; after the switch to my read: 3 notifications (a normal cron tick), nothing else. Control: 0 platform-wide pings and auth events. Same ping caveat as the earlier windows. |
+| verification | **Live page re-read after deploy:** "Install the app on your phone, then sign in with your email. New to NetraOps? Use the temporary password from your admin; the app asks you to choose a new password the first time. Already have an account? Use your own password." `APP_BASE=https://www.netraops.com npm run check:app-page` passes every assertion including the new one. Before merge: the same check run against production (old sentence) failed on exactly that assertion and nothing else. |
+| visible change | `/app` tells a new guard to use the temporary password and a returning guard their own; the migration message A2 no longer says to ignore the page's line. |
+
+---
+
 ## Shipped 2026-10-14 — PR #113, every remaining guard name stripped from the public repo (N191), by OVERRIDE — verified 2026-10-13 18:19 PT
 
 | thing | value |
