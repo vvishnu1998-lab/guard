@@ -6,7 +6,8 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthPayload, requireAuth, requireAuthAllowingTemporaryPassword, secretForRole } from '../middleware/auth';
-import { sendTempPasswordEmail } from '../services/email';
+import { sendPasswordChangedEmail, sendTempPasswordEmail, type PasswordPortal } from '../services/email';
+import { deviceLabel } from '../services/deviceLabel';
 import { Sentry } from '../services/sentry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 
@@ -53,6 +54,20 @@ export function currentPasswordError(p: unknown): string | null {
  */
 export function isFilledString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0;
+}
+
+/**
+ * N197 (Phase D, D2; Vishnu's decisions 3a and 4a, 2026-10-14): after a change
+ * of password, the first from a temporary password included, a notice to the
+ * account's own address. Called once the change is stored, and not awaited: the
+ * change stands whatever SendGrid does. A failed send is reported inside
+ * sendPasswordChangedEmail (sendgrid_failing), and nothing on the way to it,
+ * synchronous or not, can turn the change's 200 into an error.
+ */
+function notifyPasswordChanged(email: string, portal: PasswordPortal, req: Request): void {
+  void Promise.resolve()
+    .then(() => sendPasswordChangedEmail({ portal, email, changedAt: new Date(), device: deviceLabel(req.headers['user-agent']) }))
+    .catch(() => undefined);
 }
 
 import { generateTempPassword as _generateTempPassword } from '../utils/tempPassword';
@@ -270,7 +285,7 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
   if (currentErr) return res.status(400).json({ error: currentErr });
 
   const guardResult = await pool.query(
-    'SELECT password_hash FROM guards WHERE id = $1',
+    'SELECT password_hash, email FROM guards WHERE id = $1',
     [req.user!.sub]
   );
   const valid = await bcrypt.compare(current_password, guardResult.rows[0].password_hash);
@@ -303,6 +318,7 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
     data: { guard_id: req.user!.sub },
   });
   await logEvent(req.user!.sub, 'guard', 'password_changed', req);
+  notifyPasswordChanged(guardResult.rows[0].email, 'guard', req);
   res.json({ success: true });
 });
 
@@ -447,7 +463,7 @@ router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('comp
   if (currentErr) return res.status(400).json({ error: currentErr });
 
   const adminResult = await pool.query(
-    'SELECT password_hash FROM company_admins WHERE id = $1',
+    'SELECT password_hash, email FROM company_admins WHERE id = $1',
     [req.user!.sub]
   );
   if (!adminResult.rows[0]) return res.status(404).json({ error: 'Admin not found' });
@@ -464,6 +480,7 @@ router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('comp
     [newHash, req.user!.sub]
   );
   await logEvent(req.user!.sub, 'company_admin', 'password_changed', req);
+  notifyPasswordChanged(adminResult.rows[0].email, 'admin', req);
   res.json({ success: true });
 });
 
@@ -548,7 +565,7 @@ router.post('/client/change-password', requireAuth('client'), async (req: Reques
   if (currentErr) return res.status(400).json({ error: currentErr });
 
   const clientResult = await pool.query(
-    'SELECT password_hash FROM clients WHERE id = $1',
+    'SELECT password_hash, email FROM clients WHERE id = $1',
     [req.user!.sub]
   );
   if (!clientResult.rows[0]) return res.status(404).json({ error: 'Client not found' });
@@ -567,6 +584,7 @@ router.post('/client/change-password', requireAuth('client'), async (req: Reques
     [newHash, req.user!.sub]
   );
   await logEvent(req.user!.sub, 'client', 'password_changed', req);
+  notifyPasswordChanged(clientResult.rows[0].email, 'client', req);
   res.json({ success: true });
 });
 
