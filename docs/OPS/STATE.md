@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #115, the end-of-day state record, by OVERRIDE (docs; a Railway restart) — verified 2026-10-13 18:50 PT
+
+| thing | value |
+|---|---|
+| merge | PR #115 merged as `20b0e73` at **18:47:52 PT (01:47:52Z, 2026-10-14) by OVERRIDE**. Vishnu: "OVERRIDE — merge #115." Prechecks at 01:47:45Z: head `14a0c82` containing main `b4e72a7`, MERGEABLE/CLEAN, 5 of 5 checks green, 2 files. `gh pr merge --merge --match-head-commit 14a0c82…`. Before it, 01:47:46Z: 2 STARNET sessions open, last ping 01:30:20Z, control counts matching. |
+| Railway | `aa9e8d91-bdc3-4205-8c72-b72344f7dd5b` **SUCCESS** at 01:49:26Z (18:49:26 PT) from `20b0e73` (pending 01:47:57Z). |
+| web | Vercel production on `20b0e73`: success at 01:49:38Z. |
+| health | `/health` commit `20b0e73`, first seen 01:49:29Z by a 10 s poll; `/health/crons` 20 jobs, `stale: []`. |
+| restart window | 01:47:52Z to 01:49:29Z. STARNET, counts via `postgres-readonly` (the query ran from 01:47:52Z to the read): **0 location pings, 0 session starts or ends, 0 breaks, 0 notifications, 0 guard auth events**; the 2 open sessions stayed open. Control: 0 platform-wide pings and auth events. The last STARNET ping before the merge was 01:30:20Z, so probably none was due inside the window (the usual caveat). |
+| visible change | None: documentation only. |
+| after it | N192 (the hours snapshot drift) was fixed in a small PR the same night, and **D26** (never write files into the production container; `railway ssh` is read-only; report a blocker and stop) was added to `DECISIONS.md`. |
+
+---
+
 ## State of the world, end of the 2026-10-13 session (2026-10-14 ~01:45Z): the guard-app store links are live; the public repo was cleaned; nothing has been sent to any guard
 
 **`main` is `b4e72a7`.** Seven PRs merged in about three hours, **every one by OVERRIDE** (Vishnu present, STARNET restart-window counts taken each time: **0 STARNET writes in all seven windows**, with the standing caveat that probably no ping was due inside any of them; the 2 to 3 open STARNET sessions stayed open throughout).
