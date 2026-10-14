@@ -28,6 +28,8 @@
  *      "Powered by NetraOps" and a blank row; the table below is the BASE route's, cell for cell,
  *      seven rows down; the logo once per sheet; the print header and footer; the tenant's own
  *      letterhead only; the null path; and mutation controls
+ *   P  B7's API half (decision 3a): GET /api/admin/company carries csv_preamble, the very lines the
+ *      analytics CSV opens with, for any admin of the company
  */
 import Module from 'node:module';
 import fs from 'node:fs';
@@ -299,6 +301,8 @@ async function main(): Promise<void> {
     s3KeyFromPublicUrl: (url: string): string | null => {
       try { const u = new URL(url); return u.hostname === S3_HOST ? u.pathname.replace(/^\//, '') || null : null; } catch { return null; }
     },
+    // GET /api/admin/company presigns the logo's URL; here it comes back as stored.
+    urlOrPresign: async (url: string | null) => url,
     getS3ObjectBuffer: async (key: string) => {
       const b = s3Objects.get(key);
       if (!b) throw Object.assign(new Error('NoSuchKey'), { code: 'NoSuchKey', statusCode: 404 });
@@ -430,7 +434,9 @@ async function main(): Promise<void> {
     "DELETE FROM companies WHERE name LIKE 'Fixture Patrol lhb6-%'",
   ]) swept += (await q(sql)).rowCount ?? 0;
   if (swept > 0) console.log(`(swept ${swept} rows an earlier run left behind)`);
-  const priorStarGuard = (await q('SELECT 1 FROM companies WHERE id = $1', [STAR_GUARD])).rows[0] ?? null;
+  // Star Guard's row is created when this database has none, and its profile is put back either way.
+  const PROFILE = ['contact_email', 'phone', 'address', 'licence_number', 'website', 'logo_url', 'logo_updated_at'];
+  const priorStarGuard = (await q(`SELECT ${PROFILE.join(', ')} FROM companies WHERE id = $1`, [STAR_GUARD])).rows[0] ?? null;
   let server: Server | null = null;
 
   try {
@@ -483,6 +489,7 @@ async function main(): Promise<void> {
     const app = express();
     app.use(express.json());
     app.use('/api/exports', (await import('../src/routes/exports')).default);
+    app.use('/api/admin/company', (await import('../src/routes/companyProfile')).default);
     app.use('/api/exports-base', loadAt(BASE, 'src/routes/exports.ts').default);
     const listening: Server = await new Promise((resolve) => { const sv = app.listen(0, '127.0.0.1', () => resolve(sv)); });
     server = listening;
@@ -684,13 +691,64 @@ async function main(): Promise<void> {
       check(caught === mutants.length + 1, `L8 ${caught} of ${mutants.length + 1} mutants caught`);
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    section('P  GET /api/admin/company: csv_preamble, the lines the analytics CSV opens with');
+    {
+      const { csvPreamble } = await import('../src/services/letterhead/csv');
+      const { letterheadText } = await import('../src/services/letterhead');
+      /** The lines a CSV body opens with before its first blank line (the BOM dropped). */
+      const csvHead = (body: Buffer) => { const lines = body.toString('utf8').replace(/^﻿/, '').split('\n'); return lines.slice(0, lines.indexOf('')); };
+      const secondA = await ins('company_admins',
+        `INSERT INTO company_admins (company_id, name, email, password_hash, is_primary) VALUES ($1, $2, $3, 'x', false) RETURNING id`,
+        [STAR_GUARD, `${marker} second-a`, `${marker}-second-a@test.invalid`]);
+      const profile = async (token: string) => { const r = await fetch(`${origin}/api/admin/company`, { headers: { authorization: `Bearer ${token}` } }); return { status: r.status, body: await r.json() as any }; };
+      {
+        const r = await profile(adminToken(adminA, STAR_GUARD));
+        const csv = csvHead((await get('/api/exports/analytics/csv', adminToken(adminA, STAR_GUARD))).body);
+        const want = csvPreamble(FULL as never);
+        check(r.status === 200 && show(r.body.csv_preamble) === show(want) && show(csv) === show(want),
+          `P1 Star Guard's primary admin: csv_preamble is the analytics CSV's opening lines, quoted and guarded (${show(r.body.csv_preamble)})`);
+        check(show(letterheadText({ name: ' Star Guard ', contact_email: ' ', phone: null, address: '', licence_number: ' PPO 1 ', website: null }))
+          === show({ companyName: ' Star Guard ', contactEmail: null, phone: null, address: null, licenceNumber: 'PPO 1', website: null, logo: null }),
+          'P1b letterheadText: fields trimmed and an empty one null, as the lookups always did; the name as stored; no logo');
+      }
+      {
+        const r = await profile(adminToken(secondA, STAR_GUARD));
+        check(r.status === 200 && r.body.is_primary === false && show(r.body.csv_preamble) === show(csvPreamble(FULL as never)),
+          `P2 a secondary admin of the same company gets the same lines (${r.status}, is_primary ${r.body.is_primary})`);
+      }
+      {
+        const r = await profile(adminToken(adminB, other));
+        const csv = csvHead((await get('/api/exports/analytics/csv', adminToken(adminB, other))).body);
+        check(r.status === 200 && show(r.body.csv_preamble) === show([`"${OTHER_NAME}"`, '"Powered by NetraOps"']) && show(csv) === show(r.body.csv_preamble),
+          `P3 the other company (an empty profile): its own name and "Powered by NetraOps", as its analytics CSV opens (${show(r.body.csv_preamble)})`);
+      }
+      {
+        const hostile = ['=HYPERLINK("https://x.example","Star Guard")', '@ops.example', '+1 (408) 555-0142', '-1 Example Way\n=San Jose', '+PPO 1', 'https://www.starguard.example/'];
+        await q('UPDATE companies SET contact_email = $2, phone = $3, address = $4, licence_number = $5, website = $6 WHERE id = $1', [STAR_GUARD, hostile[1], hostile[2], hostile[3], hostile[4], hostile[5]]);
+        const r = await profile(adminToken(adminA, STAR_GUARD));
+        const csv = csvHead((await get('/api/exports/analytics/csv', adminToken(adminA, STAR_GUARD))).body);
+        const lines: string[] = r.body.csv_preamble ?? [];
+        check(r.status === 200 && show(lines) === show(csv) && lines.length === 5
+          && lines[1] === `"'-1 Example Way, =San Jose"` && lines[2].startsWith('"Tel +1 (408) 555-0142') && lines[3] === `"License No. +PPO 1"` && lines[4] === '"Powered by NetraOps"',
+          `P4 a hostile profile: the same escaping as the analytics CSV, the address line guarded, the phone line labelled "Tel" (${show(lines)})`);
+        await q('UPDATE companies SET contact_email = $2, phone = $3, address = $4, licence_number = $5, website = $6 WHERE id = $1',
+          [STAR_GUARD, FULL.contactEmail, FULL.phone, FULL.address, FULL.licenceNumber, FULL.website]);
+      }
+    }
+
     // ── (next section) ──
   } finally {
     if (server) { const sv = server; await new Promise<void>((resolve) => sv.close(() => resolve())); }
     for (const table of ['geofence_violations', 'reports', 'shift_sessions', 'shifts', 'guards', 'sites', 'company_admins', 'companies']) {
       if (seeded[table].length) await q(`DELETE FROM ${table} WHERE id = ANY($1::uuid[])`, [seeded[table]]);
     }
-    if (!priorStarGuard) await q('DELETE FROM companies WHERE id = $1', [STAR_GUARD]);
+    if (priorStarGuard) {
+      await q(`UPDATE companies SET ${PROFILE.map((c, i) => `${c} = $${i + 2}`).join(', ')} WHERE id = $1`,
+        [STAR_GUARD, ...PROFILE.map((c) => priorStarGuard[c])]);
+    } else {
+      await q('DELETE FROM companies WHERE id = $1', [STAR_GUARD]);
+    }
     const left = (await q(`SELECT (SELECT count(*) FROM sites WHERE name LIKE $1)::int + (SELECT count(*) FROM company_admins WHERE email LIKE $1)::int
                                 + (SELECT count(*) FROM guards WHERE email LIKE $1)::int + (SELECT count(*) FROM companies WHERE name LIKE $2)::int AS n`,
       [`${marker}%`, `%${marker}`])).rows[0].n;

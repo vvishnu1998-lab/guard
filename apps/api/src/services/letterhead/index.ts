@@ -94,12 +94,7 @@ async function lookup(via: 'company' | 'site' | 'guard', id: string, sql: string
   }
   if (!row) return null;
   return {
-    companyName: row.name,
-    contactEmail: text(row.contact_email),
-    phone: text(row.phone),
-    address: text(row.address),
-    licenceNumber: text(row.licence_number),
-    website: text(row.website),
+    ...letterheadText(row),
     logo: row.logo_url
       ? await waitAtMost(logoFor(row.id, row.logo_url, row.logo_updated_at), opts.logoWaitMs, row.id)
       : null,
@@ -107,6 +102,23 @@ async function lookup(via: 'company' | 'site' | 'guard', id: string, sql: string
 }
 
 const text = (v: string | null): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
+
+/**
+ * The text of a company's letterhead from its companies row, without the logo:
+ * trimmed, an empty value null. The lookups above add the logo to it;
+ * GET /api/admin/company builds the CSV preamble from it (B7).
+ */
+export function letterheadText(row: Pick<CompanyRow, 'name' | 'contact_email' | 'phone' | 'address' | 'licence_number' | 'website'>): Letterhead {
+  return {
+    companyName: row.name,
+    contactEmail: text(row.contact_email),
+    phone: text(row.phone),
+    address: text(row.address),
+    licenceNumber: text(row.licence_number),
+    website: text(row.website),
+    logo: null,
+  };
+}
 
 /** The logo, or null if `ms` passes first; the fetch itself still settles into the cache. */
 function waitAtMost(logo: Promise<Buffer | null>, ms: number | undefined, companyId: string): Promise<Buffer | null> {

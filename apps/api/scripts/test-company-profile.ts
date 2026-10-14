@@ -235,8 +235,11 @@ async function main(): Promise<void> {
       check(r.body?.is_primary === true, 'G1 is_primary true from the DB although the JWT claims false');
       check(PROFILE.every((f) => r.body?.[f] === null), 'G1 the five fields start null');
       check(r.body?.logo_url === null && r.body?.logo_updated_at === null && r.body?.updated_at === null, 'G1 logo_url, logo_updated_at, updated_at null');
-      check(show(Object.keys(r.body ?? {}).sort()) === show(['address', 'contact_email', 'id', 'is_primary', 'licence_number', 'logo_updated_at', 'logo_url', 'name', 'phone', 'updated_at', 'website']),
+      check(show(Object.keys(r.body ?? {}).sort()) === show(['address', 'contact_email', 'csv_preamble', 'id', 'is_primary', 'licence_number', 'logo_updated_at', 'logo_url', 'name', 'phone', 'updated_at', 'website']),
         `G1 exactly the documented keys (got ${show(Object.keys(r.body ?? {}).sort())})`);
+      // B7: the letterhead lines a CSV export opens with; an empty profile has the name and "Powered by" only.
+      check(show(r.body?.csv_preamble) === show([`"${marker}-A"`, '"Powered by NetraOps"']),
+        `G1 csv_preamble for an empty profile: the name and "Powered by NetraOps" (got ${show(r.body?.csv_preamble)})`);
     }
     {
       const r = await call('GET', '', tSecondA);
