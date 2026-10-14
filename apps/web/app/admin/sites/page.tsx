@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { adminGet, adminPatch, adminPost } from '../../../lib/adminApi';
+import { fmtContractDate } from '../../../lib/contractDates';
 import {
   centroidOf,
   boundingRadiusMeters,
@@ -813,11 +814,6 @@ export default function SitesPage() {
     finally { setGeoSaving(false); }
   }
 
-  function fmtDate(iso: string | null) {
-    if (!iso) return '—';
-    return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  }
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -896,11 +892,11 @@ export default function SitesPage() {
                 {/* FIX 2: no "no end date" filler. When contract_end is null,
                     show just the start date; when present, show start → end. */}
                 <div className="text-gray-400 text-xs text-right whitespace-nowrap hidden md:block">
-                  {fmtDate(site.contract_start)}
+                  {fmtContractDate(site.contract_start)}
                   {site.contract_end && (
                     <>
                       <span className="text-gray-600"> → </span>
-                      {fmtDate(site.contract_end)}
+                      {fmtContractDate(site.contract_end)}
                     </>
                   )}
                 </div>
@@ -929,11 +925,11 @@ export default function SitesPage() {
                   <div className="md:hidden">
                     <p className="text-gray-500 text-xs tracking-widest mb-1">CONTRACT</p>
                     <p className="text-gray-300 text-sm">
-                      {fmtDate(site.contract_start)}
+                      {fmtContractDate(site.contract_start)}
                       {site.contract_end && (
                         <>
                           <span className="text-gray-600"> → </span>
-                          {fmtDate(site.contract_end)}
+                          {fmtContractDate(site.contract_end)}
                         </>
                       )}
                     </p>

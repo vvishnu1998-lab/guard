@@ -280,9 +280,12 @@ router.patch('/sites/:id/photo-limit', requireAuth('vishnu'), async (req, res) =
 
 // GET /api/admin/all-sites — every site across all companies (Vishnu view)
 router.get('/all-sites', requireAuth('vishnu'), async (_req, res) => {
+  // N201: timezone lets the Vishnu companies page count a contract's days left
+  // at the site, not in the browser.
   const result = await pool.query(
     `SELECT
        s.id, s.name, s.address, s.is_active, s.contract_start, s.contract_end,
+       s.timezone,
        s.photo_limit_override,
        co.id   AS company_id,
        co.name AS company_name,
