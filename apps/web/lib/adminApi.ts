@@ -11,8 +11,12 @@ function getToken(): string {
   return document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? '';
 }
 
+/** The API's answer to an admin on a temporary password (N194): every route but changing it is refused. */
+export const PASSWORD_CHANGE_REQUIRED = 'PASSWORD_CHANGE_REQUIRED';
+export const CHANGE_PASSWORD_PATH = '/admin/change-password';
+
 export async function adminFetch(path: string, options?: RequestInit): Promise<Response> {
-  return fetch(`${API}${path}`, {
+  const res = await fetch(`${API}${path}`, {
     cache: 'no-store',  // never serve a stale list — refetches after mutations must reflect them
     ...options,
     headers: {
@@ -21,6 +25,16 @@ export async function adminFetch(path: string, options?: RequestInit): Promise<R
       ...(options?.headers ?? {}),
     },
   });
+  // N194: an admin on a temporary password is sent to change it, from any
+  // page whose data the API refused. Not from the change-password page itself,
+  // where the nav's own polling would otherwise reload it forever. The
+  // response still goes back to the caller, which shows the API's sentence
+  // until the browser moves.
+  if (res.status === 403 && typeof window !== 'undefined' && window.location.pathname !== CHANGE_PASSWORD_PATH) {
+    const body = await res.clone().json().catch(() => null) as { code?: unknown } | null;
+    if (body?.code === PASSWORD_CHANGE_REQUIRED) window.location.href = CHANGE_PASSWORD_PATH;
+  }
+  return res;
 }
 
 /**

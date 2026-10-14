@@ -157,7 +157,7 @@ async function main(): Promise<void> {
     app.use(express.json());
     app.use('/api/auth', authRoutes);
     app.use('/api/admin/company', (await import('../src/routes/companyProfile')).default);
-    const ADMIN_ROUTE = "router.post('/admin/change-password', requireAuth('company_admin'), async (req: Request, res: Response) => {\n  const { current_password, new_password } = req.body;\n  const policyErr = validatePassword(new_password);";
+    const ADMIN_ROUTE = "router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('company_admin'), async (req: Request, res: Response) => {\n  const { current_password, new_password } = req.body;\n  const policyErr = validatePassword(new_password);";
     app.use('/api/auth-m1', mutantOf('src/routes/auth.ts', (s) => s.replace(
       "'UPDATE company_admins SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',",
       "'UPDATE company_admins SET password_hash = $1, must_change_password = false WHERE id = $2',")).default);

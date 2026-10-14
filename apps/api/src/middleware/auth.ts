@@ -46,6 +46,21 @@ export function secretForRole(role: string | undefined): string | undefined {
 }
 
 export function requireAuth(...roles: UserRole[]) {
+  return authenticate(roles, {});
+}
+
+/**
+ * N194: an admin on a temporary password (company_admins.must_change_password)
+ * is held to changing it. requireAuth refuses every other route with 403
+ * PASSWORD_CHANGE_REQUIRED, which the admin web answers by opening
+ * /admin/change-password. Only POST /api/auth/admin/change-password and
+ * POST /api/auth/logout use this one.
+ */
+export function requireAuthAllowingTemporaryPassword(...roles: UserRole[]) {
+  return authenticate(roles, { allowTemporaryPassword: true });
+}
+
+function authenticate(roles: UserRole[], opts: { allowTemporaryPassword?: boolean }) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header?.startsWith('Bearer ')) {
@@ -164,9 +179,9 @@ export function requireAuth(...roles: UserRole[]) {
     // tokens_not_before means no revocation — existing sessions survive.
     if (payload.role === 'company_admin') {
       const adminResult = await pool.query(
-        'SELECT is_active, tokens_not_before FROM company_admins WHERE id = $1',
+        'SELECT is_active, tokens_not_before, must_change_password FROM company_admins WHERE id = $1',
         [payload.sub]
-      ).catch(() => ({ rows: [] as { is_active: boolean; tokens_not_before: Date | null }[] }));
+      ).catch(() => ({ rows: [] as { is_active: boolean; tokens_not_before: Date | null; must_change_password: boolean }[] }));
 
       const adminRow = adminResult.rows[0];
       if (!adminRow?.is_active) {
@@ -178,6 +193,11 @@ export function requireAuth(...roles: UserRole[]) {
         if ((payload.iat + 1) * 1000 <= notBeforeMs) {
           return res.status(401).json({ error: 'Session revoked by administrator' });
         }
+      }
+      // N194: a temporary password may only be changed. The admin web reads
+      // `code`, so the enum goes there and `error` keeps a sentence.
+      if (adminRow.must_change_password && !opts.allowTemporaryPassword) {
+        return res.status(403).json({ code: 'PASSWORD_CHANGE_REQUIRED', error: 'Change your temporary password to continue.' });
       }
     }
 

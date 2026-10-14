@@ -5,7 +5,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthPayload, requireAuth, secretForRole } from '../middleware/auth';
+import { AuthPayload, requireAuth, requireAuthAllowingTemporaryPassword, secretForRole } from '../middleware/auth';
 import { sendTempPasswordEmail } from '../services/email';
 import { Sentry } from '../services/sentry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
@@ -427,7 +427,7 @@ router.post('/admin/login', async (req: Request, res: Response) => {
 
 // ── Star admin: change password ──────────────────────────────────────────────
 
-router.post('/admin/change-password', requireAuth('company_admin'), async (req: Request, res: Response) => {
+router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('company_admin'), async (req: Request, res: Response) => {
   const { current_password, new_password } = req.body;
   const policyErr = validatePassword(new_password);
   if (policyErr) return res.status(400).json({ error: policyErr });
@@ -751,7 +751,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
 
 // ── Logout ───────────────────────────────────────────────────────────────────
 
-router.post('/logout', requireAuth('guard', 'company_admin', 'client', 'vishnu'), async (req: Request, res: Response) => {
+router.post('/logout', requireAuthAllowingTemporaryPassword('guard', 'company_admin', 'client', 'vishnu'), async (req: Request, res: Response) => {
   // Both INSERTs drop ON CONFLICT DO NOTHING and let the UNIQUE(jti)
   // index serialize concurrent double-taps. Logout stays idempotent —
   // 23505 means someone (or this same caller) already revoked the jti,
