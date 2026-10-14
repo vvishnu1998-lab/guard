@@ -16,6 +16,12 @@
  * 2. THE ?src= TAG NEVER CHANGES THE SERVER OUTPUT AND IS NEVER ECHOED. A
  *    hostile value must produce the same page, byte for byte.
  * 3. THE BADGES LINK STRAIGHT TO THE STORES OF RECORD, with fixed page tags.
+ *    Apple's official badge is on the left and Google Play is a text link of
+ *    the SAME height on the right (until Google's artwork lands); the artwork
+ *    the SITE SERVES is byte-identical to the file the store supplied (a CDN
+ *    transform or an "optimised" copy would fail); on a confident iPhone the
+ *    Google wording hides and on Android the App Store wording hides, by CSS
+ *    only: the server HTML stays one byte-identical page.
  * 4. SHARE + SEO: canonical /app, its own Open Graph block (with the inherited
  *    image), indexable, honest JSON-LD (no rating, review or offers), and no
  *    Smart App Banner tag (a decision, not an omission).
@@ -26,7 +32,7 @@
  */
 import * as crypto from 'crypto';
 import * as http from 'http';
-import { APP_PAGE_URL, APP_STORE_URL, appStoreHref, playHref } from '../lib/storeLinks';
+import { APPLE_CLEAR_SPACE_PX, APP_PAGE_URL, APP_STORE_URL, BADGE_HEIGHT_PX, STORE_ARTWORK, appStoreHref, playHref } from '../lib/storeLinks';
 
 const BASE = (process.env.APP_BASE ?? 'http://localhost:3000').replace(/\/$/, '');
 const IS_LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)/.test(BASE);
@@ -122,6 +128,121 @@ async function main() {
   // Apple first in the DOM (Apple's rule: first in a lineup).
   if (html.indexOf('data-store="apple"') > html.indexOf('data-store="google"')) fail('Apple badge must come first in the DOM');
   if (/apple-itunes-app/i.test(html)) fail('apple-itunes-app (Smart App Banner) present: decided against for now');
+  // ── the row: Apple badge (an <img> inside its link) left, Google a text link, one height ──
+  // Everything below reads the SERVED html, by exact tokens and parsed declarations (not by
+  // substring), so `max-height:56px`, `group/main` or `...:hidden-x` cannot pass for the real thing.
+  const EXPECTED_APPLE_SRC = '/badges/Download_on_the_App_Store_Badge_US-UK_RGB_blk_092917.svg';
+  const ALT = { apple: 'Download on the App Store', google: 'Get it on Google Play' } as const;
+  const HIDE = { ios: 'group-data-[platform=ios]:hidden', android: 'group-data-[platform=android]:hidden' } as const;
+  const tokens = (s: string | undefined) => (s ?? '').split(/\s+/).filter(Boolean);
+  const classOf = (tag: string) => tokens(/\sclass="([^"]*)"/.exec(tag)?.[1]);
+  const styleOf = (tag: string): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const d of (/\sstyle="([^"]*)"/.exec(tag)?.[1] ?? '').split(';')) {
+      const i = d.indexOf(':');
+      if (i > 0) out[d.slice(0, i).trim().toLowerCase()] = d.slice(i + 1).trim().toLowerCase();
+    }
+    return out;
+  };
+  const openTag = (store: 'apple' | 'google') => new RegExp(`<a[^>]*data-store="${store}"[^>]*>`).exec(html)?.[0] ?? '';
+  const inner = (store: 'apple' | 'google') => new RegExp(`<a[^>]*data-store="${store}"[^>]*>([\\s\\S]*?)</a>`).exec(html)?.[1] ?? '';
+  const sameStyle = (got: Record<string, string>, want: Record<string, string>) => JSON.stringify(Object.entries(got).sort()) === JSON.stringify(Object.entries(want).sort());
+  const px = `${BADGE_HEIGHT_PX}px`;
+
+  // The Apple badge has SHIPPED (owner decision 2026-10-13): deleting its STORE_ARTWORK entry, or
+  // pointing it elsewhere, must fail here, not quietly fall back to a text link.
+  if (!STORE_ARTWORK.apple) fail('STORE_ARTWORK.apple is missing: the Apple badge shipped 2026-10-13, so removing it needs an edit to this check');
+  else if (STORE_ARTWORK.apple.src !== EXPECTED_APPLE_SRC) fail(`STORE_ARTWORK.apple.src ${STORE_ARTWORK.apple.src} != ${EXPECTED_APPLE_SRC}`);
+  if (html.split('data-store="').length !== 3) fail(`expected exactly two data-store anchors, found ${html.split('data-store="').length - 1}`);
+
+  for (const store of ['apple', 'google'] as const) {
+    const a = store === 'apple' ? STORE_ARTWORK.apple : STORE_ARTWORK.google;
+    const body = inner(store);
+    const tag = openTag(store);
+    // anchor: its own platform-hide token (and NOT the other one), the shared row height, nothing else in style
+    const cls = classOf(tag);
+    const own = store === 'apple' ? HIDE.android : HIDE.ios;
+    const other = store === 'apple' ? HIDE.ios : HIDE.android;
+    if (!cls.includes(own)) fail(`${store}: the link must carry the exact class token ${own} (hidden on the OTHER platform): ${cls.join(' ')}`);
+    if (cls.includes(other)) fail(`${store}: the link must NOT carry ${other}: ${cls.join(' ')}`);
+    if (!sameStyle(styleOf(tag), { 'min-height': px })) fail(`${store}: link style must be exactly min-height:${px}: ${JSON.stringify(styleOf(tag))}`);
+    if (a) {
+      const imgTag = /<img\b[^>]*>/.exec(body)?.[0] ?? '';
+      if (!imgTag) fail(`${store}: the official badge image is not inside its link`);
+      else {
+        if (!new RegExp(`\\ssrc="${a.src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`).test(imgTag)) fail(`${store}: <img> src is not ${a.src}: ${imgTag}`);
+        if ((/\salt="([^"]*)"/.exec(imgTag)?.[1] ?? '') !== ALT[store]) fail(`${store}: badge alt must be exactly "${ALT[store]}": ${imgTag}`);
+        if (!sameStyle(styleOf(imgTag), { height: px, width: 'auto' })) fail(`${store}: badge <img> style must be exactly height:${px};width:auto: ${JSON.stringify(styleOf(imgTag))}`);
+        if (body.replace(imgTag, '').trim() !== '') fail(`${store}: the badge link holds more than the image (the quarter-height clear space must be empty): ${body.replace(imgTag, '').trim().slice(0, 80)}`);
+        else ok(`${store}: official badge ${a.src}, ${px} tall, link holds only the image`);
+      }
+      // The served bytes are the store's file, byte for byte (no CDN transform, no re-save).
+      const asset = await fetch(BASE + a.src);
+      const buf = Buffer.from(await asset.arrayBuffer());
+      const got = crypto.createHash('sha256').update(buf).digest('hex');
+      const wantType = a.src.endsWith('.svg') ? /image\/svg\+xml/ : a.src.endsWith('.png') ? /image\/png/ : /image\//;
+      if (asset.status !== 200) fail(`${store} artwork -> ${asset.status}`);
+      else if (!wantType.test(asset.headers.get('content-type') ?? '')) fail(`${store} artwork content-type ${asset.headers.get('content-type')}`);
+      else if (got !== a.sha256) fail(`${store} artwork bytes served by the site (${got.slice(0, 12)}) differ from the file the store supplied (${a.sha256.slice(0, 12)})`);
+      else ok(`${store} artwork served byte-identical to the store's file (sha256 ${got.slice(0, 12)})`);
+    } else {
+      // No official artwork yet: a plain text link, never a lookalike badge.
+      const spanTag = /<span\b[^>]*>/.exec(body)?.[0] ?? '';
+      const label = store === 'apple' ? 'Available on the App Store' : 'Available on Google Play';
+      if (/<img/.test(body)) fail(`${store}: an image inside a link that has no official artwork (a lookalike badge?)`);
+      else if (body.replace(/<[^>]+>/g, '').trim() !== label) fail(`${store}: text link wording must be exactly "${label}": ${body.slice(0, 120)}`);
+      else ok(`${store}: text link "${label}" (no official artwork yet)`);
+      if (styleOf(spanTag)['min-height'] !== px) fail(`${store}: the text link's inner box is not min-height:${px}: ${JSON.stringify(styleOf(spanTag))}`);
+      for (const bad of ['padding', 'margin', 'max-height', 'line-height', 'height', 'width']) {
+        if (bad in styleOf(spanTag) || bad in styleOf(tag)) fail(`${store}: text link style must not set ${bad} (it would change the row height)`);
+      }
+    }
+  }
+
+  // ── platform wording: ONE marker on <main id="store-links">, hidden by CSS only ──
+  const mainTag = /<main\b[^>]*>/.exec(html)?.[0] ?? '';
+  if (!/\sid="store-links"/.test(mainTag) || !/\sdata-platform="other"/.test(mainTag) || !classOf(mainTag).includes('group')) {
+    fail(`<main> must carry id="store-links", data-platform="other" and the exact class token "group": ${mainTag}`);
+  } else ok('platform marker on <main id="store-links"> (server value "other", exact "group" token)');
+  // The CENSUS: exactly these elements carry a platform-hide class, no more (a stray hide on any other
+  // element would make content vanish on a phone), and each has exactly the token it should.
+  const hidden = Array.from(html.matchAll(/<(\w+)\b[^>]*\sclass="([^"]*group-data-\[platform=[^"]*)"[^>]*>/g)).map((m) => ({ el: m[1], cls: tokens(m[2]) }));
+  const key = (h: { el: string; cls: string[] }) => `${h.el}:${[...h.cls.filter((t) => t.startsWith('group-data-'))].sort().join('+')}`;
+  const census = hidden.map(key).sort();
+  const wantCensus = [
+    `a:${HIDE.android}`,                         // Apple link
+    `a:${HIDE.ios}`,                             // Google link
+    `p:${HIDE.ios}`,                             // "No Google Play on your phone" line
+    `span:${HIDE.android}`,                      // "the App Store" in "Can't find it?"
+    `span:${HIDE.ios}`,                          // "Google Play" in "Can't find it?"
+    `span:${[HIDE.android, HIDE.ios].sort().join('+')}`, // the " or " between them
+  ].sort();
+  if (JSON.stringify(census) !== JSON.stringify(wantCensus)) fail(`platform-hidden elements are not exactly the expected six.\n         got  ${JSON.stringify(census)}\n         want ${JSON.stringify(wantCensus)}`);
+  else ok('exactly six platform-hidden elements, each with exactly its tokens');
+  const noPlay = /<p\b[^>]*\sclass="([^"]*)"[^>]*>\s*<span\b[^>]*>No Google Play on your phone/.exec(html);
+  if (!noPlay || !tokens(noPlay[1]).includes(HIDE.ios)) fail('the "No Google Play on your phone" line must carry the exact token group-data-[platform=ios]:hidden');
+  else ok('"No Google Play on your phone" line hidden on iOS');
+  const findIt = /Can(?:&#x27;|&#39;|')t find it\?<\/span>[\s\S]*?<\/p>/.exec(html)?.[0] ?? '';
+  const spans = Array.from(findIt.matchAll(/<span class="([^"]*)">([^<]*)<\/span>/g)).map((m) => ({ cls: tokens(m[1]).filter((t) => t.startsWith('group-data-')).sort().join('+'), text: m[2] }));
+  const wantSpans = [
+    { cls: HIDE.android, text: 'the App Store' },
+    { cls: [HIDE.android, HIDE.ios].sort().join('+'), text: ' or ' },
+    { cls: HIDE.ios, text: 'Google Play' },
+  ];
+  if (JSON.stringify(spans) !== JSON.stringify(wantSpans)) fail(`"Can't find it?" spans are not [the App Store | " or " | Google Play] with the right hide tokens: ${JSON.stringify(spans)}`);
+  else ok('"Can\'t find it?" wording is platform-aware (three spans, exact tokens)');
+  // The served STYLESHEET must contain the rules that make those classes do something.
+  const sheets = Array.from(html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"|<link[^>]+href="([^"]+)"[^>]+rel="stylesheet"/g)).map((m) => m[1] ?? m[2]);
+  let css = '';
+  for (const href of sheets) css += await (await fetch(new URL(href, BASE + '/app').toString())).text();
+  const rule = /((?:\.group\[data-platform=(?:ios|android)\] \.group-data-\\\[platform\\=(?:ios|android)\\\]\\:hidden,?)+)\{display:none\}/.exec(css)?.[1] ?? '';
+  if (!rule.includes('[data-platform=ios]') || !rule.includes('[data-platform=android]')) fail('the served CSS has no display:none rule for both group-data-[platform=ios] and group-data-[platform=android] (Tailwind did not emit the hide rules)');
+  else ok('served CSS hides .group-data-[platform=ios|android]:hidden under the matching data-platform');
+  // Apple's quarter-height clear space: the tile's padding and its gap are both larger.
+  const tileClass = classOf(/<div\b[^>]*>(?=\s*<a[^>]*data-store="apple")/.exec(html)?.[0] ?? '');
+  const spacing = tileClass.filter((t) => /^(?:sm:)?(?:p|gap)-\d+$/.test(t)).map((t) => ({ t, px: Number(t.split('-')[1]) * 4 }));
+  if (spacing.length < 4 || spacing.some((x) => x.px <= APPLE_CLEAR_SPACE_PX)) fail(`the tile's padding and gap must all exceed Apple's clear space (${APPLE_CLEAR_SPACE_PX}px): ${JSON.stringify(spacing)}`);
+  else ok(`tile padding and gap (${spacing.map((x) => `${x.t}=${x.px}px`).join(', ')}) all exceed the ${APPLE_CLEAR_SPACE_PX}px clear space`);
   const qr = attr(html, /<img[^>]+src="(\/qr\/app-desktop\.svg)"/);
   if (!qr) fail('desktop QR image missing');
   else {
