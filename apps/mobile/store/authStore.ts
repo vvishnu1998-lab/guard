@@ -108,7 +108,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     // only flipped mustChangePassword (pre-Build-48 behaviour), home would
     // mount and volley authenticated calls into 401 → refresh(401) → logout
     // storms that burn the shared /api/auth rate-limit budget the guard needs
-    // for their re-login (deepak lockout, 2026-08-20). Tear the session down
+    // for their re-login (the 2026-08-20 lockout). Tear the session down
     // deliberately instead, mirroring logout's ordering — minus the fcm-null
     // POST, which the server has already done for us and which would only
     // spend a rate-limited request on a dead bearer token.

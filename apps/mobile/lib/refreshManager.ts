@@ -43,7 +43,7 @@ const KEYCHAIN_OPTS = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
  * have no refresh token at all, or on a sub mismatch. Distinguishes "this
  * session is dead, log out" from a transient network/5xx failure, which
  * propagates as a plain error and must NOT trigger logout — offline guards
- * keep their retry + banner behaviour (spec 2026-08-20, deepak lockout).
+ * keep their retry + banner behaviour (spec 2026-08-20, the lockout).
  */
 export class RefreshRejectedError extends Error {
   constructor(message: string) {

@@ -251,7 +251,7 @@ export function BREAK_HOURS_ROW_SQL(breakAlias: string, sessionAlias: string): s
  * "time until the next accepted ping", not "time away".
  *
  * Measured on prod 2026-08-30: 21 of 31 violations were closed by the
- * back-stamp, not by a guard returning. reddy's 2026-08-19 session showed
+ * back-stamp, not by a guard returning. one guard's 2026-08-19 session showed
  * 5.35h of "off-post" on a 7.40h shift, of which 4.78h was one row that
  * simply stayed open until a ping finally arrived at 04:50.
  *
@@ -262,7 +262,7 @@ export function BREAK_HOURS_ROW_SQL(breakAlias: string, sessionAlias: string): s
  * window counts if no ping LANDED inside it.
  *
  * PRESENCE IS JUDGED ON lp.pinged_at, NEVER lp.window_label. A guard can
- * backfill six labels in ten minutes — reddy did exactly that on 2026-08-19,
+ * backfill six labels in ten minutes — one guard did exactly that on 2026-08-19,
  * submitting labels 19:30 through 22:00 between 04:50 and 05:00. Backfill
  * answers the REPORTING obligation; it cannot retroactively prove someone
  * stood somewhere four hours earlier. Crediting labels would have credited
@@ -271,7 +271,7 @@ export function BREAK_HOURS_ROW_SQL(breakAlias: string, sessionAlias: string): s
  * ── CALLERS MUST STILL SUM OVER VIOLATIONS ──────────────────────────────
  *
  * This returns ONE violation row's hours. A session can carry several — five
- * sessions in prod carry two each, and reddy's 2026-08-19 total of 4.93h is
+ * sessions in prod carry two each, and that same guard's 2026-08-19 total of 4.93h is
  * 4.434 + 0.500 from two rows. Every call site therefore still wraps this in
  * SUM(...) over geofence_violations. An earlier draft of this change claimed
  * the outer SUM could be dropped; it cannot, and doing so would silently

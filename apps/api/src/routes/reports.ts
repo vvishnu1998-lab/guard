@@ -385,7 +385,7 @@ router.post('/', requireAuth('guard'), idempotent('reports'), async (req, res) =
   // 800 to 5120 so the row can hold anything S3 was willing to take
   // (MAX_UPLOAD_BYTES = 5 MiB, services/s3.ts:31). The three values are
   // now one value. Changing one without the others reopens exactly the
-  // hole that orphaned vamshi's 919 KB photo on 2026-08-22: S3 accepted
+  // hole that orphaned a guard's 919 KB photo on 2026-08-22: S3 accepted
   // it, Postgres refused it, and the object was left with no row.
   const MAX_PHOTO_KB = 5120;
 

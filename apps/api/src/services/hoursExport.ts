@@ -33,7 +33,7 @@
  * scheduled_hours belongs to the SHIFT, not the session. Summing it per
  * session double-counts a mid-shift handoff — services/shiftHours.ts warns
  * about exactly this, and prod has one such shift today
- * (d9ac9565, 7.50 h scheduled, reddy -> kartikeya, summed as 15.00 h).
+ * (d9ac9565, 7.50 h scheduled, one guard handing off to another, summed as 15.00 h).
  *
  * Every aggregate therefore uses a per-session SHARE of the shift's
  * scheduled hours, split in proportion to PAYABLE hours (D19):

@@ -80,7 +80,7 @@ export class ApiError extends Error {
  * token). Extends ApiError so isNetworkError() returns false: offlineStore
  * must propagate this to the UI, never queue-and-retry it (the pre-Build-48
  * misclassification retried revoked sessions into the shared /api/auth
- * rate-limit budget — deepak lockout, 2026-08-20). `.message` keeps the
+ * rate-limit budget — the 2026-08-20 lockout). `.message` keeps the
  * legacy copy so existing `Alert.alert(err.message)` call sites still read
  * correctly.
  */

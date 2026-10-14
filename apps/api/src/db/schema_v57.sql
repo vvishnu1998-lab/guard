@@ -4,9 +4,9 @@
 -- window close and never retried. A single skipped cron minute cost the
 -- reminder outright, and because guards react to the push rather than to a
 -- clock, it also cost the ping and then FLAGGED them for missing it.
--- Observed 2026-08-24 04:00Z: the tick gap 03:59:10 -> 04:01:05 cost Naveen
--- his 21:00 ping and produced the missed_pings row for it. He pings 10-56s
--- after every reminder he receives.
+-- Observed 2026-08-24 04:00Z: the tick gap 03:59:10 -> 04:01:05 cost a STARNET
+-- guard their 21:00 ping and produced the missed_pings row for it. They ping 10-56s
+-- after every reminder they receive.
 --
 -- Widening the eligibility to a RANGE means a later tick can still fire, so
 -- the job now needs to know which window it has already spoken for.

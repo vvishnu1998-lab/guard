@@ -156,7 +156,7 @@ export default function RootLayout() {
   // user in sequence and silently no-ops on subsequent calls when already
   // granted. Without this, the "Always" prompt would only appear once the
   // guard clocks into their first shift, which left existing installs without
-  // background geofencing (the bug james hit on 2026-05-15).
+  // background geofencing (the bug a tester hit on 2026-05-15).
   useEffect(() => {
     if (status !== 'authenticated' || mustChangePassword) return;
     (async () => {

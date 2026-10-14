@@ -721,7 +721,7 @@ router.post('/violation', requireAuth('guard'), async (req, res) => {
   // Break-time quiet policy (locked 2026-08-20): during an active break
   // there is no ping obligation and no geofence enforcement — a boundary
   // exit is recorded as an off_post_events row ONLY. No violation row, no
-  // guard push, no admin email (deepak's 14:12–14:35 meal break produced a
+  // guard push, no admin email (a guard's 14:12–14:35 meal break produced a
   // 17-min violation + 4 alert cycles ≈ 8 admin emails). The row still
   // feeds breakExpiryCron's return-check, which reads off_post_events as
   // off-post evidence.

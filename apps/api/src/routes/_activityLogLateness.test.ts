@@ -67,13 +67,13 @@ function test(name: string, fn: () => void): void {
 console.log('activityLog — "Missed — answered … late"\n');
 
 // ── The production row the end-measurement came from ──────────────────────
-// session bb3934c9, guard reddy (Star Guard), missed_pings e80658df:
+// session bb3934c9, a Star Guard guard, missed_pings e80658df:
 //   window 18:30:00 → 19:00:00Z, resolved by ping 79e7bd01 at 19:00:52.912Z
 const W_START = '2026-09-12T18:30:00.000Z';
 const W_END   = '2026-09-12T19:00:00.000Z';
 const PINGED  = '2026-09-12T19:00:52.912Z';
 
-test('reddy bb3934c9: 53 s past the deadline reads 53 seconds, not 31 minutes', () => {
+test('Star Guard session bb3934c9: 53 s past the deadline reads 53 seconds, not 31 minutes', () => {
   // 52.912 s: under a minute the figure counts whole seconds.
   assert.strictEqual(render(W_END, PINGED), 'Missed — answered 53 seconds late');
   assert.strictEqual(answeredMinutesLate_OLD(W_START, PINGED), 31, 'the old figure, for contrast');

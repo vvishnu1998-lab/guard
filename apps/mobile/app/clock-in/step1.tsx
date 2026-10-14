@@ -26,7 +26,7 @@ export default function ClockInStep1() {
   // mount and again on RETRY. On iOS, Balanced accuracy uses wifi/cell
   // triangulation and returns whatever CLLocationManager last cached — which
   // is up to several minutes old and does NOT refresh just because the
-  // guard has physically walked to the site. James's Build-30 walk-test:
+  // guard has physically walked to the site. The Build-30 walk-test:
   // opened wizard outside geofence, walked ~200m onto site, tapped RETRY,
   // still saw OFFSITE. Force-quit + relaunch worked because a fresh process
   // starts CoreLocation from empty. Fix: start watchPositionAsync on mount

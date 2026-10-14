@@ -1,8 +1,8 @@
 /**
  * Break Expiry — runs every minute (schema_v46 package, 2026-08-18).
  *
- * Until this job existed, planned_duration_minutes was display-only: the
- * reddy session of 2026-08-17 ran a 30-minute meal break for 112 minutes
+ * Until this job existed, planned_duration_minutes was display-only: a
+ * Star Guard session of 2026-08-17 ran a 30-minute meal break for 112 minutes
  * with no cap, no flag, and no notification. Now:
  *
  *   Step 1 — AUTO-CLOSE: any open break past its plan is closed server-side
