@@ -6,11 +6,15 @@
  * pill that expands inline. Add / assign / deactivate / per-assignment
  * edit-end-remove flows preserved from the previous table layout.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { adminGet, adminPost, adminPatch, adminFetch, adminDelete } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 import { fmtCalDate } from '../../../lib/shiftFormat';
 import GuardDeactivateDialog from '../../../components/admin/GuardDeactivateDialog';
+import {
+  ADDED_INSTALL_LINE, BANNER_URL, MODAL_HELPER_LINE, PANEL_LEAD, PANEL_QR_ALT, PANEL_QR_SRC, PANEL_URL,
+  credentialsCopyText,
+} from '../../../lib/guardAppHandoff';
 
 interface Assignment {
   id:              string;
@@ -109,6 +113,10 @@ export default function GuardsPage() {
   const [formError,  setFormError]  = useState('');
   const [credentialsBanner, setCredentialsBanner] = useState<CredentialsBanner | null>(null);
   const [resendingId, setResendingId] = useState<string | null>(null);
+  // Which COPY button last wrote to the clipboard (shows "COPIED" for 2 s).
+  const [copied, setCopied] = useState<string | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
 
   // ── Redesign state (Session 2) ─────────────────────────────────────────
   const [search,       setSearch]       = useState('');
@@ -180,9 +188,20 @@ export default function GuardsPage() {
     finally { setResendingId(null); }
   }
 
+  // "COPIED" only after the write resolved. A refused write shows nothing; the
+  // links are on screen as selectable text, so there is always a manual path.
+  function copyText(text: string, key: string) {
+    navigator.clipboard?.writeText(text)
+      .then(() => {
+        setCopied(key);
+        if (copiedTimer.current) clearTimeout(copiedTimer.current);
+        copiedTimer.current = setTimeout(() => setCopied((c) => (c === key ? null : c)), 2000);
+      })
+      .catch(() => { /* ignore */ });
+  }
+
   function copyCredentialsToClipboard(b: CredentialsBanner) {
-    const text = `Email: ${b.email}\nPassword: ${b.temp_password}`;
-    navigator.clipboard?.writeText(text).catch(() => { /* ignore */ });
+    copyText(credentialsCopyText(b.email, b.temp_password), 'credentials');
   }
 
   async function assignGuard() {
@@ -323,10 +342,22 @@ export default function GuardsPage() {
       {error && <div className="bg-red-900/40 border border-red-500 text-red-300 text-sm rounded-lg px-4 py-3">{error}</div>}
 
       {addedBadge && (
-        <div className="bg-green-900/40 border border-green-500 text-green-300 text-sm rounded-lg px-4 py-3 flex items-center justify-between">
-          <span>Guard added with badge <span className="font-mono font-bold text-green-200">{addedBadge}</span>.</span>
-          <button onClick={() => setAddedBadge(null)} aria-label="Dismiss"
-            className="text-green-400 hover:text-green-200 text-lg leading-none">✕</button>
+        <div className="bg-green-900/40 border border-green-500 text-green-300 text-sm rounded-lg px-4 py-3 flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <p>Guard added with badge <span className="font-mono font-bold text-green-200">{addedBadge}</span>.</p>
+            <p className="text-xs text-green-400 mt-1">{ADDED_INSTALL_LINE}</p>
+            <p data-testid="added-install-link" className="text-xs font-mono text-green-200 mt-1 break-all select-all">{BANNER_URL}</p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => copyText(BANNER_URL, 'banner')}
+              className="text-xs tracking-widest border rounded px-3 py-1 text-green-300 hover:text-green-100 border-green-500/40 hover:bg-green-500/10"
+            >
+              {copied === 'banner' ? 'COPIED' : 'COPY LINK'}
+            </button>
+            <button onClick={() => setAddedBadge(null)} aria-label="Dismiss"
+              className="text-green-400 hover:text-green-200 text-lg leading-none">✕</button>
+          </div>
         </div>
       )}
 
@@ -359,7 +390,7 @@ export default function GuardsPage() {
                   : 'text-amber-200 hover:text-amber-50 border-amber-500/40 hover:bg-amber-500/10'
               }`}
             >
-              COPY
+              {copied === 'credentials' ? 'COPIED' : 'COPY'}
             </button>
             <button
               onClick={() => setCredentialsBanner(null)}
@@ -371,6 +402,32 @@ export default function GuardsPage() {
           </div>
         </div>
       )}
+
+      {/* GUARD APP: the one install link and its QR code, for any guard, any time.
+          Collapsed by default so it costs one row; at every width, because an
+          admin on a phone still needs the COPY LINK button. */}
+      <details data-testid="guard-app-panel" className="group bg-[#0F1E35] border border-[#1A3050] rounded-xl">
+        <summary className="flex items-center justify-between gap-4 px-4 min-h-[44px] cursor-pointer list-none [&::-webkit-details-marker]:hidden text-xs tracking-widest text-gray-400 hover:text-gray-200">
+          <span>GUARD APP <span className="text-gray-600">· INSTALL LINK</span></span>
+          <svg className="w-3.5 h-3.5 shrink-0 text-gray-500 group-open:rotate-180 transition-transform duration-200" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M5 8l5 5 5-5" /></svg>
+        </summary>
+        <div className="px-4 pb-4 flex flex-col sm:flex-row gap-4 sm:items-start">
+          <div className="shrink-0 rounded-lg overflow-hidden bg-white self-start">
+            {/* eslint-disable-next-line @next/next/no-img-element -- a static, committed SVG */}
+            <img src={PANEL_QR_SRC} alt={PANEL_QR_ALT} width={222} height={222} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-gray-300 text-sm mb-2">{PANEL_LEAD}</p>
+            <p data-testid="panel-install-link" className="text-xs font-mono text-gray-400 mb-3 break-all select-all">{PANEL_URL}</p>
+            <button
+              onClick={() => copyText(PANEL_URL, 'panel')}
+              className="text-xs tracking-widest border rounded px-3 py-2 min-h-[40px] text-amber-300 hover:text-amber-100 border-amber-500/40 hover:bg-amber-500/10"
+            >
+              {copied === 'panel' ? 'COPIED' : 'COPY LINK'}
+            </button>
+          </div>
+        </div>
+      </details>
 
       {/* Desktop list */}
       <div className="hidden md:block bg-[#0F1E35] border border-[#1A3050] rounded-xl overflow-hidden">
@@ -621,7 +678,7 @@ export default function GuardsPage() {
                 </div>
               ))}
             </div>
-            <p className="text-gray-600 text-xs mt-3 mb-5">Guard will be prompted to change their password on first login.</p>
+            <p className="text-gray-600 text-xs mt-3 mb-5">Guard will be prompted to change their password on first login. {MODAL_HELPER_LINE}</p>
             <div className="flex gap-3">
               <button onClick={() => setShowAdd(false)} className="flex-1 border border-[#1A3050] text-gray-400 rounded-lg py-3 text-sm tracking-widest hover:border-gray-500 transition-colors">CANCEL</button>
               <button onClick={addGuard} disabled={saving} className="flex-1 bg-amber-400 text-gray-900 font-bold rounded-lg py-3 text-sm tracking-widest hover:bg-amber-300 disabled:opacity-40 transition-colors">
