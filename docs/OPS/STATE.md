@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #118, B6 + B7: the company letterhead on the analytics XLSX (moved from SheetJS to exceljs, cell for cell) and on the checkpoint-scans CSV, by OVERRIDE — verified 2026-10-13 21:06 PT
+
+| thing | value |
+|---|---|
+| merge | PR #118 merged as `814a0db` at **21:03:38 PT (04:03:38Z) by OVERRIDE**. Vishnu: "1b 2a 3a … Build, prove, push (I'll approve), merge by OVERRIDE when CI is green." The push asked Vishnu (N183) and he approved it; the PR opened at ~20:55 PT. One read at 21:03:33 PT: 5/5 SUCCESS, CLEAN, head `485dfaf`, main `86cc2f0`. Then one call, `gh pr merge 118 --merge --match-head-commit 485dfaf…`. The merge tree equals the head's tree (`de019fa`). |
+| Railway | `2be33bd9-f9e6-450d-b7da-ccbdd69588c7` **SUCCESS** at 21:05:05 PT from `814a0db`. |
+| web | Vercel production on `814a0db`: success at 21:05:24 PT. |
+| health | `/health` commit `814a0db`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`1c6dd514`, from #117's `86cc2f0`) served its last request at 21:04:30.6 and stopped at 21:05:15.9 PT. The new one was listening at 21:04:59.6 and served its first request at 21:05:25.5. Over its whole life (19:36 to 21:04 PT) the old one served 1,225 requests: 6 were 499s, every one a GET and all before 19:54 PT (client aborts), and 0 were 5xx. Sentry, 20:36–21:06 PT: API, none; mobile, no new issue (MOBILE-11, known since 09-29, last seen 20:39). |
+| restart window | 21:03:38–21:05:16 PT: STARNET wrote nothing. Its 21:00 cron tick (13 notifications, 2 missed pings, 1 missed report), 3 location pings and 3 reports all landed by 21:00:50, before the merge. 5 STARNET sessions were open. |
+| visible change | Every tenant's admins, STARNET included. The analytics XLSX (Analytics → EXPORT → EXCEL) opens every sheet with the company's letterhead block, the title "Analytics Export · <period>" and "Powered by NetraOps"; the table starts at row 8, cell for cell as before, and every sheet prints with the company's header and footer. Its default font is Calibri 11 (12 before). The checkpoint-scans CSV (a site's EXPORT CSV) opens with the company's name, contact lines and "Powered by NetraOps", then a blank line, then the scans as before. `GET /api/admin/company` carries `csv_preamble`. Vishnu's all-company analytics export has no letterhead, as before. Not yet seen in a downloaded file in production. |
+
+---
+
 ## Shipped 2026-10-14 — PR #115, the end-of-day state record, by OVERRIDE (docs; a Railway restart) — verified 2026-10-13 18:50 PT
 
 | thing | value |

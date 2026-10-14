@@ -5323,7 +5323,7 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
-- **Status 2026-10-13 (B6 and B7, BUILT on `feat/letterhead-b6-b7`):** the analytics workbook draws the logo
+- **Status 2026-10-13 (B6 and B7, SHIPPED as `814a0db`, PR #118):** the analytics workbook draws the logo
   through B1's block, which decodes it again before exceljs embeds it. A logo that does not decode leaves the
   block's text in column A (`scripts/test-letterhead-b6-b7.ts`, L4). The checkpoint CSV carries no logo.
 - **Status 2026-10-13 (B5, SHIPPED as `dde311c`, PR #106):** the admin alerts and the guard, client and
@@ -6144,7 +6144,7 @@ verified 2026-10-14 by me, read-only: the committed `hours-export.2026-07-01_202
 
 ## New from Phase B, stages B6 and B7 (2026-10-13)
 
-**Status: BUILT 2026-10-13 on `feat/letterhead-b6-b7` (5 commits on `86cc2f0`), not yet merged.** Vishnu asked
+**Status: SHIPPED 2026-10-13 as `814a0db` (PR #118, 21:03:38 PT, by OVERRIDE; see STATE.md).** Vishnu asked
 for both stages in one PR and decided 1b, 2a and 3a (2026-10-13). They are the last two stages of Phase B.
 - **B6, the analytics XLSX** (`GET /api/exports/analytics/xlsx`; company admins download it from Analytics →
   EXPORT → EXCEL):
@@ -6196,7 +6196,9 @@ for both stages in one PR and decided 1b, 2a and 3a (2026-10-13). They are the l
     - each commit alone, and gitleaks.
   - Not run: `scripts/test-payable-hours.ts`, whose seed stops at v81 (N172). Its U4 now reads past the
     letterhead rows, checked against sample workbooks.
-- **SheetJS (xlsx 0.18.5) stays a dependency of apps/api, used by test scripts only:**
+- **SheetJS (xlsx 0.18.5) moved to apps/api's devDependencies with the PR after #118 (Vishnu, 2026-10-13). Only
+  test scripts use it; the production build (`tsc -p tsconfig.json`, what Railway runs) requires 30 packages, none
+  of them xlsx:**
   - `scripts/test-n171-formula-guard.ts`;
   - `scripts/test-payable-hours.ts`;
   - `scripts/test-letterhead-b6-b7.ts`, where it is the baseline.
@@ -6222,3 +6224,94 @@ and contact lines of about 90 characters and more.
   - shorten the company name in the header and footer with an ellipsis, as the PDF letterhead does;
   - shorten or wrap long block lines.
 - **Size S. Tier 1.**
+
+## New from Phase C, change password (2026-10-13)
+
+**Status: BUILT 2026-10-13 on `feat/phase-c-change-password` (on `814a0db`), not yet merged.** Phase C is the
+third part of Vishnu's program: A company profile, B letterhead, C change password, D login history. He asked
+for a change-password link in Settings for every admin, primary and secondary, and decided 1a and 2a on
+2026-10-13.
+- **Settings → YOUR ACCOUNT → CHANGE PASSWORD.** The section is every admin's. It renders before and whether or
+  not the company profile loads, because the password is the admin's own.
+- **1a: the link opens `/admin/change-password?from=settings`.**
+  - It is the page a temporary password already used, with the same form and the same
+    `POST /api/auth/admin/change-password`.
+  - Opened from Settings it reads "Change your password" with CURRENT PASSWORD, and has a Cancel back to
+    Settings.
+  - Only the exact value `from=settings` switches the wording, and Cancel's target is fixed.
+  - A temporary password still gets the page of before.
+- **2a: no API change.** The server ends every session of the admin (`tokens_not_before`), so the page clears
+  the cookies and signs in again from `/admin/login`, where "Password updated" shows, as before. The form says
+  so before it is sent.
+- **Current flows, for the record (read 2026-10-13):**
+  - Admin, client and guard each have `POST /api/auth/<role>/change-password`. Each one checks the current
+    password, holds the new one to 8-128 characters and ends every session. The guard route also revokes the
+    guard's devices.
+  - `/api/auth` allows 20 requests per 15 minutes per IP.
+  - Guards change it from the mobile Profile tab, either way in. Clients only have the temporary-password page
+    (N196).
+- **Proof:**
+  - `apps/web` `npm run check:change-password`, 16/16. Both pages are rendered as they are now and as they
+    were at `814a0db`:
+    - the temporary-password page and 11 near misses of `from=settings` are `814a0db`'s markup byte for byte;
+    - the voluntary page swapped back is `814a0db`'s markup, and Cancel is fixed to `/admin/settings`;
+    - handleSubmit is unchanged;
+    - YOUR ACCOUNT renders before "Loading…" and sits under no condition;
+    - both sources, with the Phase C lines taken out, are `814a0db`'s;
+    - 8 of 8 mutants caught.
+  - `scripts/test-phase-c-change-password.ts`, 23/23 (local database). For a primary admin, a secondary admin
+    and an admin on a temporary password:
+    - the change, the new hash and one `password_changed` event;
+    - every old access and refresh token refused;
+    - the new password signs in.
+
+    A refused change leaves everything as it was. 3 of 3 route mutants caught.
+  - In a browser, against the real auth and profile routers on the local database:
+    - a secondary admin's Settings shows the link; the page reads as voluntary; Cancel goes back;
+    - a change lands on "Password updated", and the new password signs in;
+    - the temporary-password admin gets the page of before, with no Cancel;
+    - the primary sees the link above its editable profile;
+    - both pages fit 375 px with no horizontal scroll.
+- **Visible on deploy to every tenant's admins**, STARNET included. Nothing changes for clients or guards.
+- **Size S. Tier 1.**
+
+### N194 — an admin on a temporary password is not held on the change-password page
+
+verified 2026-10-13 by reading the code (Phase C).
+- The admin login sends an admin with `must_change_password` to `/admin/change-password`. The page renders
+  inside the admin layout with the sidebar, though, and nothing else checks the flag: neither the API's
+  `requireAuth`, nor the web middleware, nor any admin page.
+- So an admin can leave the page and keep using the temporary password, which arrived by email, for as long as
+  the session lasts, and sign in with it again.
+- **Fix:** the API refuses a `company_admin` token whose row has `must_change_password`, except for the
+  change-password and logout routes; the web hides the nav on that page. The guard and client flows need the
+  same check.
+- **Size S. Tier 1** (auth).
+
+### N195 — a change-password request with no current password gets a 500, not a 400
+
+verified 2026-10-13 by `scripts/test-phase-c-change-password.ts` (E3) on the admin route.
+- `POST /api/auth/admin/change-password` with no `current_password` reaches `bcrypt.compare(undefined, …)`,
+  which throws "data and hash arguments required". The error handler answers 500. Nothing is stored.
+- The guard and client routes have the same line (`routes/auth.ts:252` and `:527`). This was read, not run.
+- No page sends such a request: the web forms and the mobile screen always send a current password.
+- **Fix:** answer 400 when `current_password` is not a string, in all three routes.
+- **Size XS. Tier 1.**
+
+### N196 — clients cannot change their password unless an admin resets it
+
+verified 2026-10-13. The client portal has only the temporary-password page (`/client/change-password`, which the
+client login sends a temporary password to) and no link to it. Admins have one since Phase C, and guards have
+one on the mobile Profile tab.
+- **Fix when wanted:** the same link in the client portal, with the same page worded for a change the client
+  chose.
+- **Size S. Tier 1** (client-visible).
+
+### N197 — no role is told by email when its password changes
+
+verified 2026-10-13 by reading `routes/auth.ts`. The three change-password routes write an auth event and send no
+email (forgot-password does email the temporary password, to the same address). So someone whose password was
+changed by another person, with a session or the current password, learns of it only when their sign-in fails.
+- **Proposed for Phase D (login history):** an email to the account's own address after every change, saying
+  when the change happened and what to do if it was not them.
+- **Size S. Tier 1** (customer-visible email).

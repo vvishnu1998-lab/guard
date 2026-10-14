@@ -13,7 +13,8 @@
     "check:store-links": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-store-links.ts",
     "check:checkpoint-csv": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-checkpoint-csv.ts",
     "check:app-page": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-app-page.ts",
-    "check:guard-handoff": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-guard-handoff.ts"
+    "check:guard-handoff": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-guard-handoff.ts",
+    "check:change-password": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-change-password.ts"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",

@@ -1,5 +1,38 @@
 'use client';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useState, FormEvent } from 'react';
+
+/**
+ * /admin/change-password — one page, two ways in:
+ *   - a temporary password: the admin login sends an admin whose
+ *     must_change_password is set here, and the page asks for the current
+ *     (or temporary) password, as it always has;
+ *   - Settings → YOUR ACCOUNT → CHANGE PASSWORD (Phase C; Vishnu's decision
+ *     1a, 2026-10-13) opens it as ?from=settings: the same form and the same
+ *     POST, worded for a change the admin chose, with a Cancel back to
+ *     Settings. Only that exact value switches the wording; Cancel's target is
+ *     fixed, never read from the URL.
+ * Either way the server ends every session of the admin (tokens_not_before),
+ * so success clears the cookies and signs in again from /admin/login
+ * (decision 2a).
+ */
+const COPY = {
+  temporary: {
+    eyebrow: 'SET PASSWORD',
+    title: 'Choose a new password',
+    intro: 'Enter your current (or temporary) password, then choose a new password of at least 8 characters.',
+    currentLabel: 'CURRENT / TEMPORARY PASSWORD',
+    submit: 'SET PASSWORD & CONTINUE',
+  },
+  settings: {
+    eyebrow: 'YOUR ACCOUNT',
+    title: 'Change your password',
+    intro: 'Enter your current password, then choose a new one of at least 8 characters. Changing it signs you out everywhere, this browser included; sign in again with the new password.',
+    currentLabel: 'CURRENT PASSWORD',
+    submit: 'CHANGE PASSWORD',
+  },
+} as const;
 
 function EyeIcon() {
   return (
@@ -26,6 +59,8 @@ function readCookie(name: string): string | null {
 }
 
 export default function AdminChangePasswordPage() {
+  const fromSettings = useSearchParams()?.get('from') === 'settings';
+  const copy = fromSettings ? COPY.settings : COPY.temporary;
   const [current, setCurrent]         = useState('');
   const [next, setNext]               = useState('');
   const [confirm, setConfirm]         = useState('');
@@ -80,10 +115,10 @@ export default function AdminChangePasswordPage() {
     <main className="min-h-screen bg-[#060E1A] flex items-center justify-center p-8">
       <div className="w-full max-w-[420px]">
         <div className="mb-10">
-          <p className="text-amber-500 text-[11px] tracking-[0.3em] font-semibold mb-3">SET PASSWORD</p>
-          <h1 className="text-white font-black text-3xl tracking-tight mb-2">Choose a new password</h1>
+          <p className="text-amber-500 text-[11px] tracking-[0.3em] font-semibold mb-3">{copy.eyebrow}</p>
+          <h1 className="text-white font-black text-3xl tracking-tight mb-2">{copy.title}</h1>
           <p className="text-white/35 text-sm tracking-wide">
-            Enter your current (or temporary) password, then choose a new password of at least 8 characters.
+            {copy.intro}
           </p>
         </div>
 
@@ -95,7 +130,7 @@ export default function AdminChangePasswordPage() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-white/40 text-[10px] tracking-[0.2em] font-semibold mb-2">CURRENT / TEMPORARY PASSWORD</label>
+            <label className="block text-white/40 text-[10px] tracking-[0.2em] font-semibold mb-2">{copy.currentLabel}</label>
             <div className="relative">
               <input
                 type={showCurrent ? 'text' : 'password'}
@@ -142,8 +177,16 @@ export default function AdminChangePasswordPage() {
             disabled={loading}
             className="w-full bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-black font-black tracking-[0.15em] text-sm py-4 rounded-lg transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-amber-500/20 hover:shadow-amber-500/30 mt-2"
           >
-            {loading ? 'SAVING…' : 'SET PASSWORD & CONTINUE'}
+            {loading ? 'SAVING…' : copy.submit}
           </button>
+          {fromSettings && (
+            <Link
+              href="/admin/settings"
+              className="block text-center text-white/40 hover:text-white text-xs tracking-[0.2em] font-semibold py-2"
+            >
+              CANCEL
+            </Link>
+          )}
         </form>
       </div>
     </main>

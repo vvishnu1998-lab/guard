@@ -1,14 +1,23 @@
 'use client';
+import Link from 'next/link';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { adminGet, adminPatch, ApiError } from '../../../lib/adminApi';
 
 /**
- * /admin/settings — company profile (Phase A, GET/PATCH /api/admin/company)
- * and company logo (POST/DELETE /api/admin/company/logo).
+ * /admin/settings — the admin's own account (Phase C: change password),
+ * company profile (Phase A, GET/PATCH /api/admin/company) and company logo
+ * (POST/DELETE /api/admin/company/logo).
  *
- * Every admin of the company can VIEW; only the primary admin can EDIT. The
- * API re-checks primary on every write; `is_primary` here only decides which
- * controls render, and anything but `true` renders read-only (fail closed).
+ * YOUR ACCOUNT is every admin's, primary or not, and renders before and
+ * whether or not the company profile loads: the password is the admin's own.
+ * Its link opens /admin/change-password?from=settings, the same page and the
+ * same POST /api/auth/admin/change-password a temporary password leads to,
+ * worded for a change the admin chose (Vishnu's decision 1a, 2026-10-13).
+ *
+ * Every admin of the company can VIEW the profile; only the primary admin can
+ * EDIT it. The API re-checks primary on every write; `is_primary` here only
+ * decides which controls render, and anything but `true` renders read-only
+ * (fail closed).
  *
  * Vercel and Railway deploy separately, so this page must survive an API that
  * lacks the route or some fields: every field is optional, a missing one
@@ -239,6 +248,20 @@ export default function AdminSettingsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-widest text-[#C9A84C]">SETTINGS</h1>
       </div>
+
+      {/* ── Your account ─────────────────────────────────────────────────── */}
+      <section className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-4 md:p-6">
+        <h2 className="text-white font-bold tracking-widest text-base mb-1">YOUR ACCOUNT</h2>
+        <p className="text-gray-500 text-xs mb-5">
+          The password you sign in with. Changing it signs you out everywhere, this browser included.
+        </p>
+        <Link
+          href="/admin/change-password?from=settings"
+          className="inline-block border border-[#00C8FF] text-[#00C8FF] font-bold tracking-widest text-sm px-5 py-2.5 rounded-lg hover:bg-[#00C8FF]/10 transition-colors"
+        >
+          CHANGE PASSWORD
+        </Link>
+      </section>
 
       {loading && <p className="text-gray-500 text-sm">Loading…</p>}
 
