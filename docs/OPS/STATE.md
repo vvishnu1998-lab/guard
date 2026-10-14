@@ -264,6 +264,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-13 — PR #110, W3: the admin Guards page hands the guard the app link (banner, COPY text, a GUARD APP panel with a static QR), by OVERRIDE — verified 2026-10-13 17:46 PT; admin page behaviour and a real-phone QR scan: Vishnu, pending
+
+| thing | value |
+|---|---|
+| merge | PR #110 merged as `5ed59e5` at **17:43:45 PT (00:43:45Z, 2026-10-14) by OVERRIDE**. Vishnu: "When #110 is CI green + Vercel green: OVERRIDE merge." Prechecks at 00:43:33Z: head `5a93b34` directly on `14413dd` (merge-base equals origin/main), MERGEABLE/CLEAN, 5 of 5 checks green (the three required contexts, **Vercel**, Vercel Preview Comments), 11 files (the Guards page, `lib/guardAppHandoff.ts`, the check script, the QR SVG, `package.json`, `tsconfig.check.json`, four docs and a columns-only template CSV). `gh pr merge --merge --match-head-commit 5a93b34…`. Before it, 00:43:34Z: 3 STARNET sessions open, last ping 00:37:45Z, control counts matching. |
+| history rewrite | The branch was first pushed at 23:56:47Z with a per-badge sheet in it (N190). Vishnu approved `git push --force-with-lease` and it landed at **00:40:41Z**: the branch had been public for about 44 minutes, and the old commits (`ef7a1b2`, `0bce497`) stay reachable by SHA until GitHub purges them (a Support request was drafted for Vishnu to file). The merged history has no sheet file and no badge id except a test-tenant guard. |
+| Railway | `07978ba7-747a-4ac9-a2c8-90ec237a5957` **SUCCESS** at 00:45:37Z (17:45:37 PT) from `5ed59e5` (pending 00:43:49Z). |
+| web | Vercel production on `5ed59e5`: success at 00:46:18Z. **The first preview of the branch FAILED** (23:57Z, log never read: the Vercel CLI is blocked by `guard.sh` and the browser pane is not logged in to Vercel); the force-pushed branch built green. An independent reviewer reproduced a failing build of the first commit as an intermittent `next/font/google` fetch error (about 1 in 12), so a transient is likely but unconfirmed. |
+| health | `/health` commit `5ed59e5`, first seen 00:45:43Z by a 10 s poll; `/health/crons` 20 jobs, `stale: []`. |
+| restart window | 00:43:45Z to 00:45:43Z (merge to the first poll that saw the new commit; the container switch was NOT timed). STARNET, counts via `postgres-readonly`: **0 location pings, 0 session starts or ends, 0 breaks, 0 notifications, 0 guard auth events**, and 0 of each from 00:45:43Z to my read about 00:50Z; the 3 open sessions stayed open. Control: 0 platform-wide pings and 0 platform-wide auth events. The last STARNET ping before the merge was 00:37:45Z and sessions ping about every 30 minutes, so **probably no ping was due inside the window**: these zeros show that nothing in flight was lost, not that a ping would have survived the restart. |
+| verification | `https://www.netraops.com/qr/app-admin.svg` returns 200 `image/svg+xml` with bytes **identical** to the repo file (sha256 prefix `2221466fad90971a`); `APP_BASE=https://www.netraops.com npm run check:app-page` still passes (the Guards page does not touch `/app`). Before merge: `check:guard-handoff` with **17 mutants caught**, the QR decoded by Apple's Vision as exactly `https://www.netraops.com/app?src=admin` (a noisy copy fails), a local browser run against a mock API at 375/390/1280, `tsc` and `next build` clean (also on a clean `git archive` of the pushed commit). **Not seen:** the Guards page in production (it needs a login), a **real-phone scan** of the admin QR, and a real ADD GUARD/RESEND click-through with COPY. |
+| visible change | After ADD GUARD the banner offers the install link with COPY LINK; the credentials COPY text now ends with a blank line and the link; a collapsed GUARD APP row shows the QR and the link at every width. No store or platform is named. The banner does **not** say the welcome email was sent (the create route answers 201 first and reports a failed send only to Sentry). |
+
+---
+
 ## Shipped 2026-10-13 — PR #109, E1: the guard welcome email's "Get the NetraOps app" block (both copies), a text part, click tracking off, by OVERRIDE — verified 2026-10-13 15:53 PT; Gmail raw check PASSED (Vishnu); **real path VERIFIED end to end on a test guard (Vishnu, 2026-10-13 ~16:48 PT)**
 
 | thing | value |

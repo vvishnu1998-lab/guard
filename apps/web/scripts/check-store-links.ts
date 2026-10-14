@@ -21,10 +21,15 @@
  *
  * Run: npm run check:store-links (from apps/web). Not postinstall.
  */
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   APP_PAGE_URL,
   APP_STORE_URL,
+  APPLE_CLEAR_SPACE_PX,
   APPLE_PROVIDER_TOKEN,
+  BADGE_HEIGHT_PX,
   PLAY_STORE_URL,
   SRC_REGISTRY,
   STORE_ARTWORK,
@@ -194,13 +199,40 @@ eq('detectPlatform(oversized UA)', detectPlatform('iPhone '.repeat(200)), 'other
 // ── 4. artwork ─────────────────────────────────────────────────────────────
 // An entry means the owner dropped the store's unaltered artwork into
 // public/badges/. Until then the page renders a text link, not a lookalike.
+// Apple ships and Google does not yet (owner decision, 2026-10-13 evening):
+// that is ALLOWED, and the Google text link must stay the same height.
 console.log('[check-store-links] badge artwork');
 for (const [store, art] of Object.entries(STORE_ARTWORK)) {
   if (!art) continue;
   if (!art.src.startsWith('/badges/')) fail(`${store} artwork must live under /badges/`);
   if (!(art.width > 0 && art.height > 0)) fail(`${store} artwork needs its natural width and height`);
+  const file = path.join(__dirname, '..', 'public', art.src);
+  if (!fs.existsSync(file)) { fail(`${store} artwork file is missing: ${art.src}`); continue; }
+  const bytes = fs.readFileSync(file);
+  const got = crypto.createHash('sha256').update(bytes).digest('hex');
+  eq(`${store} artwork sha256 (as the store supplied it)`, got, art.sha256);
+  if (!/^[0-9a-f]{64}$/.test(art.sha256)) fail(`${store} artwork sha256 is not a 64-hex digest`);
+  if (art.src.endsWith('.svg')) {
+    const text = bytes.toString('utf8');
+    // The file's own size is the truth; the numbers in STORE_ARTWORK only reserve the aspect ratio.
+    const w = Number(/<svg[^>]*\swidth="([\d.]+)"/.exec(text)?.[1]);
+    const h = Number(/<svg[^>]*\sheight="([\d.]+)"/.exec(text)?.[1]);
+    if (!(w > 0 && h > 0)) fail(`${store} svg has no width/height on its root`);
+    else if (Math.abs(w / h - art.width / art.height) / (w / h) > 0.01) fail(`${store} aspect ${art.width}x${art.height} is more than 1% off the file's ${w}x${h}`);
+    // Served from our own origin: no script, handler, foreign object, external or data: reference.
+    for (const bad of [/<script/i, /\son[a-z]+\s*=/i, /<foreignObject/i, /<image/i, /<style/i, /\bdata:/i, /\b(?:xlink:)?href\s*=/i]) {
+      if (bad.test(text)) fail(`${store} svg contains ${bad}`);
+    }
+  }
 }
-console.log(`  apple: ${STORE_ARTWORK.apple ? STORE_ARTWORK.apple.src : 'NOT YET (text link)'}   google: ${STORE_ARTWORK.google ? STORE_ARTWORK.google.src : 'NOT YET (text link)'}`);
+// The Apple badge SHIPPED (owner decision, 2026-10-13): its entry may not be deleted quietly.
+if (!STORE_ARTWORK.apple) fail('STORE_ARTWORK.apple is missing: the Apple badge shipped 2026-10-13, so removing it needs an edit to this check');
+// One shared height for the row: a badge and a text link must never differ.
+if (BADGE_HEIGHT_PX < 44) fail(`BADGE_HEIGHT_PX ${BADGE_HEIGHT_PX} is under the 44 px tap target`);
+if (BADGE_HEIGHT_PX < 40) fail('Apple requires its badge to be at least 40 px tall on screen');
+if (STORE_ARTWORK.apple && STORE_ARTWORK.apple.src.indexOf('_blk_') < 0) fail('Apple artwork must be the BLACK badge (the page tile is light)');
+console.log(`  apple: ${STORE_ARTWORK.apple ? STORE_ARTWORK.apple.src : 'NOT YET (text link)'}   google: ${STORE_ARTWORK.google ? STORE_ARTWORK.google.src : 'NOT YET (text link, same height)'}`);
+console.log(`  row height ${BADGE_HEIGHT_PX} px, Apple clear space ${APPLE_CLEAR_SPACE_PX} px (the tile's padding and gap are checked against it in check-app-page)`);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);

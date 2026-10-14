@@ -9,8 +9,9 @@ import { appStoreHref, detectPlatform, normalizeSrc, playHref } from '../../lib/
 //
 //   1. re-tags the two store hrefs from ?src= (collapsed through the closed
 //      registry, so an unknown value becomes 'other' and is never echoed);
-//   2. marks the container with the visitor's platform so CSS can hide the
-//      OTHER store's badge on a confident phone.
+//   2. marks the container (<main id="store-links">: the badges AND the help lines that
+//      name a store) with the visitor's platform so CSS can hide the OTHER
+//      store's link and wording on a confident phone.
 //
 // There is deliberately NO navigation here: no redirect, no auto-open, no
 // timer. A visitor always taps the badge themselves (owner decision
