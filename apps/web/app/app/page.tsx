@@ -102,8 +102,9 @@ export default function AppPage() {
           Get the NetraOps guard app
         </h1>
         <p className="text-white/70 text-lg max-w-xl mb-10">
-          Install the app on your phone, then sign in with the email and temporary password your company admin gave you.
-          The app asks you to choose a new password the first time.
+          Install the app on your phone, then sign in with your email. New to NetraOps? Use the temporary password from
+          your admin; the app asks you to choose a new password the first time. Already have an account? Use your own
+          password.
         </p>
 
         {/* ── STORE BADGES ─────────────────────────────────────────────────────
