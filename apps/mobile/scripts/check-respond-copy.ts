@@ -116,7 +116,7 @@ const POST_N46: { label: string; kind: RespondKind; err: ApiError; expectSameAsO
   { label: 'swap :1850 RECIPIENT_OVERLAP', kind: 'swap', expectSameAsOld: false,
     err: new ApiError(409, { code: 'RECIPIENT_OVERLAP', error: 'RECIPIENT_OVERLAP',
       message: 'You now have an overlapping shift; swap is no longer possible.',
-      conflict: { shift_id: 'b2afb11f-4861-436e-a8c9-5f6ec2961082', guard_name: 'Raja',
+      conflict: { shift_id: 'b2afb11f-4861-436e-a8c9-5f6ec2961082', guard_name: 'Alex',
                   site_name: '375 Shopping Complex',
                   scheduled_start: '2026-10-05T21:00:00.000Z',
                   scheduled_end: '2026-10-06T07:00:00.000Z' } }) },

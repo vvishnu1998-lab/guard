@@ -49,7 +49,7 @@ export type BreakBlockReason =
   /** S6.2 — eligibility lands so late that a break started then could not
    *  finish before scheduled_end. The four-hour rule is UNCHANGED and still
    *  anchors on actual clock-in; this only stops the screen quoting a time
-   *  the guard can never use. Walk-test 2026-09-01: reddy clocked in 6:53 PM
+   *  the guard can never use. Walk-test 2026-09-01: a guard clocked in 6:53 PM
    *  on a 3:30 PM – 11:00 PM shift, so eligibility fell at 10:53 PM and the
    *  screen read "AVAILABLE AT 10:53 PM" — seven minutes before the shift
    *  ended. Terminal, like BREAK_QUOTA_EXCEEDED: eligible_at is null. */

@@ -12,14 +12,14 @@
 -- Nine (shift_session_id, window_label) pairs already carry more than one
 -- ping — 20 rows, all belonging to STARNET SECURITY (a live paying
 -- customer), across three sessions:
---   6936d78a  deepak naik / Bethel AME        10:30 x3, 12:00 x3, + 4 pairs
---   9d15ce95  Bhanu / Cristo Rey (07-18)      02:00, 03:30
---   1ba93935  Nandu / Cristo Rey (08-19)      01:30
+--   6936d78a  GRD0004 / Bethel AME            10:30 x3, 12:00 x3, + 4 pairs
+--   9d15ce95  GRD0001 / Cristo Rey (07-18)    02:00, 03:30
+--   1ba93935  GRD0002 / Cristo Rey (08-19)    01:30
 --
 -- They are two distinct defects, neither of which this index can repair:
 --   * genuine repeat answers of the same window (02:00:36 + 02:01:05);
 --   * MISLABELLED rows, where window_label names a window the ping does
---     not belong to — including Nandu's 21:49:08 ping labelled '01:30',
+--     not belong to — including GRD0002's 21:49:08 ping labelled '01:30',
 --     a window three hours forty minutes in its OWN FUTURE. That row is
 --     why the window_label validation in routes/locations.ts ships
 --     alongside this index. Note that shift ran 19:00-06:00, so '01:30'

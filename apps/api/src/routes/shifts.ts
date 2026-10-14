@@ -2543,7 +2543,7 @@ router.get('/inbound-swap-requests', requireAuth('guard'), async (req, res) => {
 });
 
 // Symmetric to /inbound-swap-requests but for the requester side. Home
-// screen surfaces a "PENDING HANDOFF · Waiting for james…" card so the
+// screen surfaces a "PENDING HANDOFF · Waiting for <name>…" card so the
 // initiator doesn't lose sight of an in-flight request after they navigate
 // away from the modal.
 //
@@ -3553,8 +3553,8 @@ router.post('/:id/handoff-clock-in', requireAuth('guard'), idempotent('handoff-c
       [hist.from_session_id],
     );
     const closed = await client.query<{ id: string; total_hours: number | null }>(
-      // Walk-test 2026-07-09 mosser towers: reddy clocked in 03:12Z, shift
-      // scheduled_start 03:20Z. James's handoff-clock-in fired ~03:19Z —
+      // Walk-test 2026-07-09 mosser towers: a guard clocked in 03:12Z, shift
+      // scheduled_start 03:20Z. The handoff-clock-in fired ~03:19Z —
       // BEFORE scheduled_start. NOW - MAX(clocked_in, scheduled_start) went
       // negative, ROUND yielded -0.02h, chk_total_hours_nonneg rejected the
       // UPDATE. Clamp with GREATEST(0, …) to match the manual clock-out and

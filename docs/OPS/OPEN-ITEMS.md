@@ -456,7 +456,7 @@ round-trips through the URL as `?guard=<name>`.
 convention.
 
 **Names are not identifiers.** Per `netraops-invariants`, badge numbers collide across tenants and
-`GRD0004` is "deepak naik" on **both** Star Guard and STARNET SECURITY. Names collide *within* a
+`GRD0004` has the same guard name on **both** Star Guard and STARNET SECURITY. Names collide *within* a
 tenant too — verified read-only 2026-09-08, `Star Guard` (`b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee`)
 holds **two same-name pairs**: `c2f4b9e3-bed9-4693-b752-a04bc115e863` / `a532b077-39ba-43f1-93bd-176752fb6e21`
 (GRD0003 / GRD0004, also carried item C23) and `0af98d92-b028-44d6-b1e3-d242161087ac` /
@@ -953,7 +953,7 @@ client must branch on it — and **the mobile change has to ship first, by OTA, 
 change to those two routes**, or the window between deploys makes the wrong copy more likely,
 not less.
 
-⚠ **Nandu is OTA-unreachable** — iOS build 44, runtime 1.0.14, below the 1.0.17 floor that
+⚠ **GRD0002 is OTA-unreachable** — iOS build 44, runtime 1.0.14, below the 1.0.17 floor that
 carries an update client. Any device on that build keeps the current behaviour regardless of
 what is published.
 
@@ -1592,13 +1592,13 @@ which points those are. **Size S. Tier 1.**
 **N62. Four of five deactivated guards still hold open `guard_site_assignments`.**
 verified: YES — queried at this ref, resolved by uuid.
 
-| guard_id | badge | name | company_id | open assignments |
+| guard_id | badge | name (removed, N191) | company_id | open assignments |
 |---|---|---|---|---|
-| `faf47dd5-9686-44a1-8623-994e8a26fcb3` | GRD0014 | Supriya | `27c4d404-…` STARNET | **2** |
-| `7b79fc50-b91a-465c-9b7c-cabf10ab1f9a` | GRD0011 | Anoop | `27c4d404-…` STARNET | **1** |
-| `09017296-3676-4ed6-805d-8be537608c74` | GRD0006 | Nikith Reddy | `b7c7d32d-…` Star Guard | **1** |
-| `a532b077-39ba-43f1-93bd-176752fb6e21` | GRD0004 | deepak naik | `b7c7d32d-…` Star Guard | **1** |
-| `c1f2c8a5-fe03-46e6-8cdc-457d061eee01` | GRD0003 | Nikith | `27c4d404-…` STARNET | 0 |
+| `faf47dd5-9686-44a1-8623-994e8a26fcb3` | GRD0014 | — | `27c4d404-…` STARNET | **2** |
+| `7b79fc50-b91a-465c-9b7c-cabf10ab1f9a` | GRD0011 | — | `27c4d404-…` STARNET | **1** |
+| `09017296-3676-4ed6-805d-8be537608c74` | GRD0006 | — | `b7c7d32d-…` Star Guard | **1** |
+| `a532b077-39ba-43f1-93bd-176752fb6e21` | GRD0004 | — | `b7c7d32d-…` Star Guard | **1** |
+| `c1f2c8a5-fe03-46e6-8cdc-457d061eee01` | GRD0003 | — | `27c4d404-…` STARNET | 0 |
 
 Five open assignments across four inactive guards — an open assignment being one with
 `assigned_until IS NULL`, i.e. no end date at all. Every one of these says "this guard is posted to
@@ -1952,12 +1952,12 @@ Of 23 active devices:
 
 | runtime | active | guards |
 |---|---|---|
-| **1.0.17** | **14** | Ahmad GRD0010, deepak naik GRD0004, Hari Nayak GRD0026, Jagdish GRD0012, kartikeya GRD0009, manju GRD0023, Parameshwari GRD0011, Prakash GRD0019, Raja GRD0015, Rajendar GRD0024, reddy GRD0001, Shiva GRD0020, Siddu GRD0010, Svineah GRD0008 |
-| 1.0.16 | 5 | Anil GRD0007 (iOS), Charan GRD0013, Nikith Reddy GRD0005, Satish GRD0015, Shiva GRD0012 |
-| no client string | 4 | Bhanu GRD0001, **Nandu GRD0002**, Naveen Yatakari GRD0009, vamshi krishna GRD0006 |
+| **1.0.17** | **14** | GRD0010, GRD0004, GRD0026, GRD0012, GRD0009, GRD0023, GRD0011, GRD0019, GRD0015, GRD0024, GRD0001, GRD0020, GRD0010, GRD0008 |
+| 1.0.16 | 5 | GRD0007 (iOS), GRD0013, GRD0005, GRD0015, GRD0012 |
+| no client string | 4 | GRD0001, **GRD0002**, GRD0009, GRD0006 |
 
-**The tail is 1.0.16, not a 1.0.14 straggler.** The N46 brief assumed Nandu was stranded on build 44
-/ runtime 1.0.14. Sentry shows he *was* - `com.netraops.guard@1.0.14+44`, 2026-08-19 to 2026-08-20 -
+**The tail is 1.0.16, not a 1.0.14 straggler.** The N46 brief assumed GRD0002 was stranded on build 44
+/ runtime 1.0.14. Sentry shows that device *was* - `com.netraops.guard@1.0.14+44`, 2026-08-19 to 2026-08-20 -
 and then moved to `1.0.16+46` on 2026-08-29. **No device anywhere has reported from 1.0.14 since
 2026-08-20T11:08:47.** The four with no client string are a reporting artifact, not a fifth cohort;
 see N73.
@@ -2025,8 +2025,8 @@ There are two claim sites:
 
 So a device that claimed its token before the header existed and has not re-registered since reads
 `client = NULL` forever, regardless of what it is actually running. Four active devices are in that
-state: Bhanu GRD0001, Nandu GRD0002, Naveen Yatakari GRD0009, vamshi krishna GRD0006. Nandu is the
-proof - his row is NULL while Sentry has him on `1.0.16+46` since 2026-08-29.
+state: GRD0001, GRD0002, GRD0009, GRD0006. GRD0002 is the
+proof - its row is NULL while Sentry has it on `1.0.16+46` since 2026-08-29.
 
 **The comment at `auth.ts:208-224` is wrong about its own premise.** It says login "carries
 platform/version/build/runtime/update in a single greppable line" and is "the one moment that always
@@ -2921,8 +2921,7 @@ as `35.205.81.31`. **The two disagree.**
 (`express-rate-limit@8.5.2`, no custom `keyGenerator` anywhere in
 `apps/api/src`): `globalLimiter` at 500/15min and `authLimiter` at 20/15min. If
 `79.127.178.82` is an intermediate shared across many real clients, then those
-clients share a rate-limit budget. That is the shape of the deepak lockout
-(2026-08-20), where retried revoked sessions consumed a shared `/api/auth`
+clients share a rate-limit budget. That is the shape of the 2026-08-20 lockout, where retried revoked sessions consumed a shared `/api/auth`
 budget.
 
 **Pre-existing, and NOT caused by the N85 fix.** It is recorded now because that
@@ -6119,9 +6118,11 @@ verified 2026-10-13 by me: `vvishnu1998-lab/guard` is **PUBLIC** (`gh repo view`
 - **Vishnu:** the GitHub Support request is drafted (`~/guard-private/github-support-purge-request.md`); he files it. **N191** covers the broader name exposure found while checking this.
 - **Size S. Tier 1** (docs and a support request). Lesson recorded: a document for a public repo says "N badges", never a badge list, and the full per-badge file stays outside the repo.
 
-### N191 — Guard NAMES are in the PUBLIC repo in more places than `DEVICES.md` (found 2026-10-13)
+### N191 — Guard NAMES were in the PUBLIC repo in many files: stripped to badge-only (2026-10-13/14)
 
-verified 2026-10-13 by me (`git grep` of eight STARNET guard names on `origin/main`; names not repeated here): **56 hits in `apps/api/scripts/__snapshots__/hours-export.2026-07-01_2026-08-23.json`** (a per-guard hours export used as a test snapshot), 10 in `docs/OPS/OPEN-ITEMS.md`, 9 in two skill files (`.claude/skills/netraops-invariants/SKILL.md` and `release-ops/SKILL.md`, some tying a name to a badge and a site), 5 in `docs/OPS/DEVICES.md`, and single comment lines in `schema_v49.sql`, `schema_v52.sql`, `schema_v54.sql`, `routes/reports.ts`, `mobile/lib/compressImage.ts` and `mobile/components/CameraCapture.tsx`. `DEVICES.md`'s own header called itself "the only operational document that carries guard NAMES": that is no longer true. `POLICY.md` ("guard_id, company_id, badge, counts only") is the rule.
-- **Decision (Vishnu, 2026-10-13): strip `DEVICES.md` to badge-only in a small PR after #111. Done in that PR** (docs-only, held for his merge). **Recommended next, not yet approved:** the same for the two skill files, `OPEN-ITEMS.md` and the code/SQL comments (replace a name with its badge), and replace the names in the hours-export snapshot with badges (that file is a test fixture, so its harness must be checked first).
-- **What cannot be undone:** the names stay in `main`'s history. Removing them from that history means rewriting `main`, which is not recommended; the point of the scrub is to stop publishing them going forward.
-- **Size M. Tier 1.**
+verified 2026-10-13 by me with a one-way-hash scan (no name was read out of the database: the database returned md5 digests of every guard-name token, and the tree was matched against them): the public `main` carried guard names in **43 files**: a per-guard hours export used as a test fixture (`apps/api/scripts/__snapshots__/hours-export.2026-07-01_2026-08-23.json`, two tenants), `docs/OPS/OPEN-ITEMS.md` (including a roster table of 14 + 5 + 4 guards), two skill files (`.claude/skills/netraops-invariants` and `release-ops`, some tying a name to a badge, a site and a shift count), `DEVICES.md` (done in #112), `schema_v49/52/54/57.sql` comments, and comments in `routes/`, `jobs/`, `services/` and the mobile app. `DEVICES.md`'s header had called itself "the only operational document that carries guard NAMES".
+- **Done in this PR:** every name is replaced by the badge or by "a guard"; **the hash scan now reports 0 un-reviewed hits** (277 on the pre-scrub tree; `scripts/ops/scan-guard-names.py`, reviewed exceptions in `scripts/ops/guard-name-scan.allow`, hashes kept in `~/guard-private/`). The fixture is redacted **by the harness itself**: `scripts/hours-export-snapshot.ts` now passes every dataset through `scripts/hoursExportRedact.ts` ("Guard GRD0004") before it asserts, compares or writes, and `npm run check:hours-redaction` (offline, 6 mutants caught) proves the committed file has no name. The new fixture is the old one passed through that same function: identical apart from `guard_name` and `label`. SQL changes are comments only (`migrate.ts` runs the files and does not hash them).
+- **Not run:** `npm run script:hours-snapshot -- --check` reads production, so it was not run. It is not in CI. It needs one run by Vishnu through the usual in-environment route; a drift report would mean the closed 2026-07-01..08-23 window changed (it should not).
+- **Still public, deliberately not changed (Vishnu's call):** (1) **customer contacts' names** (STARNET's admin and client contacts) in `POLICY.md`, `OPEN-ITEMS.md` and the invariants skill: they are not guards; (2) a **test client's e-mail address** in `audit/VERIFICATION.md`, `audit/WEEK1.md` and `test-idor-replay.ts`; (3) **the owner's own e-mail addresses** (`eas.json` Apple ID, `docs/app-store-submission.md`, `seed-apple-reviewer.ts`); (4) form **placeholders** such as "e.g. James Wilson" and fixture names that are plainly made up. (5) The **fixture still holds badge-level shift and clock times and site names** for 2026-07-01..08-23 (pre-existing, historical): it is the same kind of data N190 removed from #110. Coarsening the rows would weaken what the harness exists to catch, so it is left, and it matters less if the repo goes private.
+- **What cannot be undone:** the names stay in `main`'s git history, and in any clone or cached view taken before today. Rewriting `main` is not recommended.
+- **Size M. Tier 1** (docs, comments, a test fixture and a harness; no runtime code path changed).

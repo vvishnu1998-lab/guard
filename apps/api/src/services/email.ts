@@ -610,7 +610,7 @@ function fmtTimeSite(dt: Date | string, tz: string = PACIFIC): string {
   return `${pick('hour')}:${pick('minute')} ${pick('dayPeriod')} ${pick('timeZoneName')}`;
 }
 
-// Title-cases each whitespace-delimited word. "james vince" → "James Vince".
+// Title-cases each whitespace-delimited word. "jane doe" → "Jane Doe".
 // Common-name edge cases (McDonald, O'Brien, hyphens) intentionally not
 // handled — accepted limitation for the first pass.
 function titleCase(name: string | null | undefined): string {
@@ -620,7 +620,7 @@ function titleCase(name: string | null | undefined): string {
     .join(' ');
 }
 
-// First-name extractor for the greeting. "david payne" → "David".
+// First-name extractor for the greeting. "jane doe" → "Jane".
 function firstName(fullName: string | null | undefined): string {
   if (!fullName) return 'there';
   return titleCase(fullName).split(' ')[0] || 'there';
@@ -1727,8 +1727,8 @@ export function renderGeofenceBreachAlert(row: {
 // Fires from POST /api/shifts/:id/swap-response when a guard-initiated
 // swap is accepted. Recipient policy: all active company admins on the
 // tenant (via getActiveAdminEmails). No client-facing email — this is an
-// internal FYI so admins can audit "did I know Deepak's shift got
-// covered by James".
+// internal FYI so admins can audit "did I know the 14:00 shift got
+// covered by the guard who accepted it".
 
 /**
  * Send the accepted-swap FYI email. Called from the swap-response

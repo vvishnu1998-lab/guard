@@ -72,8 +72,8 @@ const SHIFT = { start: '2026-09-12T18:00:00.000Z', end: '2026-09-12T21:00:00.000
 console.log('windowJustOpened — reminder window selection\n');
 
 // ── R4: a window that opened before clock-in is not the guard's to answer ──
-// This is the case that produced the dispatch: reddy clocked in at 18:02:42
-// and got nothing at 18:00, then his first prompt at 18:30.
+// This is the case that produced the dispatch: a guard clocked in at 18:02:42
+// and got nothing at 18:00, then their first prompt at 18:30.
 test('clock-in mid-window: NO prompt at the window already in progress', () => {
   assert.strictEqual(
     openedAt({ ...SHIFT, clockIn: '2026-09-12T18:02:00.000Z', now: '2026-09-12T18:00:05.000Z' }),

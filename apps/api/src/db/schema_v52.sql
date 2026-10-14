@@ -63,8 +63,8 @@
 -- and is deliberately NOT touched here.
 
 -- ── 1. reports — HIGHEST PRIORITY ───────────────────────────────────────
--- Demonstrated the gap three times: 2026-08-21 (Nikith), 2026-08-22 02:13
--- (deepak), 2026-08-22 08:16 + 09:00 (controlled reproduction).
+-- Demonstrated the gap three times: 2026-08-21 (a STARNET guard), 2026-08-22 02:13
+-- (another STARNET guard), 2026-08-22 08:16 + 09:00 (controlled reproduction).
 
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS location_mocked BOOLEAN;
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS fix_age_ms       INTEGER;
