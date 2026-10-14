@@ -6227,7 +6227,7 @@ and contact lines of about 90 characters and more.
 
 ## New from Phase C, change password (2026-10-13)
 
-**Status: BUILT 2026-10-13 on `feat/phase-c-change-password` (on `814a0db`), not yet merged.** Phase C is the
+**Status: SHIPPED 2026-10-13 as `fe57a5c` (PR #119, 22:34:08 PT, by OVERRIDE; see STATE.md).** Phase C is the
 third part of Vishnu's program: A company profile, B letterhead, C change password, D login history. He asked
 for a change-password link in Settings for every admin, primary and secondary, and decided 1a and 2a on
 2026-10-13.
@@ -6283,9 +6283,50 @@ verified 2026-10-13 by reading the code (Phase C).
   `requireAuth`, nor the web middleware, nor any admin page.
 - So an admin can leave the page and keep using the temporary password, which arrived by email, for as long as
   the session lasts, and sign in with it again.
-- **Fix:** the API refuses a `company_admin` token whose row has `must_change_password`, except for the
-  change-password and logout routes; the web hides the nav on that page. The guard and client flows need the
-  same check.
+- **Fix (as proposed 2026-10-13):** the API refuses a `company_admin` token whose row has `must_change_password`,
+  except for the change-password and logout routes; the web hides the nav on that page. The guard and client
+  flows need the same check.
+- **Status 2026-10-14: BUILT on `fix/n194-n195-n198` (on `fe57a5c`), not yet merged.** For admins only:
+  - **API:** `requireAuth` answers an admin whose row has `must_change_password` with 403
+    `{"code":"PASSWORD_CHANGE_REQUIRED","error":"Change your temporary password to continue."}`. The enum is in
+    `code` and `error` keeps a sentence, because the admin web is the only client. The flag comes from the admin
+    row query the middleware already made, and the deactivated and revoked-session answers still come first.
+  - Only `POST /api/auth/admin/change-password` and `POST /api/auth/logout` take such a session, through
+    `requireAuthAllowingTemporaryPassword`.
+  - **Web:** `adminFetch` sends the browser to `/admin/change-password` when the API answers with that code, from
+    any admin page but that one. The nav polls `/api/chat/rooms` on every admin page, so every way off the page
+    leads back to it. The caller still gets the response, and the page shows the API's sentence until the
+    browser moves.
+  - **Unlike the proposal, the nav stays on the page:** it has the only sign-out, and its links all lead back.
+  - **Guards and clients are not held** (N199).
+  - **Production, read-only 2026-10-14:** STARNET's 2 active admins have passwords of their own. One admin each
+    in Star Guard and in "test company" is on a temporary password; they are the only two.
+  - **Proof:**
+    - `scripts/test-n194-temporary-password-hold.ts`, 21/21 (local database), over HTTP with the real routers:
+      - an admin signed in on a temporary password gets the 403 from Settings' route, the chat poll, the sites
+        list and a write, and nothing is written;
+      - a refreshed session gets it too;
+      - a deactivated admin and a revoked session still get their own answers;
+      - sign-out and the change go through; the flag clears, the old session ends, and the new password reaches
+        every route;
+      - an admin with a password of their own, and a guard and a client with the flag set, are not held;
+      - `requireAuthAllowingTemporaryPassword` has exactly those two call sites;
+      - 6 of 6 mutants caught: no hold, the allowance ignored, the flag not read, the hold ahead of the
+        deactivation check, and sign-out or the change behind plain `requireAuth`.
+    - `apps/web` `npm run check:password-hold`, 10/10. `lib/adminApi.ts` runs as it is and as it was at
+      `fe57a5c`, with fetch, window and document stubbed:
+      - the hold moves the browser once from each of 4 admin pages, and never from the change-password page;
+      - 11 other responses on 5 pages, through every helper, make `fe57a5c`'s request and get its answer, with
+        no move;
+      - a server render is unchanged;
+      - 5 of 5 mutants caught.
+    - `scripts/test-phase-c-change-password.ts`, 23/23. Its route mutant now matches the new middleware name.
+    - In a browser, against the real routers on a local database and the branch's web dev server:
+      - the temporary-password sign-in lands on `/admin/change-password`, as before;
+      - for 44 s after sign-in, through 4 refused chat polls (each a 403), that page never reloaded;
+      - Settings from the nav, and `/admin/sites` typed in, each came back to the page within about a second;
+      - the change lands on "Password updated", and the new password reaches the dashboard and Settings;
+      - an admin who never had a temporary password reaches the dashboard and the sites list.
 - **Size S. Tier 1** (auth).
 
 ### N195 — a change-password request with no current password gets a 500, not a 400
@@ -6296,6 +6337,20 @@ verified 2026-10-13 by `scripts/test-phase-c-change-password.ts` (E3) on the adm
 - The guard and client routes have the same line (`routes/auth.ts:252` and `:527`). This was read, not run.
 - No page sends such a request: the web forms and the mobile screen always send a current password.
 - **Fix:** answer 400 when `current_password` is not a string, in all three routes.
+- **Status 2026-10-14: BUILT on `fix/n194-n195-n198` (on `fe57a5c`), not yet merged.** All three routes answer 400
+  `{"error":"Current password is required"}` when `current_password` is not a string. The check runs after the
+  new-password rule, so every request refused with a 400 before gets the same 400.
+  - **Run, not only read:** at `fe57a5c` the guard and client routes answered 500 too.
+  - **Proof:** `scripts/test-n195-current-password.ts`, 21/21 (local database). Each route is driven over HTTP as
+    it is now and as it was at `fe57a5c`:
+    - a current password that is absent, null, a number, true, an object or an array goes from 500 to 400, and
+      nothing is stored;
+    - 9 other refused requests, and the change itself, get `fe57a5c`'s status and body;
+    - `routes/auth.ts` is the only file that reads `current_password`, and each route checks it before its
+      first query;
+    - 3 of 3 mutants caught.
+
+    `scripts/test-phase-c-change-password.ts` E3 now expects the 400.
 - **Size XS. Tier 1.**
 
 ### N196 — clients cannot change their password unless an admin resets it
@@ -6315,3 +6370,91 @@ changed by another person, with a session or the current password, learns of it 
 - **Proposed for Phase D (login history):** an email to the account's own address after every change, saying
   when the change happened and what to do if it was not them.
 - **Size S. Tier 1** (customer-visible email).
+
+### N198 — the web build downloads its fonts from Google, so a Google hiccup fails the build
+
+verified 2026-10-13 on PR #119's Vercel preview, from the build log Vercel showed Vishnu.
+- **What happened:** next/font/google's loader crashed while fetching the fonts:
+  `TypeError: Cannot read properties of null (reading '1')` at `google/loader.js:112`, from `app/layout.tsx`.
+- **Not the code:** the same commit built cleanly from a fresh install here, and Vercel built it after a Redeploy.
+- **What it loads** (`app/layout.tsx:2-25`): Inter (400-900), Barlow Condensed (500, 700) and DM Sans (400-700),
+  latin subset, `display: 'swap'`, as `--font-inter`, `--font-display` and `--font-dm-sans`.
+- **Effect:** any web build, preview or production, can fail on Google Fonts' availability, and every merge to
+  `main` builds the web. A failed production build leaves the last deploy live. A failed preview build blocks an
+  OVERRIDE merge, which needs the Vercel check green.
+- **Fix (Vishnu, 2026-10-13: low priority, the next code PR):** self-host with next/font/local.
+  - Commit the woff2 files under `apps/web`, with the same weights, subset, variables and display.
+  - Commit the license files with them (check each font's license).
+  - Prove that the built CSS names no Google host.
+  - Prove that pages render with the same faces: a computed font-family check and before/after screenshots.
+- **Status 2026-10-14: BUILT on `fix/n194-n195-n198` (on `fe57a5c`), not yet merged.**
+  - **What:** the 15 woff2 files next/font/google served at `fe57a5c` (331,312 bytes), committed under
+    `apps/web/app/fonts/` with each family's OFL 1.1 licence, and loaded by `next/font/local` in
+    `app/fonts/index.ts`.
+  - They make Google's 56 faces: the same weights, unicode-ranges and display, and the same 4 latin files
+    preloaded. (`subsets: ['latin']` chose only the preloads; the CSS Google served declared every subset.)
+  - next/font/local gives a family one unicode-range, so each subset is its own family. Each CSS variable lists
+    them latin first, then Google's size-adjusted Arial fallback, which is now in `globals.css`.
+  - **Proof:**
+    - `npm run check:fonts`, 14/14:
+      - no `next/font/google` import;
+      - the 56 faces equal `reference.json`, taken from `fe57a5c`'s build, with each file checked by sha256;
+      - the stacks, the fallbacks, the layout wiring and the licences;
+      - 7 of 7 mutants caught.
+    - The two production builds compared: the same 56 faces (variable, weight, style, display, unicode-range
+      and file bytes), the same 3 fallbacks and 4 preloads, and no Google host in the branch's CSS or HTML.
+    - Built offline from a clean `.next`, in a sandbox that denies the network: the branch builds, and
+      `fe57a5c` fails fetching `fonts.googleapis.com`.
+    - Screenshots of `/` and `/admin/login` from both builds: 0 pixels differ (of 7,933,440 and 1,152,000).
+      With the fallback forced, 32,021 differ, so the comparison can fail.
+    - In the browser run of N194, the admin pages fetched only the 4 preloaded latin files, all from
+      `/_next/static/media`, and made no request to a Google host.
+    - The plan's computed font-family check would compare names that differ by construction (next/font names
+      each family after its call), so the build comparison maps each family to its CSS variable instead.
+- **Size S. Tier 1** (the web build; the typography must not change).
+
+## New from N194 and N195 (fix/n194-n195-n198, 2026-10-14)
+
+### N199 — clients and guards on a temporary password are held by their apps only, not by the API
+
+verified 2026-10-14 by N194's harness (N2, N3) and production, read-only.
+- N194 holds admins in the API. A client's or a guard's session with `must_change_password` set still reaches
+  every route.
+- **Guards:** the mobile app holds them on its change-password screen (`apps/mobile/app/_layout.tsx`, from the
+  login's `must_change_password`). `guards.must_change_password` defaults to true (`schema_auth.sql:33`).
+- **Clients:** the client login sends a temporary password to `/client/change-password`, and nothing keeps the
+  client there. It is the gap N194 closed for admins.
+- **Production:** STARNET has no active guard or client on a temporary password. The other three tenants have 6
+  guards and 3 clients on one.
+- **Fix when wanted:** the same check in `requireAuth` for clients, with the client portal handling the code as
+  `adminFetch` does. For guards, first read which builds the flagged guards run.
+- **Size S. Tier 1** (auth).
+
+### N200 — the login routes answer 500 to an email or a password that is not a string
+
+verified 2026-10-14 by a local probe (N195's sibling).
+- `POST /api/auth/{guard,admin,client,vishnu}/login` check that `email` and `password` are present, not that
+  they are strings.
+  - A number or an object for the password reaches `bcrypt.compare`, which throws.
+  - A number for the email reaches `email.toLowerCase()`, which throws.
+- On a local database the guard, admin and client logins answered 500 to all three. The vishnu login answered
+  500 to a number for the email; the probe did not reach its password check.
+- No page sends such a request. Each one is a 500 in Sentry, on a public route (20 requests per 15 minutes per
+  IP).
+- **Fix:** answer 400 "email and password required" unless both are strings, in all four routes.
+- **Size XS. Tier 1.**
+
+### N201 — the admin Sites list shows each contract date a day early, west of UTC
+
+verified 2026-10-14 in a browser, during N194's browser run, on a local stack run as production runs (the API in
+UTC, the browser in Pacific).
+- A site whose contract starts 2026-01-01 is listed as starting "31 Dec 2025".
+- **Cause:** node-postgres turns a `DATE` into a JavaScript Date at the API process's midnight. The API runs in
+  UTC (Railway sets no `TZ`), so `contract_start` reaches the browser as `2026-01-01T00:00:00.000Z`. The Sites
+  list formats it with `new Date(iso).toLocaleDateString(…)` (`fmtDate` in `app/admin/sites/page.tsx`), in the
+  browser's zone, where it is the previous evening anywhere west of UTC. `contract_end` goes through the same
+  function.
+- The API sets no `DATE` parser (`setTypeParser` appears nowhere in `apps/api/src`), so other date-only columns
+  formatted this way are likely the same. Not audited.
+- **Fix when wanted:** format a date-only value from its `YYYY-MM-DD` part, never through the browser's zone.
+- **Size S. Tier 1** (every admin in the US sees it).

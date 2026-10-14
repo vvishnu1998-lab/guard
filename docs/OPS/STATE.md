@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #119, Phase C: a change-password link in Settings for every admin; SheetJS to devDependencies; the #118 docs, by OVERRIDE — verified 2026-10-13 22:37 PT
+
+| thing | value |
+|---|---|
+| merge | PR #119 merged as `fe57a5c` at **22:34:08 PT (05:34:08Z) by OVERRIDE**. Vishnu: "1a 2a." The push asked Vishnu and he approved it. The PR opened at ~22:14 PT. The first single read (22:22:34 PT) found the Vercel preview check FAILED and merged nothing. The build log, which Vishnu read in Vercel: next/font's Google loader crashed fetching the fonts (`TypeError: Cannot read properties of null (reading '1')`, `google/loader.js:112`). The same commit built cleanly from a fresh install here. Vishnu: "Transient, not our diff. I clicked Redeploy. Run a fresh single CI read and merge by OVERRIDE if green." The fresh read at 22:34:03 PT: 5/5 SUCCESS, CLEAN, head `31d23f5`, main `814a0db`. Then one call, `gh pr merge 119 --merge --match-head-commit 31d23f5…`. The merge tree equals the head's tree (`473ccc4`). N198: self-host the fonts. |
+| Railway | `116be9ca-db4e-4a3d-800a-700c910f5ea5` **SUCCESS** at 22:35:16 PT from `fe57a5c`. |
+| web | Vercel production on `fe57a5c`: success at 22:36:49 PT. |
+| health | `/health` commit `fe57a5c`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`2be33bd9`, from #118's `814a0db`) served its last request at 22:34:25.5 and stopped at 22:35:27.1 PT. The new one was listening at 22:35:11.0 and served its first request at 22:35:25.6, so they overlapped. Over its whole life (21:05 to 22:34 PT) the old one served 948 requests: 0 were 499s and 0 were 5xx. To 22:37 the new one served 5 requests, with no error. Sentry, 22:07–22:37 PT: API, none; mobile, no new issue (MOBILE-13 and MOBILE-12, known since 09-29, last seen before the merge). |
+| restart window | 22:34:08–22:35:28 PT: STARNET wrote nothing. Before the merge it wrote its 22:30 cron tick (5 notifications, 1 missed ping), 4 location pings (22:30:11–22:31:21) and 2 reports (22:31). 4 STARNET sessions were open. |
+| visible change | Every tenant's admins, STARNET included: Settings opens with YOUR ACCOUNT → CHANGE PASSWORD. It goes to `/admin/change-password?from=settings`, the page a temporary password uses, worded for a change the admin chose and with a Cancel; a change signs the admin out everywhere. The temporary-password page is unchanged. Nothing changed for clients or guards. The API's xlsx is a devDependency now; the production build never loaded it. Not yet seen by an admin in production. |
+
+---
+
 ## Shipped 2026-10-14 — PR #118, B6 + B7: the company letterhead on the analytics XLSX (moved from SheetJS to exceljs, cell for cell) and on the checkpoint-scans CSV, by OVERRIDE — verified 2026-10-13 21:06 PT
 
 | thing | value |
