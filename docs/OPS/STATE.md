@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-13 — PR #111, the Apple badge on /app (Google Play as a same-height text link; the iPhone nit), by OVERRIDE — verified 2026-10-13 17:53 PT; `check:app-page` passes against www; an iPhone tap on the badge: Vishnu, pending
+
+| thing | value |
+|---|---|
+| merge | PR #111 merged as `3f11595` at **17:51:12 PT (00:51:12Z, 2026-10-14) by OVERRIDE**. Vishnu: "Then rebase #111 on main, re-check, OVERRIDE merge." The branch was **updated with main by a plain merge** (no force-push), then re-checked (`tsc`, `check:store-links`, `check:guard-handoff`, `next build`, `check:app-page` against `next start`). Prechecks at 00:51:04Z: head `e4e5a53` containing main `5ed59e5`, MERGEABLE/CLEAN, 5 of 5 checks green (the three required contexts, Vercel, Vercel Preview Comments), 10 files (the page, `StoreBadge`, the enhancer, `lib/storeLinks.ts`, the Apple SVG, both check scripts, STATE, OPEN-ITEMS, `badge-artwork.md`). `gh pr merge --merge --match-head-commit e4e5a53…`. Before it, 00:51:06Z: 3 STARNET sessions open, last ping 00:37:45Z, control counts matching. |
+| Railway | `9e7c4ca3-7455-47ef-b693-fbf27ffff717` **SUCCESS** at 00:52:28Z (17:52:28 PT) from `3f11595` (pending 00:51:18Z). |
+| web | Vercel production on `3f11595`: success at 00:53:06Z; `/app` HTML carried the badge from 00:53:22Z (a 10 s poll). |
+| health | `/health` commit `3f11595`, first seen 00:52:27Z; `/health/crons` 20 jobs, `stale: []`. |
+| restart window | 00:51:12Z to 00:52:27Z. STARNET, counts via `postgres-readonly`: **0 location pings, 0 session starts or ends, 0 breaks, 0 notifications, 0 guard auth events**, and 0 of each to my read at about 00:55Z; the 3 open sessions stayed open. Control: 0 platform-wide pings and auth events. As with #110, the last STARNET ping before the merge (00:37:45Z) means **probably no ping was due inside the window**; the zeros show nothing in flight was lost. |
+| verification | `APP_BASE=https://www.netraops.com npm run check:app-page` passes **every** assertion, including: 9 user agents get one byte-identical 200 (no `Vary: User-Agent`); the **served** Apple badge is byte-identical to the store's file (sha256 `a26fc5b3…`); exactly six elements carry a platform-hide class, each with exactly its tokens; the served stylesheet carries the `display:none` rule; the tile's padding (24/32 px) and gap (20/32 px) exceed Apple's 14 px clear space. In the browser pane at 1024 px: Apple 167.5 x 56 px at left, the Google text link 234.5 x 56 px at right, one top edge, both hrefs the stores of record. Before merge: an **independent review** (4 read-only reviewers, each finding attacked by a skeptic) found nothing blocking in page behaviour or Apple-rule compliance, and about 30 mutants that slipped past the first assertions; **22 mutants are now caught**. **Not seen:** Safari/WebKit rendering of the SVG, a tap on the badge on an iPhone (Vishnu), Search Console URL Inspection (Vishnu, pending). The footer's Google credit line is UNVERIFIED (`badge-artwork.md`). |
+| visible change | `/app` shows Apple's official "Download on the App Store" badge on the left and "Available on Google Play" as a text link of the same height on the right (stacked, Apple on top, below 640 px). On a confident iPhone only the App Store link shows and the line "No Google Play on your phone" is hidden; "Can't find it?" names only the store for that platform. Crawlers, iPad and no-JavaScript see everything. The `/app` "temporary password" copy (D2) is unchanged. |
+
+---
+
 ## Shipped 2026-10-13 — PR #110, W3: the admin Guards page hands the guard the app link (banner, COPY text, a GUARD APP panel with a static QR), by OVERRIDE — verified 2026-10-13 17:46 PT; admin page behaviour and a real-phone QR scan: Vishnu, pending
 
 | thing | value |
@@ -680,7 +694,7 @@ guards in that position.
 
 ---
 
-Device inventory: see DEVICES.md (not included in the triage context pack — contains guard names).
+Device inventory: see DEVICES.md (not included in the triage context pack; badge-only since 2026-10-13, N191).
 
 ## STARNET sites — verified 2026-09-07 02:30 UTC (2026-09-06 19:30 PT)
 

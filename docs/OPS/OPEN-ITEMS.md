@@ -133,6 +133,7 @@ table (lines 121-139), zero elsewhere in that file. Fixed structurally rather th
   `release-ops` SKILL.md, so the name there is marked `[name redacted]` rather than silently rewritten.
 Post-fix scan of all six embedded files: **0 name occurrences**. `DEVICES.md` keeps all 8, unchanged,
 and carries a header saying it must never be added to the pack.
+**Update 2026-10-13 (N191):** `DEVICES.md` is now **badge-only** (the repo is public; the names stay in git history). Names still appear elsewhere in the public tree: see N191.
 
 **N17. Daily digest email to Gmail is not built.**
 verified: YES, absent — `DECISIONS.md` D4 specifies "claude.ai is the call path, plus a daily digest
@@ -6084,7 +6085,7 @@ verified 2026-10-13 by me, read-only and public: the iTunes lookup for id 676926
 
 ### N187 — Store badge artwork: Apple ships now, Google Play is a text link until its file lands
 
-verified 2026-10-13 by me: PR #108 shipped `/app` with **text links** and no badge artwork. **Decision (Vishnu, 2026-10-13 evening): ship Apple's badge now, with a Google Play text link of the same height on its right; replace the text link with Google's badge when the file lands.** (This supersedes "never ship the Apple badge alone".) The badge PR (`feat/store-badge-apple`) carries it.
+verified 2026-10-13 by me: PR #108 shipped `/app` with **text links** and no badge artwork. **Decision (Vishnu, 2026-10-13 evening): ship Apple's badge now, with a Google Play text link of the same height on its right; replace the text link with Google's badge when the file lands.** (This supersedes "never ship the Apple badge alone".) **SHIPPED: PR #111 `3f11595` (STATE).**
 - Apple: the black US-UK SVG from Apple's badge bundle, sha256 `a26fc5b38380272c92e9019a2eb8b45542a66814b3e2b203772db8904b9fb99f` (10,804 bytes, 119.66 x 40, scanned clean), pinned in `STORE_ARTWORK`; provenance in `audits/store-links/badge-artwork.md`. Shown at 56 px tall (visible badge measured 56 x 167.5), clear space 14 px.
 - Google: **pending Partner Marketing Hub approval** (about 1 business day, per Vishnu). Needed: the unaltered file, source, sha256, natural size, and a measured *visible* height (Google's must be at least Apple's, so `BADGE_HEIGHT_PX` may have to rise for both). Re-read the Hub's current legal line.
 - **Follow-ups from the badge PR's independent review (not done; Vishnu's call):** neither `check:store-links` nor `check:app-page` runs in CI (every `apps/web` check is by hand): add `check:store-links` to a workflow and a CODEOWNERS entry for `apps/web/public/badges/**`, `lib/storeLinks.ts` and the two check scripts; the navy Google text link next to Apple's black badge can read as a home-made badge (restyle it as an outline link if you want it plainly a link); the footer's Google credit line is UNVERIFIED (see `badge-artwork.md`).
@@ -6121,6 +6122,6 @@ verified 2026-10-13 by me: `vvishnu1998-lab/guard` is **PUBLIC** (`gh repo view`
 ### N191 — Guard NAMES are in the PUBLIC repo in more places than `DEVICES.md` (found 2026-10-13)
 
 verified 2026-10-13 by me (`git grep` of eight STARNET guard names on `origin/main`; names not repeated here): **56 hits in `apps/api/scripts/__snapshots__/hours-export.2026-07-01_2026-08-23.json`** (a per-guard hours export used as a test snapshot), 10 in `docs/OPS/OPEN-ITEMS.md`, 9 in two skill files (`.claude/skills/netraops-invariants/SKILL.md` and `release-ops/SKILL.md`, some tying a name to a badge and a site), 5 in `docs/OPS/DEVICES.md`, and single comment lines in `schema_v49.sql`, `schema_v52.sql`, `schema_v54.sql`, `routes/reports.ts`, `mobile/lib/compressImage.ts` and `mobile/components/CameraCapture.tsx`. `DEVICES.md`'s own header called itself "the only operational document that carries guard NAMES": that is no longer true. `POLICY.md` ("guard_id, company_id, badge, counts only") is the rule.
-- **Decision (Vishnu, 2026-10-13):** strip `DEVICES.md` to badge-only in a small PR after #111. **Recommended next, not yet approved:** the same for the two skill files, `OPEN-ITEMS.md` and the code/SQL comments (replace a name with its badge), and replace the names in the hours-export snapshot with badges (that file is a test fixture, so its harness must be checked first).
+- **Decision (Vishnu, 2026-10-13): strip `DEVICES.md` to badge-only in a small PR after #111. Done in that PR** (docs-only, held for his merge). **Recommended next, not yet approved:** the same for the two skill files, `OPEN-ITEMS.md` and the code/SQL comments (replace a name with its badge), and replace the names in the hours-export snapshot with badges (that file is a test fixture, so its harness must be checked first).
 - **What cannot be undone:** the names stay in `main`'s history. Removing them from that history means rewriting `main`, which is not recommended; the point of the scrub is to stop publishing them going forward.
 - **Size M. Tier 1.**
