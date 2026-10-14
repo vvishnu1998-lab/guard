@@ -24,6 +24,7 @@ import {
   type ShiftHours,
   type PayableShiftHours,
 } from '../services/shiftHours';
+import { parseCursor, signInHistory } from '../services/signInHistory';
 
 const router = Router();
 
@@ -280,9 +281,12 @@ router.patch('/sites/:id/photo-limit', requireAuth('vishnu'), async (req, res) =
 
 // GET /api/admin/all-sites — every site across all companies (Vishnu view)
 router.get('/all-sites', requireAuth('vishnu'), async (_req, res) => {
+  // N201: timezone lets the Vishnu companies page count a contract's days left
+  // at the site, not in the browser.
   const result = await pool.query(
     `SELECT
        s.id, s.name, s.address, s.is_active, s.contract_start, s.contract_end,
+       s.timezone,
        s.photo_limit_override,
        co.id   AS company_id,
        co.name AS company_name,
@@ -1992,6 +1996,18 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(pdf);
+});
+
+// ── Phase D, D1: the admin's own sign-in history ──────────────────────────────
+//
+// GET /api/admin/me/sign-ins[?before=<cursor>] → { events, next }. The caller's
+// own rows only (services/signInHistory.ts), 50 a page, newest first. Under
+// /api/admin, not /api/auth: the auth router's limiter (20 requests per 15
+// minutes) would spend a sign-in allowance on reading a list.
+router.get('/me/sign-ins', requireAuth('company_admin'), async (req, res) => {
+  const before = parseCursor(req.query.before);
+  if (before === 'invalid') return res.status(400).json({ code: 'INVALID_CURSOR', error: 'That page link is not valid.' });
+  res.json(await signInHistory(req.user!.sub, before));
 });
 
 export default router;

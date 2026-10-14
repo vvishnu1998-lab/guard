@@ -43,6 +43,18 @@ export function currentPasswordError(p: unknown): string | null {
   return typeof p === 'string' ? null : 'Current password is required';
 }
 
+/**
+ * N200: the four login routes and forgot-password checked that `email` and
+ * `password` were present, not that they were strings, so anything else
+ * truthy reached email.toLowerCase() or bcrypt.compare, which throw, and the
+ * error handler answered 500. Each route now answers its own 400 unless both
+ * are non-empty strings; every request it answered with a 400 before gets the
+ * same 400.
+ */
+export function isFilledString(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0;
+}
+
 import { generateTempPassword as _generateTempPassword } from '../utils/tempPassword';
 function generateTempPassword(): string { return _generateTempPassword(12); }
 
@@ -78,7 +90,7 @@ export async function logEvent(
 
 router.post('/guard/login', async (req: Request, res: Response) => {
   const { email, password, fcm_token } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  if (!isFilledString(email) || !isFilledString(password)) return res.status(400).json({ error: 'email and password required' });
 
   const guardResult = await pool.query(
     `SELECT g.id, g.company_id, g.password_hash, g.is_active, g.must_change_password,
@@ -344,7 +356,7 @@ router.post('/guard/fcm-token', requireAuth('guard'), async (req: Request, res: 
 
 router.post('/admin/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  if (!isFilledString(email) || !isFilledString(password)) return res.status(400).json({ error: 'email and password required' });
 
   const result = await pool.query(
     `SELECT ca.id, ca.company_id, ca.password_hash, ca.is_active, ca.is_primary, ca.must_change_password,
@@ -465,7 +477,7 @@ router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('comp
 
 router.post('/client/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  if (!isFilledString(email) || !isFilledString(password)) return res.status(400).json({ error: 'email and password required' });
 
   const result = await pool.query(
     `SELECT cl.id, cl.password_hash, cl.is_active, cl.must_change_password,
@@ -562,7 +574,7 @@ router.post('/client/change-password', requireAuth('client'), async (req: Reques
 
 router.post('/vishnu/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  if (!isFilledString(email) || !isFilledString(password)) return res.status(400).json({ error: 'email and password required' });
 
   // Wrong email — stateless 401. Never touch vishnu_state for a non-account
   // so an attacker guessing emails can't lock the real Vishnu out.
@@ -861,7 +873,7 @@ router.post('/admin/unlock-guard/:guard_id', requireAuth('company_admin'), async
 
 router.post('/forgot-password', async (req: Request, res: Response) => {
   const { email, portal } = req.body;
-  if (!email || !portal) return res.status(400).json({ error: 'email and portal required' });
+  if (!isFilledString(email) || !portal) return res.status(400).json({ error: 'email and portal required' });
   if (!['admin', 'client', 'guard', 'vishnu'].includes(portal)) {
     return res.status(400).json({ error: 'invalid portal' });
   }

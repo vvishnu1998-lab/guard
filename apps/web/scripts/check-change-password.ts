@@ -197,8 +197,13 @@ function main(): void {
   console.log('\n── 5  mutation controls');
   // Each mutant's edit must apply exactly once (once() throws otherwise), so a control that stopped
   // applying fails loudly instead of passing for the wrong reason.
-  const accountUnder = (cond: string) => (s: string) => once(once(s, '      {/* ── Your account', `      {${cond} && (<>{/* ── Your account`, 'section start'),
-    '          CHANGE PASSWORD\n        </Link>\n      </section>\n', '          CHANGE PASSWORD\n        </Link>\n      </section></>)}\n', 'section end');
+  // The section's end is found, not matched by its last lines: Phase D (D1) put a second link beside CHANGE PASSWORD.
+  const accountUnder = (cond: string) => (s: string) => {
+    const t = once(s, '      {/* ── Your account', `      {${cond} && (<>{/* ── Your account`, 'section start');
+    const end = t.indexOf('      </section>\n', t.indexOf('{/* ── Your account'));
+    if (end < 0) throw new Error('section end: not found');
+    return t.slice(0, end) + '      </section></>)}\n' + t.slice(end + '      </section>\n'.length);
+  };
   const mutants: Array<[string, () => boolean]> = [
     ['the voluntary wording on any case of "settings"', () => temporaryUnchanged(once(change, "useSearchParams()?.get('from') === 'settings'", "useSearchParams()?.get('from')?.toLowerCase() === 'settings'", 'm1')).length > 0],
     ['Cancel sent where the URL says', () => voluntaryRight(once(change, '              href="/admin/settings"\n', "              href={useSearchParams()?.get('back') ?? '/admin/settings'}\n", 'm2')).length > 0],

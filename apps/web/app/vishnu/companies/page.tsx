@@ -8,6 +8,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { vishnuGet, vishnuPost, vishnuPatch } from '../../../lib/vishnuApi';
+import { contractCell, SITE_ZONE_FALLBACK } from '../../../lib/contractDates';
+import { dayOffsetInZone } from '../../../lib/shiftFormat';
 
 interface Company {
   id:                  string;
@@ -42,6 +44,8 @@ interface Site {
   is_active:             boolean;
   contract_start:        string;
   contract_end:          string | null;
+  /** N201: the site's zone, for the days left; absent from an API older than it. */
+  timezone?:             string;
   photo_limit_override:  number | null;
   company_id:            string;
   company_name:          string;
@@ -53,21 +57,6 @@ interface Site {
 const EMPTY_FORM       = { name: '', default_photo_limit: '5' };
 const EDIT_EMPTY       = { name: '', default_photo_limit: '' };
 const ADMIN_FORM_EMPTY = { name: '', email: '', password: '' };
-
-function fmtDate(iso: string | null): string {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-}
-
-function contractCell(end: string | null): { date: string; sub: string; subColor: string } {
-  if (!end) return { date: 'No contract end', sub: '', subColor: 'text-gray-600' };
-  const days = Math.ceil((new Date(end).getTime() - Date.now()) / 86_400_000);
-  const date = fmtDate(end);
-  if (days < 0)  return { date, sub: 'EXPIRED',   subColor: 'text-red-400' };
-  if (days < 30) return { date, sub: `${days}d remaining`, subColor: 'text-orange-400' };
-  if (days < 90) return { date, sub: `${days}d remaining`, subColor: 'text-yellow-400' };
-  return                 { date, sub: `${days}d remaining`, subColor: 'text-green-400' };
-}
 
 export default function CompaniesPage() {
   const [companies,   setCompanies]   = useState<Company[]>([]);
@@ -472,7 +461,7 @@ export default function CompaniesPage() {
                           </thead>
                           <tbody>
                             {sites.map((s) => {
-                              const cc = contractCell(s.contract_end);
+                              const cc = contractCell(s.contract_end, dayOffsetInZone(0, s.timezone ?? SITE_ZONE_FALLBACK));
                               const isHighlighted = highlighted.has(s.id);
                               return (
                                 <tr

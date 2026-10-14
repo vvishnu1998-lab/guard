@@ -13,6 +13,8 @@ import { adminGet, adminPatch, ApiError } from '../../../lib/adminApi';
  * Its link opens /admin/change-password?from=settings, the same page and the
  * same POST /api/auth/admin/change-password a temporary password leads to,
  * worded for a change the admin chose (Vishnu's decision 1a, 2026-10-13).
+ * Beside it, SIGN-IN HISTORY opens /admin/settings/sign-ins, the admin's own
+ * history (Phase D, D1: decisions 1b and 2a, 2026-10-14).
  *
  * Every admin of the company can VIEW the profile; only the primary admin can
  * EDIT it. The API re-checks primary on every write; `is_primary` here only
@@ -255,12 +257,20 @@ export default function AdminSettingsPage() {
         <p className="text-gray-500 text-xs mb-5">
           The password you sign in with. Changing it signs you out everywhere, this browser included.
         </p>
-        <Link
-          href="/admin/change-password?from=settings"
-          className="inline-block border border-[#00C8FF] text-[#00C8FF] font-bold tracking-widest text-sm px-5 py-2.5 rounded-lg hover:bg-[#00C8FF]/10 transition-colors"
-        >
-          CHANGE PASSWORD
-        </Link>
+        <div className="flex flex-wrap gap-3">
+          <Link
+            href="/admin/change-password?from=settings"
+            className="inline-block border border-[#00C8FF] text-[#00C8FF] font-bold tracking-widest text-sm px-5 py-2.5 rounded-lg hover:bg-[#00C8FF]/10 transition-colors"
+          >
+            CHANGE PASSWORD
+          </Link>
+          <Link
+            href="/admin/settings/sign-ins"
+            className="inline-block border border-[#00C8FF] text-[#00C8FF] font-bold tracking-widest text-sm px-5 py-2.5 rounded-lg hover:bg-[#00C8FF]/10 transition-colors"
+          >
+            SIGN-IN HISTORY
+          </Link>
+        </div>
       </section>
 
       {loading && <p className="text-gray-500 text-sm">Loading…</p>}

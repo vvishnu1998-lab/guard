@@ -115,6 +115,19 @@ export function fmtCalRange(from: string, to: string): string {
   return `${a.d} – ${b.d} ${monthB} ${b.y}`;
 }
 
+/**
+ * Whole calendar days from one bare date to another: 0 for the same day,
+ * negative when `toYmd` is earlier (N201). Null when either is not a bare
+ * date. Counted between UTC midnights, every one of which is 24h apart, so
+ * no zone and no DST change can add or lose a day.
+ */
+export function calDaysBetween(fromYmd: string, toYmd: string): number | null {
+  const a = calParts(fromYmd);
+  const b = calParts(toYmd);
+  if (!a || !b) return null;
+  return Math.round((Date.UTC(Number(b.y), b.m - 1, Number(b.d)) - Date.UTC(Number(a.y), a.m - 1, Number(a.d))) / 86_400_000);
+}
+
 // ── Site-zone wall-clock conversion ─────────────────────────────────────
 //
 // The shift-edit form must round-trip an instant through a site-local wall

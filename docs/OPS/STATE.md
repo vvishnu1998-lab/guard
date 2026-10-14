@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #120, N194 (an admin on a temporary password can only change it), N195 (no current password is a 400), N198 (self-hosted web fonts) and the #119 docs, by OVERRIDE — verified 2026-10-14 14:36 PT
+
+| thing | value |
+|---|---|
+| merge | PR #120 merged as `7245a0a` at **14:06:10 PT (21:06:10Z) by OVERRIDE**. Vishnu: "Next PR: N194, N195, N198, plus the #119 docs draft. … Merge by OVERRIDE when CI is green." The push asked Vishnu and he approved it; the PR opened at ~13:56 PT. One read at 14:06:03 PT: 5/5 SUCCESS (gitleaks, typecheck and the floor, the window anchor, Vercel, Vercel Preview Comments), CLEAN, head `04daf78`, main `fe57a5c`. Then one call, `gh pr merge 120 --merge --match-head-commit 04daf78…`. The merge tree equals the head's tree (`20f444a`). |
+| Railway | `0d20964b-e591-485e-bf62-dfdcdf96ab2a` **SUCCESS** at 14:07:55 PT from `7245a0a`. |
+| web | Vercel production on `7245a0a`: success at 14:08:47 PT. Production serves the self-hosted fonts: `/`, `/admin/login` and `/app` each carry 59 `@font-face` rules (56 faces and 3 fallbacks) naming 15 woff2 files under `/_next/static/media`, with the 4 latin files preloaded and no Google host in the HTML or CSS. `check:app-page` against production passes. |
+| health | `/health` commit `7245a0a`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`116be9ca`, from #119's `fe57a5c`) served its last request at 14:07:25.3 PT and logged last at 14:08:06.96 (a cron tick). The new one was listening at 14:07:39.5 and served its first request at 14:08:01.96, so they overlapped. Over its whole life (22:35 PT on 10-13 to 14:07 PT) the old one served 7,222 requests: 0 were 5xx, and 24 were 499s (the client closed the connection), in three bursts on mobile routes at 03:31 PT (9), 04:39 PT (14) and 13:48 PT (1). To 14:36 the new one served 177 requests: 0 were 499s and 0 were 5xx. Sentry, 14:06–14:36 PT: API and web, none; mobile, no new issue (MOBILE-13 and MOBILE-12, known since 09-29). |
+| restart window | 14:06:10–14:08:07 PT: STARNET wrote nothing. In the 15 minutes before the merge it wrote 1 clock-in, 2 location pings, 7 notifications, 1 missed report, 1 clock-in verification and 2 device check-ins. 3 STARNET sessions were open. |
+| visible change | Nothing for STARNET: none of its admins, guards or clients is on a temporary password. An admin who signs in with a temporary password can now only change it or sign out; every other page returns to `/admin/change-password`. Today that is one admin in Star Guard and one in "test company". A change-password request with no current password gets a 400. The web build no longer reaches Google Fonts, and the typography is unchanged. Not yet seen by a temporary-password admin in production. |
+
+---
+
 ## Shipped 2026-10-14 — PR #119, Phase C: a change-password link in Settings for every admin; SheetJS to devDependencies; the #118 docs, by OVERRIDE — verified 2026-10-13 22:37 PT
 
 | thing | value |

@@ -6286,7 +6286,7 @@ verified 2026-10-13 by reading the code (Phase C).
 - **Fix (as proposed 2026-10-13):** the API refuses a `company_admin` token whose row has `must_change_password`,
   except for the change-password and logout routes; the web hides the nav on that page. The guard and client
   flows need the same check.
-- **Status 2026-10-14: BUILT on `fix/n194-n195-n198` (on `fe57a5c`), not yet merged.** For admins only:
+- **Status 2026-10-14: SHIPPED as `7245a0a` (PR #120, 14:06:10 PT, by OVERRIDE; see STATE.md).** For admins only:
   - **API:** `requireAuth` answers an admin whose row has `must_change_password` with 403
     `{"code":"PASSWORD_CHANGE_REQUIRED","error":"Change your temporary password to continue."}`. The enum is in
     `code` and `error` keeps a sentence, because the admin web is the only client. The flag comes from the admin
@@ -6337,7 +6337,7 @@ verified 2026-10-13 by `scripts/test-phase-c-change-password.ts` (E3) on the adm
 - The guard and client routes have the same line (`routes/auth.ts:252` and `:527`). This was read, not run.
 - No page sends such a request: the web forms and the mobile screen always send a current password.
 - **Fix:** answer 400 when `current_password` is not a string, in all three routes.
-- **Status 2026-10-14: BUILT on `fix/n194-n195-n198` (on `fe57a5c`), not yet merged.** All three routes answer 400
+- **Status 2026-10-14: SHIPPED as `7245a0a` (PR #120, 14:06:10 PT, by OVERRIDE; see STATE.md).** All three routes answer 400
   `{"error":"Current password is required"}` when `current_password` is not a string. The check runs after the
   new-password rule, so every request refused with a 400 before gets the same 400.
   - **Run, not only read:** at `fe57a5c` the guard and client routes answered 500 too.
@@ -6369,6 +6369,10 @@ email (forgot-password does email the temporary password, to the same address). 
 changed by another person, with a session or the current password, learns of it only when their sign-in fails.
 - **Proposed for Phase D (login history):** an email to the account's own address after every change, saying
   when the change happened and what to do if it was not them.
+- **Folded into Phase D as D2** (Vishnu, 2026-10-14): 3a, every role on every change, the first change from a
+  temporary password included; 4a, the copy as proposed, with the weekday computed in Pacific time and a test
+  that pins a known date's weekday. It emails STARNET's guards, admins and client, so its merge is Tier 2 and
+  waits for Vishnu to be present.
 - **Size S. Tier 1** (customer-visible email).
 
 ### N198 — the web build downloads its fonts from Google, so a Google hiccup fails the build
@@ -6387,7 +6391,7 @@ verified 2026-10-13 on PR #119's Vercel preview, from the build log Vercel showe
   - Commit the license files with them (check each font's license).
   - Prove that the built CSS names no Google host.
   - Prove that pages render with the same faces: a computed font-family check and before/after screenshots.
-- **Status 2026-10-14: BUILT on `fix/n194-n195-n198` (on `fe57a5c`), not yet merged.**
+- **Status 2026-10-14: SHIPPED as `7245a0a` (PR #120, 14:06:10 PT, by OVERRIDE; see STATE.md).**
   - **What:** the 15 woff2 files next/font/google served at `fe57a5c` (331,312 bytes), committed under
     `apps/web/app/fonts/` with each family's OFL 1.1 licence, and loaded by `next/font/local` in
     `app/fonts/index.ts`.
@@ -6442,6 +6446,19 @@ verified 2026-10-14 by a local probe (N195's sibling).
 - No page sends such a request. Each one is a 500 in Sentry, on a public route (20 requests per 15 minutes per
   IP).
 - **Fix:** answer 400 "email and password required" unless both are strings, in all four routes.
+- **Status 2026-10-14: BUILT on `feat/phase-d1-sign-in-history` (on `7245a0a`, folded into Phase D's D1 by Vishnu), not yet merged.** The four
+  login routes answer their 400 "email and password required" unless both are non-empty strings.
+  Forgot-password read `email.toLowerCase()` the same way, and now answers its 400 "email and portal required".
+  Every request a route refused with a 400 before gets the same 400.
+  - **Proof:** `scripts/test-n200-login-input.ts`, 17/17 (local database). Each route is driven over HTTP as it is
+    now and as it was at `7245a0a`, each request from the same account state:
+    - a number, an object, an array or true for the email or the password goes from 500 to the 400 on all four
+      logins and records nothing; forgot-password the same for the email;
+    - 11 or 12 other requests per login (missing, empty, null, 0 and false fields, an unknown email, a wrong
+      password, the right one, the email in capitals with spaces, a locked account) and 8 to forgot-password get
+      `7245a0a`'s answer and leave the account as it left it (failure count, lock, events);
+    - every `email.toLowerCase()` and `bcrypt.compare(password, …)` sits after its route's check;
+    - 5 of 5 mutants caught.
 - **Size XS. Tier 1.**
 
 ### N201 — the admin Sites list shows each contract date a day early, west of UTC
@@ -6457,4 +6474,115 @@ UTC, the browser in Pacific).
 - The API sets no `DATE` parser (`setTypeParser` appears nowhere in `apps/api/src`), so other date-only columns
   formatted this way are likely the same. Not audited.
 - **Fix when wanted:** format a date-only value from its `YYYY-MM-DD` part, never through the browser's zone.
+- **Status 2026-10-14: BUILT on `feat/phase-d1-sign-in-history` (on `7245a0a`, folded into Phase D's D1 by Vishnu), not yet merged.**
+  - **Audited:** the schema has four `DATE` columns. The web shows `sites.contract_start` and `contract_end`; N55
+    had already fixed the other two, the guard assignment dates.
+  - **The Sites list** formats them with `fmtContractDate` (`lib/contractDates.ts`). It reads the `YYYY-MM-DD` part
+    through N55's `fmtCalDate` and never builds a Date: the same format, on the right day.
+  - **The Vishnu companies page had the same bug twice:**
+    - the end date, a day early;
+    - the days left, counted from now to the end date's UTC midnight, so a contract read EXPIRED from 5 PM
+      Pacific the day before its end.
+
+    It now counts calendar days from today at the site (`calDaysBetween` from `dayOffsetInZone` in the site's
+    zone), so a contract is live through its end date.
+  - **The API:** Vishnu's `GET /api/admin/all-sites` also sends each site's `timezone`. Without it the page falls
+    back to Pacific.
+  - **Proof:**
+    - `apps/web` `npm run check:contract-dates`, 17/17:
+      - every day of 2025–2028, in both input shapes, renders as the old formatter rendered the right day;
+      - in six zones from UTC-11 to UTC+14 each date renders its own day, and the old formatter is shown wrong
+        in all three zones west of UTC;
+      - `calDaysBetween` matches a four-year day walk;
+      - the contract cell is right at each band and on the end date;
+      - both pages and the route are `7245a0a`'s source with exactly these edits;
+      - 8 of 8 mutants caught.
+    - `scripts/test-n201-all-sites.ts`, 3/3: every row is `7245a0a`'s plus the site's own zone, and the dates'
+      wire format is unchanged.
+    - In the browser run, with the browser in Pacific:
+      - the Sites list shows "01 Jan 2026 → 31 Dec 2026" where the old code showed "31 Dec 2025";
+      - the Vishnu page shows "31 Dec 2026", 78d remaining, on 14 October.
 - **Size S. Tier 1** (every admin in the US sees it).
+
+## New from Phase D, login history (2026-10-14)
+
+**Status: D1 BUILT 2026-10-14 on `feat/phase-d1-sign-in-history` (on `7245a0a`), not yet merged. D2 not started.**
+
+Phase D is the last part of Vishnu's program: A company profile, B letterhead, C change password, D login
+history. N197 is folded in.
+
+Vishnu, 2026-10-14:
+- "1b 2a 3a 4a."
+- "Fold N200 (login 500 on non-text input) and N201 (contract dates a day early) into D1."
+- "Build D1 straight through, merge by OVERRIDE. D2 waits for me to be present for the merge."
+
+Locked since 2026-10-06 (6a): own history only, no IP column.
+
+- **1b:** the history lists sign-ins, failed sign-ins, lockouts, password changes and password reset emails.
+  - It lists no sign-outs: the admin web's SIGN OUT only clears its cookies, so none is recorded (N202).
+- **2a:** its own page, `/admin/settings/sign-ins`.
+  - Opened from Settings → YOUR ACCOUNT → SIGN-IN HISTORY.
+  - Newest first, 50 at a time with LOAD MORE, back 365 days (auth_events' retention).
+- **3a and 4a are D2, the N197 email:** to every role on every change, NetraOps-branded, with no address.
+  - Vishnu caught the proposed copy's weekday: 14 October 2026 is a Wednesday, not a Tuesday.
+  - **D2 computes the weekday from the Pacific date, with a test that pins a known date's weekday.**
+  - D2 emails STARNET's guards, admins and client: Tier 2, merged with Vishnu present.
+- **D1, the API:** `GET /api/admin/me/sign-ins[?before=<cursor>]` (`routes/admin.ts`, `services/signInHistory.ts`).
+  - **What it returns:** the caller's own `auth_events` rows (its id, role `company_admin`), of the five types,
+    within 365 days, newest first, 50 a page. Each event is `{ at, type, device }`, never the address or the raw
+    user agent.
+  - **The cursor** keeps Postgres's microseconds.
+  - **Where it lives:** under `/api/admin`, not `/api/auth`. The auth router's limiter (20 requests per 15
+    minutes) would spend sign-in allowance on reading a list.
+  - **The device:** `services/deviceLabel.ts` names it ("Chrome on macOS", "Safari on iPhone", "NetraOps app on
+    Android", "curl").
+- **D1, the web:**
+  - Each event shows its name, device and time in Pacific time, weekday included ("Wed 14 Oct 2026, 21:30 PT"),
+    whatever the browser's zone.
+  - Failed and blocked sign-ins are amber.
+  - An API older than the route (a 404) gets a sentence.
+  - An admin on a temporary password gets N194's hold.
+- **Proof:**
+  - `scripts/test-d1-sign-in-history.ts`, 18/18 (local database):
+    - only the caller's own rows: not another admin's, not another role's row on the same id, not the six other
+      event types, not a row 366 days old;
+    - `{ at, type, device }` only; the address, which is in every row, is never sent;
+    - 120 rows in pages of 50, 50 and 20, with rows a microsecond apart and rows at one instant across the page
+      ends;
+    - malformed cursors 400; no token 401; a guard's, a client's or Vishnu's token 403; the N194 hold;
+    - 19 user agents named;
+    - `admin.ts` is `7245a0a`'s source plus this route and N201's zone;
+    - 7 of 7 mutants caught: each filter dropped, a millisecond cursor, the route open to another role, iPhone
+      read as macOS.
+  - `apps/web` `npm run check:sign-in-history`, 15/15:
+    - 13 pinned Pacific times, and every six hours of 2025–2028 against Intl's Los Angeles weekday, in six zones.
+      The pinned times include Wednesday 14 October 2026, the evening that is already Thursday in UTC, both
+      midnights, both 2026 DST changes, a leap day and a year end;
+    - the event names, and the list rendered in every state;
+    - the page's request, cursor and 404;
+    - Settings' link in the first render, and Settings is `7245a0a`'s source plus that edit;
+    - 8 of 8 mutants caught, among them the weekday taken from the UTC instant and from the browser's zone.
+  - `check:change-password` is still 16/16. Its section-end mutant now finds the end of YOUR ACCOUNT rather than
+    matching the section's old last line.
+  - In a browser, against the real routers on a local database and the branch's web dev server:
+    - the sign-in appears in the history at once ("Chrome on macOS", "Wed 14 Oct 2026, 15:02 PT");
+    - a seeded 04:30Z sign-in reads "Wed 14 Oct 2026, 21:30 PT";
+    - failures are amber;
+    - LOAD MORE brings 63 of 63, with no repeats, then the last line;
+    - no address appears anywhere;
+    - at 375 px neither page scrolls sideways, and the two Settings links stack.
+- **Visible on deploy to every tenant's admins**, STARNET included: SIGN-IN HISTORY in Settings. Nothing changes for
+  clients or guards; N200 changes only the answers to requests no app sends.
+- **Size M. Tier 1.**
+
+### N202 — the admin web's SIGN OUT leaves the session alive on the server
+
+verified 2026-10-14 by reading `components/admin/AdminNav.tsx`, and in production's auth_events: no admin sign-out
+has ever been recorded.
+- SIGN OUT clears the two cookies and opens the sign-in page. It never calls `POST /api/auth/logout`.
+- So the access token stays valid until it expires (8 hours): anyone holding a copy can keep using it after the
+  admin signs out.
+- For the same reason, no sign-out appears in the history (Phase D's option 1c, not chosen).
+- **Fix when wanted:** SIGN OUT calls `/api/auth/logout` with the session before clearing the cookies, and the route
+  revokes the token's id. The history can then list sign-outs.
+- **Size S. Tier 1.**
