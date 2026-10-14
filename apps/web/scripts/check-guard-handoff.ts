@@ -140,6 +140,22 @@ if (!/copyText\(BANNER_URL, 'banner'\)/.test(page)) fail('the Guard added banner
 if (!/copyText\(PANEL_URL, 'panel'\)/.test(page)) fail('the GUARD APP panel has no COPY LINK for PANEL_URL');
 if (!/src=\{PANEL_QR_SRC\}/.test(page)) fail('the GUARD APP panel does not render PANEL_QR_SRC');
 if (!/\{BANNER_URL\}/.test(page) || !/\{PANEL_URL\}/.test(page)) fail('the links must be on screen as selectable text');
+// What the page RENDERS, not just what the lib exports: a hard-coded string, a dropped
+// line, a panel that opens by default or hides below a breakpoint all slip past a lib-only check.
+const need = (label: string, re: RegExp) => { if (!re.test(page)) fail(`page.tsx: ${label}`); };
+need('the Guard added banner does not render {ADDED_INSTALL_LINE}', /\{ADDED_INSTALL_LINE\}/);
+need('the Add Guard modal does not render {MODAL_HELPER_LINE}', /\{MODAL_HELPER_LINE\}/);
+need('the GUARD APP panel does not render {PANEL_LEAD}', /\{PANEL_LEAD\}/);
+need('the QR image alt is not {PANEL_QR_ALT}', /alt=\{PANEL_QR_ALT\}/);
+const detailsTag = /<details[^>]*>/.exec(page)?.[0] ?? '';
+if (!detailsTag) fail('page.tsx: no <details> panel');
+if (/\sopen[\s=>{]/.test(detailsTag)) fail('the GUARD APP panel must be collapsed by default (no open attribute)');
+if (/(^|[\s"])(?:[a-z]+:)?hidden(?=[\s"])/.test(/className="([^"]*)"/.exec(detailsTag)?.[1] ?? '')) fail('the GUARD APP panel must be shown at every width (a hidden class is on <details>)');
+// COPIED only after the clipboard write RESOLVES, and the old COPY button label stays COPY otherwise.
+need('setCopied must run inside .then() of the clipboard write', /navigator\.clipboard\?\.writeText\(text\)\s*\.then\(\(\) => \{\s*setCopied\(key\)/);
+// The create route answers 201 before it sends, so the page must not claim the welcome email WAS sent.
+if (/welcome email (?:was|has been|is being) sent/i.test(page)) fail('page.tsx claims the welcome email was sent');
+
 // User-visible copy on the page must not name a store or a platform either.
 // Comments are stripped first (they may explain why); what is left is code and copy.
 const pageNoComments = page.replace(/\{\/\*[\s\S]*?\*\/\}/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

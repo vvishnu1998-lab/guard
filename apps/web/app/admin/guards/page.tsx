@@ -6,7 +6,7 @@
  * pill that expands inline. Add / assign / deactivate / per-assignment
  * edit-end-remove flows preserved from the previous table layout.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { adminGet, adminPost, adminPatch, adminFetch, adminDelete } from '../../../lib/adminApi';
 import InactiveSiteBadge from '../../../components/InactiveSiteBadge';
 import { fmtCalDate } from '../../../lib/shiftFormat';
@@ -115,6 +115,8 @@ export default function GuardsPage() {
   const [resendingId, setResendingId] = useState<string | null>(null);
   // Which COPY button last wrote to the clipboard (shows "COPIED" for 2 s).
   const [copied, setCopied] = useState<string | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
 
   // ── Redesign state (Session 2) ─────────────────────────────────────────
   const [search,       setSearch]       = useState('');
@@ -192,7 +194,8 @@ export default function GuardsPage() {
     navigator.clipboard?.writeText(text)
       .then(() => {
         setCopied(key);
-        setTimeout(() => setCopied((c) => (c === key ? null : c)), 2000);
+        if (copiedTimer.current) clearTimeout(copiedTimer.current);
+        copiedTimer.current = setTimeout(() => setCopied((c) => (c === key ? null : c)), 2000);
       })
       .catch(() => { /* ignore */ });
   }
