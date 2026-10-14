@@ -92,7 +92,11 @@ export default function AppPage() {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-6 pt-14 pb-20">
+      {/* id/group/data-platform live on <main> so the platform marker reaches the
+          badges AND the help lines below that name a store: the client enhancer
+          sets data-platform from the user agent, CSS hides the other store's
+          wording. Server HTML is identical for everyone (data-platform="other"). */}
+      <main id="store-links" data-platform="other" className="group max-w-3xl mx-auto px-6 pt-14 pb-20">
         <p className="text-[#C9A84C] text-xs tracking-[0.35em] font-semibold mb-4">FOR SECURITY GUARDS</p>
         <h1 className="font-display uppercase text-4xl md:text-6xl font-bold tracking-[0.02em] text-white mb-5">
           Get the NetraOps guard app
@@ -105,12 +109,12 @@ export default function AppPage() {
         {/* ── STORE BADGES ─────────────────────────────────────────────────────
             Light tile: Apple's badge is black with a grey border and must not
             be recoloured, so it needs a light ground (and its quarter-height
-            clear space stays empty). data-platform is set by the client
-            enhancer; with no JavaScript both badges show. */}
+            clear space stays empty: the tile's padding and gap are both larger
+            than a quarter of the badge height). Apple's official badge is on
+            the left, Google Play is a text link of the SAME height on the
+            right until Google's artwork lands. With no JavaScript both show. */}
         <div
-          id="store-links"
-          data-platform="other"
-          className="group rounded-2xl bg-[#F5F3EE] p-6 sm:p-8 flex flex-col sm:flex-row items-center justify-center gap-5 sm:gap-8"
+          className="rounded-2xl bg-[#F5F3EE] p-6 sm:p-8 flex flex-col sm:flex-row items-center justify-center gap-5 sm:gap-8"
           style={{ minHeight: 120 }}
         >
           <StoreBadge store="apple" />
@@ -144,10 +148,12 @@ export default function AppPage() {
         {/* ── HELP ─────────────────────────────────────────────────────────── */}
         <section className="mt-12 space-y-4 text-white/70">
           <p>
-            <span className="text-white font-semibold">Can&apos;t find it?</span> Search for NetraOps by Calvern LLC in the
-            App Store or Google Play.
+            <span className="text-white font-semibold">Can&apos;t find it?</span> Search for NetraOps by Calvern LLC in{' '}
+            <span className="group-data-[platform=android]:hidden">the App Store</span>
+            <span className="group-data-[platform=ios]:hidden group-data-[platform=android]:hidden"> or </span>
+            <span className="group-data-[platform=ios]:hidden">Google Play</span>.
           </p>
-          <p>
+          <p className="group-data-[platform=ios]:hidden">
             <span className="text-white font-semibold">No Google Play on your phone, or it won&apos;t install?</span> Ask your
             company admin.
           </p>

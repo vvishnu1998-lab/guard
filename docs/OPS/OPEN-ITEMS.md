@@ -6081,13 +6081,12 @@ verified 2026-10-13 by me, read-only and public: the iTunes lookup for id 676926
 - **Decision (Vishnu, 2026-10-13):** he sets territory availability in App Store Connect himself.
 - **To close:** re-run the lookup per storefront Vishnu intends; each returns 1. **Size S. Tier 2** (a console change, Vishnu).
 
-### N187 — Store badge artwork: both badges ship together, in one PR
+### N187 — Store badge artwork: Apple ships now, Google Play is a text link until its file lands
 
-verified 2026-10-13 by me: PR #108 ships `/app` with **text links** and no badge artwork. **Decision (Vishnu, 2026-10-13): merge with text links now; wire both badges in one follow-up PR once Google's file lands; never ship the Apple badge alone.**
-- Apple: the black US-UK SVG from Apple's badge bundle is in the store-app worktree, **uncommitted on purpose**, sha256 `a26fc5b38380272c92e9019a2eb8b45542a66814b3e2b203772db8904b9fb99f` (10,804 bytes, 119.66 x 40, scanned clean), with a provenance record beside it.
-- Google: **pending Partner Marketing Hub approval** (about 1 business day, per Vishnu). Needed: the unaltered file, source, sha256, natural size, and a measured *visible* height (Google's must be at least Apple's; Apple's at least 40 px). Re-read the Hub's current legal line.
-- `STORE_ARTWORK` in `apps/web/lib/storeLinks.ts` is empty until then; `check:store-links` prints "NOT YET (text link)".
-- **Nit for this PR (Vishnu, 2026-10-13, after his iPhone test of #108):** hide the "No Google Play on your phone, or it won't install? Ask your company admin." line on iOS. It sits outside `#store-links`, so the platform marker does not reach it: put it inside the group or give it its own `group-data-[platform=ios]:hidden`.
+verified 2026-10-13 by me: PR #108 shipped `/app` with **text links** and no badge artwork. **Decision (Vishnu, 2026-10-13 evening): ship Apple's badge now, with a Google Play text link of the same height on its right; replace the text link with Google's badge when the file lands.** (This supersedes "never ship the Apple badge alone".) The badge PR (`feat/store-badge-apple`) carries it.
+- Apple: the black US-UK SVG from Apple's badge bundle, sha256 `a26fc5b38380272c92e9019a2eb8b45542a66814b3e2b203772db8904b9fb99f` (10,804 bytes, 119.66 x 40, scanned clean), pinned in `STORE_ARTWORK`; provenance in `audits/store-links/badge-artwork.md`. Shown at 56 px tall (visible badge measured 56 x 167.5), clear space 14 px.
+- Google: **pending Partner Marketing Hub approval** (about 1 business day, per Vishnu). Needed: the unaltered file, source, sha256, natural size, and a measured *visible* height (Google's must be at least Apple's, so `BADGE_HEIGHT_PX` may have to rise for both). Re-read the Hub's current legal line.
+- **Nit, done in the badge PR (Vishnu, 2026-10-13):** the "No Google Play on your phone, or it won't install?" line is hidden on iOS, and the "Can't find it?" line names only the App Store on iOS and only Google Play on Android (`<main id="store-links">` now carries the platform marker). `check:app-page` pins both.
 - **Apple campaign attribution:** `APPLE_PROVIDER_TOKEN` is empty. It exists only after Vishnu creates the first campaign link in App Store Connect; until then the App Store link is the bare URL of record. Apple hides a campaign under 5 users, so with about 24 iPhone guards most per-placement rows will be blank: count with `/app` page views.
 - **Size S. Tier 1** (a web PR).
 

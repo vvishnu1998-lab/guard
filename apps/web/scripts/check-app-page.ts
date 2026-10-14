@@ -16,6 +16,12 @@
  * 2. THE ?src= TAG NEVER CHANGES THE SERVER OUTPUT AND IS NEVER ECHOED. A
  *    hostile value must produce the same page, byte for byte.
  * 3. THE BADGES LINK STRAIGHT TO THE STORES OF RECORD, with fixed page tags.
+ *    Apple's official badge is on the left and Google Play is a text link of
+ *    the SAME height on the right (until Google's artwork lands); the artwork
+ *    the SITE SERVES is byte-identical to the file the store supplied (a CDN
+ *    transform or an "optimised" copy would fail); on a confident iPhone the
+ *    Google wording hides and on Android the App Store wording hides, by CSS
+ *    only: the server HTML stays one byte-identical page.
  * 4. SHARE + SEO: canonical /app, its own Open Graph block (with the inherited
  *    image), indexable, honest JSON-LD (no rating, review or offers), and no
  *    Smart App Banner tag (a decision, not an omission).
@@ -26,7 +32,7 @@
  */
 import * as crypto from 'crypto';
 import * as http from 'http';
-import { APP_PAGE_URL, APP_STORE_URL, appStoreHref, playHref } from '../lib/storeLinks';
+import { APP_PAGE_URL, APP_STORE_URL, BADGE_HEIGHT_PX, STORE_ARTWORK, appStoreHref, playHref } from '../lib/storeLinks';
 
 const BASE = (process.env.APP_BASE ?? 'http://localhost:3000').replace(/\/$/, '');
 const IS_LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)/.test(BASE);
@@ -122,6 +128,49 @@ async function main() {
   // Apple first in the DOM (Apple's rule: first in a lineup).
   if (html.indexOf('data-store="apple"') > html.indexOf('data-store="google"')) fail('Apple badge must come first in the DOM');
   if (/apple-itunes-app/i.test(html)) fail('apple-itunes-app (Smart App Banner) present: decided against for now');
+  // The row: Apple badge (an <img> inside its link) left, Google a text link, one height.
+  const openTag = (store: 'apple' | 'google') => new RegExp(`<a[^>]*data-store="${store}"[^>]*>`).exec(html)?.[0] ?? '';
+  const inner = (store: 'apple' | 'google') => new RegExp(`<a[^>]*data-store="${store}"[^>]*>([\\s\\S]*?)</a>`).exec(html)?.[1] ?? '';
+  const minH = (tag: string) => /min-height:\s*(\d+)px/.exec(tag)?.[1];
+  const art = { apple: STORE_ARTWORK.apple, google: STORE_ARTWORK.google };
+  for (const store of ['apple', 'google'] as const) {
+    const a = art[store];
+    const body = inner(store);
+    if (a) {
+      const img = new RegExp(`<img[^>]*src="${a.src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*>`).exec(body)?.[0] ?? '';
+      if (!img) fail(`${store}: the official badge image is not inside its link`);
+      else if (!new RegExp(`height:\\s*${BADGE_HEIGHT_PX}px`).test(img)) fail(`${store}: badge <img> is not ${BADGE_HEIGHT_PX}px tall: ${img}`);
+      else if (!/alt="(Download on the App Store|Get it on Google Play)"/.test(img)) fail(`${store}: badge alt text is not the store's wording: ${img}`);
+      else ok(`${store}: official badge ${a.src}, ${BADGE_HEIGHT_PX}px tall`);
+    } else {
+      if (/<img/.test(body)) fail(`${store}: an image inside a link that has no official artwork (a lookalike badge?)`);
+      else if (!new RegExp(store === 'apple' ? 'Available on the App Store' : 'Available on Google Play').test(body)) fail(`${store}: text link wording missing`);
+      else ok(`${store}: text link (no official artwork yet)`);
+      if (new RegExp(`min-height:\\s*${BADGE_HEIGHT_PX}px`).test(body) === false) fail(`${store}: the text link is not ${BADGE_HEIGHT_PX}px tall`);
+    }
+    if (minH(openTag(store)) !== String(BADGE_HEIGHT_PX)) fail(`${store}: link min-height is ${minH(openTag(store))}px, expected ${BADGE_HEIGHT_PX}px (one row height)`);
+    if (a) {
+      const asset = await fetch(BASE + a.src);
+      const buf = Buffer.from(await asset.arrayBuffer());
+      const got = crypto.createHash('sha256').update(buf).digest('hex');
+      if (asset.status !== 200) fail(`${store} artwork -> ${asset.status}`);
+      else if (!/image\/svg\+xml/.test(asset.headers.get('content-type') ?? '')) fail(`${store} artwork content-type ${asset.headers.get('content-type')}`);
+      else if (got !== a.sha256) fail(`${store} artwork bytes served by the site (${got.slice(0, 12)}) differ from the file the store supplied (${a.sha256.slice(0, 12)})`);
+      else ok(`${store} artwork served byte-identical to the store's file (sha256 ${got.slice(0, 12)})`);
+    }
+  }
+  // Platform wording: ONE marker on <main id="store-links">, hidden by CSS only.
+  const mainTag = /<main[^>]*>/.exec(html)?.[0] ?? '';
+  if (!/id="store-links"/.test(mainTag) || !/data-platform="other"/.test(mainTag) || !/class="[^"]*\bgroup\b/.test(mainTag)) {
+    fail(`<main> must carry id="store-links", data-platform="other" and the group class: ${mainTag}`);
+  } else ok('platform marker on <main id="store-links"> (server value "other")');
+  const noPlay = /<p[^>]*class="([^"]*)"[^>]*>\s*<span[^>]*>No Google Play on your phone/.exec(html);
+  if (!noPlay || !/group-data-\[platform=ios\]:hidden/.test(noPlay[1])) fail('the "No Google Play on your phone" line must be hidden on iOS (group-data-[platform=ios]:hidden)');
+  else ok('"No Google Play on your phone" line hidden on iOS');
+  const findIt = /Can(?:&#x27;|&#39;|')t find it\?<\/span>[\s\S]*?<\/p>/.exec(html)?.[0] ?? '';
+  if (!/<span class="[^"]*group-data-\[platform=android\]:hidden[^"]*">the App Store<\/span>/.test(findIt) || !/<span class="[^"]*group-data-\[platform=ios\]:hidden[^"]*">Google Play<\/span>/.test(findIt)) {
+    fail('"Can\'t find it?" must hide the App Store wording on Android and the Google Play wording on iOS');
+  } else ok('"Can\'t find it?" wording is platform-aware');
   const qr = attr(html, /<img[^>]+src="(\/qr\/app-desktop\.svg)"/);
   if (!qr) fail('desktop QR image missing');
   else {

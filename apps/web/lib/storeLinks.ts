@@ -181,11 +181,39 @@ export function detectPlatform(ua: unknown): Platform {
  * Google Partner Marketing Hub) under that store's terms, and committed
  * UNALTERED under public/badges/. Until an entry exists the page shows a
  * plain text link, never a lookalike badge. width/height are the artwork's
- * own pixel dimensions (the aspect ratio), not the displayed size.
+ * own pixel dimensions rounded to whole numbers (HTML attributes), used only to
+ * reserve the aspect ratio before the file loads; the file's own size wins.
+ *
+ * APPLE ships, GOOGLE does not yet (owner decision, 2026-10-13 evening): Apple's
+ * official badge sits left and Google Play is a text link of the SAME height on
+ * the right. When Google's file lands, add it here and the text link becomes
+ * the badge; nothing else changes. Each entry carries the sha256 of the file as
+ * supplied: scripts/check-store-links.ts compares it with the file in the repo,
+ * and scripts/check-app-page.ts with the bytes the deployed site serves, so a
+ * re-save, an "optimised" copy or a CDN transform fails loudly.
  */
 export interface BadgeArtwork {
   src: string;
   width: number;
   height: number;
+  /** sha256 (hex) of the file exactly as the store supplied it. */
+  sha256: string;
 }
-export const STORE_ARTWORK: { apple?: BadgeArtwork; google?: BadgeArtwork } = {};
+export const STORE_ARTWORK: { apple?: BadgeArtwork; google?: BadgeArtwork } = {
+  // "Download on the App Store", black, US-UK, as supplied (119.66407 x 40).
+  apple: {
+    src: '/badges/Download_on_the_App_Store_Badge_US-UK_RGB_blk_092917.svg',
+    width: 120,
+    height: 40,
+    sha256: 'a26fc5b38380272c92e9019a2eb8b45542a66814b3e2b203772db8904b9fb99f',
+  },
+};
+
+/**
+ * ONE height for every store link on /app, badge and text link alike, so the
+ * row never has a tall item and a short one. Apple's floor is 40 px on screen;
+ * 56 clears it and the 44 px tap target.
+ */
+export const BADGE_HEIGHT_PX = 56;
+/** Apple: the clear space around its badge is a quarter of the badge's height, with nothing inside it. */
+export const APPLE_CLEAR_SPACE_PX = BADGE_HEIGHT_PX / 4;

@@ -1,9 +1,9 @@
-import { APP_STORE_URL, PLAY_STORE_URL, STORE_ARTWORK, appStoreHref, playHref } from '../../lib/storeLinks';
+import { APP_STORE_URL, BADGE_HEIGHT_PX, PLAY_STORE_URL, STORE_ARTWORK, appStoreHref, playHref } from '../../lib/storeLinks';
 
 // One store link on /app. Server component: the anchors and their FIXED
 // page-level tag are in the HTML that every visitor, crawler and link
 // previewer receives. AppLinksEnhancer (client) later re-tags the hrefs from
-// ?src= and hides the other platform's badge on a confident phone.
+// ?src= and hides the other platform's link on a confident phone.
 //
 // The badge image links STRAIGHT to its own store listing (never to /app):
 // both stores' own generators only ever produced direct links, and Google's
@@ -11,7 +11,9 @@ import { APP_STORE_URL, PLAY_STORE_URL, STORE_ARTWORK, appStoreHref, playHref } 
 //
 // NEVER draw a lookalike badge. Both stores forbid altering their artwork,
 // and Apple forbids building your own. When the official artwork is not in
-// the repo yet (STORE_ARTWORK) this renders a plain text link instead.
+// the repo yet (STORE_ARTWORK) this renders a plain text link instead. Today
+// that is Google Play; Apple's badge ships. Both are exactly BADGE_HEIGHT_PX tall,
+// so the row is one height whichever of the two is a badge.
 
 const COPY = {
   apple: {
@@ -28,13 +30,11 @@ const COPY = {
   },
 } as const;
 
-// Apple's floor is 40 px on screen. 56 px clears it and the 44 px tap target.
-const BADGE_HEIGHT_PX = 56;
-
 export default function StoreBadge({ store }: { store: 'apple' | 'google' }) {
   const c = COPY[store];
   const art = store === 'apple' ? STORE_ARTWORK.apple : STORE_ARTWORK.google;
-  // group-data-[platform=...] hides the OTHER store on a confident phone. On
+  // group-data-[platform=...] hides the OTHER store on a confident phone. The
+  // group is <main id="store-links"> in app/app/page.tsx. On
   // every other visitor (desktop, iPad, bots, no-JS) both stay visible.
   const hideWhen = store === 'apple' ? 'group-data-[platform=android]:hidden' : 'group-data-[platform=ios]:hidden';
 
