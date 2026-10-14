@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #121, Phase D's D1 (an admin's own sign-in history), N200 (login 400s) and N201 (contract dates on their own day), by OVERRIDE — verified 2026-10-14 16:26 PT
+
+| thing | value |
+|---|---|
+| merge | PR #121 merged as `69f97dd` at **15:55:09 PT (22:55:09Z) by OVERRIDE**. Vishnu: "1b 2a 3a 4a. … Fold N200 (login 500 on non-text input) and N201 (contract dates a day early) into D1. Build D1 straight through, merge by OVERRIDE. D2 waits for me to be present for the merge." The push asked Vishnu and he approved it. One read at 15:55:02 PT: 5/5 SUCCESS, CLEAN, head `a793849`, main `7245a0a`. Then one call, `gh pr merge 121 --merge --match-head-commit a793849…`. The merge tree equals the head's tree (`a6dd31f`). |
+| Railway | `8c451709-10ce-4fff-9132-268b4362510e` **SUCCESS** at 15:56:57 PT from `69f97dd`. |
+| web | Vercel production on `69f97dd`: success at 15:57:40 PT. |
+| health | `/health` commit `69f97dd`; `/health/crons` 20 jobs, `stale: []`; route control 401. Without a token, `GET /api/admin/me/sign-ins` and `/api/admin/all-sites` answer 401, so both routes exist. N200 is live: `POST /api/auth/admin/login` with a number for the email answers 400 `{"error":"email and password required"}`. |
+| switchover | The old container (`0d20964b`, from #120's `7245a0a`) served its last request at 15:56:25.3 PT and logged last at 15:57:05.8. The new one was listening at 15:56:49.6 and served its first request at 15:57:25.3. Over its whole life (14:07 to 15:56 PT) the old one served 632 requests: 0 were 499s and 0 were 5xx. To 16:25 the new one served 291: 0 were 499s and 0 were 5xx. Sentry, 15:55–16:25 PT: API, mobile and web, none. |
+| restart window | 15:55:09–15:57:06 PT: STARNET wrote nothing. It had been quiet since its 15:32:00 ping, with 3 sessions open. After the deploy its next ping landed at 16:00:07, and by 16:17 it had written 2 pings and 9 notifications. |
+| visible change | Every tenant's admins, STARNET included: Settings → YOUR ACCOUNT gains SIGN-IN HISTORY, listing the admin's own sign-ins, failed sign-ins, lockouts, password changes and reset emails, in Pacific time. The admin Sites list and the Vishnu companies page now show contract dates on their own day; they were a day early west of UTC. A sign-in with an email or password that is not text gets a 400 instead of a 500. Nothing changed for clients or guards. Not yet seen by an admin in production. |
+
+---
+
 ## Shipped 2026-10-14 — PR #120, N194 (an admin on a temporary password can only change it), N195 (no current password is a 400), N198 (self-hosted web fonts) and the #119 docs, by OVERRIDE — verified 2026-10-14 14:36 PT
 
 | thing | value |
