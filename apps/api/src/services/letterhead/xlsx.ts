@@ -6,8 +6,10 @@
  * profile holds, so no cell below them moves with the profile. The logo sits
  * in column A, in the PDF letterhead's 110 x 46 pt box at 96 dpi
  * (147 x 61 px), aspect kept; the company name and up to three contact lines
- * (letterhead/text.ts, the lines the PDF prints) sit beside it in column B.
- * With no logo the text starts in column A.
+ * (letterhead/text.ts, the lines the PDF prints) sit beside it in column B,
+ * or in `textColumnWithLogo` where column A is too narrow to hold the logo
+ * (the analytics workbook keeps its default widths and uses D). With no logo
+ * the text starts in column A.
  *
  * Every line is written through neutralizeFormula() (N171), so the block is
  * safe in any workbook. A contact line that starts with a phone a spreadsheet
@@ -31,24 +33,35 @@ import { checkImageDecodes } from '../imageDecode';
 import { neutralizeFormula, readsAsFormula } from '../spreadsheetSafe';
 
 const NAVY = 'FF0B1526';
+
+/** The image id each workbook holds the logo under, so a workbook that letters several sheets embeds it once. */
+const logoIds = new WeakMap<ExcelJS.Workbook, Map<Buffer, number>>();
+function logoId(wb: ExcelJS.Workbook, logo: Buffer, extension: 'png' | 'jpeg'): number {
+  let ids = logoIds.get(wb);
+  if (!ids) logoIds.set(wb, (ids = new Map()));
+  let id = ids.get(logo);
+  if (id === undefined) ids.set(logo, (id = wb.addImage({ buffer: logo as unknown as ExcelJS.Buffer, extension })));
+  return id;
+}
 const MUTED = 'FF64748B';
 const LOGO_BOX_PX = { w: 147, h: 61 };
 
 /** Rows the block always occupies; a sheet's own content starts below them. */
 export const LETTERHEAD_ROWS = 4;
 
-export function writeLetterheadBlock(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, lh: Letterhead): void {
+export function writeLetterheadBlock(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, lh: Letterhead,
+  { textColumnWithLogo = 2 }: { textColumnWithLogo?: number } = {}): void {
   let textCol = 1;
   const decoded = lh.logo ? checkImageDecodes(lh.logo) : null;
   if (lh.logo && decoded?.ok) {
     const scale = Math.min(LOGO_BOX_PX.w / decoded.width, LOGO_BOX_PX.h / decoded.height);
-    const image = wb.addImage({ buffer: lh.logo as unknown as ExcelJS.Buffer, extension: decoded.kind });
+    const image = logoId(wb, lh.logo, decoded.kind);
     ws.addImage(image, {
       tl: { col: 0.08, row: 0.15 },
       ext: { width: Math.round(decoded.width * scale), height: Math.round(decoded.height * scale) },
       editAs: 'oneCell',
     });
-    textCol = 2;
+    textCol = textColumnWithLogo;
   }
   ws.getRow(1).height = 24;
   for (let r = 2; r <= LETTERHEAD_ROWS; r++) ws.getRow(r).height = 15;

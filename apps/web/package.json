@@ -11,6 +11,7 @@
     "check:bulk-cancel-copy": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-bulk-cancel-copy.ts",
     "check:payable-hours": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-payable-hours.ts",
     "check:store-links": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-store-links.ts",
+    "check:checkpoint-csv": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-checkpoint-csv.ts",
     "check:app-page": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-app-page.ts",
     "check:guard-handoff": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-guard-handoff.ts"
   },

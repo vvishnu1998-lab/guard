@@ -22,10 +22,9 @@
  * frozen header in the approved design was unreachable on that library, not
  * merely awkward.
  *
- * exceljs writes all of it, verified the same way. routes/exports.ts still
- * uses xlsx for the analytics export and is the only other consumer;
- * migrating it is a separate follow-up, so the two libraries coexist until
- * then.
+ * exceljs writes all of it, verified the same way. The analytics export
+ * (routes/exports.ts) moved to exceljs too in B6 (services/analyticsWorkbook.ts);
+ * SheetJS is left only in the test harnesses that read workbooks back.
  *
  * NEITHER library writes charts. exceljs exposes no addChart on the workbook
  * or the worksheet and emits no chart parts. The approved design's two charts
@@ -77,7 +76,7 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
  * shift_date_label note in routes/billing.ts before the contract landed).
  * Formatting the string keeps the value the server decided.
  */
-function ddMmmYy(isoDate: string): string {
+export function ddMmmYy(isoDate: string): string {
   const [y, m, d] = isoDate.split('-');
   return `${d}-${MONTHS[Number(m) - 1]}-${y.slice(2)}`;
 }

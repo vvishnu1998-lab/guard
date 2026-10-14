@@ -418,6 +418,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-13 — PR #107, N184: a company's welcome emails speak as the company; N183: every agent push asks Vishnu, by OVERRIDE — verified 2026-10-13 14:23 PT
+
+| thing | value |
+|---|---|
+| merge | PR #107 merged as `b9335d6` at **14:18:37 PT by OVERRIDE**. Vishnu: "1. Allow it. Two exact-command rules for this branch, then push, open the PR, link it. 2. (b). Change guard.sh and the deny rules to "ask" before merge, rerun the guard tests, then remove the two allow rules since ask replaces them. 3. OVERRIDE. Merge when CI is green, then fast-forward ~/guard and run the post-deploy checks." The session pushed the branch and opened the PR at ~14:10 PT under the two exact-command allow rules. One read at 14:18:32: 5/5 SUCCESS, CLEAN, head `6efa864`, main `dde311c`. Then one call, `gh pr merge 107 --merge --match-head-commit 6efa864…`. The merge tree equals the head's tree (`d9aa788`). |
+| Railway | `fc9a45a6-3e80-42c4-8053-afc5223ce634` **SUCCESS** at 14:20:47 PT from `b9335d6`. |
+| web | Vercel production on `b9335d6`: success at 14:21:35 PT. |
+| health | `/health` commit `b9335d6`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`a5e85d02`, from #106's `dde311c`) served its last request at 14:20:27.7 and stopped at 14:21:00.5 PT. The new one started at 14:20:41.3, was listening at 14:20:42.0 and served its first request at 14:21:14.7. No request reached either container in between; the only traffic then was one web client's chat poll and the cron health monitor. The old container's last cron tick ran at 14:20:04 and the new one's first at 14:21:02, so no minute ran twice. Over its whole life (12:02 to 14:20 PT) the old one served 1,514 requests: 0 were 499s and 0 were 5xx. To 14:23:25 the new one served 29 requests, with 0 5xx and 0 499, and logged no error. Sentry, 13:53–14:23 PT: API, none; mobile, no new issue (the one seen, NETRAOPS-MOBILE-13 "Background location permission denied", is known since 09-29 and was last seen at 14:00:19, before the merge). |
+| restart window | 14:18:37–14:21:01 PT: STARNET wrote nothing. In the 15 minutes before the merge it wrote one location ping. After the stop, to 14:23 PT, it wrote one report at 14:21:54 (`POST /api/reports` 201, on the new container). |
+| guard live | `~/guard` fast-forwarded from `d6c8b7d` to `b9335d6` at 14:18:50 PT. Its `guard.sh` and `settings.json` equal the merge's. `scripts/ops/test-guard-hook.sh` against the live hook: 34/34. The two exact-command allow rules for `feat/n184-welcomes` were then removed from `.claude/settings.local.json` (14:19:21 PT). From here an agent's push is a prompt Vishnu answers in the app. |
+| visible change | A company with a letterhead now sends the approved N184 wording in its guard, client and secondary-admin welcomes: the subject, the header, a first-name greeting, and one contact line naming the same route as the footer. Every welcome without a letterhead, the primary-admin welcome and the password reset are unchanged. Not yet seen in a delivered email. |
+
+---
+
 ## Shipped 2026-10-13 — PR #106, B5: the company letterhead on the admin alerts and account emails, every style inline (N182), month-name dates, by OVERRIDE — verified 2026-10-13 12:06 PT; Gmail verified ~12:40 PT
 
 | thing | value |

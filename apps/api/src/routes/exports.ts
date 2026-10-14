@@ -7,7 +7,9 @@
  *
  * GET /api/exports/analytics/csv   → UTF-8 CSV attachment; a company admin's
  *                                    opens with the company letterhead (B1)
- * GET /api/exports/analytics/xlsx  → Excel workbook attachment
+ * GET /api/exports/analytics/xlsx  → Excel workbook attachment; a company
+ *                                    admin's carries the letterhead on every
+ *                                    sheet (B6)
  *
  * Query params (all optional):
  *   site_id    — filter to a single site
@@ -23,7 +25,8 @@ import { pool } from '../db/pool';
 import { SHIFT_HOURS_SQL_FIELDS } from '../services/shiftHours';
 import { letterheadForCompany } from '../services/letterhead';
 import { withCsvPreamble } from '../services/letterhead/csv';
-import { neutralizeFormula, neutralizeRow } from '../services/spreadsheetSafe';
+import { neutralizeFormula } from '../services/spreadsheetSafe';
+import { analyticsWorkbook } from '../services/analyticsWorkbook';
 
 const router = Router();
 
@@ -81,8 +84,9 @@ async function fetchAnalyticsData(companyId: string | null, params: {
   // Guard hours by site — the canonical breakdown alongside the legacy
   // `total_hours` scalar. sh JOIN needed for scheduled_hours and Payable.
   // payable_hours (D19) is emitted right after actual_hours, so the XLSX —
-  // json_to_sheet over these rows — gains it as the column after Actual with
-  // no change of its own; the CSV lists it explicitly below.
+  // every key of these rows as a column (services/analyticsWorkbook.ts) —
+  // gains it as the column after Actual with no change of its own; the CSV
+  // lists it explicitly below.
   const hq = buildArgs('ss.clocked_in_at', 'ss.clocked_in_at');
   const hours = await pool.query(`
     SELECT
@@ -97,12 +101,12 @@ async function fetchAnalyticsData(companyId: string | null, params: {
       ROUND(CAST(ss.total_hours AS NUMERIC), 2) AS total_hours,
       ${SHIFT_HOURS_SQL_FIELDS('ss', 'sh', { payable: true })},
       -- Rendered site-local, in SQL rather than JS. This file's XLSX path is
-      -- json_to_sheet(rows), which emits EVERY key as a column, so carrying a
+      -- writeAnalyticsTable(rows), which emits EVERY key as a column, so carrying a
       -- site_timezone helper the way routes/billing.ts does would silently add
       -- a column to the sheet; TO_CHAR replaces the value in place and leaves
       -- the header row untouched. Shape matches billing's toLocaleString
       -- ('en-GB') output, DD/MM/YYYY, HH:MM:SS. NULL survives as NULL, which
-      -- rowsToCsv renders as an empty field and json_to_sheet leaves blank.
+      -- rowsToCsv renders as an empty field and the XLSX leaves blank.
       -- ORDER BY below stays on the QUALIFIED column (ss./r./gv.), not this
       -- alias — sorting the formatted string would order lexicographically by
       -- day-of-month.
@@ -200,7 +204,7 @@ router.get('/analytics/csv', requireAuth('company_admin', 'vishnu'), async (req:
   if (!type || type === 'hours') {
     // Keys and labels are parallel arrays, and rowsToCsv silently reverts the
     // WHOLE header row to raw keys if their lengths differ — add to both.
-    // The XLSX sheet carries raw keys as its headers (json_to_sheet), so only
+    // The XLSX sheet carries raw keys as its headers (writeAnalyticsTable), so only
     // this CSV has friendly labels.
     sections.push('GUARD HOURS\n' + rowsToCsv(
       [
@@ -251,26 +255,16 @@ router.get('/analytics/xlsx', requireAuth('company_admin', 'vishnu'), async (req
     { site_id, guard_id, date_from, date_to },
   );
 
-  // Dynamically import xlsx to keep startup fast
-  const XLSX = require('xlsx');
-
-  const wb = XLSX.utils.book_new();
-
-  // Every value goes through neutralizeRow (N171): SheetJS stores strings as
-  // text cells, but Excel re-reads a text cell as typed input when it is edited.
-  // Sheet 1 — Guard Hours
-  const hoursWs = XLSX.utils.json_to_sheet(data.hours.map(neutralizeRow));
-  XLSX.utils.book_append_sheet(wb, hoursWs, 'Guard Hours');
-
-  // Sheet 2 — Reports
-  const reportsWs = XLSX.utils.json_to_sheet(data.reports.map(neutralizeRow));
-  XLSX.utils.book_append_sheet(wb, reportsWs, 'Reports');
-
-  // Sheet 3 — Geofence Violations
-  const violWs = XLSX.utils.json_to_sheet(data.violations.map(neutralizeRow));
-  XLSX.utils.book_append_sheet(wb, violWs, 'Geofence Violations');
-
-  const buffer: Buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  // Guard Hours, Reports, Geofence Violations, cell for cell as SheetJS wrote
+  // them before B6 (services/analyticsWorkbook.ts). Every value still goes
+  // through neutralizeRow (N171): a text cell is stored as text, but Excel
+  // re-reads it as typed input when it is edited.
+  // The admin's own company letterhead on every sheet (Phase B, B6; decision
+  // 2a), as on the CSV above. Vishnu's export spans every company and gets
+  // none. letterheadForCompany never throws, and null leaves the workbook
+  // without one.
+  const lh = isVishnu ? null : await letterheadForCompany(req.user!.company_id!);
+  const buffer = await analyticsWorkbook(data, lh, { dateFrom: date_from, dateTo: date_to });
 
   const filename = `guard-analytics-${new Date().toISOString().slice(0,10)}.xlsx`;
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

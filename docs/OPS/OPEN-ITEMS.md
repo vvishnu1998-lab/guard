@@ -5323,6 +5323,9 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
+- **Status 2026-10-13 (B6 and B7, BUILT on `feat/letterhead-b6-b7`):** the analytics workbook draws the logo
+  through B1's block, which decodes it again before exceljs embeds it. A logo that does not decode leaves the
+  block's text in column A (`scripts/test-letterhead-b6-b7.ts`, L4). The checkpoint CSV carries no logo.
 - **Status 2026-10-13 (B5, SHIPPED as `dde311c`, PR #106):** the admin alerts and the guard, client and
   secondary-admin welcomes carry the company's letterhead with B4's fallbacks: an empty profile leaves the
   name, and a lookup that fails sends the email of before, but for B5's dates and its "Do not reply" line
@@ -5999,7 +6002,8 @@ auto-mode classifier stopped it, as "Out-of-Place Publication".
   `git -C <dir> ls-remote origin` and `git -C <dir> rev-parse HEAD`.
 - **Decision (Vishnu, 2026-10-13): a push ASKS him rather than being blocked.** So no agent push is silent, and
   he stays out of the terminal.
-- **Status 2026-10-13: BUILT on `feat/n184-welcomes`.**
+- **Status 2026-10-13: SHIPPED in #107 (`b9335d6`, 14:18:37 PT) and LIVE in `~/guard` (fast-forwarded at
+  14:18:50 PT; the live hook passes 34/34).**
   - guard.sh tokenizes the command and finds git's push subcommand after any of git's own options, in lists,
     pipes and `bash -c "…"` strings.
   - For every push shape it answers with a PreToolUse "ask" decision. The Claude Code docs say a hook's "ask"
@@ -6012,8 +6016,11 @@ auto-mode classifier stopped it, as "Out-of-Place Publication".
     and without it the same push reached the shell.
   - `scripts/ops/test-guard-hook.sh`: 34/34. Main's hook gets all 14 push asks wrong: 9 shapes slip through and 5
     are hard-blocked.
-- **The exact-command allow rules** for this branch's push and PR are removed from `.claude/settings.local.json`
-  once this is live in `~/guard`. "ask" replaces them.
+- **The exact-command allow rules** for this branch's push and PR were removed from `.claude/settings.local.json`
+  at 14:19:21 PT on 2026-10-13, once this was live in `~/guard`. "ask" replaces them.
+- **An older allow rule** in the same file, for `git -C <the main checkout> push origin main`, was removed at
+  14:30:22 PT (Vishnu: "(a). Remove it."). Before #107 it approved that push with neither guard matching; only
+  branch protection would have refused it. No allow rule there mentions a push now.
 - **Size XS. Tier 1** (agent guardrails).
 
 ### N184 — the company's welcome emails name two contact routes and say "Welcome" twice
@@ -6048,7 +6055,8 @@ verified 2026-10-13 by Vishnu, on B5 test #5, the client welcome with Star Guard
     - otherwise, an active primary admin: "Questions? Contact Star Guard at {admin email}.";
     - otherwise: "Questions? Contact NetraOps support at support@netraops.com."
   - **Unchanged:** the primary-admin welcome, the password reset, and any welcome sent without a letterhead.
-- **Status 2026-10-13: BUILT on `feat/n184-welcomes`.** `scripts/test-letterhead-b5.ts` W covers the new wording
+- **Status 2026-10-13: SHIPPED in #107 (`b9335d6`, 14:18:37 PT, by OVERRIDE); not yet seen in a delivered
+  email.** `scripts/test-letterhead-b5.ts` W covers the new wording
   and all three contact tiers (118/118), and E2 the escaping. `check-email-escaping.ts` covers 16 templates, including the three
   letterhead welcomes. 10 mutation controls were each caught by their intended check. Every welcome without a letterhead,
   the primary-admin welcome and the password reset are byte-identical to `dde311c`.
@@ -6132,4 +6140,85 @@ verified 2026-10-13 by me with a one-way-hash scan (no name was read out of the 
 verified 2026-10-14 by me, read-only: the committed `hours-export.2026-07-01_2026-08-23.json` no longer equals a live build. **The cause is one thing:** the builder's SQL labels a deactivated site `[INACTIVE] <name>` (`hoursExport.ts`, "payroll must include hours at now-retired sites"), the 23000 Cristo Rey Los Altos site is now inactive, and the fixture was written before that. **Method** (the harness itself could not be run: the local `.env` is a local Postgres, `railway run` cannot resolve the private database host, and the container has no `ts-node`): the builder's real SQL was captured with a stubbed pool and run through `postgres-readonly` as a hash diff against the fixture's rows (no name returned). **Star Guard: 42 of 42 session rows identical. STARNET: 18 of 18 identical once the prefix is applied to the 11 Cristo Rey rows** (and 11 of 18 without it). The builder's code has not changed since the fixture (only comments, 2026-10-13). So `script:hours-snapshot -- --check` would report DRIFT in `rows[].site_name`, `by_site` and `by_guard_site` (`site_name` and `label`) for that site, and nothing else. It is not in CI, so nothing was failing visibly; the drift is **independent of N191**.
 - **DONE offline (Vishnu chose option (b), 2026-10-14), in its own PR:** the fixture is regenerated by running the REAL `buildHoursExport` over the verified rows (with the `[INACTIVE]` prefix the builder applies to a deactivated site; the old fixture's names were used only to reproduce the builder's sort order and never reach the output) and then the harness's own redaction. **Proof:** (1) a CONTROL run of the same regeneration without the prefix reproduces the previously committed fixture **byte for byte**; (2) the new fixture differs from it in exactly **23 leaf values, every one the prefix** (11 `rows[].site_name`, 1 `by_site` site_name and 1 label, 5 `by_guard_site` site_names and 5 labels, all STARNET's Cristo Rey site), array order unchanged; (3) every row of both tenants is hash-equal to the set verified against live (Star Guard 42 of 42, STARNET 18 of 18); (4) live has 0 auto-closed sessions in the window for both tenants, matching the fixture's flags; (5) `check:hours-redaction` and the name scan pass. **Still Vishnu's: one in-environment `script:hours-snapshot -- --check` after this merges** (D26: it is not run from here). The harness header now says a closed window can still drift when a site's active flag changes, and that the fix is `--write`.
 - **Left in the production container, harmless:** `/tmp/hs.b64` (4,208 bytes) and an empty `/tmp/hs-check.js`, from an aborted attempt to run the harness through `railway ssh`. No database write; they disappear at the next redeploy. The auto-mode classifier then denied further `railway ssh` commands.
+- **Size S. Tier 1.**
+
+## New from Phase B, stages B6 and B7 (2026-10-13)
+
+**Status: BUILT 2026-10-13 on `feat/letterhead-b6-b7` (5 commits on `86cc2f0`), not yet merged.** Vishnu asked
+for both stages in one PR and decided 1b, 2a and 3a (2026-10-13). They are the last two stages of Phase B.
+- **B6, the analytics XLSX** (`GET /api/exports/analytics/xlsx`; company admins download it from Analytics →
+  EXPORT → EXCEL):
+  - **1b: the whole export moves from SheetJS to exceljs** (`services/analyticsWorkbook.ts`).
+    - The workbook with no letterhead (Vishnu's all-company export, or a lookup that fails) is cell-identical
+      to `86cc2f0`'s SheetJS output: values, types, number formats and column widths. Both SheetJS's reader
+      and a spec-level XML reader see it so.
+    - Two things SheetJS did below the cell model are kept. Control characters are written as `_xHHHH_`.
+      `<ignoredErrors>` stops Excel flagging the NUMERIC hours, which arrive as text ("8.00"), as numbers
+      stored as text.
+    - What changes: the default font is Calibri 11 (12 before), as in the hours workbooks, and text sits in
+      the shared string table.
+  - **2a: the letterhead on all three sheets.**
+    - Layout: B1's block in rows 1-4, then "Analytics Export · <period>", "Powered by NetraOps", a blank row,
+      and the table from row 8, cell for cell.
+    - The logo floats over A1:C4 and the block's text starts in column D, so the table keeps its default
+      column widths.
+    - Every sheet prints with B1's header and footer.
+    - Rendered through Excel (PDF export), a full profile prints on the same 4 pages as the plain workbook.
+      Widening column A for the logo, as the hours SUMMARY does, had cost Reports and Violations a page each.
+  - B1's `writeLetterheadBlock` gained `textColumnWithLogo` (default 2) and now embeds the logo once per
+    workbook. The hours workbooks do not change (`scripts/test-letterhead-b1.ts` 59/59).
+- **B7, the checkpoint-scans CSV** (built in the browser on a site's page, EXPORT CSV; meant for the property
+  manager):
+  - **3a: the lines come from the API.** Every `/api/admin/company` body carries `csv_preamble`: csvPreamble()
+    of the company's letterhead, the very lines the analytics CSV opens with.
+  - The page fetches it when the button is pressed and puts it above the scans: the BOM, the lines, one blank
+    line, then the file as before, CRLF throughout.
+  - A failed fetch, an API without the field, or a line that is not one quoted cell leaves the file byte for
+    byte as before.
+- **Proof:**
+  - `scripts/test-letterhead-b6-b7.ts`, 52/52:
+    - X: the writer against json_to_sheet, on every value type, the awkward strings, and a process in Pacific
+      time; 10 mutants caught.
+    - R: Vishnu's export against the `86cc2f0` route over HTTP, five queries.
+    - L: the lettered workbook. The block and title are right, the table from row 8 matches the base route
+      cell for cell, the logo is embedded once, and the print chrome is right. Also covered: tenant isolation,
+      the null path, a corrupt logo and a hostile profile; 8 mutants caught.
+    - P: `csv_preamble` equals the analytics CSV's opening lines, for primary and secondary admins and for
+      empty and hostile profiles.
+  - Excel itself, driven through AppleScript, reads a SheetJS workbook of the awkward values and its exceljs
+    twin identically: every value and every number format.
+  - `apps/web` `npm run check:checkpoint-csv`, 29/29. It runs the page's exportScansCsv as it is now and as it
+    was at `86cc2f0`. Without a letterhead the bytes match in all four failure modes; 3 mutants caught.
+  - Also green:
+    - `scripts/test-n171-formula-guard.ts` 58/58 (R9 now compares the table below the letterhead);
+    - `scripts/test-company-profile.ts` 129/129 (the key list gains `csv_preamble`);
+    - `check:types`, the response-body floor, and the web's `tsc`;
+    - each commit alone, and gitleaks.
+  - Not run: `scripts/test-payable-hours.ts`, whose seed stops at v81 (N172). Its U4 now reads past the
+    letterhead rows, checked against sample workbooks.
+- **SheetJS (xlsx 0.18.5) stays a dependency of apps/api, used by test scripts only:**
+  - `scripts/test-n171-formula-guard.ts`;
+  - `scripts/test-payable-hours.ts`;
+  - `scripts/test-letterhead-b6-b7.ts`, where it is the baseline.
+
+  No production code loads it. jszip, already a dependency of exceljs, is now declared for `<ignoredErrors>`.
+- **Visible on deploy to every tenant's admins, STARNET included:**
+  - its admins' analytics XLSX shows its logo and contact lines;
+  - their checkpoint CSV opens with its name, its contact lines and "Powered by NetraOps".
+- **Size M. Tier 1.**
+
+### N193 — an extreme-length letterhead runs past the XLSX print chrome and the page (B1's footer, B6's block)
+
+verified 2026-10-13 by rendering through Excel (PDF export) with B1's LONG fixture: a 75-character company name
+and contact lines of about 90 characters and more.
+- **B1's footer:** "Confidential — <company>" (left) runs into "Page n of N" (centre). This affects the hours
+  workbooks since B1 and the analytics workbook since B6. By measurement it starts at a company name of about
+  50 characters.
+- **B6's block:** a contact line longer than about 90 characters (from column D to the right margin) prints its
+  tail on an extra page of the narrow Reports and Violations sheets.
+- **Today no company is near either.** The longest company name in production is 16 characters, and STARNET's
+  longest contact line is about 76 (read-only lengths, 2026-10-13).
+- **Fix when needed:**
+  - shorten the company name in the header and footer with an ellipsis, as the PDF letterhead does;
+  - shorten or wrap long block lines.
 - **Size S. Tier 1.**

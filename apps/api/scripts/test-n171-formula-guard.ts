@@ -418,8 +418,12 @@ async function main(): Promise<void> {
         `R8 clean data, analytics CSV: the base route ${sha(b.body)} = current ${sha(c.body)} (${c.body.length} bytes)`);
       const bx = await get(`/api/exports-base/analytics/xlsx?${range}`, tokenFor(C));
       const cx = await get(`/api/exports/analytics/xlsx?${range}`, tokenFor(C));
-      const cellsOf = (buf: Buffer) => { const wb = XLSX.read(buf, { type: 'buffer' }); return show(wb.SheetNames.map((n: string) => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true }))); };
-      check(bx.status === 200 && cellsOf(bx.body) === cellsOf(cx.body), 'R9 clean data, analytics XLSX: every cell of every sheet the same as the base route\'s');
+      const cellsOf = (buf: Buffer, fromRow = 0) => { const wb = XLSX.read(buf, { type: 'buffer' }); return show(wb.SheetNames.map((n: string) => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, range: fromRow }))); };
+      // Since B6 a company admin's workbook opens every sheet with the company letterhead (rows 1-7,
+      // "Powered by NetraOps" in A6); the table follows from row 8 (scripts/test-letterhead-b6-b7.ts).
+      const lettered = XLSX.read(cx.body, { type: 'buffer' });
+      check(bx.status === 200 && cellsOf(bx.body) === cellsOf(cx.body, 7) && lettered.SheetNames.every((n: string) => lettered.Sheets[n].A6?.v === 'Powered by NetraOps'),
+        'R9 clean data, analytics XLSX: below the letterhead (B6), every cell of every sheet the same as the base route\'s');
       const hostileVsBase = await get(`/api/exports-base/analytics/csv?${range}`, tokenFor(H));
       check(parseCsv(hostileVsBase.body.toString('utf8')).flat().includes(HOSTILE.guard),
         'R10 control: the base route, given the hostile data, writes it bare; the comparisons above can see the difference');

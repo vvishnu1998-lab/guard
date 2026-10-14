@@ -1,7 +1,11 @@
 /**
  * Company profile, Phase A (schema_v82). Mounted at /api/admin/company.
  *
- *   GET    /       any active company admin of the caller's company
+ *   GET    /       any active company admin of the caller's company. Every
+ *                  response's body also carries csv_preamble: the lines a CSV
+ *                  export opens with (Phase B, B7), each one an already
+ *                  quoted, formula-guarded cell (services/letterhead/csv.ts),
+ *                  the same lines the analytics CSV prints
  *   PATCH  /       the PRIMARY admin only: contact_email, phone, address,
  *                  licence_number, website (services/companyProfile.ts)
  *   POST   /logo   the PRIMARY admin only: one PNG or JPEG in field `file`,
@@ -59,6 +63,8 @@ import { deleteS3Object, uploadBufferToS3, urlOrPresign } from '../services/s3';
 import { Sentry } from '../services/sentry';
 import { detectImageKind, readImageDimensions } from '../services/imageDimensions';
 import { checkImageDecodes } from '../services/imageDecode';
+import { letterheadText } from '../services/letterhead';
+import { csvPreamble } from '../services/letterhead/csv';
 import {
   errorBody,
   parseProfilePatch,
@@ -112,6 +118,7 @@ async function profileBody(row: CompanyRow, isPrimary: boolean) {
     logo_updated_at: row.logo_updated_at,
     updated_at: row.updated_at,
     is_primary: isPrimary,
+    csv_preamble: csvPreamble(letterheadText(row)),
   };
 }
 
