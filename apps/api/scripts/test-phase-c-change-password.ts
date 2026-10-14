@@ -254,8 +254,8 @@ async function main(): Promise<void> {
       check(short.status === 400 && long.status === 400 && short.body?.error === 'Minimum 8 characters.' && await unchanged() && await settings(l.body.access) === 200,
         `E2 a new password of 7 or 129 characters: 400 "Minimum 8 characters." (${short.status}, ${long.status}); nothing stored`);
       const none = await change(l.body.access, undefined, pw());
-      check(none.status >= 400 && await unchanged() && await settings(l.body.access) === 200,
-        `E3 no current password at all: refused (${none.status}${none.status === 500 ? ', a 500 rather than a 400: N195' : ''}); nothing stored`);
+      check(none.status === 400 && none.body?.error === 'Current password is required' && await unchanged() && await settings(l.body.access) === 200,
+        `E3 no current password at all: 400 "Current password is required" (N195) (${none.status} ${show(none.body)}); nothing stored`);
       const guardToken = jwt.sign({ sub: primAfter.id, role: 'guard', company_id: STAR_GUARD }, process.env.JWT_SECRET!, { expiresIn: '1h' });
       const clientToken = jwt.sign({ sub: primAfter.id, role: 'client', site_id: STAR_GUARD }, process.env.JWT_SECRET!, { expiresIn: '1h' });
       const asGuard = await change(guardToken, primAfter.password, pw());

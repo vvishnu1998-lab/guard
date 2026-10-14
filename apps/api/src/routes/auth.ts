@@ -33,6 +33,16 @@ export function validatePassword(p: unknown): string | null {
   return null;
 }
 
+/**
+ * N195: the three change-password routes compare `current_password` with
+ * bcrypt, which throws on anything but a string, and the error handler then
+ * answered 500. Checked after the new-password rule, so every request that was
+ * refused with a 400 before still gets the same 400.
+ */
+export function currentPasswordError(p: unknown): string | null {
+  return typeof p === 'string' ? null : 'Current password is required';
+}
+
 import { generateTempPassword as _generateTempPassword } from '../utils/tempPassword';
 function generateTempPassword(): string { return _generateTempPassword(12); }
 
@@ -244,6 +254,8 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
   const { current_password, new_password } = req.body;
   const policyErr = validatePassword(new_password);
   if (policyErr) return res.status(400).json({ error: policyErr });
+  const currentErr = currentPasswordError(current_password);
+  if (currentErr) return res.status(400).json({ error: currentErr });
 
   const guardResult = await pool.query(
     'SELECT password_hash FROM guards WHERE id = $1',
@@ -419,6 +431,8 @@ router.post('/admin/change-password', requireAuth('company_admin'), async (req: 
   const { current_password, new_password } = req.body;
   const policyErr = validatePassword(new_password);
   if (policyErr) return res.status(400).json({ error: policyErr });
+  const currentErr = currentPasswordError(current_password);
+  if (currentErr) return res.status(400).json({ error: currentErr });
 
   const adminResult = await pool.query(
     'SELECT password_hash FROM company_admins WHERE id = $1',
@@ -518,6 +532,8 @@ router.post('/client/change-password', requireAuth('client'), async (req: Reques
   const { current_password, new_password } = req.body;
   const policyErr = validatePassword(new_password);
   if (policyErr) return res.status(400).json({ error: policyErr });
+  const currentErr = currentPasswordError(current_password);
+  if (currentErr) return res.status(400).json({ error: currentErr });
 
   const clientResult = await pool.query(
     'SELECT password_hash FROM clients WHERE id = $1',
