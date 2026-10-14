@@ -49,6 +49,15 @@ const nextConfig = {
         destination: '/privacy',
         permanent: true,
       },
+      // The April 2026 "Netra" policy was served as a static file at this
+      // path and claimed retention terms that are no longer true. The file is
+      // deleted; any store listing or bookmark still pointing here lands on
+      // the current policy.
+      {
+        source: '/privacy-policy.html',
+        destination: '/privacy',
+        permanent: true,
+      },
       // app.netraops.com serves the whole site (it is the host portal links in
       // emails use), but the guard app has ONE canonical URL on www. Limited to
       // this single path on purpose: /admin, /client and /vishnu links on the
