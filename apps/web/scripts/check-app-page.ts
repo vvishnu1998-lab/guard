@@ -251,6 +251,16 @@ async function main() {
     else ok('desktop QR asset served as svg');
   }
 
+  // ── 3b. the sign-in sentence (D2, 2026-10-14) ─────────────────────────────
+  // A returning guard who follows "sign in with the temporary password your admin gave you" types a
+  // dead temporary password, and five wrong tries lock the account for 30 minutes. The page says
+  // which password applies to whom, and the migration messages no longer tell guards to ignore it.
+  const bodyText = html.replace(/<script[\s\S]*?<\/script>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  if (!bodyText.includes('New to NetraOps? Use the temporary password from your admin;')) fail('the page must tell a NEW guard to use the temporary password from their admin');
+  else if (!bodyText.includes('Already have an account? Use your own password.')) fail('the page must tell a RETURNING guard to use their own password');
+  else if (/temporary password your company admin gave you/.test(bodyText)) fail('the old sentence that told every guard to use the temporary password is back');
+  else ok('the page says which password applies: temporary for a new guard, their own for a returning one');
+
   // ── 4. share + SEO ───────────────────────────────────────────────────────
   console.log('[check-app-page] share and SEO');
   const canonical = attr(html, /<link[^>]+rel="canonical"[^>]+href="([^"]+)"/) ?? attr(html, /<link[^>]+href="([^"]+)"[^>]+rel="canonical"/);

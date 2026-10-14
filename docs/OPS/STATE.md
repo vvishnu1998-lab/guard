@@ -264,6 +264,20 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #113, every remaining guard name stripped from the public repo (N191), by OVERRIDE — verified 2026-10-13 18:19 PT
+
+| thing | value |
+|---|---|
+| merge | PR #113 merged as `e943426` at **18:17:14 PT (01:17:14Z, 2026-10-14) by OVERRIDE**. Vishnu: "OVERRIDE — merge #113." Prechecks at 01:16:15Z and again at 01:17:04Z: head `4aa1f00` containing main `f01ffc7`, MERGEABLE/CLEAN, 5 of 5 checks green (the three required contexts, Vercel, Vercel Preview Comments), 38 files. `gh pr merge --merge --match-head-commit 4aa1f00…`. Before it, 01:16:16Z: 2 STARNET sessions open, last ping 01:01:56Z, control counts matching. The merge tree equals the PR head's tree (`7139828f`). |
+| Railway | `6afc753d-4197-4eaa-9c91-17fb1cf70278` **SUCCESS** at 01:18:21Z (18:18:21 PT) from `e943426` (pending 01:17:17Z). |
+| web | Vercel production on `e943426`: success at 01:18:36Z. |
+| health | `/health` commit `e943426`, first seen 01:18:30Z by a 10 s poll; `/health/crons` 20 jobs, `stale: []`. |
+| restart window | 01:17:14Z to 01:18:30Z. STARNET, counts via `postgres-readonly`: **0 location pings, 0 session starts or ends, 0 breaks, 0 notifications, 0 guard auth events**, and 0 of each to my read; the 2 open sessions stayed open. Control: 0 platform-wide pings and auth events. The last STARNET ping before the merge was 01:01:56Z and pings land about every 30 minutes, so probably none was due inside the window (the same caveat as #110, #111, #112). |
+| verification | **43 files with guard names are clean: the one-way-hash scan reports 0 un-reviewed hits (277 on the pre-scrub tree).** 23 TS/TSX/SQL files compile to identical output with comments stripped; the five that differ are the intended ones. `npm run check:hours-redaction` passes (6 mutants caught), API and mobile `tsc` clean, the edited lateness test (9) and `check:respond-copy` (29/29) pass. `APP_BASE=https://www.netraops.com npm run check:app-page` still passes after the deploy. **NOT run:** the production `npm run script:hours-snapshot -- --check` (it reads prod and is not in CI): Vishnu runs it in-environment once. |
+| visible change | None to users: docs, comments, a test fixture and a harness. The snapshot fixture holds "Guard GRD0004"-style pseudonyms; skill files and OPEN-ITEMS name badges. The names remain in git history. |
+
+---
+
 ## Shipped 2026-10-14 — PR #112, DEVICES.md is badge-only (docs; a Railway restart, by OVERRIDE) — verified 2026-10-13 18:05 PT
 
 | thing | value |
