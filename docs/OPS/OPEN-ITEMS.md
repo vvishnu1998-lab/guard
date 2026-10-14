@@ -6373,7 +6373,9 @@ changed by another person, with a session or the current password, learns of it 
   temporary password included; 4a, the copy as proposed, with the weekday computed in Pacific time and a test
   that pins a known date's weekday. It emails STARNET's guards, admins and client, so its merge is Tier 2 and
   waits for Vishnu to be present.
-- **Size S. Tier 1** (customer-visible email).
+- **Status 2026-10-14: BUILT as Phase D's D2 on `feat/phase-d2-password-changed-email` (on `69f97dd`), not yet
+  merged** (Tier 2: Vishnu present). See the Phase D section for what it sends and the proof.
+- **Size S. Tier 1** (customer-visible email; its merge is Tier 2).
 
 ### N198 — the web build downloads its fonts from Google, so a Google hiccup fails the build
 
@@ -6446,7 +6448,7 @@ verified 2026-10-14 by a local probe (N195's sibling).
 - No page sends such a request. Each one is a 500 in Sentry, on a public route (20 requests per 15 minutes per
   IP).
 - **Fix:** answer 400 "email and password required" unless both are strings, in all four routes.
-- **Status 2026-10-14: BUILT on `feat/phase-d1-sign-in-history` (on `7245a0a`, folded into Phase D's D1 by Vishnu), not yet merged.** The four
+- **Status 2026-10-14: SHIPPED as `69f97dd` (PR #121, 15:55:09 PT, by OVERRIDE, in Phase D's D1; see STATE.md).** The four
   login routes answer their 400 "email and password required" unless both are non-empty strings.
   Forgot-password read `email.toLowerCase()` the same way, and now answers its 400 "email and portal required".
   Every request a route refused with a 400 before gets the same 400.
@@ -6474,7 +6476,7 @@ UTC, the browser in Pacific).
 - The API sets no `DATE` parser (`setTypeParser` appears nowhere in `apps/api/src`), so other date-only columns
   formatted this way are likely the same. Not audited.
 - **Fix when wanted:** format a date-only value from its `YYYY-MM-DD` part, never through the browser's zone.
-- **Status 2026-10-14: BUILT on `feat/phase-d1-sign-in-history` (on `7245a0a`, folded into Phase D's D1 by Vishnu), not yet merged.**
+- **Status 2026-10-14: SHIPPED as `69f97dd` (PR #121, 15:55:09 PT, by OVERRIDE, in Phase D's D1; see STATE.md).**
   - **Audited:** the schema has four `DATE` columns. The web shows `sites.contract_start` and `contract_end`; N55
     had already fixed the other two, the guard assignment dates.
   - **The Sites list** formats them with `fmtContractDate` (`lib/contractDates.ts`). It reads the `YYYY-MM-DD` part
@@ -6506,7 +6508,8 @@ UTC, the browser in Pacific).
 
 ## New from Phase D, login history (2026-10-14)
 
-**Status: D1 BUILT 2026-10-14 on `feat/phase-d1-sign-in-history` (on `7245a0a`), not yet merged. D2 not started.**
+**Status: D1 SHIPPED 2026-10-14 as `69f97dd` (PR #121, 15:55:09 PT, by OVERRIDE; see STATE.md). D2 BUILT on
+`feat/phase-d2-password-changed-email` (on `69f97dd`), not yet merged: Tier 2, it waits for Vishnu to be present.**
 
 Phase D is the last part of Vishnu's program: A company profile, B letterhead, C change password, D login
 history. N197 is folded in.
@@ -6574,6 +6577,42 @@ Locked since 2026-10-06 (6a): own history only, no IP column.
 - **Visible on deploy to every tenant's admins**, STARNET included: SIGN-IN HISTORY in Settings. Nothing changes for
   clients or guards; N200 changes only the answers to requests no app sends.
 - **Size M. Tier 1.**
+
+**D2, the N197 email: BUILT 2026-10-14, not yet merged; its merge waits for Vishnu (Tier 2).**
+- **When it is sent:** after every change of password through the three change-password routes, the first
+  change from a temporary password included (3a). It is sent once the change is stored, and not awaited:
+  - a failed send is reported to Sentry (`sendgrid_failing`, flow `password_changed`);
+  - nothing on the notice's path can turn the change's 200 into an error.
+- **What it says (4a):**
+  - subject "Your NetraOps password was changed", NetraOps-branded like the reset email;
+  - "The password for your NetraOps <portal> account (<address>) was changed on Wednesday, October 14, 2026 at
+    2:06 PM PT, from Chrome on macOS. Every session that was signed in has been signed out." Then "If this was
+    you, there's nothing to do.";
+  - the last line: admins "If it wasn't, reset it now with "Forgot password?" on the sign-in page, and contact
+    support@netraops.com."; guards "… contact your supervisor right away."; clients "… contact your security
+    provider right away.";
+  - no address of the request (6a).
+- **The weekday:** `pacificLongDateTime` (`services/pacificDate.ts`) takes it from the Pacific calendar date, as
+  Vishnu asked when he corrected the proposed copy.
+- **Proof:**
+  - `scripts/test-d2-password-changed-email.ts`, 15/15 (local database, the real email module, SendGrid a
+    recorder):
+    - each role gets one email to its own address, naming its portal, its Pacific time, its device and its own
+      last line;
+    - the weekday matches Intl's in Los Angeles;
+    - refused changes send nothing;
+    - the first change from a temporary password sends one;
+    - with SendGrid failing, the change stands at 200 and Sentry is told once;
+    - every route answers as at `69f97dd` and leaves the same rows, and `69f97dd` sends nothing;
+    - 4 of 4 mutants caught.
+  - `scripts/check-pacific-long-date.ts`, 5/5:
+    - 13 pinned times, Wednesday, October 14, 2026 at 2:06 PM and at 9:30 PM (already Thursday in UTC) among
+      them;
+    - every six hours of 2025–2028 against Intl, in six process zones;
+    - 3 of 3 mutants caught.
+  - `check-email-escaping`: 19 templates, the three new variants with the address and the device poisoned.
+- **After the merge, Vishnu's real-path check:** change the Star Guard test admin's password and read the email
+  in Gmail.
 
 ### N202 — the admin web's SIGN OUT leaves the session alive on the server
 

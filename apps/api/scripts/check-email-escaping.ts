@@ -124,6 +124,13 @@ const cases: Case[] = [
   { name: 'clientWelcome+letterhead', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<ul style=', '<div style="background:#f5f5f5;padding:14px 28px'], subjectHasPoison: true,
     out: E.renderClientWelcome({ client_name:POISON, client_email:POISON, company_name:POISON,
       site_names:POISON, primary_admin_email:POISON, temp_password:'Abc23xyz' } as any, POISON_LH_REPLY) },
+  // N197 (Phase D, D2): the account's email and the device name (from a request header) are poisoned, in each portal's wording.
+  { name: 'passwordChanged (admin)', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<strong>Admin Dashboard</strong>'], subjectHasPoison: false,
+    out: E.renderPasswordChanged({ portal: 'admin', email: POISON, changedAt: D, device: POISON }) },
+  { name: 'passwordChanged (guard)', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<strong>Guard App</strong>'], subjectHasPoison: false,
+    out: E.renderPasswordChanged({ portal: 'guard', email: POISON, changedAt: D, device: POISON }) },
+  { name: 'passwordChanged (client)', markup: ['<table role="presentation" width="100%"', '<h1 style=', '<strong>Client Portal</strong>'], subjectHasPoison: false,
+    out: E.renderPasswordChanged({ portal: 'client', email: POISON, changedAt: D, device: POISON }) },
 ];
 
 console.log(`[check-email-escaping] ${cases.length} templates, poison = ${POISON}\n`);

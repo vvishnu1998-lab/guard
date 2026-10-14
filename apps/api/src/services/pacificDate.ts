@@ -64,3 +64,34 @@ export function isPastPacificDateString(yyyymmdd: string, now: Date = new Date()
  * routes/admin.ts dashboard-sites, which anchors per-site.
  */
 export const PACIFIC_TZ_SQL = "'America/Los_Angeles'";
+
+const LONG_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Los_Angeles',
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  hourCycle: 'h12',
+});
+const WEEKDAYS_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/**
+ * An instant as a sentence names it, in Pacific time: "Wednesday, October 14,
+ * 2026 at 2:06 PM PT" (Phase D, D2: the password-changed email).
+ *
+ * The weekday is computed from the Pacific calendar date, on that date's UTC
+ * midnight, so no process zone can move it. Vishnu's correction, 2026-10-14:
+ * the copy first proposed for this email named 14 October 2026 a Tuesday; it
+ * is a Wednesday, and scripts/test-d2-password-changed-email.ts pins it.
+ */
+export function pacificLongDateTime(input: Date | string): string {
+  const parts = LONG_PARTS.formatToParts(typeof input === 'string' ? new Date(input) : input);
+  const part = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  const y = Number(part('year'));
+  const m = Number(part('month'));
+  const d = Number(part('day'));
+  const weekday = WEEKDAYS_LONG[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  return `${weekday}, ${MONTHS_LONG[m - 1]} ${d}, ${y} at ${part('hour')}:${part('minute')} ${part('dayPeriod').toUpperCase()} PT`;
+}

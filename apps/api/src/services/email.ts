@@ -22,6 +22,8 @@ import { Sentry } from './sentry';
 import { SHIFT_HOURS_SQL_FIELDS, formatHoursHHMM, formatOffPostHours, formatScheduledHours, type ShiftHours } from './shiftHours';
 import { completedTrackableWindows, breakOverlapsWindow, siteLocalLabel } from './pingWindows';
 import { monthDayYear } from './pdf/dates';
+import { pacificLongDateTime } from './pacificDate';
+import { deviceInSentence } from './deviceLabel';
 import {
   mailLetterheadForSite, mailLetterheadForCompany, mailHeaderHtml, mailCompanyHtml, mailFooterHtml, withLetterhead,
   POWERED_BY_HTML, type MailLetterhead,
@@ -1517,6 +1519,61 @@ export async function sendTempPasswordEmail(
   } catch (err: any) {
     console.error(`[email] sendTempPasswordEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
     reportSendgridFailure('temp_password', err, { portal });
+    throw err;
+  }
+}
+
+// ── N197 — the password-changed notice (Phase D, D2) ──────────────────────────
+//
+// Vishnu's decisions 3a and 4a (2026-10-14): after every change of password
+// through the three change-password routes, the first from a temporary
+// password included, a notice to the account's own address. NetraOps-branded
+// like the reset email above: when (Pacific time, the weekday from the Pacific
+// date), from what device, and what to do if it was not them. Never an address
+// (decision 6a).
+
+export type PasswordPortal = 'admin' | 'client' | 'guard';
+
+const PASSWORD_CHANGED: Record<PasswordPortal, { label: string; notYou: string }> = {
+  admin: { label: 'Admin Dashboard', notYou: 'If it wasn\'t, reset it now with "Forgot password?" on the sign-in page, and contact support@netraops.com.' },
+  client: { label: 'Client Portal', notYou: 'If it wasn\'t, contact your security provider right away.' },
+  guard: { label: 'Guard App', notYou: 'If it wasn\'t, contact your supervisor right away.' },
+};
+
+export function renderPasswordChanged(data: { portal: PasswordPortal; email: string; changedAt: Date; device: string }): { subject: string; html: string } {
+  const { label, notYou } = PASSWORD_CHANGED[data.portal];
+  return {
+    subject: 'Your NetraOps password was changed',
+    html: emailPage(`
+    <div style="${ES.card}">
+      <div style="${ES.hdr}">
+        <div style="${ES.brand}">NetraOps</div>
+        <h1 style="${ES.hdrH1}">PASSWORD CHANGED</h1>
+        <p style="${ES.hdrP}">${label.toUpperCase()}</p>
+      </div>
+      <div style="${ES.body}">
+        <p style="font-size:15px;color:#333;margin-bottom:16px">
+          The password for your NetraOps <strong>${label}</strong> account (${escapeHtml(data.email)}) was changed on
+          <strong>${pacificLongDateTime(data.changedAt)}</strong>, from ${escapeHtml(deviceInSentence(data.device))}.
+          Every session that was signed in has been signed out.
+        </p>
+        <p style="color:#555;font-size:14px;margin-bottom:12px">If this was you, there's nothing to do.</p>
+        <p style="color:#DC2626;font-size:14px;font-weight:600;margin-bottom:0">${notYou}</p>
+      </div>
+      <div style="${ES.footer}">NetraOps</div>
+    </div>`),
+  };
+}
+
+/** Sends the notice; a failure is reported (`sendgrid_failing`, flow password_changed) and rethrown. */
+export async function sendPasswordChangedEmail(data: { portal: PasswordPortal; email: string; changedAt: Date; device: string }): Promise<void> {
+  const { subject, html } = renderPasswordChanged(data);
+  try {
+    await sgMail.send({ to: data.email, from: FROM, replyTo: REPLY_TO, subject, html });
+    noteSendgridSuccess('password_changed');
+  } catch (err: any) {
+    console.error(`[email] sendPasswordChangedEmail: SENDGRID ERROR — ${err?.message ?? err}`, err?.response?.body);
+    reportSendgridFailure('password_changed', err, { portal: data.portal });
     throw err;
   }
 }

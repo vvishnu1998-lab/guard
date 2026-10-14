@@ -36,3 +36,11 @@ export function deviceLabel(ua: string | null | undefined): string {
   if (os) return `A browser on ${os}`;
   return 'Unknown device';
 }
+
+/** The device's name inside a sentence: "from Chrome on macOS", "from the NetraOps app on iPhone", "from an unknown device". */
+export function deviceInSentence(label: string): string {
+  if (label.startsWith('NetraOps app')) return `the ${label}`;
+  if (label === 'Unknown device') return 'an unknown device';
+  if (label.startsWith('A browser')) return `a${label.slice(1)}`;
+  return label;
+}
