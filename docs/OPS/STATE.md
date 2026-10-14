@@ -665,7 +665,7 @@ guards in that position.
 
 ---
 
-Device inventory: see DEVICES.md (not included in the triage context pack — contains guard names).
+Device inventory: see DEVICES.md (not included in the triage context pack; badge-only since 2026-10-13, N191).
 
 ## STARNET sites — verified 2026-09-07 02:30 UTC (2026-09-06 19:30 PT)
 

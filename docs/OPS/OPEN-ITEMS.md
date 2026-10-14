@@ -133,6 +133,7 @@ table (lines 121-139), zero elsewhere in that file. Fixed structurally rather th
   `release-ops` SKILL.md, so the name there is marked `[name redacted]` rather than silently rewritten.
 Post-fix scan of all six embedded files: **0 name occurrences**. `DEVICES.md` keeps all 8, unchanged,
 and carries a header saying it must never be added to the pack.
+**Update 2026-10-13 (N191):** `DEVICES.md` is now **badge-only** (the repo is public; the names stay in git history). Names still appear elsewhere in the public tree: see N191.
 
 **N17. Daily digest email to Gmail is not built.**
 verified: YES, absent — `DECISIONS.md` D4 specifies "claude.ai is the call path, plus a daily digest
