@@ -24,6 +24,7 @@ import {
   type ShiftHours,
   type PayableShiftHours,
 } from '../services/shiftHours';
+import { parseCursor, signInHistory } from '../services/signInHistory';
 
 const router = Router();
 
@@ -1995,6 +1996,18 @@ router.post('/activity-log/pdf', requireAuth('company_admin'), async (req, res) 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(pdf);
+});
+
+// ── Phase D, D1: the admin's own sign-in history ──────────────────────────────
+//
+// GET /api/admin/me/sign-ins[?before=<cursor>] → { events, next }. The caller's
+// own rows only (services/signInHistory.ts), 50 a page, newest first. Under
+// /api/admin, not /api/auth: the auth router's limiter (20 requests per 15
+// minutes) would spend a sign-in allowance on reading a list.
+router.get('/me/sign-ins', requireAuth('company_admin'), async (req, res) => {
+  const before = parseCursor(req.query.before);
+  if (before === 'invalid') return res.status(400).json({ code: 'INVALID_CURSOR', error: 'That page link is not valid.' });
+  res.json(await signInHistory(req.user!.sub, before));
 });
 
 export default router;
