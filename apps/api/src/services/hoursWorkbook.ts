@@ -76,7 +76,7 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
  * shift_date_label note in routes/billing.ts before the contract landed).
  * Formatting the string keeps the value the server decided.
  */
-function ddMmmYy(isoDate: string): string {
+export function ddMmmYy(isoDate: string): string {
   const [y, m, d] = isoDate.split('-');
   return `${d}-${MONTHS[Number(m) - 1]}-${y.slice(2)}`;
 }

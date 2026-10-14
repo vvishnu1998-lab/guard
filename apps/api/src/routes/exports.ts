@@ -7,7 +7,9 @@
  *
  * GET /api/exports/analytics/csv   → UTF-8 CSV attachment; a company admin's
  *                                    opens with the company letterhead (B1)
- * GET /api/exports/analytics/xlsx  → Excel workbook attachment
+ * GET /api/exports/analytics/xlsx  → Excel workbook attachment; a company
+ *                                    admin's carries the letterhead on every
+ *                                    sheet (B6)
  *
  * Query params (all optional):
  *   site_id    — filter to a single site
@@ -257,7 +259,12 @@ router.get('/analytics/xlsx', requireAuth('company_admin', 'vishnu'), async (req
   // them before B6 (services/analyticsWorkbook.ts). Every value still goes
   // through neutralizeRow (N171): a text cell is stored as text, but Excel
   // re-reads it as typed input when it is edited.
-  const buffer = await analyticsWorkbook(data);
+  // The admin's own company letterhead on every sheet (Phase B, B6; decision
+  // 2a), as on the CSV above. Vishnu's export spans every company and gets
+  // none. letterheadForCompany never throws, and null leaves the workbook
+  // without one.
+  const lh = isVishnu ? null : await letterheadForCompany(req.user!.company_id!);
+  const buffer = await analyticsWorkbook(data, lh, { dateFrom: date_from, dateTo: date_to });
 
   const filename = `guard-analytics-${new Date().toISOString().slice(0,10)}.xlsx`;
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

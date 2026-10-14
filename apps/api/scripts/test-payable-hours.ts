@@ -632,13 +632,16 @@ async function main(): Promise<void> {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const XLSX = require('xlsx');
       const wb = XLSX.read(out.body, { type: 'buffer' });
-      const hoursHeader = (XLSX.utils.sheet_to_json(wb.Sheets['Guard Hours'], { header: 1 })[0] ?? []) as string[];
+      // Since B6 a company admin's workbook opens every sheet with the letterhead (rows 1-7, "Powered by
+      // NetraOps" in A6), and the table starts on row 8; without one it starts on row 1.
+      const from = (n: string) => (wb.Sheets[n].A6?.v === 'Powered by NetraOps' ? 7 : 0);
+      const hoursHeader = (XLSX.utils.sheet_to_json(wb.Sheets['Guard Hours'], { header: 1, range: from('Guard Hours') })[0] ?? []) as string[];
       check(JSON.stringify(hoursHeader) === JSON.stringify(KEYS),
         `Guard Hours header = ${KEYS.length} raw keys, payable_hours after actual_hours (${hoursHeader.join(' | ')})`);
-      const vioHeader = (XLSX.utils.sheet_to_json(wb.Sheets['Geofence Violations'], { header: 1 })[0] ?? []) as string[];
+      const vioHeader = (XLSX.utils.sheet_to_json(wb.Sheets['Geofence Violations'], { header: 1, range: from('Geofence Violations') })[0] ?? []) as string[];
       check(JSON.stringify(vioHeader) === JSON.stringify(['site_name', 'guard_name', 'occurred_at', 'resolved_at',
         'duration_minutes', 'supervisor_override', 'notification_sent']), 'Geofence Violations sheet header unchanged');
-      const rows = XLSX.utils.sheet_to_json(wb.Sheets['Guard Hours']) as any[];
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets['Guard Hours'], { range: from('Guard Hours') }) as any[];
       const f = rows.find((r) => r.guard_name === `${marker}-F`);
       check(num(f?.payable_hours) === 3 && num(f?.actual_hours) === 7,
         `F: payable_hours ${fmt(f?.payable_hours)} = 3, actual_hours ${fmt(f?.actual_hours)} = 7`);

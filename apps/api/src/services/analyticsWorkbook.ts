@@ -28,10 +28,26 @@
  * What does change: the default font is Calibri 11 (exceljs, as in the hours
  * workbooks) where SheetJS wrote Calibri 12, and text is stored in the shared
  * string table rather than inline. Neither changes a value, a type or a format.
+ *
+ * ── THE LETTERHEAD (Phase B, B6; Vishnu's decision 2a, 2026-10-13) ────────
+ * With a letterhead, every sheet opens with the company's block (rows 1-4,
+ * letterhead/xlsx.ts), then "Analytics Export   ·   <period>", then "Powered
+ * by NetraOps", a blank row, and the table from row 8, cell for cell as
+ * without one, in the same column widths. The logo floats over A1:C4 and the
+ * block's text starts in column D: widening column A for the logo, as the
+ * hours SUMMARY does, pushed Reports and Violations onto a second printed
+ * page. "Powered by" sits under the title, not at the right of its row as on
+ * the hours SUMMARY, for the same reason: a cell at the right widened the
+ * print range and printed a page holding nothing else. Every sheet prints with
+ * the company's header and footer. Without one (null: Vishnu's all-company export, or a
+ * lookup that failed) the workbook is the one above.
  */
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import { neutralizeRow } from './spreadsheetSafe';
+import type { Letterhead } from './letterhead/types';
+import { writeLetterheadBlock, stampPrintChrome, LETTERHEAD_ROWS } from './letterhead/xlsx';
+import { ddMmmYy } from './hoursWorkbook';
 
 export type AnalyticsRow = Record<string, unknown>;
 
@@ -101,8 +117,50 @@ export async function ignoreNumberStoredAsText(xlsx: Buffer): Promise<Buffer> {
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
-export async function analyticsWorkbook(data: AnalyticsData): Promise<Buffer> {
+/** What the export covers: the request's date_from and date_to, as given. */
+export interface AnalyticsPeriod {
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export const ANALYTICS_TITLE = 'Analytics Export';
+/** With a letterhead, the table's header row: below the block, the title, "Powered by" and a blank row. */
+export const LETTERED_TABLE_ROW = LETTERHEAD_ROWS + 4;
+/** With a logo, the block's text column: the logo's box (147 px) spans default-width A and B and part of C. */
+const TEXT_COLUMN_WITH_LOGO = 4;
+const NAVY = 'FF0B1526';
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** "Period 01-Sep-26 to 30-Sep-26", "From …", "Through …" or "All records"; dates as the hours workbook prints them. */
+export function analyticsPeriodText({ dateFrom, dateTo }: AnalyticsPeriod): string {
+  const day = (s: string) => (ISO_DATE.test(s) ? ddMmmYy(s) : s);
+  if (dateFrom && dateTo) return `Period ${day(dateFrom)} to ${day(dateTo)}`;
+  if (dateFrom) return `From ${day(dateFrom)}`;
+  if (dateTo) return `Through ${day(dateTo)}`;
+  return 'All records';
+}
+
+function writeLetteredSheet(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, rows: AnalyticsRow[], lh: Letterhead, period: AnalyticsPeriod): void {
+  writeLetterheadBlock(wb, ws, lh, { textColumnWithLogo: TEXT_COLUMN_WITH_LOGO });
+  const title = ws.getRow(LETTERHEAD_ROWS + 1);
+  title.getCell(1).value = `${ANALYTICS_TITLE}   ·   ${analyticsPeriodText(period)}`;
+  title.getCell(1).font = { bold: true, size: 12, color: { argb: NAVY } };
+  const powered = ws.getRow(LETTERHEAD_ROWS + 2).getCell(1);
+  powered.value = 'Powered by NetraOps';
+  powered.font = { size: 8, color: { argb: 'FF94A3B8' } };
+  writeAnalyticsTable(ws, rows, LETTERED_TABLE_ROW);
+}
+
+export async function analyticsWorkbook(data: AnalyticsData, lh: Letterhead | null = null, period: AnalyticsPeriod = {}): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
-  for (const [name, key] of ANALYTICS_SHEETS) writeAnalyticsTable(wb.addWorksheet(name), data[key]);
+  for (const [name, key] of ANALYTICS_SHEETS) {
+    const ws = wb.addWorksheet(name);
+    if (lh) writeLetteredSheet(wb, ws, data[key], lh, period);
+    else writeAnalyticsTable(ws, data[key]);
+  }
+  if (lh) {
+    wb.company = lh.companyName;
+    stampPrintChrome(wb, lh, ANALYTICS_TITLE);
+  }
   return ignoreNumberStoredAsText(Buffer.from(await wb.xlsx.writeBuffer()));
 }

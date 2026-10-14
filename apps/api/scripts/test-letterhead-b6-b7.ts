@@ -22,7 +22,12 @@
  *
  *   X  the writer against SheetJS's json_to_sheet: every value type, the awkward strings, empty
  *      sheets, keys first met in a later row, in UTC and in Pacific time; and mutation controls
- *   R  the route over HTTP against the BASE route, three callers by five queries
+ *   R  the route over HTTP against the BASE route: Vishnu's all-company export, which carries no
+ *      letterhead, by five queries
+ *   L  with a letterhead (decision 2a): every sheet opens with the company's block, the title,
+ *      "Powered by NetraOps" and a blank row; the table below is the BASE route's, cell for cell,
+ *      seven rows down; the logo once per sheet; the print header and footer; the tenant's own
+ *      letterhead only; the null path; and mutation controls
  */
 import Module from 'node:module';
 import fs from 'node:fs';
@@ -31,6 +36,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import ts from 'typescript';
+import { pngImage, pngCorruptAfterHeader } from './image-fixtures';
 
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost']);
 /** main before B6 (PR #117's merge). Every "before" is read from here. */
@@ -39,6 +45,14 @@ const STAR_GUARD = 'b7c7d32d-a69e-4842-9eae-0a11eb2ff8ee';
 const JWT_SECRET = 'test-only-letterhead-b6';
 const VISHNU_SECRET = 'test-only-letterhead-b6-vishnu';
 const S3_HOST = 'test-bucket.s3.us-east-1.amazonaws.com';
+/** A well-formed company id that no row has: its letterhead lookup returns null. */
+const NO_SUCH_COMPANY = '00000000-0000-4000-8000-00000000b6b6';
+const LOGO = pngImage(400, 160);
+const FULL = {
+  companyName: 'Star Guard', contactEmail: 'dispatch@starguard.example', phone: '(408) 555-0142',
+  address: '1200 Example Avenue, Suite 300\nSan Jose, CA 95110', licenceNumber: 'PPO 120456',
+  website: 'https://www.starguard.example/', logo: LOGO,
+};
 
 process.env.JWT_SECRET = JWT_SECRET;
 process.env.VISHNU_JWT_SECRET = VISHNU_SECRET;
@@ -218,6 +232,25 @@ function differences(a: SheetView[], b: SheetView[]): string[] {
 }
 const cellCount = (v: SheetView[]) => v.reduce((n, s) => n + Object.keys(s.sj).length, 0);
 const brief = (d: string[]) => (d.length === 0 ? 'no differences' : `${d.length} differences: ${d.slice(0, 4).join('; ')}${d.length > 4 ? ' …' : ''}`);
+
+/** A sheet's cells below row `rows`, moved up by `rows`: the table of a lettered sheet, where a plain one has it. */
+function tableOf(v: SheetView, rows: number): SheetView {
+  const move = <T>(cells: Record<string, T>) => {
+    const out: Record<string, T> = {};
+    for (const [k, c] of Object.entries(cells)) {
+      const m = k.match(/^([A-Z]+)(\d+)$/)!;
+      if (Number(m[2]) > rows) out[`${m[1]}${Number(m[2]) - rows}`] = c;
+    }
+    return out;
+  };
+  return { ...v, sj: move(v.sj), spec: move(v.spec), dimension: null, ignoredErrors: null };
+}
+/** The cells of rows 1..`rows`, as address → value (spec reader). */
+function blockOf(v: SheetView, rows: number): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, c] of Object.entries(v.spec)) if (Number(k.match(/\d+$/)![0]) <= rows) out[k] = c[1];
+  return out;
+}
 
 /** The analytics workbook as main wrote it: json_to_sheet over each query's neutralized rows. */
 function sheetjsWorkbook(data: { hours: object[]; reports: object[]; violations: object[] }, neutralizeRow: (r: any) => any): Buffer {
@@ -465,7 +498,9 @@ async function main(): Promise<void> {
     // ══════════════════════════════════════════════════════════════════════════
     section(`R  GET /api/exports/analytics/xlsx against the ${BASE.slice(0, 7)} route (SheetJS), over HTTP`);
     {
-      const callers: Array<[string, string]> = [['Vishnu (every company)', vishnuToken], ["Star Guard's admin", adminToken(adminA, STAR_GUARD)], ["the other company's admin", adminToken(adminB, other)]];
+      // Vishnu's export spans every company and carries no letterhead: the workbook with none, against
+      // main's. A company admin's carries one since B6; section L holds its table to the same comparison.
+      const callers: Array<[string, string]> = [['Vishnu (every company, no letterhead)', vishnuToken]];
       const queries: Array<[string, string]> = [
         ['no filter', ''],
         ['one site', `site_id=${north}`],
@@ -490,6 +525,163 @@ async function main(): Promise<void> {
       const src = fs.readFileSync(path.join(__dirname, '..', 'src/routes/exports.ts'), 'utf8');
       check(!/require\(['"]xlsx['"]\)|from ['"]xlsx['"]/.test(src) && /require\(['"]xlsx['"]\)/.test(execFileSync('git', ['show', `${BASE}:apps/api/src/routes/exports.ts`], { encoding: 'utf8' })),
         'R3 the route no longer loads SheetJS; the base one did');
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    section('L  with a letterhead: the block, the title, "Powered by NetraOps", then the table cell for cell seven rows down; the print chrome; the logo once');
+    {
+      const JSZip = (await import('jszip')).default;
+      const { contactLines } = await import('../src/services/letterhead/text');
+      const { neutralizeFormula, readsAsFormula } = await import('../src/services/spreadsheetSafe');
+      const hf = (t: string) => t.replace(/&/g, '&&');
+      type Profile = { companyName: string; contactEmail: string | null; phone: string | null; address: string | null; licenceNumber: string | null; website: string | null; logo: Buffer | null };
+      /** Everything wrong with a lettered workbook, against the plain workbook of the same data. */
+      async function letteredProblems(buf: Buffer, plain: Buffer, lh: Profile, title: string, logoDrawn: boolean): Promise<string[]> {
+        const problems: string[] = [];
+        const v = await viewOf(buf);
+        const p = await viewOf(plain);
+        if (show(v.map((x) => x.name)) !== show(p.map((x) => x.name))) problems.push(`sheets ${show(v.map((x) => x.name))}`);
+        const col = logoDrawn ? 'D' : 'A';
+        const want: Record<string, unknown> = { [`${col}1`]: neutralizeFormula(lh.companyName) };
+        contactLines(lh as never).forEach((line, i) => {
+          want[`${col}${2 + i}`] = neutralizeFormula(lh.phone && line.startsWith(lh.phone) && readsAsFormula(line) ? `Tel ${line}` : line);
+        });
+        want.A5 = title;
+        want.A6 = 'Powered by NetraOps';
+        const sorted = (o: Record<string, unknown>) => show(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
+        for (let i = 0; i < Math.min(v.length, p.length); i++) {
+          const got = blockOf(v[i], 7);
+          if (sorted(got) !== sorted(want)) problems.push(`${v[i].name} rows 1-7 ${sorted(got)}`);
+          problems.push(...differences([tableOf(v[i], 7)], [{ ...p[i], dimension: null, ignoredErrors: null }]).map((d) => `${v[i].name} table: ${d}`));
+          if (v[i].ignoredErrors !== `<ignoredError numberStoredAsText="1" sqref="${v[i].dimension}"/>`) problems.push(`${v[i].name} ignoredErrors ${v[i].ignoredErrors}`);
+        }
+        const zip = await JSZip.loadAsync(buf);
+        const parts = Object.keys(zip.files).filter((f) => /^xl\/worksheets\/sheet\d+\.xml$/.test(f)).sort();
+        for (const part of parts) {
+          const xml = await zip.file(part)!.async('string');
+          const head = unescapeXml(xml.match(/<oddHeader>([\s\S]*?)<\/oddHeader>/)?.[1] ?? '');
+          const foot = unescapeXml(xml.match(/<oddFooter>([\s\S]*?)<\/oddFooter>/)?.[1] ?? '');
+          if (head !== `&L&B${hf(lh.companyName)}&R${hf('Analytics Export')}`) problems.push(`${part} header ${show(head)}`);
+          if (foot !== `&L&8Confidential — ${hf(lh.companyName)}&C&8Page &P of &N&R&8Powered by NetraOps`) problems.push(`${part} footer ${show(foot)}`);
+          const at = (tag: string) => xml.indexOf(`<${tag}`);
+          if (!(at('headerFooter') > 0 && at('ignoredErrors') > at('headerFooter') && (logoDrawn ? at('drawing') > at('ignoredErrors') : at('drawing') < 0))) {
+            problems.push(`${part} element order headerFooter ${at('headerFooter')} ignoredErrors ${at('ignoredErrors')} drawing ${at('drawing')}`);
+          }
+        }
+        const media = Object.keys(zip.files).filter((f) => f.startsWith('xl/media/') && !zip.files[f].dir);
+        if (logoDrawn) {
+          if (media.length !== 1 || !(await zip.file(media[0])!.async('nodebuffer')).equals(lh.logo!)) problems.push(`media ${show(media)} (want the logo, once)`);
+          const drawings = Object.keys(zip.files).filter((f) => /^xl\/drawings\/drawing\d+\.xml$/.test(f));
+          if (drawings.length !== parts.length) problems.push(`${drawings.length} drawings for ${parts.length} sheets`);
+          for (const d of drawings) {
+            const x = await zip.file(d)!.async('string');
+            const from = x.match(/<xdr:from><xdr:col>(\d+)<\/xdr:col><xdr:colOff>\d+<\/xdr:colOff><xdr:row>(\d+)<\/xdr:row>/);
+            const ext = x.match(/<xdr:ext cx="(\d+)" cy="(\d+)"\/>/);
+            const px = ext ? [Number(ext[1]) / 9525, Number(ext[2]) / 9525] : [];
+            if (!from || from[1] !== '0' || from[2] !== '0' || !ext || px[0] > 147 || px[1] > 61) problems.push(`${d} anchor ${from?.slice(1).join(',')} size ${px.join('x')}`);
+          }
+        } else if (media.length !== 0) problems.push(`media ${show(media)} (want none)`);
+        return problems;
+      }
+
+      // Star Guard's full profile and logo, behind the stubbed S3.
+      const logoKey = `company-logos/${STAR_GUARD}/${marker}.png`;
+      s3Objects.set(logoKey, LOGO);
+      await q(`UPDATE companies SET contact_email = $2, phone = $3, address = $4, licence_number = $5, website = $6, logo_url = $7, logo_updated_at = $8 WHERE id = $1`,
+        [STAR_GUARD, FULL.contactEmail, FULL.phone, FULL.address, FULL.licenceNumber, FULL.website, `https://${S3_HOST}/${logoKey}`, new Date('2026-10-13T18:00:00Z')]);
+      const A = adminToken(adminA, STAR_GUARD);
+      for (const [what, qs, title] of [
+        ['no filter', '', 'Analytics Export   ·   All records'],
+        ['a date range', 'date_from=2026-09-11&date_to=2026-09-13', 'Analytics Export   ·   Period 11-Sep-26 to 13-Sep-26'],
+        ['from a date', 'date_from=2026-09-12', 'Analytics Export   ·   From 12-Sep-26'],
+        ['one site', `site_id=${north}`, 'Analytics Export   ·   All records'],
+        ['one guard', `guard_id=${gB}`, 'Analytics Export   ·   All records'],
+        ['a range with no rows', 'date_from=2025-01-01&date_to=2025-01-02', 'Analytics Export   ·   Period 01-Jan-25 to 02-Jan-25'],
+      ] as const) {
+        const c = await get(`/api/exports/analytics/xlsx?${qs}`, A);
+        const b = await get(`/api/exports-base/analytics/xlsx?${qs}`, A);
+        const pr = await letteredProblems(c.body, b.body, FULL, title, true);
+        check(c.status === 200 && pr.length === 0,
+          `L1 Star Guard's admin, ${what}: on all three sheets, the block in D1:D4 beside the logo, "${title.replace(/ {3}/g, ' ')}", "Powered by NetraOps"; the table from row 8 is the base route's cell for cell; header and footer; one logo (${pr.length ? pr.slice(0, 3).join('; ') : 'nothing wrong'})`);
+      }
+      {
+        const c = await get('/api/exports/analytics/xlsx', adminToken(adminB, other));
+        const b = await get('/api/exports-base/analytics/xlsx', adminToken(adminB, other));
+        const empty = { companyName: OTHER_NAME, contactEmail: null, phone: null, address: null, licenceNumber: null, website: null, logo: null };
+        const pr = await letteredProblems(c.body, b.body, empty, 'Analytics Export   ·   All records', false);
+        const all = (await viewOf(c.body)).flatMap((x) => Object.values(x.spec).map((cell) => String(cell[1])));
+        const zip = await (await import('jszip')).default.loadAsync(c.body);
+        const xml = (await Promise.all(Object.keys(zip.files).filter((f) => f.endsWith('.xml')).map((f) => zip.file(f)!.async('string')))).join('');
+        check(c.status === 200 && pr.length === 0 && all.length > 100 && !all.some((t) => t.includes('Star Guard')) && !xml.includes('Star Guard') && !xml.includes('starguard'),
+          `L2 the other company's admin: its own name in A1, no contact lines and no logo (an empty profile), its own header and footer; nothing of Star Guard's anywhere in the file (${pr.length ? pr.slice(0, 3).join('; ') : 'nothing wrong'})`);
+      }
+      {
+        // requireAuth re-reads the ADMIN row, not the company, so a token naming a company with no row
+        // reaches the handler: no rows, and a letterhead lookup that returns null.
+        const t = adminToken(adminA, NO_SUCH_COMPANY);
+        const c = await get('/api/exports/analytics/xlsx', t);
+        const b = await get('/api/exports-base/analytics/xlsx', t);
+        const zip = await (await import('jszip')).default.loadAsync(c.body);
+        const sheetXml = (await Promise.all(Object.keys(zip.files).filter((f) => /worksheets\/sheet/.test(f)).map((f) => zip.file(f)!.async('string')))).join('');
+        const d = differences(await viewOf(b.body), await viewOf(c.body));
+        check(c.status === 200 && d.length === 0 && !sheetXml.includes('headerFooter') && !sheetXml.includes('<drawing'),
+          `L3 a lookup that returns null: the workbook without a letterhead, the base route's cell for cell, no header, footer or drawing (${brief(d)})`);
+      }
+      // Straight through the module: the profile's edge cases.
+      const sweep3 = sweepData();
+      const plain3 = sheetjsWorkbook(sweep3, neutralizeRow);
+      {
+        const corrupt = { ...FULL, logo: pngCorruptAfterHeader(400, 160) };
+        const pr = await letteredProblems(await AW.analyticsWorkbook(sweep3 as never, corrupt, {}), plain3, corrupt, 'Analytics Export   ·   All records', false);
+        check(pr.length === 0, `L4 a logo that does not decode (N167): no picture, the block's text from column A (${pr.slice(0, 3).join('; ') || 'nothing wrong'})`);
+      }
+      {
+        const hostile = { companyName: '=HYPERLINK("https://x.example","Star Guard") & Co', contactEmail: '@ops.example', phone: '+1 (408) 555-0142',
+          address: '-1 Example Way\n=San Jose', licenceNumber: '+PPO 1', website: 'https://www.starguard.example/', logo: LOGO };
+        const buf = await AW.analyticsWorkbook(sweep3 as never, hostile, { dateFrom: '2026-09-01', dateTo: '2026-09-30' });
+        const pr = await letteredProblems(buf, plain3, hostile, 'Analytics Export   ·   Period 01-Sep-26 to 30-Sep-26', true);
+        const v = await viewOf(buf);
+        check(pr.length === 0 && v[0].spec.D1?.[1] === "'=HYPERLINK(\"https://x.example\",\"Star Guard\") & Co"
+          && String(v[0].spec.D2?.[1]).startsWith("'-1 Example Way") && String(v[0].spec.D3?.[1]).startsWith('Tel +1 (408) 555-0142'),
+          `L5 a hostile profile: every block line that would run as a formula gets its apostrophe, the "+1" phone line reads "Tel +1 …", and & is && in the header and footer (${pr.slice(0, 3).join('; ') || 'nothing wrong'})`);
+      }
+      {
+        const P = AW.analyticsPeriodText;
+        const cases: Array<[object, string]> = [
+          [{}, 'All records'], [{ dateFrom: '2026-09-01' }, 'From 01-Sep-26'], [{ dateTo: '2026-09-30' }, 'Through 30-Sep-26'],
+          [{ dateFrom: '2026-09-01', dateTo: '2026-09-30' }, 'Period 01-Sep-26 to 30-Sep-26'], [{ dateFrom: '20260901', dateTo: '2026-9-30' }, 'Period 20260901 to 2026-9-30'],
+        ];
+        const bad = cases.filter(([a, w]) => P(a as never) !== w).map(([a, w]) => `${show(a)} → ${show(P(a as never))}, want ${show(w)}`);
+        check(bad.length === 0, `L6 the period line: none, from, through, both, and a date Postgres takes but that is not YYYY-MM-DD (printed as given) (${bad.join('; ') || 'all five'})`);
+      }
+      // Mutation controls: each mutant of the lettered layout must be caught by letteredProblems.
+      const mutants: Array<[string, (s: string) => string]> = [
+        ['the block text in column B, under the logo', (s) => s.replace('const TEXT_COLUMN_WITH_LOGO = 4;', 'const TEXT_COLUMN_WITH_LOGO = 2;')],
+        ['the table one row higher', (s) => s.replace('export const LETTERED_TABLE_ROW = LETTERHEAD_ROWS + 4;', 'export const LETTERED_TABLE_ROW = LETTERHEAD_ROWS + 3;')],
+        ['no print header or footer', (s) => s.replace('    stampPrintChrome(wb, lh, ANALYTICS_TITLE);\n', '')],
+        ['no "Powered by NetraOps"', (s) => s.replace("  powered.value = 'Powered by NetraOps';\n", '')],
+        ['the block on the first sheet only', (s) => s.replace('    if (lh) writeLetteredSheet(wb, ws, data[key], lh, period);', "    if (lh && name === 'Guard Hours') writeLetteredSheet(wb, ws, data[key], lh, period);")],
+        ['the period left out of the title', (s) => s.replace('`${ANALYTICS_TITLE}   ·   ${analyticsPeriodText(period)}`', 'ANALYTICS_TITLE')],
+        ['<ignoredErrors> left out', (s) => s.replace('return ignoreNumberStoredAsText(Buffer.from(await wb.xlsx.writeBuffer()));', 'return Buffer.from(await wb.xlsx.writeBuffer());')],
+      ];
+      let caught = 0;
+      for (const [label, edit] of mutants) {
+        const mutant = loadAt(null, 'src/services/analyticsWorkbook.ts', edit);
+        const pr = await letteredProblems(await mutant.analyticsWorkbook(sweep3, FULL, {}), plain3, FULL, 'Analytics Export   ·   All records', true);
+        if (pr.length > 0) caught += 1;
+        check(pr.length > 0, `L7 control — ${label}: caught (${pr.slice(0, 2).join('; ')})`);
+      }
+      {
+        // The block writer itself (B1's), with the logo embedded per sheet again.
+        (globalThis as any).__lhb6MutantXlsx = loadAt(null, 'src/services/letterhead/xlsx.ts', (s) => s.replace('const image = logoId(wb, lh.logo, decoded.kind);',
+          'const image = wb.addImage({ buffer: lh.logo as unknown as ExcelJS.Buffer, extension: decoded.kind });'));
+        const again = loadAt(null, 'src/services/analyticsWorkbook.ts', (s) => s.replace("import { writeLetterheadBlock, stampPrintChrome, LETTERHEAD_ROWS } from './letterhead/xlsx';",
+          'const { writeLetterheadBlock, stampPrintChrome, LETTERHEAD_ROWS } = (globalThis as any).__lhb6MutantXlsx;'));
+        const pr = await letteredProblems(await again.analyticsWorkbook(sweep3, FULL, {}), plain3, FULL, 'Analytics Export   ·   All records', true);
+        if (pr.length > 0) caught += 1;
+        check(pr.some((x) => x.startsWith('media')), `L7 control — the logo embedded once per sheet: caught (${pr.slice(0, 2).join('; ')})`);
+      }
+      check(caught === mutants.length + 1, `L8 ${caught} of ${mutants.length + 1} mutants caught`);
     }
 
     // ── (next section) ──
