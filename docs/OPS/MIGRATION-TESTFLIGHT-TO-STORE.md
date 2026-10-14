@@ -26,7 +26,7 @@ no badge** for the same reason. A blank tracking template is committed
 | H3 | The pilot in section 2 has run, **including the queue-flush steps**, and the wording below is re-checked against what it showed | Vishnu |
 | H4 | Vishnu has approved every message below word for word | Vishnu |
 | H5 | The admin has confirmed a **current phone number for every badge** on the list (the sheet cannot say who has left) | STARNET admin |
-| H6 | The decisions in section 9 (D1 to D4) are made | Vishnu |
+| H6 | The decisions in section 9 (D1 to D4) are made | **DONE 2026-10-14** (Vishnu accepted all four as recommended) |
 
 ---
 
@@ -191,7 +191,7 @@ Good, let's switch NetraOps now. Keep this text: you need the link again in step
 
 1. Tap this link:
 https://www.netraops.com/app?src=migrate_admin
-Tap Available on the App Store (ignore the page's line about a temporary password). Check that you see NetraOps by Calvern LLC (it may show as Netraops) and a button. If the button says Open, that is your OLD copy: do NOT tap it. Do NOT tap the button yet. If you see "not available" or anything else, STOP and text me. Do not delete anything.
+Tap Available on the App Store. Check that you see NetraOps by Calvern LLC (it may show as Netraops) and a button. If the button says Open, that is your OLD copy: do NOT tap it. Do NOT tap the button yet. If you see "not available" or anything else, STOP and text me. Do not delete anything.
 2. Go to your Home Screen. Press and hold the NetraOps icon. Tap Remove App, then Delete App, then Delete. Do not pick "Remove from Home Screen". Do not reinstall from TestFlight.
 3. Tap my link again, tap Available on the App Store, then tap Get. If Apple asks for your Apple ID password or Face ID, that is Apple, not NetraOps.
 4. Tap Open. Sign in with your email and the NetraOps password you use now. Type it only in the app, never on a website. When your phone asks, tap Allow for Notifications. For Location tap Allow While Using App. If it asks again, tap Change to Always Allow. Then open Settings, NetraOps, Location, and check it says Always and Precise Location is on.
@@ -342,10 +342,12 @@ A guard who is "done" but has **no device claim** after the wave is not done. **
 
 ## 9. Decisions (Vishnu) and open questions
 
-**D1. The queue.** The app shows no queued items and flushes only on shift (section 1). Two routes. **(b), my recommendation: the human gate above** (3B) plus the pilot's flush test, which needs nothing built. **(a)** an OTA to runtime 1.0.17 and 1.0.18 before wave 1 that syncs on foreground and shows a persistent "N waiting to send" banner from `pendingCount`; it removes the guesswork but is mobile work on `batch/mobile-19` (you run EAS) and moves the in-app card from about 10-26 to before 10-19. I would build (a) into M1 anyway and **not gate wave 1 on it** unless the pilot shows items are actually lost.
-**D2. The /app page says "temporary password".** The page tells a returning guard to sign in with "the email and temporary password your company admin gave you"; the messages say "the password you use now". A guard who follows the page types an old temporary password and can lock the account. Until it is fixed the messages tell the guard to ignore that line. **Recommendation: a one-line copy change** ("New to NetraOps? Use the temporary password from your admin. Already have an account? Use your own password.") **in the next web PR** (the badge follow-up or W2).
-**D3. The word "TestFlight"** in iPhone admin texts (section 4). Recommended yes.
-**D4. The reporting columns.** The private sheet has `sessions_last_14d` (a count) and `message`. Per-guard usual start hours were left out: that is more than `POLICY.md` allows without your yes, and the evening cut from the live schedule does the job. **The sheet itself is private** (see the top of this document).
+**D1 to D4 were DECIDED on 2026-10-14: Vishnu accepted all four recommendations as written.** What each means now:
+
+**D1. The queue. DECIDED: route (b), the human gate (3B) plus the pilot's flush test; nothing is built for wave 1.** The OTA banner (a) is built into M1 (`batch/mobile-19`: foreground sync plus a persistent "N waiting to send" banner from `pendingCount`) and **does not gate the waves** unless the pilot shows items are actually lost. The app shows no queued items and flushes only on shift (section 1). Two routes. **(b), my recommendation: the human gate above** (3B) plus the pilot's flush test, which needs nothing built. **(a)** an OTA to runtime 1.0.17 and 1.0.18 before wave 1 that syncs on foreground and shows a persistent "N waiting to send" banner from `pendingCount`; it removes the guesswork but is mobile work on `batch/mobile-19` (you run EAS) and moves the in-app card from about 10-26 to before 10-19. I would build (a) into M1 anyway and **not gate wave 1 on it** unless the pilot shows items are actually lost.
+**D2. The /app page says "temporary password". DECIDED and DONE in its own web PR (2026-10-14): the page now says "New to NetraOps? Use the temporary password from your admin; ... Already have an account? Use your own password.", `check:app-page` pins it, and message A2 no longer says to ignore the line (re-read the live page before sending).** The page tells a returning guard to sign in with "the email and temporary password your company admin gave you"; the messages say "the password you use now". A guard who follows the page types an old temporary password and can lock the account. Until it is fixed the messages tell the guard to ignore that line. **Recommendation: a one-line copy change** ("New to NetraOps? Use the temporary password from your admin. Already have an account? Use your own password.") **in the next web PR** (the badge follow-up or W2).
+**D3. The word "TestFlight"** in iPhone admin texts (section 4). **DECIDED: yes, A1 and A2 keep it.**
+**D4. The reporting columns. DECIDED: as recommended.** The private sheet has `sessions_last_14d` (a count) and `message`. Per-guard usual start hours were left out: that is more than `POLICY.md` allows without your yes, and the evening cut from the live schedule does the job. **The sheet itself is private** (see the top of this document).
 
 Open questions:
 1. App Store Connect: the **Build row** on the 1.0.17 version page (expected 48), the **exact TestFlight expiry**, and when territory availability is fixed (N186; all territories).
