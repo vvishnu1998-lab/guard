@@ -5323,7 +5323,7 @@ pdfkit, exceljs or a mail client cannot draw.
     where `services/letterhead` returns `logo: null` and sends a Sentry warning.
   - **Still open:** consumers are switched over stage by stage, B1 onward. The email tests listed
     above still apply (B4, B5).
-- **Status 2026-10-13 (B6 and B7, BUILT on `feat/letterhead-b6-b7`):** the analytics workbook draws the logo
+- **Status 2026-10-13 (B6 and B7, SHIPPED as `814a0db`, PR #118):** the analytics workbook draws the logo
   through B1's block, which decodes it again before exceljs embeds it. A logo that does not decode leaves the
   block's text in column A (`scripts/test-letterhead-b6-b7.ts`, L4). The checkpoint CSV carries no logo.
 - **Status 2026-10-13 (B5, SHIPPED as `dde311c`, PR #106):** the admin alerts and the guard, client and
@@ -6144,7 +6144,7 @@ verified 2026-10-14 by me, read-only: the committed `hours-export.2026-07-01_202
 
 ## New from Phase B, stages B6 and B7 (2026-10-13)
 
-**Status: BUILT 2026-10-13 on `feat/letterhead-b6-b7` (5 commits on `86cc2f0`), not yet merged.** Vishnu asked
+**Status: SHIPPED 2026-10-13 as `814a0db` (PR #118, 21:03:38 PT, by OVERRIDE; see STATE.md).** Vishnu asked
 for both stages in one PR and decided 1b, 2a and 3a (2026-10-13). They are the last two stages of Phase B.
 - **B6, the analytics XLSX** (`GET /api/exports/analytics/xlsx`; company admins download it from Analytics →
   EXPORT → EXCEL):
@@ -6196,7 +6196,9 @@ for both stages in one PR and decided 1b, 2a and 3a (2026-10-13). They are the l
     - each commit alone, and gitleaks.
   - Not run: `scripts/test-payable-hours.ts`, whose seed stops at v81 (N172). Its U4 now reads past the
     letterhead rows, checked against sample workbooks.
-- **SheetJS (xlsx 0.18.5) stays a dependency of apps/api, used by test scripts only:**
+- **SheetJS (xlsx 0.18.5) moved to apps/api's devDependencies with the PR after #118 (Vishnu, 2026-10-13). Only
+  test scripts use it; the production build (`tsc -p tsconfig.json`, what Railway runs) requires 30 packages, none
+  of them xlsx:**
   - `scripts/test-n171-formula-guard.ts`;
   - `scripts/test-payable-hours.ts`;
   - `scripts/test-letterhead-b6-b7.ts`, where it is the baseline.
