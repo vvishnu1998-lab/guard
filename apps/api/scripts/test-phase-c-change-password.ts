@@ -157,7 +157,7 @@ async function main(): Promise<void> {
     app.use(express.json());
     app.use('/api/auth', authRoutes);
     app.use('/api/admin/company', (await import('../src/routes/companyProfile')).default);
-    const ADMIN_ROUTE = "router.post('/admin/change-password', requireAuth('company_admin'), async (req: Request, res: Response) => {\n  const { current_password, new_password } = req.body;\n  const policyErr = validatePassword(new_password);";
+    const ADMIN_ROUTE = "router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('company_admin'), async (req: Request, res: Response) => {\n  const { current_password, new_password } = req.body;\n  const policyErr = validatePassword(new_password);";
     app.use('/api/auth-m1', mutantOf('src/routes/auth.ts', (s) => s.replace(
       "'UPDATE company_admins SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',",
       "'UPDATE company_admins SET password_hash = $1, must_change_password = false WHERE id = $2',")).default);
@@ -254,8 +254,8 @@ async function main(): Promise<void> {
       check(short.status === 400 && long.status === 400 && short.body?.error === 'Minimum 8 characters.' && await unchanged() && await settings(l.body.access) === 200,
         `E2 a new password of 7 or 129 characters: 400 "Minimum 8 characters." (${short.status}, ${long.status}); nothing stored`);
       const none = await change(l.body.access, undefined, pw());
-      check(none.status >= 400 && await unchanged() && await settings(l.body.access) === 200,
-        `E3 no current password at all: refused (${none.status}${none.status === 500 ? ', a 500 rather than a 400: N195' : ''}); nothing stored`);
+      check(none.status === 400 && none.body?.error === 'Current password is required' && await unchanged() && await settings(l.body.access) === 200,
+        `E3 no current password at all: 400 "Current password is required" (N195) (${none.status} ${show(none.body)}); nothing stored`);
       const guardToken = jwt.sign({ sub: primAfter.id, role: 'guard', company_id: STAR_GUARD }, process.env.JWT_SECRET!, { expiresIn: '1h' });
       const clientToken = jwt.sign({ sub: primAfter.id, role: 'client', site_id: STAR_GUARD }, process.env.JWT_SECRET!, { expiresIn: '1h' });
       const asGuard = await change(guardToken, primAfter.password, pw());

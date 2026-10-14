@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+/* The web fonts' fallbacks (N198; app/fonts/index.ts). Arial, scaled to each
+   font's metrics so text keeps its size and line height until the font loads.
+   next/font/google generated these overrides; they are kept as they were.
+   scripts/check-fonts.ts holds them to app/fonts/reference.json. */
+@font-face { font-family: 'netraops-inter-fallback'; src: local("Arial"); ascent-override: 90.49%; descent-override: 22.56%; line-gap-override: 0.00%; size-adjust: 107.06%; }
+@font-face { font-family: 'netraops-barlow-condensed-fallback'; src: local("Arial"); ascent-override: 130.73%; descent-override: 26.15%; line-gap-override: 0.00%; size-adjust: 76.49%; }
+@font-face { font-family: 'netraops-dm-sans-fallback'; src: local("Arial"); ascent-override: 94.90%; descent-override: 29.66%; line-gap-override: 0.00%; size-adjust: 104.53%; }
+
 :root {
   color-scheme: dark;
   --color-base: #F5F3EE;
