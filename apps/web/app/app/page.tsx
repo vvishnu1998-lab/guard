@@ -108,11 +108,14 @@ export default function AppPage() {
 
         {/* ── STORE BADGES ─────────────────────────────────────────────────────
             Light tile: Apple's badge is black with a grey border and must not
-            be recoloured, so it needs a light ground (and its quarter-height
-            clear space stays empty: the tile's padding and gap are both larger
-            than a quarter of the badge height). Apple's official badge is on
-            the left, Google Play is a text link of the SAME height on the
-            right until Google's artwork lands. With no JavaScript both show. */}
+            be recoloured; a light tile gives it contrast (Apple's guidelines
+            name no background), and its quarter-height clear space stays
+            empty: the tile's padding and gap are both larger than a quarter
+            of the badge height. From the sm breakpoint (640 px) Apple's
+            official badge is on the left and Google Play is a text link of the
+            SAME height on the right; below it they stack, Apple on top. Google's
+            artwork replaces the text link when its file lands. With no
+            JavaScript both show. */}
         <div
           className="rounded-2xl bg-[#F5F3EE] p-6 sm:p-8 flex flex-col sm:flex-row items-center justify-center gap-5 sm:gap-8"
           style={{ minHeight: 120 }}
@@ -171,8 +174,11 @@ export default function AppPage() {
           Credit lines go where legal information lives, once per site/page and
           only for the marks used. Apple's wording is from its Marketing
           Resources and Identity Guidelines (counsel may confirm). Google's is
-          from its badge guidance as last published; re-read the Partner
-          Marketing Hub "legal line" at build time. */}
+          from its badge guidance as last published and is UNVERIFIED against
+          today's Partner Marketing Hub (the page read on 2026-10-13 did not
+          carry the legal line); re-read it when Google's badge file lands.
+          Google Play is a TEXT link today, so its "logo" half applies once
+          the badge does. */}
       <footer className="border-t border-white/[0.05] py-10 px-6">
         <div className="max-w-3xl mx-auto space-y-5">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2">

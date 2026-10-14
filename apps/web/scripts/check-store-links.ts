@@ -225,13 +225,14 @@ for (const [store, art] of Object.entries(STORE_ARTWORK)) {
     }
   }
 }
+// The Apple badge SHIPPED (owner decision, 2026-10-13): its entry may not be deleted quietly.
+if (!STORE_ARTWORK.apple) fail('STORE_ARTWORK.apple is missing: the Apple badge shipped 2026-10-13, so removing it needs an edit to this check');
 // One shared height for the row: a badge and a text link must never differ.
 if (BADGE_HEIGHT_PX < 44) fail(`BADGE_HEIGHT_PX ${BADGE_HEIGHT_PX} is under the 44 px tap target`);
 if (BADGE_HEIGHT_PX < 40) fail('Apple requires its badge to be at least 40 px tall on screen');
-eq('APPLE_CLEAR_SPACE_PX is a quarter of the badge height', APPLE_CLEAR_SPACE_PX, BADGE_HEIGHT_PX / 4);
 if (STORE_ARTWORK.apple && STORE_ARTWORK.apple.src.indexOf('_blk_') < 0) fail('Apple artwork must be the BLACK badge (the page tile is light)');
 console.log(`  apple: ${STORE_ARTWORK.apple ? STORE_ARTWORK.apple.src : 'NOT YET (text link)'}   google: ${STORE_ARTWORK.google ? STORE_ARTWORK.google.src : 'NOT YET (text link, same height)'}`);
-console.log(`  row height ${BADGE_HEIGHT_PX} px, Apple clear space ${APPLE_CLEAR_SPACE_PX} px`);
+console.log(`  row height ${BADGE_HEIGHT_PX} px, Apple clear space ${APPLE_CLEAR_SPACE_PX} px (the tile's padding and gap are checked against it in check-app-page)`);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);

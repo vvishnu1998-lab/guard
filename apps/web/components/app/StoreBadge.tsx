@@ -42,14 +42,16 @@ export default function StoreBadge({ store }: { store: 'apple' | 'google' }) {
     <a
       data-store={store}
       href={c.href}
-      className={`inline-flex items-center justify-center rounded-lg ${hideWhen}`}
+      // The site-wide focus ring (cyan, tuned for the navy page) is about 1.6:1 on this cream
+      // tile; a navy ring is 16.5:1. The `!` is needed because `.mkt a:focus-visible` is more specific.
+      className={`inline-flex items-center justify-center rounded-lg focus-visible:!outline-[#0B1526] ${hideWhen}`}
       style={{ minHeight: BADGE_HEIGHT_PX }}
     >
       {art ? (
         // eslint-disable-next-line @next/next/no-img-element -- unaltered store artwork, served as-is
         <img src={art.src} alt={c.alt} width={art.width} height={art.height} style={{ height: BADGE_HEIGHT_PX, width: 'auto' }} />
       ) : (
-        <span className="inline-flex items-center rounded-lg bg-[#0B1526] px-6 text-base font-semibold text-white" style={{ minHeight: BADGE_HEIGHT_PX }}>
+        <span className="inline-flex items-center justify-center whitespace-nowrap rounded-lg bg-[#0B1526] px-4 sm:px-6 text-base font-semibold text-white" style={{ minHeight: BADGE_HEIGHT_PX }}>
           {c.text}
         </span>
       )}

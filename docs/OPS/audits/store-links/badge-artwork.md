@@ -4,7 +4,7 @@
 text link of the same height, and Google's official badge replaces the text link when its
 file lands.** (The earlier rule, "never ship Apple alone, both badges in one PR", was
 Vishnu's and he lifted it.) Apple's badge is on the LEFT, the text link on the right, both
-exactly 56 px tall (`BADGE_HEIGHT_PX` in `lib/storeLinks.ts`).
+exactly 56 px tall (`BADGE_HEIGHT_PX` in `lib/storeLinks.ts`). That is the layout from the `sm` breakpoint (640 px) up; below it the two links stack, **Apple on top**.
 
 ## Apple: "Download on the App Store", black, US-UK
 
@@ -19,14 +19,14 @@ exactly 56 px tall (`BADGE_HEIGHT_PX` in `lib/storeLinks.ts`).
 | Intrinsic size | 119.66407 x 40 (width x height), aspect 2.99:1 |
 | Altered? | No. Byte-identical copy (`cp -p`; sha256 re-checked on 2026-10-13 against BOTH copies in `~/Downloads`: the bundle path above and `~/Downloads/SVG/`). Nothing in `~/Downloads` was deleted or modified. **Pinned** as `sha256` in `STORE_ARTWORK` (`lib/storeLinks.ts`): `check:store-links` compares it with the file in the repo, `check:app-page` with the bytes the deployed site serves. |
 | Content scan | 25 `<path>`, 9 `<g>`, 1 `<title>`, 1 `<svg>`. No script, event handler, `<style>`, `<image>`, `data:`, `href` or external reference (the single `http://` is the SVG xmlns). Safe to serve from our domain. |
-| Licence | Apple Marketing Agreement, accepted by Vishnu when he downloaded the bundle. |
+| Licence | Apple Marketing Agreement; **acceptance is per Vishnu, not independently verified** (nothing in the repo evidences it). |
 | NOT checked | Whether this 2017-dated file is byte-identical to what Apple's Marketing Tools emits today. It was not compared (that would be a new download). |
 
 **Measured on the built page (2026-10-13, a production build, Chromium):** displayed
 height **56 px**, width 167.5 px (`<img>` height 56, SVG aspect 2.991); the **visible**
 (non-transparent) badge measured 56 x 167.5 px, i.e. the artwork fills its box, with no
 built-in padding. The clear space is a quarter of that, **14 px**, and the tile's padding
-(24 px on a phone, 32 px from the `sm` breakpoint) and the gap to the neighbouring link
+(24 px on a phone, 32 px from the `sm` breakpoint, 640 px) and the gap to the neighbouring link
 (20 px stacked, 32 px side by side) are both larger. The SVG's own size reads 119.66407 x 40;
 `STORE_ARTWORK` holds 120 x 40 (HTML attributes), within 1% of that aspect, and only
 reserves space before the file loads.
@@ -38,13 +38,20 @@ clear space of a quarter of its height with nothing inside it; no animating,
 angling, recolouring or redrawing; one per layout, subordinate to the main
 message; first in a lineup that includes another platform's badge.
 
-## Google: "Get it on Google Play"
+## Google: "Get it on Google Play" (nothing seen yet: every Google claim below is UNVERIFIED)
 
 **PENDING.** Gated behind Partner Marketing Hub approval (about 1 business day,
 per Vishnu). Required before the follow-up PR: the unaltered artwork, its
 source and sha256, natural pixel dimensions, and a measured *visible* badge
-height (Google's PNGs carry built-in padding, and Google's visible badge must be
-at least as tall as Apple's). Re-read the Hub's current legal line at that time.
+height. **UNVERIFIED until the file is in hand:** whether Google's PNGs carry
+built-in padding (they are commonly padded) and what the current rule is. The
+Hub page as fetched by a reviewer on 2026-10-13 says to make the Google Play badge
+"the same size or larger than the other badges"; reading that as "at least as
+tall as Apple's visible badge" is **our interpretation** (at equal height a
+narrower badge could still be smaller by area). The Hub page did **not** carry
+the legal line used in the page footer, and it does not say whether a plain
+text link is allowed; the owner accepted the Google brand-review risk. Re-read
+the legal line when the file lands.
 
 ## When Google's file lands (a small PR)
 
