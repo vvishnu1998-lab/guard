@@ -5423,10 +5423,30 @@ verified 2026-10-06, read-only: nothing in `apps/api/src` calls `process.on('unc
   that drew such a logo.
   - B0 closes that one path at both ends: upload and render.
   - Any other asynchronous throw still restarts the API; nothing guards against it.
-- **Fix (not done; Vishnu 2026-10-06: log only):** decide the policy explicitly and in code.
+- **Fix (Vishnu 2026-10-06: log only):** decide the policy explicitly and in code.
   - For an uncaught exception, Node's guidance is: log, flush Sentry, exit non-zero.
   - Decide deliberately whether an unhandled rejection should crash or warn.
   - Make a restart visible: today it only shows as a new Railway deployment log.
+- **Decided 2026-10-15 (Vishnu, 5a):** an unhandled rejection is reported and the API keeps running, as in
+  production until now; an uncaught exception is logged, reported and flushed, then the process exits 1. "Start
+  with the N169 + N204 PR, merge by OVERRIDE."
+- **Status 2026-10-15: BUILT** on `fix/n169-process-handlers` (on `2324b59`).
+  - `services/processHandlers.ts` (new) holds both handlers. `index.ts` imports it second, right after
+    `services/sentry`, so they are in place before the rest of the API loads.
+  - An uncaught exception: the line `[process] uncaught exception; exiting` with the stack, a fatal event, a flush
+    of at most 2 s, then exit 1. A backstop exits at 3 s.
+  - An unhandled rejection: the line `[process] unhandled rejection; continuing` with the reason, an error event,
+    and the process carries on.
+  - Both events keep the mechanism Sentry's own handlers gave them, so they group with any from before.
+  - The same with or without a DSN. Locally, a rejection no longer ends the process.
+  - `services/sentry.ts` leaves Sentry's two handlers out of its defaults. Running beside ours, they would print
+    Sentry's warning on every rejection and report a string reason twice.
+  - A crash now shows in Railway's logs as the `[process]` line; Sentry gets its fatal event, as before.
+  - **Proof:** `scripts/test-n169-process-handlers.ts`, 20/20, in child processes reporting to a stand-in Sentry
+    ingest on 127.0.0.1. It covers `index.ts`'s own boot error; the events match the ones Sentry's handlers sent
+    at BASE; 6 of 6 mutants are caught. The compiled build, run under plain `node` as Railway runs it, logged,
+    reported and exited 1 the same way.
+- **The restart:** `railway.json` restarts the API at most 3 times on failure (N208).
 - **Size S. Tier 1** (a code PR through the deploy gate).
 
 ### N170 — routes/activityLog.ts imports from the PDF theme and pdfkit, and uses none of it
@@ -6748,8 +6768,14 @@ and `middleware.ts`.
   - **2a:** N206's preview arrives as the client portal's cookie; no token in any URL.
   - **3b:** as quoted. A client's site switch follows the same rule: it starts the session the page then uses.
   - **4a:** merged with Vishnu present, in the morning, and not before 03:51 PT 2026-10-15.
-- **Status 2026-10-15: stage 2 BUILT on `feat/n203-stage2-cookie-session` (on `51814bc`). Its merge waits for
-  Vishnu (4a).**
+- **Status 2026-10-15: stage 2 SHIPPED as `2324b59` (PR #125, 09:38:37 PT, merged with Vishnu present); on the
+  cookie path in production since ~09:50 PT, when Vishnu moved the web's API address to api.netraops.com; see
+  STATE.md. N203 is DONE.**
+- **A correction to the scope and to stage 1's record:** the production web called the API at
+  `guard-production-6be4.up.railway.app` (NEXT_PUBLIC_API_URL), another site than www. Stage 1's cookie was
+  therefore never kept by a production browser, and stage 2 ran on the bearer path until the address moved.
+  CORS had been checked on api.netraops.com, never the address the build used. The mobile app keeps the Railway
+  address (eas.json): it uses bearer tokens and needs no change.
 - **Stage 2, the API** (`services/webSession.ts`, `routes/auth.ts`, `routes/clientPortal.ts`, `routes/admin.ts`):
   - A sign-in or site switch from a production netraops.com origin that names its portal gets no access or refresh
     token in the body; the session is the cookie. Only the web after stage 2 names its portal, so a tab still on the
@@ -6827,7 +6853,8 @@ and `middleware.ts`.
     - "Preview as client" opens `/client` with no token in the address; it reads and writes nothing;
     - a wrong current password on change-password shows the error and signs nobody out;
     - the web on another site (the preview path): the bearer token and the hint; pages load; SIGN OUT revokes.
-- **Visible on deploy, stage 1:** nothing on screen. Sign-ins and site switches set one more cookie, HttpOnly, for
+- **Visible on deploy, stage 1** (in production the cookie took effect only from 2026-10-15 ~09:50 PT; see the
+  correction above): nothing on screen. Sign-ins and site switches set one more cookie, HttpOnly, for
   the API's host. A client switching site, or anyone signing out of the web, ends every token of that sign-in.
   Guards: unchanged.
 - **Visible on deploy, stage 2:** nothing on screen for a signed-in user, who stays signed in. Sign-ins write no
@@ -6848,9 +6875,23 @@ keys: code, message, status".
 - The browser's unhandledrejection handler caught it: the rejected value is a plain object, not an Error, and
   nothing on the page handled it.
 - It predates Phase D. It fired at 17:01 PT during Vishnu's D2 check, as it has on pages no deploy touched.
-- **Where it comes from: UNVERIFIED.** It may be one browser, or a browser extension.
+- **Where it comes from:** UNVERIFIED on 2026-10-14; the look below answers it.
 - **Next (Vishnu, 2026-10-14: "an N-item for a read-only look"):** read the events' stack frames, breadcrumbs and
   browser details in Sentry; say whether it is our code, and how many browsers send it.
+- **The look, 2026-10-15 (read-only): not our code. It is script from a browser extension, in Chrome on macOS.**
+  - Sentry still holds 233 of its events (2026-09-05 to 2026-10-15; older ones have aged out). Not one has a stack
+    frame.
+  - All 233 carry console breadcrumbs `[extensionService] request:start` and `request:success`; in 172 of them one is
+    among the last three before the error. That string is in none of our apps, Next.js or the Sentry SDK, and in
+    none of the 18 production chunks behind six www pages. The control: 2 of those chunks hold the Sentry SDK's own
+    `unhandledrejection` handler.
+  - None of our web code rejects with a plain `{code, message, status}` object.
+  - All 233 are Chrome 152 to 155 on macOS. At least the `/vishnu` events are Vishnu's own browser (that page needs
+    his sign-in). The latest fired at 10:02, 10:13 and 10:14 PT on 2026-10-15, the first 21 s after his sign-out in
+    N203 stage 2's check; four more at 17:01 PT on 2026-10-14, during his D2 check.
+- **Decided 2026-10-15 (Vishnu, 6a):** archive WEB-4 in Sentry. "6a: you archive WEB-4 via the Sentry API."
+  **Not done yet:** the Sentry token on the Mac is read-only (`event:read`, `org:read`, `project:read`); archiving
+  needs `event:write`. At 11:04 PT WEB-4 was unresolved, with 377 events, last seen 10:14 PT.
 - **Size S (the look). Tier 0.**
 
 ### N205 — a multi-site client's earlier session tokens outlive SIGN OUT
@@ -6885,6 +6926,47 @@ production.
 - **Fix when wanted:** the middleware lets `/client` through when `?preview=` carries a token it can verify, or the
   preview adopts its token on a page outside `/client/*`.
 - **Folded into N203 stage 2 (Vishnu's 4a, 2026-10-14):** the preview has to move to the cookie anyway.
-- **Status 2026-10-15: BUILT** with N203 stage 2: the preview arrives as the client portal's cookie, and no token
-  goes in any URL (see N203).
+- **Status 2026-10-15: SHIPPED** with N203 stage 2 as `2324b59` (PR #125): the preview arrives as the client
+  portal's cookie, and no token goes in any URL. Verified in production by Vishnu, 2026-10-15 ~09:58 PT.
 - **Size S. Tier 1.**
+
+## New from the forgot-password, N169 and N204 scopes (2026-10-15)
+
+### N207 — forgot-password replaces the password at once: anyone who knows an email can lock its owner out
+
+verified 2026-10-15 by reading `routes/auth.ts` (`POST /api/auth/forgot-password`) and `services/email.ts` on
+`2324b59`, and `auth_events` (read-only).
+- The route needs only an email and a portal. For an active admin, client or guard account it emails a temporary
+  password and overwrites `password_hash` with it at once, with `must_change_password = true`.
+- So anyone's request ends the owner's password. A guard cannot sign in at the start of a shift. A signed-in admin
+  is held on the change-password page (N194) until they find the email. Nobody else gets in: the temporary password
+  goes only to the owner's inbox.
+- The only limit is the sign-in limiter's 20 requests per 15 minutes per address; there is none per account. The
+  answer is the same either way, but only a real account waits for bcrypt and SendGrid.
+- Production, 180 days: 20 resets for 14 guards and 7 for 2 admins; 9 sends failed (2026-08-29 to 09-01).
+- **Decided 2026-10-15 (Vishnu): "1a 2a 3a 4a"**, and "1a: store the pending temp password hashed (bcrypt, same
+  cost as passwords), never plain."
+  - 1a: a reset no longer touches the password. The temporary one waits in a new table (migration v83), hashed.
+    Sign-in takes the current password or an unexpired temporary one. Using the temporary one makes it the password
+    and forces a change, as today. Signing in with the current password cancels a pending reset.
+  - 2a: a temporary password works for 24 hours.
+  - 3a: at most one reset email per account per 15 minutes.
+  - 4a: the email's last line becomes "If you didn't ask for this, ignore this email: your current password still
+    works."
+  - A request is answered the same, and as fast, whether or not the account exists.
+  - The guard app and the web need no change.
+- **v83 (Vishnu):** "you run the migration yourself when ready, preview with ROLLBACK first, then ask me for a yes
+  before COMMIT."
+- **Order (7a):** after N169's PR. **Size M. Tier 2** (it emails guards, admins and clients): merge with Vishnu
+  present.
+
+### N208 — `railway.json` restarts the API at most 3 times on failure; whether that count resets is UNVERIFIED
+
+verified 2026-10-15: `apps/api/railway.json` sets `restartPolicyType: ON_FAILURE` and `restartPolicyMaxRetries: 3`.
+Railway restarts a service that exits non-zero, up to that cap (docs.railway.com/deployments/restart-policy).
+- The docs do not say whether the count resets once the service has run a while. If it does not, a fourth crash in
+  one deployment's life leaves the API down until the next deploy.
+- N169 changes none of this: before it, Sentry's default handler also ended the process on an uncaught exception.
+  Sentry saw none in the 90 days to 2026-10-15.
+- **Fix (not done; log only):** ask Railway how the count resets, or raise the cap.
+- **Size XS. Tier 1** (`railway.json` rides with a code PR).

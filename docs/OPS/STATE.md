@@ -264,6 +264,23 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-15 — PR #125, N203 stage 2 (the web stops handling session tokens), 3b and N206, merged with Vishnu present; live on the cookie path since the web's API address moved to api.netraops.com — verified 2026-10-15 10:09 PT
+
+| thing | value |
+|---|---|
+| merge | PR #125 merged as `2324b59` at **09:38:37 PT with Vishnu present** (4a). Vishnu: "merge". One read at 09:38:32 PT: 5/5 SUCCESS, CLEAN, head `1d978b7`, main `51814bc`. Then one call, `gh pr merge 125 --merge --match-head-commit 1d978b7…`. The merge tree equals the head's tree (`8c1dbaf`). |
+| web | Vercel production on `2324b59`: success at 09:40:26 PT, ahead of the API, the order 3b's portal-name rule was built to tolerate. |
+| Railway | `b82c6718-2595-41a9-885f-b01853f8f4ee` **SUCCESS** at 09:42:50 PT from `2324b59`. |
+| health | `/health` commit `2324b59` on both api.netraops.com and guard-production-6be4.up.railway.app (one service); `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| **the API address** | **The production web called the API at `guard-production-6be4.up.railway.app`, not api.netraops.com** (NEXT_PUBLIC_API_URL; the mobile app's eas.json uses it too). To a browser that is another site than www, so stage 2 ran on the bearer path, as on a preview, and stage 1's cookie had never been kept by a production browser. Nothing broke. The scope had assumed www called api.netraops.com: CORS had been checked on that host, not the address the build used. **Vishnu set NEXT_PUBLIC_API_URL (Production) to `https://api.netraops.com` and redeployed, ~09:50 PT.** Same service, CORS already allowing www, no CSP on www; no web sign-in in the 8 hours before, so nobody was signed out. |
+| live control | `www.netraops.com/admin` with only a fake `netraops_admin_signed_in=1` cookie: 307 to the sign-in page before (09:36 PT, and at 09:43 on the bearer path), 200 after the redeploy (09:53): the page guard reads the hint. With no cookie: 307, before and after. The production bundles of the three sign-in pages now name `https://api.netraops.com` and not the Railway host. |
+| real path | Vishnu, 09:57–10:02 PT: an admin sign-in through api.netraops.com, the cookie check after it answered 200 (the browser kept the HttpOnly cookie), the dashboard, Sites, Guards and Clients loaded through it; "Preview as client" (200) opened the client portal on its cookie, no token in the address; SIGN OUT at 10:02:35 sent `POST /api/auth/logout` (200) and auth_events recorded the `logout`. |
+| switchover | The old container (`9f2f8c83`, from #124's `51814bc`) served its last request at 09:42:29.2 PT and logged last at 09:43:06.3. The new one was listening at 09:42:42.0 and served its first request at 09:43:08.6. Over its whole life (19:49 PT 2026-10-14 to 09:43) the old one served 4803 requests: 0 were 499s and 0 were 5xx. To 10:08 the new one served 274 (209 through api.netraops.com): 0 were 499s and 0 were 5xx; its 4xx were 19 polls of an old tab on the build before stage 2 (an expired session, through the Railway host, until Vishnu closed it at ~10:03) and two controls. Sentry, 09:38–10:08 PT: API none; MOBILE-11 (since 09-29) and WEB-4 (since 08-04, again during Vishnu's session). |
+| restart window | 09:38:37–09:43:07 PT: STARNET wrote a device check-in at 09:40:15 (served by the old container), with 1 session open. After the deploy: a device check-in at 09:59:58 and a ping at 10:00:06. |
+| visible change | Admins, clients and Vishnu sign in as before; the browser keeps no token a script can read, only the hint. "Preview as client" works again. Guards and the mobile app: unchanged (the app keeps the Railway address and its tokens). |
+
+---
+
 ## Shipped 2026-10-15 — PR #124, N203 stage 1 (the web session as an HttpOnly cookie too) and N205 (a site switch or a sign-out ends the whole sign-in), by OVERRIDE — verified 2026-10-14 20:19 PT
 
 | thing | value |
