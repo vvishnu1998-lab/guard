@@ -264,6 +264,22 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-15 — PR #124, N203 stage 1 (the web session as an HttpOnly cookie too) and N205 (a site switch or a sign-out ends the whole sign-in), by OVERRIDE — verified 2026-10-14 20:19 PT
+
+| thing | value |
+|---|---|
+| merge | PR #124 merged as `51814bc` at **19:48:37 PT 2026-10-14 (02:48:37Z 2026-10-15) by OVERRIDE**. Vishnu: "1a 2a 3a 4a. Fold N205 into stage 1 … Build stage 1, merge by OVERRIDE." The cookie's scope was put to him before the merge; his answer: "(a). Merge by OVERRIDE." (host-only). One read at 19:48:33 PT: 5/5 SUCCESS, CLEAN, head `5e28664`, main `541a6e1`. Then one call, `gh pr merge 124 --merge --match-head-commit 5e28664…`. The merge tree equals the head's tree (`58126e0`). |
+| Railway | `9f2f8c83-fcd2-45d8-90be-9d0d56516cf1` **SUCCESS** at 19:49:43 PT from `51814bc`. |
+| web | Vercel production on `51814bc`: success at 19:50:39 PT. **Stage 2 no earlier than 03:51 PT on 2026-10-15**: 8 hours after the later of the two. |
+| health | `/health` commit `51814bc`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| live control (API) | A bogus `netraops_admin_session` cookie with `X-NetraOps-Portal: admin`: 401 "Missing authorization token" at 19:46 PT, before the merge, and 401 "Invalid token" after. The API now reads the named portal's cookie. The same cookie without the header: still "Missing authorization token". |
+| live control (web) | The same chunk probe against the previous deployment (`541a6e1`) and www: each old sign-in page loads no chunk with `credentials:"include"`, each new one loads two (its sign-in and SIGN OUT). |
+| switchover | The old container (`26b6a430`, from #123's `541a6e1`) served its last request at 19:49:25.5 PT and logged last at 19:49:55.5. The new one was listening at 19:49:38.0 and served its first request at 19:49:39.6. Over its whole life (18:33 to 19:49 PT) the old one served 784 requests: 0 were 499s and 0 were 5xx. To 20:18 the new one served 240: 0 were 499s and 0 were 5xx; its 4xx were the four controls and one inspection 404. Sentry, 19:48–20:18 PT: API, mobile and web, none. |
+| restart window | 19:48:37–19:49:56 PT: STARNET wrote nothing. Its last write before was a ping at 19:45:48, with 4 sessions open. The first ping served by the new container landed at 20:00:15; by 20:19 it had written 2 pings and 10 notifications, with 3 sessions open. |
+| visible change | Nothing on screen. Sign-ins and site switches set one more cookie, HttpOnly, for the API's host. A client switching site, or anyone signing out of the web, now ends every token of that sign-in. Guards: unchanged. No web sign-in had happened by 20:19, so no real browser had received the cookie yet. |
+
+---
+
 ## Shipped 2026-10-14 — PR #123, N202: SIGN OUT ends the session on the server in all three portals, by OVERRIDE — verified 2026-10-14 19:02 PT
 
 | thing | value |

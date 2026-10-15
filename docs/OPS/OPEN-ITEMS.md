@@ -6712,8 +6712,8 @@ and `middleware.ts`.
   - **2a:** Vercel previews keep the bearer path; they cannot receive the cookie.
   - **3a:** SameSite=Lax, and a write the cookie authenticates must come from an allowed Origin.
   - **4a:** N206 (Preview as client) is folded into stage 2. N205 is folded into stage 1.
-- **Status 2026-10-15: stage 1 BUILT on `feat/n203-stage1-session-cookie` (on `541a6e1`).** Stage 2 no earlier than
-  8 hours after stage 1 deploys.
+- **Status 2026-10-15: stage 1 SHIPPED as `51814bc` (PR #124, 19:48:37 PT 2026-10-14, by OVERRIDE); see STATE.md.**
+  Stage 2 no earlier than 03:51 PT on 2026-10-15, 8 hours after the later deploy (Vercel, 19:50:39 PT).
 - **Stage 1, the API** (`services/webSession.ts`, `middleware/auth.ts`, `routes/auth.ts`, `routes/clientPortal.ts`):
   - At an admin, client or Vishnu sign-in and at a client's site switch, the session is also set as an HttpOnly
     cookie, one per portal (`netraops_admin_session`, `netraops_client_session`, `netraops_vishnu_session`):
@@ -6733,10 +6733,42 @@ and `middleware.ts`.
     opt-in left no cookie, one with it did.
 - **Cookie scope: host-only, on the API's host.** The scope said `.netraops.com`, so that www's page guard could read
   it, but then every netraops.com host would receive the session: `em6648.netraops.com` (SendGrid's) and any future
-  or dangling one included. Built host-only; put to Vishnu 2026-10-15, before the merge.
-- **Stage 2, the web:** every call sends `credentials: 'include'` and names its portal; the web stops writing and
+  or dangling one included. Built host-only; put to Vishnu 2026-10-15, before the merge. **Vishnu: "(a). Merge by
+  OVERRIDE."**
+- **Vishnu, 2026-10-15, for stage 2:** "since www middleware can't see the session, keep a non-secret 'signed in'
+  hint cookie on www just for the redirect, and treat the API's 401 as the real check. Propose it in the stage 2
+  scope."
+- **Stage 2, as scoped:** every call sends `credentials: 'include'` and names its portal; the web stops writing and
   reading the token; N206's preview moves to the cookie. A host-only cookie never reaches www, so the page guard
   redirects on the API's 401; a non-secret "signed in" marker can keep the instant redirect.
+- **Stage 2, Vishnu, 2026-10-15:** "1a 2a 3b 4a. 3b: stop returning tokens in the body only for web portal
+  sign-ins from production netraops.com origins. Previews keep the body tokens. The guard/mobile login must be
+  byte-identical; prove it. Build stage 2 tonight. Merge in the morning with me present."
+  - **1a:** a session from before stage 2 is swapped for the hint, once; nobody is signed out.
+  - **2a:** N206's preview arrives as the client portal's cookie; no token in any URL.
+  - **3b:** as quoted. A client's site switch follows the same rule: it starts the session the page then uses.
+  - **4a:** merged with Vishnu present, in the morning, and not before 03:51 PT 2026-10-15.
+- **Status 2026-10-15: stage 2 BUILT on `feat/n203-stage2-cookie-session` (on `51814bc`). Its merge waits for
+  Vishnu (4a).**
+- **Stage 2, the API** (`services/webSession.ts`, `routes/auth.ts`, `routes/clientPortal.ts`, `routes/admin.ts`):
+  - A sign-in or site switch from a production netraops.com origin that names its portal gets no access or refresh
+    token in the body; the session is the cookie. Only the web after stage 2 names its portal, so a tab still on the
+    web before it, the minutes the API deploys ahead of the web, previews and the mobile app keep the tokens.
+  - "Preview as client" sets the client portal's cookie for the preview's 30 minutes; the cookie web gets no token
+    in the body.
+  - The guard sign-in is untouched.
+- **Stage 2, the web** (`lib/session.ts`, new):
+  - Where the page and the API are one site, every request sends the cookie and names its portal. No token is
+    written or read: a non-secret hint, `netraops_<portal>_signed_in`, is all the browser keeps, for the page guard.
+  - The API's 401 is the real check: the admin, client and Vishnu helpers forget the session and open the sign-in
+    page. A sign-in whose cookie the browser did not keep says so instead of looping.
+  - `middleware.ts`: the hint lets the pages through; a session from before stage 2 has its token cookie verified
+    and swapped for the hint, once (1a). On a preview (another site than the API) the token cookie is checked as
+    before.
+  - The sign-in pages, the site switch, SIGN OUT, the change-password pages and the pages that sent the token
+    themselves (billing, settings, sites) go through it. No other file reads a token or builds an Authorization
+    header.
+  - N206: PreviewBootstrap and clientApi's adoption of `?preview=` are gone.
 - **Proof, stage 1:**
   - `apps/api` `scripts/test-n203-session-cookie.ts`, 32/32 (local database, the real routers):
     - the cookie per portal, with exact attributes, from `https://www.netraops.com` and `http://localhost:3105`;
@@ -6767,10 +6799,41 @@ and `middleware.ts`.
     - each SIGN OUT clears the cookie (the read: 401 "Missing authorization token"); a sign-out by cookie alone
       also revokes the token;
     - the control: a sign-in without the opt-in leaves no cookie.
-- **Visible on deploy:** nothing on screen. Sign-ins and site switches set one more cookie, HttpOnly, for the API's
-  host. A client switching site, or anyone signing out of the web, ends every token of that sign-in. Guards:
+- **Proof, stage 2:**
+  - `apps/api` `scripts/test-n203-stage2.ts`, 16/16 (local database, the real routers):
+    - 3b per portal from www, the apex and app.netraops.com with the portal named: no token in the body, the rest as
+      before, the session in the cookie; without the portal named, from a Vercel preview, localhost or no origin:
+      the tokens as before; the site switch likewise;
+    - the preview: the client cookie for 1800 s; it reads the portal and writes nothing; from a preview origin the
+      token in the body and no cookie;
+    - **the guard/mobile sign-in is byte-identical:** the guard route's source is `51814bc`'s and `541a6e1`'s to the
+      byte. Through the router at `51814bc` and now, 9 requests (the sign-in with no origin, from www with a portal
+      named, with a device token, refused, malformed twice; refresh; sign-out; the refresh token after it) give the
+      same status, headers and body byte for byte with the two tokens set aside, and tokens with the same header,
+      claims and lifetime;
+    - 6 of 6 mutants caught.
+  - `scripts/test-n203-session-cookie.ts` (stage 1) still 32/32. It reads the new session from the cookie where a
+    switch by the cookie web now carries none.
+  - `apps/web` `npm run check:session-cookie`, rewritten for stage 2, 18/18: both paths, the helpers, SIGN OUT, the
+    page guard run through next/server, the sources, and the 16 files `51814bc`'s plus exactly
+    `scripts/n203Stage2Edits.ts`, which also undoes to `51814bc`; 11 of 11 mutants caught.
+  - The checks that compare a page with an older BASE (change-password, contract-dates, sign-in-history, sign-out)
+    layer those edits and pass; password-hold now expects a 401 to open the sign-in page.
+  - In a browser (Chrome 152), the real routers on a local database:
+    - the web on the API's site (the cookie path): admin, client (through the site picker) and Vishnu sign in with
+      only the hint visible to scripts; pages load through the cookie; SIGN OUT clears it;
+    - a session ended elsewhere sends the next page to the sign-in page, hint gone;
+    - a session from before stage 2 (its token cookie, no hint) is swapped for the hint and keeps working;
+    - "Preview as client" opens `/client` with no token in the address; it reads and writes nothing;
+    - a wrong current password on change-password shows the error and signs nobody out;
+    - the web on another site (the preview path): the bearer token and the hint; pages load; SIGN OUT revokes.
+- **Visible on deploy, stage 1:** nothing on screen. Sign-ins and site switches set one more cookie, HttpOnly, for
+  the API's host. A client switching site, or anyone signing out of the web, ends every token of that sign-in.
+  Guards: unchanged.
+- **Visible on deploy, stage 2:** nothing on screen for a signed-in user, who stays signed in. Sign-ins write no
+  token a script can read. "Preview as client" works again: it used to open the client sign-in page. Guards:
   unchanged.
-- **Size M. Tier 1.**
+- **Size M. Tier 1** (stage 2's merge with Vishnu present).
 
 ### N204 — Sentry WEB-4: a rejected object nothing handles, in production since August, the homepage included
 
@@ -6801,7 +6864,7 @@ run.
 - Production, read-only 2026-10-14: 3 of 7 active clients have more than one site; 1 of them is STARNET's.
 - **Folded into N203 stage 1. Vishnu, 2026-10-14:** "Fold N205 into stage 1: switching sites or signing out must
   revoke every earlier token from that client's sign-in, not just the current one."
-- **Status 2026-10-15: BUILT** with N203 stage 1 (see N203 for the proof).
+- **Status 2026-10-15: SHIPPED** with N203 stage 1 as `51814bc` (PR #124); see N203 for the proof.
   - Every web sign-in gets a sid, carried by every token minted from it and from its refreshes. A revoked_tokens
     row `sid:<sid>` ends them all.
   - A site switch writes one before it starts a new sid; of two racing switches, the second is refused.
@@ -6822,4 +6885,6 @@ production.
 - **Fix when wanted:** the middleware lets `/client` through when `?preview=` carries a token it can verify, or the
   preview adopts its token on a page outside `/client/*`.
 - **Folded into N203 stage 2 (Vishnu's 4a, 2026-10-14):** the preview has to move to the cookie anyway.
+- **Status 2026-10-15: BUILT** with N203 stage 2: the preview arrives as the client portal's cookie, and no token
+  goes in any URL (see N203).
 - **Size S. Tier 1.**

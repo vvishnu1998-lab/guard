@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import Module from 'module';
 import * as path from 'path';
 import ts from 'typescript';
+import { applyN203Stage2 } from './n203Stage2Edits';
 
 /** main before N202 (PR #122's merge). */
 const BASE = '26d38ae526e3f478053a30967dabd4b44f5b2150';
@@ -147,8 +148,9 @@ const LOGINS: Array<{ rel: string; portal: Portal }> = [
 const NOTE = "      // N202 (2a): no refresh token is kept. Nothing in the web reads one, and SIGN OUT revokes the session.\n";
 const keepLine = (p: Portal) => `      document.cookie = \`guard_${p}_refresh=\${data.refresh}; path=/; max-age=2592000; SameSite=Strict\`;\n`;
 /**
- * A later change to the same lines, layered on so the comparison stays exact: N203 stage 1 (2026-10-15) lets
- * each sign-in request keep the API's HttpOnly session cookie. scripts/check-session-cookie.ts proves it.
+ * Later changes to the same lines, layered on so the comparison stays exact: N203 stage 1 (2026-10-15) lets
+ * each sign-in request keep the API's HttpOnly session cookie, and stage 2 (scripts/n203Stage2Edits.ts) moves
+ * the pages onto lib/session.ts. scripts/check-session-cookie.ts proves stage 2's edits exact.
  */
 const N203_COOKIE = "        // N203 stage 1: so the browser keeps the HttpOnly session cookie the API sets.\n        credentials: 'include',\n";
 const n203Anchor = (rel: string, p: Portal) => (rel === 'app/client/select-site/page.tsx'
@@ -181,7 +183,7 @@ function baseProblems(read: (rel: string) => string): string[] {
   const same = (rel: string, want: string) => { if (want !== read(rel)) problems.push(`${rel}: not BASE plus the N202 edits`); };
   try {
     for (const s of SITES) same(s.rel, once(once(base(s.rel), s.importLine[0], s.importLine[1], `${s.rel} import`), signOutOld(s.portal), signOutNew(s.portal), `${s.rel} sign-out`));
-    for (const l of LOGINS) same(l.rel, withN203(l.rel, l.portal, once(base(l.rel), keepLine(l.portal), NOTE, `${l.rel} refresh line`)));
+    for (const l of LOGINS) same(l.rel, applyN203Stage2(l.rel, withN203(l.rel, l.portal, once(base(l.rel), keepLine(l.portal), NOTE, `${l.rel} refresh line`))));
     for (const h of HISTORY) same(h.rel, h.edits.reduce((x, [a, b]) => once(x, a, b, h.rel), base(h.rel)));
   } catch (e) { problems.push((e as Error).message); }
   return problems;
@@ -205,7 +207,7 @@ async function main(): Promise<void> {
   const s = sourceProblems(now);
   check(s.length === 0, `each SIGN OUT goes through endSession then its sign-in page and writes no cookie itself; no page stores a refresh token; the 2a note on the 4 sign-in pages (${s.join('; ') || 'all right'})`);
   const bp = baseProblems(now);
-  check(bp.length === 0, `the ${SITES.length + LOGINS.length + HISTORY.length} touched files are BASE's (${BASE.slice(0, 7)}) with exactly the N202 edits, and N203 stage 1's on the sign-in requests (${bp.join('; ') || 'all equal'})`);
+  check(bp.length === 0, `the ${SITES.length + LOGINS.length + HISTORY.length} touched files are BASE's (${BASE.slice(0, 7)}) with exactly the N202 edits, then N203 stage 1's and stage 2's (${bp.join('; ') || 'all equal'})`);
 
   console.log('\n── 4  the history names a sign-out');
   const labels = now('lib/signInHistory.ts');
@@ -216,7 +218,7 @@ async function main(): Promise<void> {
   const mutants: Array<[string, () => Promise<string[]>]> = [
     ['no call to the API: the session lives on, which 1 refuses', async () => requestProblems(load(once(src, '        await fetch(`${API}/api/auth/logout`, {', '        await (async (..._a: unknown[]) => undefined)(`${API}/api/auth/logout`, {', 'm1')))],
     ['keepalive, which a browser can refuse when the request needs a CORS preflight, which 1 refuses', async () => requestProblems(load(once(src, "          method: 'POST',\n", "          method: 'POST',\n          keepalive: true,\n", 'm1b')))],
-    ['the cookies cleared before they are read: no session token sent, which 1 refuses', async () => requestProblems(load(once(src, "    const prefix = COOKIE_PREFIX[portal];\n", "    const prefix = COOKIE_PREFIX[portal];\n    document.cookie = `${prefix}_access=; path=/; max-age=0`;\n", 'm2')))],
+    ['the cookies cleared before they are read: no session token sent, which 1 refuses', async () => requestProblems(load(once(src, "    const access = readCookie(`guard_${portal}_access`);\n", "    forgetSession(portal);\n    const access = readCookie(`guard_${portal}_access`);\n", 'm2')))],
     ['no cap on the wait: an API that never answers keeps the browser signed in, which 2 refuses', async () => robustnessProblems(load(once(src, '      const timer = setTimeout(() => controller.abort(), SIGN_OUT_TIMEOUT_MS);\n', '      const timer = setTimeout(() => undefined, SIGN_OUT_TIMEOUT_MS);\n', 'm3')))],
     ['no single flight: two clicks make two calls, which 2 refuses', async () => robustnessProblems(load(once(src, '  if (inFlight) return inFlight;\n', '', 'm4')))],
     ['a sign-in page still storing the refresh token, which 3 refuses', async () => sourceProblems(editRead('app/client/select-site/page.tsx', NOTE, keepLine('client')))],

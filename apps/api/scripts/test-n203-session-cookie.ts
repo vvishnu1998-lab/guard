@@ -368,8 +368,9 @@ async function main(): Promise<void> {
       };
       if (after1.login !== REVOKED || after1.refreshed !== REVOKED || after1.refreshedRefresh !== REVOKED || after1.newOne !== 200) problems.push(`after switch 1: ${show(after1)}`);
       const sw2 = await call('POST', '/api/client/switch-site', viaCookie('client', s2.access, WWW), { site_id: north });
-      seen(sw2.body?.access, sw2.body?.refresh);
-      const s3 = sw2.body;
+      // N203 stage 2 (3b): a switch by the cookie web from www carries no token in its body; the new session is the cookie.
+      const s3 = { access: (sw2.cookies[0] ?? '').split(';')[0].split('=')[1] ?? '' };
+      seen(s3.access);
       const after2 = [(await call('GET', READ.client, bearer(s2.access))).raw, (await call('POST', '/api/auth/refresh', {}, { refresh_token: s2.refresh })).raw];
       if (sw2.status !== 200 || after2.some((x) => x !== REVOKED)) problems.push(`switch 2 (by cookie): ${sw2.status}, then ${show(after2)}`);
       const race = await Promise.all([1, 2].map(() => call('POST', '/api/client/switch-site', bearer(s3.access, WWW), { site_id: south })));

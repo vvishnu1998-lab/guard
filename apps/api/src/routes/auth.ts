@@ -10,7 +10,7 @@ import { sendPasswordChangedEmail, sendTempPasswordEmail, type PasswordPortal } 
 import { deviceLabel } from '../services/deviceLabel';
 import { Sentry } from '../services/sentry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
-import { clearSessionCookie, endSignIn, newSid, setSessionCookie, sidKey } from '../services/webSession';
+import { bodyTokens, clearSessionCookie, endSignIn, newSid, setSessionCookie, sidKey } from '../services/webSession';
 
 const router = Router();
 
@@ -453,7 +453,7 @@ router.post('/admin/login', async (req: Request, res: Response) => {
   });
   await logEvent(admin.id, 'company_admin', 'login_success', req);
   setSessionCookie(req, res, 'company_admin', tokens.access);
-  res.json({ ...tokens, must_change_password: admin.must_change_password });
+  res.json({ ...bodyTokens(req, tokens), must_change_password: admin.must_change_password });
 });
 
 // ── Star admin: change password ──────────────────────────────────────────────
@@ -554,7 +554,7 @@ router.post('/client/login', async (req: Request, res: Response) => {
   await logEvent(client.id, 'client', 'login_success', req);
   setSessionCookie(req, res, 'client', tokens.access);
   res.json({
-    ...tokens,
+    ...bodyTokens(req, tokens),
     must_change_password: client.must_change_password,
     sites,
   });
@@ -647,7 +647,7 @@ router.post('/vishnu/login', async (req: Request, res: Response) => {
   const tokens = signTokens({ sub: '00000000-0000-0000-0000-000000000000', role: 'vishnu', sid: newSid() });
   await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_success', req);
   setSessionCookie(req, res, 'vishnu', tokens.access);
-  res.json(tokens);
+  res.json(bodyTokens(req, tokens));
 });
 
 // ── Vishnu: revoke ALL super-admin sessions (break-glass) ────────────────────

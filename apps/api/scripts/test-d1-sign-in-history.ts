@@ -286,7 +286,17 @@ async function main(): Promise<void> {
     section('S  admin.ts is BASE plus N201\'s zone, this route and its import');
     {
       const base = execFileSync('git', ['show', `${BASE}:apps/api/src/routes/admin.ts`], { cwd: path.join(__dirname, '..'), encoding: 'utf8' });
-      const nowSrc = read('src/routes/admin.ts');
+      // N203 stage 2 (2026-10-15) edited the preview route; its two edits come out first, exactly, so this still
+      // compares only D1's change and N201's zone.
+      const STAGE2: Array<[string, string]> = [
+        ["import { bodyTokens, setSessionCookie } from '../services/webSession';\n", ''],
+        ["  // N206 (N203 stage 2): the preview reaches the client portal as that portal's\n  // cookie, for the token's 30 minutes, never through a URL; the cookie web gets\n  // no token in the body (3b), previews keep theirs.\n  setSessionCookie(req, res, 'client', accessToken, ttlSeconds);\n  res.json({ ...bodyTokens(req, { access_token: accessToken }), expires_in: ttlSeconds });\n",
+          '  res.json({ access_token: accessToken, expires_in: ttlSeconds });\n'],
+      ];
+      const nowSrc = STAGE2.reduce((src, [from, to]) => {
+        if (src.split(from).length !== 2) throw new Error(`N203 stage 2's edit not found once in admin.ts: ${from.slice(0, 50)}`);
+        return src.replace(from, () => to);
+      }, read('src/routes/admin.ts'));
       let back = nowSrc.replace("import { parseCursor, signInHistory } from '../services/signInHistory';\n", '');
       const r0 = back.indexOf('// ── Phase D, D1: the admin\'s own sign-in history');
       const r1 = back.indexOf('export default router;', r0);

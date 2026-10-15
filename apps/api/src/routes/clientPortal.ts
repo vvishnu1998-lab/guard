@@ -24,7 +24,7 @@ import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
 import { presignAll } from '../services/s3';
 import { signTokens } from './auth';
-import { endSignInForSwitch, newSid, setSessionCookie } from '../services/webSession';
+import { bodyTokens, endSignInForSwitch, newSid, setSessionCookie } from '../services/webSession';
 import { SHIFT_HOURS_SQL_FIELDS, type ShiftHours } from '../services/shiftHours';
 import {
   NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
@@ -130,7 +130,7 @@ router.post('/switch-site', requireAuth('client'), async (req: Request, res: Res
   }
   const tokens = signTokens({ sub: req.user!.sub, role: 'client', site_id, sid: newSid() });
   setSessionCookie(req, res, 'client', tokens.access);
-  res.json(tokens);
+  res.json(bodyTokens(req, tokens));
 });
 
 // ── Site info ─────────────────────────────────────────────────────────────────

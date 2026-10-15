@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { adminGet } from '../../../lib/adminApi';
+import { authInit } from '../../../lib/session';
 
 interface Guard { id: string; name: string; }
 interface Site  { id: string; name: string; }
@@ -19,10 +20,6 @@ interface MonthlyReport {
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-function getAdminToken() {
-  if (typeof document === 'undefined') return '';
-  return document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? '';
-}
 
 export default function BillingPage() {
   const [guards,   setGuards]   = useState<Guard[]>([]);
@@ -94,9 +91,8 @@ export default function BillingPage() {
         params.set('site_id', siteFilter);
       }
 
-      const res = await fetch(`${API}/api/billing/hours-export?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${getAdminToken()}` },
-      });
+      // N203 stage 2: the admin's session as lib/session.ts sends it.
+      const res = await fetch(`${API}/api/billing/hours-export?${params.toString()}`, authInit('admin'));
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error((err as any).error ?? `Export failed: ${res.status}`);

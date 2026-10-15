@@ -162,7 +162,9 @@ async function othersAsBase(src: string): Promise<string[]> {
     for (const page of PAGES) {
       const d = await drive(api, answer, page);
       const b = await drive(base, answer, page);
-      if (d.moves.some((m) => m.length)) problems.push(`${answer.label} on ${page}: moves ${JSON.stringify(d.moves)}`);
+      // N203 stage 2: a 401 is the session gone, so the browser opens the sign-in page (lib/session.ts). Nothing else moves.
+      const want = JSON.stringify(answer.status === 401 ? ['/admin/login'] : []);
+      if (!d.moves.every((m) => JSON.stringify(m) === want)) problems.push(`${answer.label} on ${page}: moves ${JSON.stringify(d.moves)}`);
       if (JSON.stringify(d.out) !== JSON.stringify(b.out)) problems.push(`${answer.label} on ${page}: answered differently from BASE`);
       if (JSON.stringify(d.requests) !== JSON.stringify(b.requests)) problems.push(`${answer.label} on ${page}: asked fetch differently from BASE`);
       if (!d.sameObject || !d.unread) problems.push(`${answer.label} on ${page}: the caller did not get fetch's response, unread`);
@@ -193,7 +195,7 @@ async function main(): Promise<void> {
 
   console.log('\n3. every other response is answered as BASE answers it');
   const p3 = await othersAsBase(nowSrc);
-  check(p3.length === 0, `${OTHERS.length} responses × ${PAGES.length} pages, through every helper (adminDownload on the refusals): no move; BASE's request, BASE's answer, fetch's response unread${p3.length ? ` — ${p3.slice(0, 4).join('; ')}` : ''}`);
+  check(p3.length === 0, `${OTHERS.length} responses × ${PAGES.length} pages, through every helper (adminDownload on the refusals): no move (a 401: one, to /admin/login, N203 stage 2); BASE's request, BASE's answer, fetch's response unread${p3.length ? ` — ${p3.slice(0, 4).join('; ')}` : ''}`);
 
   console.log('\n4. outside a browser nothing moves and nothing throws');
   const p4 = await serverRenderQuiet(nowSrc);

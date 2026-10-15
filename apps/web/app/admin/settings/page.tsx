@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { adminGet, adminPatch, ApiError } from '../../../lib/adminApi';
+import { authInit } from '../../../lib/session';
 
 /**
  * /admin/settings — the admin's own account (Phase C: change password),
@@ -32,10 +33,6 @@ import { adminGet, adminPatch, ApiError } from '../../../lib/adminApi';
  */
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-function getAdminToken() {
-  if (typeof document === 'undefined') return '';
-  return document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? '';
-}
 
 type FieldKey = 'contact_email' | 'phone' | 'address' | 'licence_number' | 'website';
 
@@ -93,9 +90,10 @@ async function logoRequest(method: 'POST' | 'DELETE', body?: FormData): Promise<
   { ok: true; data: CompanyProfile & { removed?: boolean } } | { ok: false; message: string }
 > {
   try {
+    // N203 stage 2: the admin's session as lib/session.ts sends it.
     const res = await fetch(`${API}/api/admin/company/logo`, {
       method,
-      headers: { Authorization: `Bearer ${getAdminToken()}` },
+      ...authInit('admin'),
       body,
     });
     const data = await res.json().catch(() => ({}));

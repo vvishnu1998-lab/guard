@@ -17,6 +17,14 @@
  *   allowed Origin (3a).
  * - Sign-out and a change of password clear it.
  *
+ * Stage 2 (Vishnu's decisions 1a 2a 3b 4a, 2026-10-15): the web uses the cookie
+ * on its own site, and names its portal on every request, sign-in included. A
+ * session made for that web, from a production netraops.com origin, is not also
+ * handed to the page in the response body (3b): previews, the mobile app and the
+ * web before stage 2 name no portal, so they keep the tokens they need. The
+ * admin's "Preview as client" gets its read-only token as the client portal's
+ * cookie, for the token's 30 minutes (N206).
+ *
  * N205: every web sign-in gets a session id (`sid`), carried by every token minted
  * from it and from its refreshes. A revoked_tokens row keyed `sid:<sid>` revokes
  * all of them at once: sign-out writes one, and a client's site switch writes one
@@ -89,14 +97,35 @@ function writeCookie(req: Request, res: Response, role: unknown, value: string, 
   res.append('Set-Cookie', `${SESSION_COOKIE[ROLE_PORTAL[role]]}=${value}; ${attributes}; Max-Age=${maxAge}`);
 }
 
-/** Sets the portal's session cookie, for a browser on an allowed origin only. */
-export function setSessionCookie(req: Request, res: Response, role: unknown, accessToken: string): void {
-  writeCookie(req, res, role, accessToken, SESSION_COOKIE_MAX_AGE_S);
+/** Sets the portal's session cookie, for a browser on an allowed origin only, for the token's lifetime. */
+export function setSessionCookie(req: Request, res: Response, role: unknown, accessToken: string, maxAgeS = SESSION_COOKIE_MAX_AGE_S): void {
+  writeCookie(req, res, role, accessToken, maxAgeS);
 }
 
 /** Clears the portal's session cookie, with the attributes it was set with. */
 export function clearSessionCookie(req: Request, res: Response, role: unknown): void {
   writeCookie(req, res, role, '', 0);
+}
+
+/**
+ * 3b: a request from the web that keeps its session in the cookie: a production
+ * netraops.com origin (https, in ALLOWED_ORIGINS) that names a portal.
+ */
+export function isCookieWebRequest(req: Request): boolean {
+  const origin = req.headers.origin;
+  const named = req.headers[PORTAL_HEADER];
+  if (!isAllowedOrigin(origin) || typeof named !== 'string' || !PORTALS.includes(named as Portal)) return false;
+  try {
+    const url = new URL(origin);
+    return url.protocol === 'https:' && (url.hostname === 'netraops.com' || url.hostname.endsWith('.netraops.com'));
+  } catch {
+    return false;
+  }
+}
+
+/** The tokens a response's body carries: none for the cookie web (3b), all of them for everyone else. */
+export function bodyTokens<T extends object>(req: Request, tokens: T): Partial<T> {
+  return isCookieWebRequest(req) ? {} : tokens;
 }
 
 /**

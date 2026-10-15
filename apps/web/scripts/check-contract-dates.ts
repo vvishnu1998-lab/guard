@@ -35,6 +35,7 @@ import * as path from 'path';
 import ts from 'typescript';
 import { contractCell, fmtContractDate } from '../lib/contractDates';
 import { calDaysBetween } from '../lib/shiftFormat';
+import { undoN203Stage2 } from './n203Stage2Edits';
 
 /** main before N201 (PR #120's merge). */
 const BASE = '7245a0a95a3cfc175e4a775cbbf58471821fa2ee';
@@ -70,7 +71,8 @@ function once(s: string, find: string, replace: string, what: string): string {
   if (n !== 1) throw new Error(`${what}: found ${n} times`);
   return s.replace(find, () => replace);
 }
-const now = (rel: string) => fs.readFileSync(path.join(WEB, rel), 'utf8');
+/** The page as it was before N203 stage 2 (scripts/n203Stage2Edits.ts, proven exact by check-session-cookie), so this check still compares only its own change. */
+const now = (rel: string) => undoN203Stage2(rel, fs.readFileSync(path.join(WEB, rel), 'utf8'));
 const base = (rel: string) => execFileSync('git', ['show', `${BASE}:apps/web/${rel}`], { encoding: 'utf8' });
 const baseApi = () => execFileSync('git', ['show', `${BASE}:apps/api/src/routes/admin.ts`], { encoding: 'utf8' });
 /** A lib module from `src`, compiled under its own path so its imports resolve as in the app: a mutant. */

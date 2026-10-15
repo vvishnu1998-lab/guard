@@ -1,5 +1,6 @@
 'use client';
 import { useState, FormEvent } from 'react';
+import { authInit, forgetSession } from '../../../lib/session';
 
 function EyeIcon() {
   return (
@@ -17,12 +18,6 @@ function EyeOffIcon() {
       <line x1="1" y1="1" x2="23" y2="23"/>
     </svg>
   );
-}
-
-function readCookie(name: string): string | null {
-  if (typeof document === 'undefined') return null;
-  const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
-  return m ? decodeURIComponent(m[1]) : null;
 }
 
 export default function ClientChangePasswordPage() {
@@ -43,19 +38,21 @@ export default function ClientChangePasswordPage() {
 
     setLoading(true);
     try {
-      const access = readCookie('guard_client_access');
+      // N203 stage 2: the session as lib/session.ts sends it (the cookie, or a preview's bearer token).
+      const auth = authInit('client');
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/client/change-password`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
+        credentials: auth.credentials,
+        headers: { 'Content-Type': 'application/json', ...auth.headers },
         body: JSON.stringify({ current_password: current, new_password: next }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Could not change password'); return; }
       // The server stamps tokens_not_before on password change, so the
-      // cookies we hold are already revoked — expire them and send the
-      // client to sign in fresh instead of into a wall of 401s.
-      document.cookie = 'guard_client_access=; path=/; max-age=0; SameSite=Strict';
-      document.cookie = 'guard_client_refresh=; path=/; max-age=0; SameSite=Strict';
+      // session we hold is already revoked, and the API cleared its cookie.
+      // Forget the rest and send the client to sign in fresh instead of
+      // into a wall of 401s.
+      forgetSession('client');
       window.location.href = '/client/login?notice=password-changed';
     } catch {
       setError('Network error. Please try again.');

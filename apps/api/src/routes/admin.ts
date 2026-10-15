@@ -25,6 +25,7 @@ import {
   type PayableShiftHours,
 } from '../services/shiftHours';
 import { parseCursor, signInHistory } from '../services/signInHistory';
+import { bodyTokens, setSessionCookie } from '../services/webSession';
 
 const router = Router();
 
@@ -66,7 +67,11 @@ router.post('/sites/:siteId/preview-client-token', requireAuth('company_admin', 
     [req.user!.sub, siteId, expiresAt],
   );
 
-  res.json({ access_token: accessToken, expires_in: ttlSeconds });
+  // N206 (N203 stage 2): the preview reaches the client portal as that portal's
+  // cookie, for the token's 30 minutes, never through a URL; the cookie web gets
+  // no token in the body (3b), previews keep theirs.
+  setSessionCookie(req, res, 'client', accessToken, ttlSeconds);
+  res.json({ ...bodyTokens(req, { access_token: accessToken }), expires_in: ttlSeconds });
 });
 
 // ── Vishnu Super Admin routes ────────────────────────────────────────────────
