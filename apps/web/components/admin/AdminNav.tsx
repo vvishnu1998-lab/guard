@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
 import { adminGet } from '../../lib/adminApi';
+import { endSession, SIGN_IN_PATH } from '../../lib/signOut';
 
 const NAV_ITEMS = [
   { href: '/admin',           label: 'DASHBOARD'      },
@@ -50,10 +51,10 @@ export default function AdminNav() {
     return () => { cancelled = true; clearInterval(id); };
   }, [pathname]);
 
-  function logout() {
-    document.cookie = 'guard_admin_access=; path=/; max-age=0';
-    document.cookie = 'guard_admin_refresh=; path=/; max-age=0';
-    router.push('/admin/login');
+  async function logout() {
+    // N202: ends the session on the server too (lib/signOut.ts), then opens the sign-in page.
+    await endSession('admin');
+    router.push(SIGN_IN_PATH.admin);
   }
 
   const navContent = (

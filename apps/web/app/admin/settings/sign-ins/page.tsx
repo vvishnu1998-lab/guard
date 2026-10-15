@@ -60,7 +60,7 @@ export default function SignInHistoryPage() {
       </div>
       <section className="bg-[#0F1E35] border border-[#1A3050] rounded-xl p-4 md:p-6">
         <p className="text-gray-500 text-xs mb-4">
-          Your own sign-ins, failed sign-ins and password changes from the last 365 days, newest first. Times are Pacific.
+          Your own sign-ins, sign-outs, failed sign-ins and password changes from the last 365 days, newest first. Times are Pacific.
         </p>
         <SignInHistoryList events={events} hasMore={next !== null} loading={loading} error={error} onMore={() => load(next)} />
       </section>

@@ -18,7 +18,8 @@
     "check:fonts": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-fonts.ts",
     "check:password-hold": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-password-hold.ts",
     "check:contract-dates": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-contract-dates.ts",
-    "check:sign-in-history": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-sign-in-history.ts"
+    "check:sign-in-history": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-sign-in-history.ts",
+    "check:sign-out": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-sign-out.ts"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",

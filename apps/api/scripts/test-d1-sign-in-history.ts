@@ -156,11 +156,11 @@ async function main(): Promise<void> {
     const now = Date.now();
     const ago = (days: number, extraMs = 0) => new Date(now - days * 86_400_000 - extraMs).toISOString();
     const IN = [
-      ['login_success', ago(0, 60_000), UA.macChrome], ['login_failed', ago(1), UA.iPhoneSafari], ['login_blocked_locked', ago(2), UA.iPhoneSafari],
+      ['login_success', ago(0, 60_000), UA.macChrome], ['logout', ago(0, 120_000), UA.macChrome], ['login_failed', ago(1), UA.iPhoneSafari], ['login_blocked_locked', ago(2), UA.iPhoneSafari],
       ['password_changed', ago(3), UA.winEdge], ['password_reset_emailed', ago(4), null], ['login_success', ago(364), UA.curl],
     ] as const;
     for (const [t, at, ua] of IN) await ev(a, t, at, ua);
-    for (const t of ['logout', 'token_refresh', 'welcome_email_resent', 'password_reset_email_failed', 'session_revoked', 'unlocked']) await ev(a, t, ago(1, 5000));
+    for (const t of ['token_refresh', 'welcome_email_resent', 'password_reset_email_failed', 'session_revoked', 'unlocked']) await ev(a, t, ago(1, 5000));
     await ev(a, 'login_success', ago(366));
     await ev(a, 'login_success', ago(0, 30_000), UA.macChrome, 'guard');
     await ev(b, 'login_success', ago(0, 10_000));
@@ -234,9 +234,9 @@ async function main(): Promise<void> {
       return problems;
     };
 
-    section('O  only the caller\'s own rows, of the five types, within 365 days, newest first');
+    section('O  only the caller\'s own rows, of the history\'s six types, within 365 days, newest first');
     const o = await ownProblems(viaHttp);
-    check(o.length === 0, `admin A sees exactly its 6 rows of the 1b types within 365 days, newest first, and not: 6 rows of other types, a 366-day-old sign-in, a guard-role row on its id, admin B's row; B sees its 1 (${o.join('; ') || 'all right'})`);
+    check(o.length === 0, `admin A sees exactly its 7 rows of the history's types (1b's five, and sign-outs since N202) within 365 days, newest first, and not: 5 rows of other types, a 366-day-old sign-in, a guard-role row on its id, admin B's row; B sees its 1 (${o.join('; ') || 'all right'})`);
 
     section('F  each event is the time, the type and a device name; never the address or the user agent');
     {
@@ -245,7 +245,7 @@ async function main(): Promise<void> {
       const raw = (await get('/api/admin/me/sign-ins', tok(a, 'company_admin'))).raw;
       check(show(keys) === '["at,device,type"]' && !raw.includes('203.0.113.7') && !raw.includes('Mozilla') && !raw.includes('ip_address'),
         `every event has exactly at, device, type; the response never carries the address (203.0.113.7 in every row) or a raw user agent (${show(keys)})`);
-      check(show(p.events.map((e) => e.device)) === show(['Chrome on macOS', 'Safari on iPhone', 'Safari on iPhone', 'Edge on Windows', 'Unknown device', 'curl']),
+      check(show(p.events.map((e) => e.device)) === show(['Chrome on macOS', 'Chrome on macOS', 'Safari on iPhone', 'Safari on iPhone', 'Edge on Windows', 'Unknown device', 'curl']),
         `devices: ${p.events.map((e) => e.device).join(', ')}`);
     }
 
@@ -301,7 +301,7 @@ async function main(): Promise<void> {
       const controls: Array<[string, () => Promise<string[]>]> = [
         ['the query without the actor filter: another admin\'s rows appear, which O refuses', () => ownProblems(viaService(mutantOf(svc, '      WHERE actor_id = $1\n        AND role', "      WHERE ($1::uuid IS NOT NULL)\n        AND role")))],
         ['without the role filter: the guard-role row on A\'s id appears, which O refuses', () => ownProblems(viaService(mutantOf(svc, "        AND role = 'company_admin'\n", '')))],
-        ['without the type filter: logouts and refreshes appear, which O refuses', () => ownProblems(viaService(mutantOf(svc, '        AND event_type = ANY($2::text[])\n', "        AND $2::text[] IS NOT NULL\n")))],
+        ['without the type filter: refreshes and other events appear, which O refuses', () => ownProblems(viaService(mutantOf(svc, '        AND event_type = ANY($2::text[])\n', "        AND $2::text[] IS NOT NULL\n")))],
         ['without the 365-day bound: the 366-day-old sign-in appears, which O refuses', () => ownProblems(viaService(mutantOf(svc, '        AND created_at > NOW() - make_interval(days => $3)\n', '        AND $3::int IS NOT NULL\n')))],
         ['a cursor cut to milliseconds: rows a microsecond apart are skipped, which P refuses', () => pageProblems(viaService(mutantOf(svc, "to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')", "to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"000Z\"')")))],
         ['the route open to Vishnu: his token gets 200, which E refuses', async () => { const r = await get('/api/admin-open/me/sign-ins', tok('00000000-0000-0000-0000-000000000000', 'vishnu')); return r.status === 200 ? ['vishnu 200'] : []; }],

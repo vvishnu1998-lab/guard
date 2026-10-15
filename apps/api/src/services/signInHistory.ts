@@ -4,7 +4,8 @@
  * Vishnu's decisions, 2026-10-14, within the one locked on 2026-10-06 (6a: own
  * history only, no IP column):
  * - 1b: sign-ins, failed sign-ins, lockouts, password changes and password
- *   reset emails;
+ *   reset emails; and, since N202 (decision 4a, 2026-10-14) made the web's SIGN
+ *   OUT end the session on the server and record it, sign-outs;
  * - 2a: its own page, newest first, 50 at a time, back to auth_events'
  *   retention.
  *
@@ -20,7 +21,7 @@
 import { pool } from '../db/pool';
 import { deviceLabel } from './deviceLabel';
 
-export const SIGN_IN_EVENT_TYPES = ['login_success', 'login_failed', 'login_blocked_locked', 'password_changed', 'password_reset_emailed'] as const;
+export const SIGN_IN_EVENT_TYPES = ['login_success', 'login_failed', 'login_blocked_locked', 'password_changed', 'password_reset_emailed', 'logout'] as const;
 export const SIGN_IN_PAGE_SIZE = 50;
 /** auth_events' retention (PURGE_DAYS.AUTH_EVENTS in jobs/nightlyPurge.ts), so a row about to be purged is never shown. */
 export const SIGN_IN_HISTORY_DAYS = 365;

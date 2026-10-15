@@ -3,6 +3,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
+import { endSession, SIGN_IN_PATH } from '../../lib/signOut';
 
 const NAV = [
   { href: '/vishnu',            label: 'OVERVIEW'         },
@@ -19,10 +20,10 @@ export default function VishnuLayout({ children }: { children: React.ReactNode }
 
   const isAuthPage = pathname === '/vishnu/login';
 
-  function logout() {
-    document.cookie = 'guard_vishnu_access=; path=/; max-age=0';
-    document.cookie = 'guard_vishnu_refresh=; path=/; max-age=0';
-    router.push('/vishnu/login');
+  async function logout() {
+    // N202: ends the session on the server too (lib/signOut.ts), then opens the sign-in page.
+    await endSession('vishnu');
+    router.push(SIGN_IN_PATH.vishnu);
   }
 
   if (isAuthPage) {

@@ -264,6 +264,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #122, Phase D's D2: the password-changed email (N197), by OVERRIDE with Vishnu present — verified in Gmail 2026-10-14 17:01 PT
+
+| thing | value |
+|---|---|
+| merge | PR #122 merged as `26d38ae` at **16:47:04 PT (23:47:04Z) by OVERRIDE, with Vishnu present**: Tier 2, because it emails STARNET's guards, admins and client. Vishnu: "merge D2". The push asked Vishnu and he approved it. One read at 16:47:01 PT: 5/5 SUCCESS, CLEAN, head `f1097eb`, main `69f97dd`. Then one call, `gh pr merge 122 --merge --match-head-commit f1097eb…`. The merge tree equals the head's tree (`252e13b`). |
+| Railway | `960fbc44-3382-4d26-a357-fa35bea108a7` **SUCCESS** at 16:48:27 PT from `26d38ae`. |
+| web | Vercel production on `26d38ae`: success at 16:48:44 PT. |
+| health | `/health` commit `26d38ae`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| switchover | The old container (`8c451709`, from #121's `69f97dd`) served its last request at 16:48:14.8 PT and logged last at 16:48:37.7. The new one was listening at 16:48:20.9 and served its first request at 16:48:25.5, so they overlapped. Over its whole life (15:57 to 16:48 PT) the old one served 767 requests: 0 were 499s and 0 were 5xx. To 17:17 the new one served 354 requests: 0 were 499s and 0 were 5xx. Sentry, 16:47–17:17 PT, nothing new: API-C (the retention run's summary, an info message, since 08-05); MOBILE-13 (since 09-29); WEB-4 (since 08-04, 374 events: an object rejected with code, message and status that nothing handles, on the homepage, /data-deletion and admin pages, from Chrome 152–155 on macOS; N204), which fired at 17:01 during Vishnu's test as it has on pages no deploy touched. |
+| restart window | 16:47:04–16:48:38 PT: STARNET wrote nothing. Its last write before was a ping at 16:37:57, with 3 sessions open. After the deploy its next ping landed at 17:00:06, and by 17:03 it had written 8 notifications. |
+| email | **VERIFIED in Gmail (Vishnu, 2026-10-14 ~17:01 PT).** He changed the Star Guard test admin's password, and the notice arrived: "Wednesday, October 14, 2026 at 5:01 PM PT, from Chrome on macOS", for the right account, with the approved copy, in the Inbox, not clipped. |
+| visible change | Every role, STARNET's guards, admins and client included, now gets "Your NetraOps password was changed" after any change of password, the first change from a temporary password included. Nothing else changed. |
+
+---
+
 ## Shipped 2026-10-14 — PR #121, Phase D's D1 (an admin's own sign-in history), N200 (login 400s) and N201 (contract dates on their own day), by OVERRIDE — verified 2026-10-14 16:26 PT
 
 | thing | value |
