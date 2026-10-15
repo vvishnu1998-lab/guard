@@ -65,7 +65,7 @@ export default function ClientLoginPage() {
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Login failed'); return; }
       document.cookie = `guard_client_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
-      document.cookie = `guard_client_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
+      // N202 (2a): no refresh token is kept. Nothing in the web reads one, and SIGN OUT revokes the session.
       // Preserve the deep-link the middleware stashed in ?from= (e.g.
       // `/client?report=<id>` from an incident-alert email). Skipped when
       // must_change_password forces the password flow.

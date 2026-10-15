@@ -15,13 +15,14 @@ export interface SignInEvent {
   device: string;
 }
 
-/** 1b: the five events the history lists. A type this page does not know is shown as sent. */
+/** 1b's five events, and sign-outs (N202, 4a). A type this page does not know is shown as sent. */
 export const SIGN_IN_EVENT_LABELS: Record<string, string> = {
   login_success: 'Signed in',
   login_failed: 'Failed sign-in',
   login_blocked_locked: 'Sign-in blocked: too many failed attempts',
   password_changed: 'Password changed',
   password_reset_emailed: 'Password reset email sent',
+  logout: 'Signed out',
 };
 
 export function signInEventLabel(type: string): string {

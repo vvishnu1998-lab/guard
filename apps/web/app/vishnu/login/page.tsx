@@ -47,7 +47,7 @@ export default function VishnuLoginPage() {
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Login failed'); return; }
       document.cookie = `guard_vishnu_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
-      document.cookie = `guard_vishnu_refresh=${data.refresh}; path=/; max-age=2592000; SameSite=Strict`;
+      // N202 (2a): no refresh token is kept. Nothing in the web reads one, and SIGN OUT revokes the session.
       window.location.href = '/vishnu';
     } catch {
       setError('Network error. Please try again.');

@@ -144,7 +144,7 @@ const EVENTS: Event[] = [
 function nameProblems(lib: any): string[] {
   const want: Record<string, string> = {
     login_success: 'Signed in', login_failed: 'Failed sign-in', login_blocked_locked: 'Sign-in blocked: too many failed attempts',
-    password_changed: 'Password changed', password_reset_emailed: 'Password reset email sent', something_new: 'something_new',
+    password_changed: 'Password changed', password_reset_emailed: 'Password reset email sent', logout: 'Signed out', something_new: 'something_new',
   };
   const problems: string[] = [];
   for (const [type, label] of Object.entries(want)) if (lib.signInEventLabel(type) !== label) problems.push(`${type} -> ${lib.signInEventLabel(type)}`);
@@ -240,7 +240,7 @@ function main(): void {
 
   console.log('\n── 2  the names');
   const n = nameProblems(lib);
-  check(n.length === 0, `the five 1b events named; failed and blocked sign-ins marked; an unknown type shown as sent (${n.join('; ') || 'all right'})`);
+  check(n.length === 0, `the history's six events named (1b's five, and N202's sign-out); failed and blocked sign-ins marked; an unknown type shown as sent (${n.join('; ') || 'all right'})`);
 
   console.log('\n── 3  the list');
   const l = listProblems(List, lib.fmtPacific);
