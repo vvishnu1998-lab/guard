@@ -264,6 +264,22 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #123, N202: SIGN OUT ends the session on the server in all three portals, by OVERRIDE — verified 2026-10-14 19:02 PT
+
+| thing | value |
+|---|---|
+| merge | PR #123 merged as `541a6e1` at **18:31:40 PT (01:31:40Z) by OVERRIDE**. Vishnu: "1a 2a 3a 4a. Build straight through, merge by OVERRIDE." One read at 18:31:35 PT: 5/5 SUCCESS, CLEAN, head `562ed57`, main `26d38ae`. Then one call, `gh pr merge 123 --merge --match-head-commit 562ed57…`. The merge tree equals the head's tree (`f107629`). |
+| Railway | `26b6a430-f94b-44f9-8383-38ec6df87aa4` **SUCCESS** at 18:33:35 PT from `541a6e1`. |
+| web | Vercel production on `541a6e1`: success at 18:34:03 PT. |
+| health | `/health` commit `541a6e1`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| live control (3a) | An unauthenticated `POST /api/auth/logout` answered 401 with `ratelimit-limit: 20` at 18:24 PT, before the merge, and with `ratelimit-limit: 500` after the deploy: sign-outs are now counted only by the global limit. |
+| live control (1a, 2a) | The same probe against the previous deployment (`26d38ae`) and against www: the old admin, client and Vishnu sign-in pages each load one chunk with `2592000` (the 30-day refresh cookie) and none with `/api/auth/logout`; the new ones load none with `2592000` and one with `/api/auth/logout`. |
+| switchover | The old container (`960fbc44`, from #122's `26d38ae`) served its last request at 18:33:25.2 PT and logged last at 18:33:45.5. The new one was listening at 18:33:26.8 and served its first request at 18:33:39.6. Over its whole life (16:48 to 18:33 PT) the old one served 1118 requests: 0 were 499s and 0 were 5xx. To 19:01 the new one served 203: 0 were 499s and 0 were 5xx; its only 4xx were the two controls. Sentry, 18:31–19:01 PT: API and web, none; mobile, MOBILE-11 and MOBILE-13 (both since 09-29; no mobile code changed). |
+| restart window | 18:31:40–18:33:46 PT: STARNET wrote a device check-in (`guard_devices.last_seen_at`) at 18:31:42 and a ping at 18:31:52 (201, served by the old container), with 3 sessions open. The first ping served by the new container landed at 18:50:45; by 19:02 it had written 3 pings and 12 notifications, with 4 sessions open. |
+| visible change | Every portal's SIGN OUT (admin, client, Vishnu) now ends its session on the server, and an admin's SIGN-IN HISTORY lists "Signed out". The sign-in pages no longer store a refresh token. Nothing changed for guards. Not yet seen in production: no web sign-out had been recorded by 19:02. |
+
+---
+
 ## Shipped 2026-10-14 — PR #122, Phase D's D2: the password-changed email (N197), by OVERRIDE with Vishnu present — verified in Gmail 2026-10-14 17:01 PT
 
 | thing | value |
