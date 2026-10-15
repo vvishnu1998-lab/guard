@@ -50,6 +50,8 @@ export function endSession(portal: Portal): Promise<void> {
       try {
         await fetch(`${API}/api/auth/logout`, {
           method: 'POST',
+          // N203 stage 1: so the browser applies the API's clearing of the HttpOnly session cookie.
+          credentials: 'include',
           signal: controller.signal,
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
           body: JSON.stringify(refresh ? { refresh_token: refresh } : {}),

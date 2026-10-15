@@ -59,6 +59,8 @@ export default function ClientLoginPage() {
     try {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/client/login`, {
         method: 'POST',
+        // N203 stage 1: so the browser keeps the HttpOnly session cookie the API sets.
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
