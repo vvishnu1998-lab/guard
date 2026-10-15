@@ -24,9 +24,11 @@
  * stampPrintChrome(): every sheet prints with the company at the top left and
  * the title at the top right, and "Confidential — <company>", the page number
  * and "Powered by NetraOps" along the bottom. Header and footer codes start
- * with &, so a literal & is written &&.
+ * with &, so a literal & is written &&. In the footer a long company name is
+ * cut with an ellipsis (N193, footerCompany below).
  */
 import type ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 import type { Letterhead } from './types';
 import { contactLines } from './text';
 import { checkImageDecodes } from '../imageDecode';
@@ -80,10 +82,43 @@ export function writeLetterheadBlock(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet
 /** Excel header/footer codes start with &; a literal one is &&. */
 const hf = (s: string): string => s.replace(/&/g, '&&');
 
+/**
+ * N193. Excel draws a footer's three sections independently, so a long company
+ * name in "Confidential — <company>" (left) ran into "Page n of N" (centre):
+ * from about 50 characters, measured through Excel's PDF export on 2026-10-13
+ * with B1's 75-character fixture. The name is cut with an ellipsis, the way the
+ * PDF letterhead cuts it (pdf.ts, fitText), so that the whole left section is
+ * at most FOOTER_LEFT_MAX_PT wide. Measured in Helvetica at the footer's 8 pt,
+ * which is wider than the Calibri Excel prints it in, so the budget holds with
+ * room to spare on Excel's default portrait page, which these workbooks use.
+ */
+export const FOOTER_LEFT_MAX_PT = 230;
+const FOOTER_LEAD = 'Confidential — ';
+let footerWidth: ((s: string) => number) | null = null;
+
+/** The company name as the footer prints it: whole when it fits, otherwise cut with an ellipsis. */
+export function footerCompany(name: string): string {
+  if (!footerWidth) {
+    const doc = new PDFDocument({ autoFirstPage: false });
+    doc.font('Helvetica').fontSize(8);
+    footerWidth = (s) => doc.widthOfString(s);
+  }
+  const width = footerWidth;
+  if (width(`${FOOTER_LEAD}${name}`) <= FOOTER_LEFT_MAX_PT) return name;
+  let lo = 0;
+  let hi = name.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (width(`${FOOTER_LEAD}${name.slice(0, mid).trimEnd()}…`) <= FOOTER_LEFT_MAX_PT) lo = mid;
+    else hi = mid - 1;
+  }
+  return `${name.slice(0, lo).trimEnd()}…`;
+}
+
 export function stampPrintChrome(wb: ExcelJS.Workbook, lh: Letterhead, title: string): void {
   const company = hf(lh.companyName);
   wb.eachSheet((ws) => {
     ws.headerFooter.oddHeader = `&L&B${company}&R${hf(title)}`;
-    ws.headerFooter.oddFooter = `&L&8Confidential — ${company}&C&8Page &P of &N&R&8Powered by NetraOps`;
+    ws.headerFooter.oddFooter = `&L&8${FOOTER_LEAD}${hf(footerCompany(lh.companyName))}&C&8Page &P of &N&R&8Powered by NetraOps`;
   });
 }

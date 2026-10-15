@@ -704,7 +704,10 @@ router.get('/reports/pdf', async (req: Request, res: Response) => {
     doc.rect(ML, y, CW, 22).fill(NAVY);
     doc.fontSize(9).fillColor(WHITE).font('Helvetica-Bold').text(dateStr, ML + 10, y + 6);
     doc.fontSize(9).fillColor('#94A3B8').font('Helvetica')
-       .text(`${dayReports.length} report${dayReports.length !== 1 ? 's' : ''}`, 0, y + 6, { align: 'right', width: PAGE_W - ML });
+       // N180: width PAGE_W - ML put the count's right edge at 545, exactly where
+       // the navy bar ends. 10 pt in, the same as the date on the bar's left
+       // (the activity log's day bar does the same with its 8).
+       .text(`${dayReports.length} report${dayReports.length !== 1 ? 's' : ''}`, 0, y + 6, { align: 'right', width: PAGE_W - ML - 10 });
     y += 28;
 
     const timelineX = ML + 20;

@@ -541,6 +541,8 @@ async function main(): Promise<void> {
       const { contactLines } = await import('../src/services/letterhead/text');
       const { neutralizeFormula, readsAsFormula } = await import('../src/services/spreadsheetSafe');
       const hf = (t: string) => t.replace(/&/g, '&&');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { footerCompany } = require(path.join(__dirname, '../src/services/letterhead/xlsx.ts')) as { footerCompany: (n: string) => string };
       type Profile = { companyName: string; contactEmail: string | null; phone: string | null; address: string | null; licenceNumber: string | null; website: string | null; logo: Buffer | null };
       /** Everything wrong with a lettered workbook, against the plain workbook of the same data. */
       async function letteredProblems(buf: Buffer, plain: Buffer, lh: Profile, title: string, logoDrawn: boolean): Promise<string[]> {
@@ -569,7 +571,8 @@ async function main(): Promise<void> {
           const head = unescapeXml(xml.match(/<oddHeader>([\s\S]*?)<\/oddHeader>/)?.[1] ?? '');
           const foot = unescapeXml(xml.match(/<oddFooter>([\s\S]*?)<\/oddFooter>/)?.[1] ?? '');
           if (head !== `&L&B${hf(lh.companyName)}&R${hf('Analytics Export')}`) problems.push(`${part} header ${show(head)}`);
-          if (foot !== `&L&8Confidential — ${hf(lh.companyName)}&C&8Page &P of &N&R&8Powered by NetraOps`) problems.push(`${part} footer ${show(foot)}`);
+          // N193 (after B6) cuts a long name in the footer to fit before the page number; the header keeps it whole.
+          if (foot !== `&L&8Confidential — ${hf(footerCompany(lh.companyName))}&C&8Page &P of &N&R&8Powered by NetraOps`) problems.push(`${part} footer ${show(foot)}`);
           const at = (tag: string) => xml.indexOf(`<${tag}`);
           if (!(at('headerFooter') > 0 && at('ignoredErrors') > at('headerFooter') && (logoDrawn ? at('drawing') > at('ignoredErrors') : at('drawing') < 0))) {
             problems.push(`${part} element order headerFooter ${at('headerFooter')} ignoredErrors ${at('ignoredErrors')} drawing ${at('drawing')}`);
@@ -650,7 +653,7 @@ async function main(): Promise<void> {
         const v = await viewOf(buf);
         check(pr.length === 0 && v[0].spec.D1?.[1] === "'=HYPERLINK(\"https://x.example\",\"Star Guard\") & Co"
           && String(v[0].spec.D2?.[1]).startsWith("'-1 Example Way") && String(v[0].spec.D3?.[1]).startsWith('Tel +1 (408) 555-0142'),
-          `L5 a hostile profile: every block line that would run as a formula gets its apostrophe, the "+1" phone line reads "Tel +1 …", and & is && in the header and footer (${pr.slice(0, 3).join('; ') || 'nothing wrong'})`);
+          `L5 a hostile profile: every block line that would run as a formula gets its apostrophe, the "+1" phone line reads "Tel +1 …", and & is && in the header and in the footer's name, cut to fit since N193 (${pr.slice(0, 3).join('; ') || 'nothing wrong'})`);
       }
       {
         const P = AW.analyticsPeriodText;

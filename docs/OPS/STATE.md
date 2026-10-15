@@ -264,6 +264,24 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-15 — PR #127, N207 (a password reset no longer replaces the password; 1a 2a 3a 4a) and schema v83, by OVERRIDE — verified 2026-10-15 12:52 PT
+
+| thing | value |
+|---|---|
+| decisions | Vishnu, 2026-10-15: "1a (I'll archive WEB-4 myself), 2 yes, 3b OVERRIDE, 4a." "Add the "It works for 24 hours." line, rerun the affected suites, then commit v83 on production and merge #127 right after." |
+| v83 | **Committed on production at 12:18:29–12:18:34 PT** by Claude, after Vishnu's yes: `railway connect Postgres < scripts/ops/v83_pending_password_resets_COMMIT.sql`. The precondition and postcondition passed; the summary row read `t \| 0 \| f \| t`; COMMIT. Read through postgres-readonly at 12:18:38 PT: the table exists; the read-only role has no table-level SELECT, cannot read `password_hash`, can read `expires_at`; 0 rows. (The preview ran at 11:40 PT and rolled back.) |
+| merge | PR #127 merged as `25bce4b` at **12:23:06 PT by OVERRIDE**. A first pinned read at 12:18:44 refused (CI still running on the force-pushed head; the app's cached status had shown the previous head's), so nothing merged then. The second read at 12:23:01: 5/5 SUCCESS, CLEAN, head `8ae9365`, main `729b4ff`; then one call, `gh pr merge 127 --merge --match-head-commit 8ae9365…`. The merge tree equals the head's tree (`289fe9e`). |
+| web | Vercel production on `25bce4b`: success at 12:24:45 PT. |
+| Railway | `5810bcc7-d209-4ff0-9ee6-c17e11eb559e` **SUCCESS** at 12:26:31 PT from `25bce4b`. |
+| health | `/health` commit `25bce4b`; `/health/crons` 20 jobs, `stale: []`; route control 401. A reset request for an address with no account answered 200 with the usual message (0.34 s and 0.49 s from the Mac). |
+| switchover | The old container (`6be48377`, from #126's `729b4ff`) served its last request at 12:25:29.1 PT and logged last at 12:26:44.2. The new one was listening at 12:26:18.1 and served its first request at 12:26:25.5. Over its whole life (11:26:25 to 12:25:29) the old one served 386 requests: 0 were 499s and 0 were 5xx. To 12:27:00 the new one served 8: 0 were 499s and 0 were 5xx. Sentry, 12:20–12:27 PT: nothing in any project. |
+| restart window | 12:23:06–12:26:44 PT: STARNET had 2 sessions open and wrote nothing (its last ping was 12:00:19; its guards ping about every 30 minutes). After the deploy: notifications at 12:30:00 and 12:30:01, and pings at 12:30:13 and 12:30:45. `pending_password_resets` held 0 rows at 12:32:41. |
+| visible change | A reset email no longer changes anyone's password: the current one keeps working, and the emailed one works for 24 hours. The email says so under the password, and its last line reads "If you didn't ask for this, ignore this email: your current password still works." |
+| Vishnu's check | **Passed.** Vishnu, 12:39–12:42 PT, on his own admin account: "Reset check passed: email showed the 24-hour line and \"current password still works\", and I signed in with my current password." `auth_events` agrees: `password_reset_emailed` at 12:39:34; `login_success` with his current password at 12:41:21 and 12:42:34; no `password_reset_used`. `pending_password_resets` held 0 rows at 12:52:05: the sign-in had cancelled the reset. |
+| WEB-4 | Vishnu archived it at 12:47:07 PT ("WEB-4 archived forever"); see OPEN-ITEMS N204. |
+
+---
+
 ## Shipped 2026-10-15 — PR #126, N169 (the API's own handlers for an uncaught exception and an unhandled rejection, 5a), by OVERRIDE — verified 2026-10-15 11:34 PT
 
 | thing | value |

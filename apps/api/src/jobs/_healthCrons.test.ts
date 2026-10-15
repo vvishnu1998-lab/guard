@@ -82,7 +82,7 @@ const LIVE_JOBS: Array<[string, string, number]> = [
   ['handoffNudge',          '*/5 * * * *',  300],
   ['lateClockInReminder',   '*/5 * * * *',  300],
   ['locationIntegrityCron', '20 0 * * *', 86400],
-  ['missedPingCron',        '*/5 * * * *',  300],
+  ['missedPingCron',        '31 */5 * * * *', 300],   // N179: second 31 of every fifth minute
   ['missedReportCron',      '*/5 * * * *',  300],
   ['missedShiftAlert',      '*/5 * * * *',  300],
   ['monthlyHoursReport',    '0 12 1 * *', 2678400],
@@ -112,12 +112,19 @@ test('all five supported shapes', () => {
   assert.strictEqual(cronIntervalSeconds('30 * * * *'), 3600);
   assert.strictEqual(cronIntervalSeconds('45 23 * * *'), 86400);
   assert.strictEqual(cronIntervalSeconds('0 0 28 * *'), 2678400);
+  // N179: a leading seconds field that is a plain number keeps the interval.
+  assert.strictEqual(cronIntervalSeconds('31 */5 * * * *'), 300);
+  assert.strictEqual(cronIntervalSeconds('0 * * * * *'), 60);
+  assert.strictEqual(cronIntervalSeconds('59 30 * * * *'), 3600);
 });
 
 test('unsupported expressions throw loudly rather than guessing', () => {
   const bad = [
     '* * * *',           // four fields
-    '* * * * * *',       // six fields
+    '* * * * * *',       // six fields: every second
+    '*/10 */5 * * * *',  // six fields: stepped seconds
+    '60 */5 * * * *',    // six fields: second out of range
+    '0 0 0 * * * *',     // seven fields
     '0 0 * * 1',         // day-of-week restriction
     '0 0 1 6 *',         // month restriction
     '*/0 * * * *',       // zero step

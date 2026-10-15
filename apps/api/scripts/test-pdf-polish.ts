@@ -30,6 +30,9 @@
  *         formatters happened to be right), every other body word keeps its text and its
  *         place, and every date keeps its value
  *      C6 the letterhead's address prints one comma where its line ends in one
+ *      C7 N180 (after this PR): every timeline day count ends 10 pt inside the navy bar, as the
+ *         date starts 10 pt inside it; control: without the edit the count ends on the bar's edge.
+ *         BASE is loaded with that one edit, exactly once, so C5 still proves nothing else moved
  *   A  the activity log (services/pdf/activityLog.ts)
  *      A1 the same bytes in UTC and in Pacific
  *      A2 every date spells its month, in US order; none numeric or day-first
@@ -148,9 +151,19 @@ async function inZone<T>(tz: string, fn: () => Promise<T>): Promise<T> {
 }
 
 /** `apps/api/<rel>` at BASE, compiled as a fresh module under the current file's path. */
-function loadBase(rel: string): any {
+function once(s: string, from: string, to: string): string {
+  if (s.split(from).length !== 2) throw new Error(`expected one ${JSON.stringify(from.slice(0, 60))}`);
+  return s.replace(from, to);
+}
+/** N180's edit to the report's timeline day count (routes/clientPortal.ts), from the line BASE and this tree share. */
+const N180_BEFORE = "{ align: 'right', width: PAGE_W - ML });";
+const N180_AFTER = "{ align: 'right', width: PAGE_W - ML - 10 });";
+function loadBase(rel: string, edit: (src: string) => string = (src) => src): any {
+  return compileAs(rel, edit(execFileSync('git', ['show', `${BASE}:apps/api/${rel}`], { encoding: 'utf8' })));
+}
+/** `src` compiled as the module at `rel`, beside whatever the tree loaded there. */
+function compileAs(rel: string, src: string): any {
   const file = path.join(__dirname, '..', rel);
-  const src = execFileSync('git', ['show', `${BASE}:apps/api/${rel}`], { encoding: 'utf8' });
   const js = ts.transpileModule(src, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
   }).outputText;
@@ -439,7 +452,11 @@ async function main(): Promise<void> {
     const app = express();
     app.use(express.json());
     app.use('/api/client', (await import('../src/routes/clientPortal')).default);
-    app.use('/api/client-base', loadBase('src/routes/clientPortal.ts').default);
+    // BASE with N180's edit, exactly once, so C5 still compares everything else word for word (C7).
+    app.use('/api/client-base', loadBase('src/routes/clientPortal.ts', (src) => once(src, N180_BEFORE, N180_AFTER)).default);
+    // C7's control: today's report without N180's edit.
+    app.use('/api/client-n180-control', compileAs('src/routes/clientPortal.ts',
+      once(fs.readFileSync(path.join(__dirname, '..', 'src/routes/clientPortal.ts'), 'utf8'), N180_AFTER, N180_BEFORE)).default);
     app.use('/api/activity-log', (await import('../src/routes/activityLog')).default);
     app.use('/api/activity-log-base', loadBase('src/routes/activityLog.ts').default);
     app.use('/api/admin', (await import('../src/routes/admin')).default);
@@ -590,6 +607,32 @@ async function main(): Promise<void> {
       const t = allText(fC);
       check(pageText(fC, 1).includes(ADDRESS_ONE_LINE) && !t.includes(',,') && allText(fBC).includes('Suite 300,, San Jose'),
         `C6 the letterhead prints "${ADDRESS_ONE_LINE}", with no doubled comma anywhere; control: BASE's report prints "Suite 300,, San Jose"`);
+    }
+    {
+      // N180: each timeline day bar runs from ML (50) to ML + CW (545). Its date starts 10 pt in;
+      // its "N report(s)" now ends 10 pt in too. A count is a number and report(s) at the right
+      // of the page (a guard summary's "| N reports" sits at x ≈ 270 and is left out).
+      const BAR_LEFT = 50;
+      const BAR_END = 545;
+      const dayCounts = (f: string) => {
+        const out: Array<{ p: number; right: number; left: number }> = [];
+        for (let p = 1; p <= pdfPages(f); p++) {
+          const ws = words(f, p);
+          for (const w of ws) {
+            if (!/^reports?$/.test(w.w) || w.x1 < 500) continue;
+            if (!ws.some((v) => Math.abs(v.y0 - w.y0) < 0.5 && /^\d+$/.test(v.w) && v.x1 < w.x0)) continue;
+            const first = ws.filter((v) => Math.abs(v.y0 - w.y0) < 1.5).sort((a, b) => a.x0 - b.x0)[0];
+            out.push({ p, right: w.x1, left: first.x0 });
+          }
+        }
+        return out;
+      };
+      const now = dayCounts(fC);
+      const ctl = dayCounts(file(await clientPdf(siteC, '/api/client-n180-control', 'UTC'), 'client-report-n180-control.pdf'));
+      const gaps = now.map((c) => `${(BAR_END - c.right).toFixed(2)}/${(c.left - BAR_LEFT).toFixed(2)}`);
+      check(now.length >= 2 && now.every((c) => Math.abs(BAR_END - c.right - 10) < 0.5 && Math.abs(c.left - BAR_LEFT - 10) < 0.5)
+        && ctl.length === now.length && ctl.every((c) => Math.abs(BAR_END - c.right) < 0.5),
+        `C7 N180: ${now.length} day counts each end 10 pt inside the bar, as each date starts 10 pt inside it (right/left gaps ${[...new Set(gaps)].join(', ')}); control: without the edit they end at ${[...new Set(ctl.map((c) => c.right.toFixed(2)))].join(', ')}`);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
