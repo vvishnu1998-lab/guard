@@ -34,6 +34,15 @@
  *      { missedPingId, windowLabel, windowStart, windowEnd }.
  *   2. sendPushNotification to the guard's fcm_token if present.
  *
+ * N179 (Vishnu, 2026-10-15, decision (a)): a 30-second grace after each
+ * window that closes from services/pingGrace.ts's cutover on. A window is
+ * judged only once its grace has passed, so this runs 31 s past each 5-minute
+ * mark and the flag and its push come about 30 s later than before. A ping
+ * labelled with the window that arrives inside the grace answers it on time,
+ * and answers only that window (windowAnsweredOnTime). An answer that arrives
+ * after the grace but before this tick is written as the row's resolution at
+ * once, marked late, with no push (lateAnswerFor, resolveAtFlag).
+ *
  * The Alerts feed's auto-erase in routes/notifications.ts hides the
  * row once resolved_at is set on the missed_pings row (which happens
  * when the guard submits a late ping via POST /api/locations/ping
@@ -51,6 +60,7 @@ import { missedWindowInsertSql } from '../services/missedWindowInsert';
 // (services/email.ts) counts expected windows with the SAME code that
 // decides whether a missed_pings row is written here.
 import { completedTrackableWindows, breakOverlapsWindow } from '../services/pingWindows';
+import { lateAnswerFor, resolveAtFlag, windowAnsweredOnTime, windowJudgeable } from '../services/pingGrace';
 import { channelForType, collapseIdFor } from '../services/pushChannels';
 
 interface SessionRow {
@@ -76,24 +86,8 @@ function siteLocalLabel(when: Date, siteTz: string | null): string {
   }).format(when);
 }
 
-async function anyPingInWindow(
-  sessionId: string,
-  windowStart: Date,
-  windowEnd: Date,
-): Promise<boolean> {
-  const { rows } = await pool.query<{ hit: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM location_pings
-       WHERE shift_session_id = $1
-         AND pinged_at >= $2 AND pinged_at < $3
-     ) AS hit`,
-    [sessionId, windowStart, windowEnd],
-  );
-  return rows[0]?.hit === true;
-}
-
-runJob('missedPingCron', '*/5 * * * *', async () => {
-  const now = new Date();
+/** One tick. Exported so scripts/test-n179-ping-grace.ts can run it at a chosen instant. */
+export async function missedPingTick(now: Date = new Date()): Promise<void> {
   let created = 0;
   let considered = 0;
 
@@ -134,13 +128,16 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
       );
 
       for (const w of windows) {
+        // N179: not before its grace has passed (services/pingGrace.ts).
+        if (!windowJudgeable(w.windowEnd, now)) continue;
         considered += 1;
 
-        // Fast-path skip: if any ping lands in the window, don't
-        // even attempt the INSERT — the ON CONFLICT would still
-        // be a no-op but the SELECT here is cheaper than the
-        // insert + conflict path.
-        if (await anyPingInWindow(s.session_id, w.windowStart, w.windowEnd)) continue;
+        // Fast-path skip: if the window was answered on time, don't even
+        // attempt the INSERT — the ON CONFLICT would still be a no-op but the
+        // SELECT here is cheaper than the insert + conflict path. N179: on
+        // time includes the grace, and a ping in the previous window's grace
+        // labelled with it answers that window, not this one.
+        if (await windowAnsweredOnTime(s.session_id, w.windowStart, w.windowEnd, s.site_tz, intervalMs)) continue;
 
         // Break-time quiet policy (locked 2026-08-20): a window any part
         // of which overlapped a break is WAIVED — no missed_pings row.
@@ -154,6 +151,9 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
         }
 
         const label = siteLocalLabel(w.windowStart, s.site_tz);
+        // N179: answered after the grace but before this tick? Then the row is
+        // written already resolved by it, below, and nobody is pushed.
+        const lateAnswer = await lateAnswerFor(s.session_id, label, w.windowEnd);
 
         // R6 dedup — ON CONFLICT DO NOTHING RETURNING id. If the
         // row already existed (this window was flagged on a prior
@@ -177,6 +177,10 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
         const mpId = inserted.rows[0]?.id;
         if (!mpId) continue;
         created += 1;
+        if (lateAnswer) {
+          await resolveAtFlag(mpId, lateAnswer);
+          continue;
+        }
 
         const title = 'Missed ping';
         const body  = `You missed the ${label} ping. Submit now.`;
@@ -226,4 +230,8 @@ runJob('missedPingCron', '*/5 * * * *', async () => {
       console.log(`[missedPingCron] considered=${considered} created=${created}`);
     }
   }
-}, { sentryMonitor: false });
+}
+
+// N179: 31 s past each 5-minute mark, so a window that closed on the mark is
+// judged just after its 30-second grace.
+runJob('missedPingCron', '31 */5 * * * *', () => missedPingTick(), { sentryMonitor: false });

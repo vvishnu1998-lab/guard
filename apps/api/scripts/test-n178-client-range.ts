@@ -126,10 +126,14 @@ async function inZone<T>(tz: string, fn: () => Promise<T>): Promise<T> {
     process.env.TZ = 'UTC';
   }
 }
-/** `apps/api/<rel>` at BASE, compiled as a fresh module under the current file's path. */
-function loadBase(rel: string): any {
+/**
+ * `apps/api/<rel>` at BASE, compiled as a fresh module under the current file's path. `edit` layers a later change
+ * onto it: N180 (after this test's PR) moved the report's timeline day count 10 pt in, so BASE's report gets the same
+ * edit, exactly once, and C8 still proves the bytes equal.
+ */
+function loadBase(rel: string, edit: (src: string) => string = (s) => s): any {
   const file = path.join(__dirname, '..', rel);
-  const src = execFileSync('git', ['show', `${BASE}:apps/api/${rel}`], { encoding: 'utf8' });
+  const src = edit(execFileSync('git', ['show', `${BASE}:apps/api/${rel}`], { encoding: 'utf8' }));
   const js = ts.transpileModule(src, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
   }).outputText;
@@ -325,7 +329,11 @@ async function main(): Promise<void> {
     const app = express();
     app.use(express.json());
     app.use('/api/client', (await import('../src/routes/clientPortal')).default);
-    app.use('/api/client-base', loadBase('src/routes/clientPortal.ts').default);
+    app.use('/api/client-base', loadBase('src/routes/clientPortal.ts', (src) => {
+      const from = "{ align: 'right', width: PAGE_W - ML });";
+      if (src.split(from).length !== 2) throw new Error('N180: expected the day count line once at BASE');
+      return src.replace(from, "{ align: 'right', width: PAGE_W - ML - 10 });");
+    }).default);
     const listening: Server = await new Promise((resolve) => { const sv = app.listen(0, '127.0.0.1', () => resolve(sv)); });
     listening.keepAliveTimeout = 600_000;
     server = listening;

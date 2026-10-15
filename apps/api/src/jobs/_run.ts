@@ -102,9 +102,15 @@ export function registeredJobs(): readonly RegisteredJob[] {
  *   M H * * *      -> 86400     daily at H:M
  *   M H D * *      -> 2678400   monthly on day D (31d; the longest month, so
  *                               the threshold never fires early on a short one)
+ *
+ * N179: any of those may carry a leading SECONDS field that is a plain number,
+ * 0-59 (node-cron's six-field form), with the same interval: missedPingCron
+ * runs at second 31 of every fifth minute. Every-second and stepped seconds
+ * still throw.
  */
 export function cronIntervalSeconds(expr: string): number {
-  const fields = expr.trim().split(/\s+/);
+  let fields = expr.trim().split(/\s+/);
+  if (fields.length === 6 && /^\d+$/.test(fields[0]) && Number(fields[0]) <= 59) fields = fields.slice(1);
   if (fields.length !== 5) {
     throw new Error(`[jobs] unsupported cron expression ${JSON.stringify(expr)}: expected 5 fields, got ${fields.length}`);
   }
@@ -242,13 +248,15 @@ let registeredCount = 0;
  * The promise produced by that .then() is discarded -- not returned, not
  * awaited, not caught. When the callback rejects, the rejection handler
  * re-throws into that orphaned promise, producing a genuine unhandled
- * rejection distinct from the one the caller awaits. Node 20+ defaults to
- * --unhandled-rejections=throw, and package.json pins engines >=20.0.0, so
- * that terminates the process. Railway would then restart it
- * (restartPolicyType ON_FAILURE, maxRetries 3).
+ * rejection distinct from the one the caller awaits. Before N169 that ended
+ * the process (Node 20+ defaults to --unhandled-rejections=throw, and
+ * package.json pins engines >=20.0.0), and Railway restarted it. Since N169,
+ * services/processHandlers.ts logs and reports it and the process carries on,
+ * so it would be one more Sentry event on every failing tick.
  *
  * Using withMonitor here would therefore convert today's silent-failure mode
- * into a crash loop -- strictly worse than the problem being fixed.
+ * into a crash loop before N169, or an event per tick after it -- worse than
+ * the problem being fixed either way.
  *
  * captureCheckIn (exports.js:128-140) is fully synchronous, returns a string
  * id, and creates no promise at all. Driving in_progress/ok/error by hand
@@ -317,7 +325,8 @@ export function runJob(
   const intervalSec = cronIntervalSeconds(expr);
 
   const monitorConfig = {
-    schedule: { type: 'crontab' as const, value: expr },
+    // Sentry's crontab has no seconds field: a six-field expression's seconds are dropped (N179).
+    schedule: { type: 'crontab' as const, value: expr.trim().split(/\s+/).slice(-5).join(' ') },
     checkinMargin: 2,
     maxRuntime: 10,
     timezone: timezone ?? 'UTC',
