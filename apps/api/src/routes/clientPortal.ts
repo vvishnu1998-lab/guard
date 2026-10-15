@@ -24,6 +24,7 @@ import type { AuthPayload } from '../middleware/auth';
 import PDFDocument from 'pdfkit';
 import { presignAll } from '../services/s3';
 import { signTokens } from './auth';
+import { endSignInForSwitch, newSid, setSessionCookie } from '../services/webSession';
 import { SHIFT_HOURS_SQL_FIELDS, type ShiftHours } from '../services/shiftHours';
 import {
   NAVY, WHITE, BLUE, RED, AMBER, GRAY1, GRAY2, TEXT, MUTED,
@@ -92,8 +93,10 @@ router.get('/sites', requireAuth('client'), async (req: Request, res: Response) 
 // POST /api/client/switch-site — body { site_id }. Verifies the target
 // site is in the caller's linked sites AND still accessible (site active +
 // portal not disabled), then mints a fresh JWT pair with the new site_id
-// baked in. The old token stays valid until natural expiry; the frontend
-// swaps the cookies immediately on the response.
+// baked in. N205 (Vishnu, 2026-10-14): the sign-in the caller's token belongs
+// to ends first, every token minted from it or from its refreshes, and the new
+// pair starts a new one. Two switches racing on one sign-in: the second is
+// refused. The new pair is also set as the client's session cookie (N203).
 //
 // Preview tokens can't switch — they're pinned to whatever the admin
 // generated them for.
@@ -122,7 +125,11 @@ router.post('/switch-site', requireAuth('client'), async (req: Request, res: Res
     return res.status(403).json({ error: 'You do not have access to that site' });
   }
 
-  const tokens = signTokens({ sub: req.user!.sub, role: 'client', site_id });
+  if (!(await endSignInForSwitch(req.user!))) {
+    return res.status(401).json({ error: 'Session revoked' });
+  }
+  const tokens = signTokens({ sub: req.user!.sub, role: 'client', site_id, sid: newSid() });
+  setSessionCookie(req, res, 'client', tokens.access);
   res.json(tokens);
 });
 

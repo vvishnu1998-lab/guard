@@ -10,6 +10,7 @@ import { sendPasswordChangedEmail, sendTempPasswordEmail, type PasswordPortal } 
 import { deviceLabel } from '../services/deviceLabel';
 import { Sentry } from '../services/sentry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
+import { clearSessionCookie, endSignIn, newSid, setSessionCookie, sidKey } from '../services/webSession';
 
 const router = Router();
 
@@ -448,8 +449,10 @@ router.post('/admin/login', async (req: Request, res: Response) => {
     role: 'company_admin',
     company_id: admin.company_id,
     is_primary: admin.is_primary,
+    sid: newSid(),
   });
   await logEvent(admin.id, 'company_admin', 'login_success', req);
+  setSessionCookie(req, res, 'company_admin', tokens.access);
   res.json({ ...tokens, must_change_password: admin.must_change_password });
 });
 
@@ -481,6 +484,7 @@ router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('comp
   );
   await logEvent(req.user!.sub, 'company_admin', 'password_changed', req);
   notifyPasswordChanged(adminResult.rows[0].email, 'admin', req);
+  clearSessionCookie(req, res, 'company_admin');
   res.json({ success: true });
 });
 
@@ -540,7 +544,7 @@ router.post('/client/login', async (req: Request, res: Response) => {
   // site. If the user has >1 site, the frontend routes to /select-site
   // and calls /switch-site to swap the site_id into a fresh JWT.
   const defaultSiteId = sites[0].id;
-  const tokens = signTokens({ sub: client.id, role: 'client', site_id: defaultSiteId });
+  const tokens = signTokens({ sub: client.id, role: 'client', site_id: defaultSiteId, sid: newSid() });
 
   // Session C — stamp last_login_at so admins can see "last login: 3 days ago"
   // on the CLIENTS AT THIS SITE list. Fire-and-forget: a DB hiccup here
@@ -548,6 +552,7 @@ router.post('/client/login', async (req: Request, res: Response) => {
   pool.query('UPDATE clients SET last_login_at = NOW() WHERE id = $1', [client.id])
     .catch((err) => console.error('[client/login] last_login_at update failed:', err));
   await logEvent(client.id, 'client', 'login_success', req);
+  setSessionCookie(req, res, 'client', tokens.access);
   res.json({
     ...tokens,
     must_change_password: client.must_change_password,
@@ -585,6 +590,7 @@ router.post('/client/change-password', requireAuth('client'), async (req: Reques
   );
   await logEvent(req.user!.sub, 'client', 'password_changed', req);
   notifyPasswordChanged(clientResult.rows[0].email, 'client', req);
+  clearSessionCookie(req, res, 'client');
   res.json({ success: true });
 });
 
@@ -638,8 +644,9 @@ router.post('/vishnu/login', async (req: Request, res: Response) => {
 
   await pool.query('UPDATE vishnu_state SET failed_login_count = 0, locked_at = NULL WHERE id = 1');
 
-  const tokens = signTokens({ sub: '00000000-0000-0000-0000-000000000000', role: 'vishnu' });
+  const tokens = signTokens({ sub: '00000000-0000-0000-0000-000000000000', role: 'vishnu', sid: newSid() });
   await logEvent('00000000-0000-0000-0000-000000000000', 'vishnu', 'login_success', req);
+  setSessionCookie(req, res, 'vishnu', tokens.access);
   res.json(tokens);
 });
 
@@ -743,6 +750,14 @@ router.post('/refresh', async (req: Request, res: Response) => {
     }
   }
 
+  // N205: a refresh token of a revoked web sign-in refreshes nothing. The new pair keeps the sid (`rest` below).
+  if (payload.sid) {
+    const ended = await pool.query('SELECT id FROM revoked_tokens WHERE jti = $1', [sidKey(payload.sid)]);
+    if (ended.rows.length > 0) {
+      return res.status(401).json({ error: 'Token has been revoked' });
+    }
+  }
+
   if (payload.jti) {
     const revoked = await pool.query('SELECT id FROM revoked_tokens WHERE jti = $1', [payload.jti]);
     if (revoked.rows.length > 0) {
@@ -807,9 +822,11 @@ router.post('/logout', requireAuthAllowingTemporaryPassword('guard', 'company_ad
   }
 
   const { refresh_token } = req.body;
+  let refreshSid: string | undefined;
   if (refresh_token) {
     try {
       const payload = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET!) as AuthPayload & { jti?: string };
+      refreshSid = payload.sid;
       if (payload.jti) {
         try {
           await pool.query(
@@ -829,7 +846,13 @@ router.post('/logout', requireAuthAllowingTemporaryPassword('guard', 'company_ad
       }
     } catch {}
   }
+  // N205: the whole sign-in ends, every token minted from it or from its refreshes.
+  // A DB error keeps the swallow above: the browser still signs out.
+  for (const sid of new Set([req.user?.sid, refreshSid])) {
+    await endSignIn(sid).catch(() => undefined);
+  }
   await logEvent(req.user!.sub, req.user!.role, 'logout', req);
+  clearSessionCookie(req, res, req.user!.role);
   res.json({ success: true });
 });
 
