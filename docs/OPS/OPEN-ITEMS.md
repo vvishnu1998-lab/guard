@@ -5430,7 +5430,8 @@ verified 2026-10-06, read-only: nothing in `apps/api/src` calls `process.on('unc
 - **Decided 2026-10-15 (Vishnu, 5a):** an unhandled rejection is reported and the API keeps running, as in
   production until now; an uncaught exception is logged, reported and flushed, then the process exits 1. "Start
   with the N169 + N204 PR, merge by OVERRIDE."
-- **Status 2026-10-15: BUILT** on `fix/n169-process-handlers` (on `2324b59`).
+- **Status 2026-10-15: SHIPPED** as `729b4ff` (PR #126, 11:23:50 PT, by OVERRIDE; see STATE.md). Built on
+  `fix/n169-process-handlers` (on `2324b59`):
   - `services/processHandlers.ts` (new) holds both handlers. `index.ts` imports it second, right after
     `services/sentry`, so they are in place before the rest of the API loads.
   - An uncaught exception: the line `[process] uncaught exception; exiting` with the stack, a fatal event, a flush
@@ -6892,6 +6893,8 @@ keys: code, message, status".
 - **Decided 2026-10-15 (Vishnu, 6a):** archive WEB-4 in Sentry. "6a: you archive WEB-4 via the Sentry API."
   **Not done yet:** the Sentry token on the Mac is read-only (`event:read`, `org:read`, `project:read`); archiving
   needs `event:write`. At 11:04 PT WEB-4 was unresolved, with 377 events, last seen 10:14 PT.
+- **Vishnu, 2026-10-15:** "1a (I'll archive WEB-4 myself)". The archive is his, in Sentry's UI; N204 closes once it
+  is recorded.
 - **Size S (the look). Tier 0.**
 
 ### N205 — a multi-site client's earlier session tokens outlive SIGN OUT
@@ -6959,6 +6962,38 @@ verified 2026-10-15 by reading `routes/auth.ts` (`POST /api/auth/forgot-password
   before COMMIT."
 - **Order (7a):** after N169's PR. **Size M. Tier 2** (it emails guards, admins and clients): merge with Vishnu
   present.
+- **Status 2026-10-15: BUILT** on `fix/n207-forgot-password` (on `729b4ff`). v83's preview ran on production and
+  rolled back. Its COMMIT waits for Vishnu's yes, and the merge for Vishnu (Tier 2).
+  - **The table:** `pending_password_resets` (schema_v83), one row per account, keyed `(role, account_id)`, with no
+    foreign key. The temporary password is stored as a cost-12 bcrypt hash, never plain. `expires_at` is 24 hours
+    on, and `created_at` paces the emails. The read-only role can read every column but `password_hash`;
+    production's default privileges would otherwise grant it the whole table.
+  - **forgot-password** answers first, then does the work. At most one email goes out per account per 15
+    minutes, claimed in one statement; a refused send gives the claim back. The account's password is untouched.
+  - **Sign-in** (admin, client, guard) takes the current password or an unexpired temporary one. The temporary
+    one becomes the password, with a forced change, as before (`password_reset_used` is recorded). Signing in with
+    the current password cancels a pending reset, and so does change-password.
+  - **A locked guard** gets past the lock with the emailed password only; the request alone no longer clears it.
+    An admin's lock is as before: a reset never lifted it.
+  - **Left alone:** an admin's resend of a welcome email, or an admin's reset of a client's password, sets a
+    password and leaves a pending reset in place. Both went to the account's own inbox, and the next sign-in with
+    either ends the other.
+  - **The email:** under the password it now says "It works for 24 hours." (Vishnu, 2026-10-15: "Add the "It works
+    for 24 hours." line"). 4a: its last line reads "If you didn't ask for this, ignore this email: your current
+    password still works." Nothing else in the email changed.
+  - **Unchanged:** the answer's text, the mobile app and the web. Their words still hold ("a temporary password has
+    been sent"; the web adds "Sign in with it and you'll be prompted to set a new password").
+  - **A stale comment, left for the next mobile batch:** the header of `apps/mobile/app/(auth)/forgot-password.tsx`
+    says the server "flips must_change_password=true" at the request. It now happens at the sign-in with the
+    emailed password.
+  - **Proof:** `scripts/test-n207-forgot-password.ts`, 22/22, with 7 of 7 mutants caught. At BASE a real account's
+    answer took 1835 ms, against 5 ms for no account: the timing difference this closes. v83's scripts were
+    rehearsed on a throwaway database with production's default privileges.
+  - **v83's preview on production, 11:40 PT:** the precondition and postcondition passed; the summary row read
+    `t | 0 | f | t`; then ROLLBACK. Nothing was left (postgres-readonly, 11:40:24 PT).
+  - **Vishnu, 2026-10-15, on the preview:** "1a (I'll archive WEB-4 myself), 2 yes, 3b OVERRIDE, 4a." So v83's
+    COMMIT runs right before the merge, which is by OVERRIDE, and the email gains the 24-hour line. The COMMIT's
+    record and the merge's ride with the next code PR.
 
 ### N208 — `railway.json` restarts the API at most 3 times on failure; whether that count resets is UNVERIFIED
 
