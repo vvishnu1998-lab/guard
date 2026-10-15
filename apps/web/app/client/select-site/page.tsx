@@ -66,6 +66,8 @@ export default function ClientSelectSitePage() {
     try {
       const res = await clientFetch('/api/client/switch-site', {
         method: 'POST',
+        // N203 stage 1: so the browser keeps the HttpOnly session cookie the API sets.
+        credentials: 'include',
         body:   JSON.stringify({ site_id: siteId }),
       });
       const data = await res.json();

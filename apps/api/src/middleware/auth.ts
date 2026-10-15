@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
 import { tagRequest } from '../services/sentry';
+import { isAllowedOrigin, sessionFromCookie, sidKey } from '../services/webSession';
 
 export type UserRole = 'guard' | 'company_admin' | 'client' | 'vishnu';
 
@@ -12,6 +13,7 @@ export interface AuthPayload {
   site_id?: string;    // client portal only
   is_primary?: boolean; // company_admin only
   jti?: string;        // refresh tokens only
+  sid?: string;        // N205: web sign-ins only; shared by every token minted from one sign-in (services/webSession.ts)
   /**
    * Session B — 'preview' identifies an admin-generated preview token
    * (POST /api/admin/sites/:siteId/preview-client-token). Middleware
@@ -60,14 +62,19 @@ export function requireAuthAllowingTemporaryPassword(...roles: UserRole[]) {
   return authenticate(roles, { allowTemporaryPassword: true });
 }
 
+/** Methods a cookie may authenticate from any origin: they change nothing. */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 function authenticate(roles: UserRole[], opts: { allowTemporaryPassword?: boolean }) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
-    if (!header?.startsWith('Bearer ')) {
+    // N203 stage 1: with no Authorization header, the session cookie the request names.
+    const fromCookie = header === undefined ? sessionFromCookie(req) : null;
+    if (!fromCookie && !header?.startsWith('Bearer ')) {
       return res.status(401).json({ error: 'Missing authorization token' });
     }
 
-    const token = header.slice(7);
+    const token = fromCookie ? fromCookie.token : header!.slice(7);
 
     // Decode without verification to peek at the role, so we can pick the
     // matching secret. This is safe: a forged role only changes which key
@@ -87,6 +94,17 @@ function authenticate(roles: UserRole[], opts: { allowTemporaryPassword?: boolea
       return res.status(401).json({ error: msg });
     }
 
+    if (fromCookie) {
+      // A portal's cookie holds that portal's session only: a client's never acts as an admin.
+      if (payload.role !== fromCookie.role) {
+        return res.status(401).json({ error: 'Invalid token' });
+      }
+      // 3a: a write the cookie authenticates must come from an allowed origin.
+      if (!SAFE_METHODS.has(req.method) && !isAllowedOrigin(req.headers.origin)) {
+        return res.status(403).json({ error: 'Origin not allowed' });
+      }
+    }
+
     if (roles.length && !roles.includes(payload.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
@@ -95,12 +113,18 @@ function authenticate(roles: UserRole[], opts: { allowTemporaryPassword?: boolea
     // Both /logout and /auth/refresh insert the presented jti into
     // revoked_tokens; the row has TTL = token.exp so the table stays
     // small.  On failure to reach the DB we deliberately fail-closed.
+    // N205: a token of a web sign-in is also refused once that sign-in is revoked.
     if (payload.jti) {
       try {
-        const revoked = await pool.query(
-          'SELECT 1 FROM revoked_tokens WHERE jti = $1 LIMIT 1',
-          [payload.jti]
-        );
+        const revoked = payload.sid
+          ? await pool.query(
+            'SELECT 1 FROM revoked_tokens WHERE jti = $1 OR jti = $2 LIMIT 1',
+            [payload.jti, sidKey(payload.sid)]
+          )
+          : await pool.query(
+            'SELECT 1 FROM revoked_tokens WHERE jti = $1 LIMIT 1',
+            [payload.jti]
+          );
         if (revoked.rows.length > 0) {
           return res.status(401).json({ error: 'Token has been revoked' });
         }

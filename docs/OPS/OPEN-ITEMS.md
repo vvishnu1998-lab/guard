@@ -6635,7 +6635,9 @@ calls the route: 75).
     password, and a sign-out refused by the limit would leave its session alive. The mobile app shares that budget
     (the 2026-08-20 lockout).
   - **4a:** SIGN-IN HISTORY lists "Signed out".
-- **Status 2026-10-14: BUILT on `feat/n202-server-sign-out` (on `26d38ae`).**
+- **Status 2026-10-14: SHIPPED as `541a6e1` (PR #123, 18:31:40 PT, by OVERRIDE); see STATE.md.** The limit change
+  is live (an unauthenticated sign-out reads `ratelimit-limit: 500`, was 20), and production's sign-in pages no
+  longer carry the refresh cookie.
 - **What changed:**
   - `apps/web/lib/signOut.ts`: `endSession(portal)` sends `POST /api/auth/logout` with the portal's session
     token, and a refresh token stored before this change, then clears both of the portal's cookies whatever the
@@ -6704,6 +6706,70 @@ and `middleware.ts`.
   stay): it needs its own scope.
 - **Vishnu, 2026-10-14, excluding it from N202:** "File the excluded item as a new N-item: move session tokens
   out of script-readable cookies (httpOnly). Scope it after N202 ships."
+- **Scoped 2026-10-14. Vishnu:** "1a 2a 3a 4a. Fold N205 into stage 1 … Build stage 1, merge by OVERRIDE. Stage 2
+  no earlier than 8 hours after stage 1 deploys."
+  - **1a:** the API sets the session as an HttpOnly cookie, and accepts it.
+  - **2a:** Vercel previews keep the bearer path; they cannot receive the cookie.
+  - **3a:** SameSite=Lax, and a write the cookie authenticates must come from an allowed Origin.
+  - **4a:** N206 (Preview as client) is folded into stage 2. N205 is folded into stage 1.
+- **Status 2026-10-15: stage 1 BUILT on `feat/n203-stage1-session-cookie` (on `541a6e1`).** Stage 2 no earlier than
+  8 hours after stage 1 deploys.
+- **Stage 1, the API** (`services/webSession.ts`, `middleware/auth.ts`, `routes/auth.ts`, `routes/clientPortal.ts`):
+  - At an admin, client or Vishnu sign-in and at a client's site switch, the session is also set as an HttpOnly
+    cookie, one per portal (`netraops_admin_session`, `netraops_client_session`, `netraops_vishnu_session`):
+    SameSite=Lax, Path=/, Secure on https, 8 hours, host-only, and only for an origin in ALLOWED_ORIGINS.
+    Sign-out and a change of password clear it.
+  - A request with no Authorization header that names its portal in `X-NetraOps-Portal` is authenticated by that
+    portal's cookie. The token must be that portal's role; a name given two values is refused; a write must come
+    from an allowed Origin. The header says which of a browser's cookies to read, and another site cannot send it
+    without passing CORS. Production's CORS already allows it.
+  - Bearer requests are unchanged. Every token without a sid, guards' included, gets BASE's answers with BASE's
+    queries.
+- **Stage 1, the web:** only the five requests that set or clear the cookie opt in (`credentials: 'include'`): the
+  three sign-ins, the client's site switch, SIGN OUT.
+  - **A correction to the scope,** which said the web would not change in stage 1. A browser keeps or clears a
+    cookie from another origin only when the request opts in. Without the opt-in no session would carry the cookie
+    when stage 2 lands, and everyone would be signed out once. The browser run shows it: a sign-in without the
+    opt-in left no cookie, one with it did.
+- **Cookie scope: host-only, on the API's host.** The scope said `.netraops.com`, so that www's page guard could read
+  it, but then every netraops.com host would receive the session: `em6648.netraops.com` (SendGrid's) and any future
+  or dangling one included. Built host-only; put to Vishnu 2026-10-15, before the merge.
+- **Stage 2, the web:** every call sends `credentials: 'include'` and names its portal; the web stops writing and
+  reading the token; N206's preview moves to the cookie. A host-only cookie never reaches www, so the page guard
+  redirects on the API's 401; a non-secret "signed in" marker can keep the instant redirect.
+- **Proof, stage 1:**
+  - `apps/api` `scripts/test-n203-session-cookie.ts`, 32/32 (local database, the real routers):
+    - the cookie per portal, with exact attributes, from `https://www.netraops.com` and `http://localhost:3105`;
+      none without an origin, for another origin or for a Vercel preview; the body unchanged; each sign-in its own
+      sid, shared by its two tokens; never for a guard;
+    - cookie auth only with the portal named: refused without the header, for another portal, for a token of
+      another role, for a name with two values, for odd names, and beside a non-bearer Authorization header; a
+      bearer token wins; route roles hold;
+    - a cookie write from no Origin, another origin or a Vercel preview: 403; from an allowed origin it reaches
+      the route; a read needs no Origin, nor does a bearer write; a site switch from another origin ends nothing;
+    - N205: a client's sign-in, refreshed and then switched: every earlier token, the refreshed pair included, is
+      refused and the new one reads; a second switch, by cookie, likewise; two racing switches make one sign-in; a
+      sign-out by cookie clears the cookie and ends the sign-in. Admin and Vishnu: signing out with a refreshed
+      token ends the first token and the refreshed refresh token. The sign-in's row lasts 30 days. Tokens from
+      before (no sid) still read, sign out and switch;
+    - a change of password clears the cookie;
+    - 14 sid-less cases, guards' included, give BASE's (`541a6e1`) answer with BASE's queries, statement for
+      statement; a token with a sid differs in one statement;
+    - 11 of 11 mutants caught.
+  - `apps/web` `npm run check:session-cookie`, 9/9, 5 of 5 mutants; `check:sign-out` still 15/15, with this edit
+    layered on.
+  - In a browser (Chrome 152), the real routers on a local database and the web on another origin of the same site:
+    - admin, client (through the site picker) and Vishnu: after the page's sign-in the browser holds the HttpOnly
+      cookie (a credentialed read naming the portal: 200); scripts cannot see it; without the portal header, or
+      without credentials: 401;
+    - a cookie write from the page's allowed origin reaches the route;
+    - after a site is picked, the cookie reads the new site and the token from before the switch is refused (N205);
+    - each SIGN OUT clears the cookie (the read: 401 "Missing authorization token"); a sign-out by cookie alone
+      also revokes the token;
+    - the control: a sign-in without the opt-in leaves no cookie.
+- **Visible on deploy:** nothing on screen. Sign-ins and site switches set one more cookie, HttpOnly, for the API's
+  host. A client switching site, or anyone signing out of the web, ends every token of that sign-in. Guards:
+  unchanged.
 - **Size M. Tier 1.**
 
 ### N204 — Sentry WEB-4: a rejected object nothing handles, in production since August, the homepage included
@@ -6733,8 +6799,14 @@ run.
 - SIGN OUT (N202) revokes only the token in use. In the browser run, after SIGN OUT, the token from before the site
   switch still answered 200 with the site.
 - Production, read-only 2026-10-14: 3 of 7 active clients have more than one site; 1 of them is STARNET's.
-- **Fix when wanted:** switch-site revokes the caller's token when it mints the new pair (an INSERT into
-  `revoked_tokens`, as the logout route does), so one token is live at a time.
+- **Folded into N203 stage 1. Vishnu, 2026-10-14:** "Fold N205 into stage 1: switching sites or signing out must
+  revoke every earlier token from that client's sign-in, not just the current one."
+- **Status 2026-10-15: BUILT** with N203 stage 1 (see N203 for the proof).
+  - Every web sign-in gets a sid, carried by every token minted from it and from its refreshes. A revoked_tokens
+    row `sid:<sid>` ends them all.
+  - A site switch writes one before it starts a new sid; of two racing switches, the second is refused.
+  - Every web sign-out writes one, the admin's and Vishnu's too.
+  - A token minted before it has no sid: a switch or a sign-out ends the token used.
 - **Size S. Tier 1.**
 
 ### N206 — "Preview as client" opens the client sign-in page, with the preview token in its address
@@ -6749,4 +6821,5 @@ production.
   parameter. N189's Web Analytics bullet covers what the analytics script does with full addresses.
 - **Fix when wanted:** the middleware lets `/client` through when `?preview=` carries a token it can verify, or the
   preview adopts its token on a page outside `/client/*`.
+- **Folded into N203 stage 2 (Vishnu's 4a, 2026-10-14):** the preview has to move to the cookie anyway.
 - **Size S. Tier 1.**

@@ -146,6 +146,15 @@ const LOGINS: Array<{ rel: string; portal: Portal }> = [
 ];
 const NOTE = "      // N202 (2a): no refresh token is kept. Nothing in the web reads one, and SIGN OUT revokes the session.\n";
 const keepLine = (p: Portal) => `      document.cookie = \`guard_${p}_refresh=\${data.refresh}; path=/; max-age=2592000; SameSite=Strict\`;\n`;
+/**
+ * A later change to the same lines, layered on so the comparison stays exact: N203 stage 1 (2026-10-15) lets
+ * each sign-in request keep the API's HttpOnly session cookie. scripts/check-session-cookie.ts proves it.
+ */
+const N203_COOKIE = "        // N203 stage 1: so the browser keeps the HttpOnly session cookie the API sets.\n        credentials: 'include',\n";
+const n203Anchor = (rel: string, p: Portal) => (rel === 'app/client/select-site/page.tsx'
+  ? "      const res = await clientFetch('/api/client/switch-site', {\n        method: 'POST',\n"
+  : `      const res = await fetch(\`\${process.env.NEXT_PUBLIC_API_URL}/api/auth/${p}/login\`, {\n        method: 'POST',\n`);
+const withN203 = (rel: string, p: Portal, src: string) => once(src, n203Anchor(rel, p), n203Anchor(rel, p) + N203_COOKIE, `${rel} N203 anchor`);
 const HISTORY: Array<{ rel: string; edits: Array<[string, string]> }> = [
   { rel: 'lib/signInHistory.ts', edits: [
     ['/** 1b: the five events the history lists. A type this page does not know is shown as sent. */', "/** 1b's five events, and sign-outs (N202, 4a). A type this page does not know is shown as sent. */"],
@@ -172,7 +181,7 @@ function baseProblems(read: (rel: string) => string): string[] {
   const same = (rel: string, want: string) => { if (want !== read(rel)) problems.push(`${rel}: not BASE plus the N202 edits`); };
   try {
     for (const s of SITES) same(s.rel, once(once(base(s.rel), s.importLine[0], s.importLine[1], `${s.rel} import`), signOutOld(s.portal), signOutNew(s.portal), `${s.rel} sign-out`));
-    for (const l of LOGINS) same(l.rel, once(base(l.rel), keepLine(l.portal), NOTE, `${l.rel} refresh line`));
+    for (const l of LOGINS) same(l.rel, withN203(l.rel, l.portal, once(base(l.rel), keepLine(l.portal), NOTE, `${l.rel} refresh line`)));
     for (const h of HISTORY) same(h.rel, h.edits.reduce((x, [a, b]) => once(x, a, b, h.rel), base(h.rel)));
   } catch (e) { problems.push((e as Error).message); }
   return problems;
@@ -196,7 +205,7 @@ async function main(): Promise<void> {
   const s = sourceProblems(now);
   check(s.length === 0, `each SIGN OUT goes through endSession then its sign-in page and writes no cookie itself; no page stores a refresh token; the 2a note on the 4 sign-in pages (${s.join('; ') || 'all right'})`);
   const bp = baseProblems(now);
-  check(bp.length === 0, `the ${SITES.length + LOGINS.length + HISTORY.length} touched files are BASE's (${BASE.slice(0, 7)}) with exactly the N202 edits (${bp.join('; ') || 'all equal'})`);
+  check(bp.length === 0, `the ${SITES.length + LOGINS.length + HISTORY.length} touched files are BASE's (${BASE.slice(0, 7)}) with exactly the N202 edits, and N203 stage 1's on the sign-in requests (${bp.join('; ') || 'all equal'})`);
 
   console.log('\n── 4  the history names a sign-out');
   const labels = now('lib/signInHistory.ts');
