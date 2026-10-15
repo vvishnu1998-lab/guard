@@ -415,6 +415,21 @@ const NO_REPLY = 'NetraOps — Do not reply to this email';
 const dates = (n: number) => [{ from: '12 Oct 2026', to: 'Oct 12, 2026', times: n }];
 const noReply = [{ from: NO_REPLY, to: 'NetraOps', times: 1 }];
 type Rewrite = { from: string; to: string; times: number };
+/**
+ * N207 (after B5) added one paragraph to the password reset, under the password, which P, T and W7 cut out of the
+ * current email (exactly once) before comparing it with BASE's; W7 checks the paragraph itself.
+ */
+const RESET_EXPIRY = /\n\s*<p style="color:#555;font-size:13px;margin-bottom:20px">\s*It works for 24 hours\.\s*<\/p>/;
+function cutResetExpiry(html: string): string {
+  if (html.split(RESET_EXPIRY).length !== 2) throw new Error('the password reset has no single "It works for 24 hours." paragraph');
+  return html.replace(RESET_EXPIRY, '');
+}
+/** N207 (4a, after B5) rewrote the password reset's last line too. */
+const resetRewrites: Rewrite[] = [...noReply, {
+  from: "If you didn't request this, contact your administrator immediately.",
+  to: "If you didn't ask for this, ignore this email: your current password still works.",
+  times: 1,
+}];
 /** name → (render with a module, the rewrites BASE's visible text needs). */
 const RENDERS: Array<[string, (E: any) => { subject: string; html: string }, Rewrite[]]> = [
   ['incident', (E) => E.renderIncidentAlert(incidentData), []],
@@ -478,9 +493,9 @@ const WELCOMES: Array<{ name: string; to: string; subject: string; title: string
     keeps: 'Sign in at app.netraops.com/client',
     send: (E) => E.sendClientWelcomeEmail({ client_id: CLIENT_ID, client_name: 'jordan lee', client_email: 'jordan.lee@example.invalid', company_id: STAR_GUARD, site_ids: [SITE], temp_password: TEMP }) },
 ];
-const NETRAOPS_ONLY: Array<{ name: string; send: (E: any) => Promise<unknown> }> = [
-  { name: 'primary-admin welcome', send: (E) => E.sendPrimaryAdminWelcomeEmail({ admin_id: ADMIN_ID, admin_name: 'pat lee', admin_email: 'pat.lee@example.invalid', company_id: STAR_GUARD, temp_password: TEMP }) },
-  { name: 'password reset', send: (E) => E.sendTempPasswordEmail('pat.lee@example.invalid', TEMP, 'admin') },
+const NETRAOPS_ONLY: Array<{ name: string; rw: Rewrite[]; cut?: (html: string) => string; send: (E: any) => Promise<unknown> }> = [
+  { name: 'primary-admin welcome', rw: noReply, send: (E) => E.sendPrimaryAdminWelcomeEmail({ admin_id: ADMIN_ID, admin_name: 'pat lee', admin_email: 'pat.lee@example.invalid', company_id: STAR_GUARD, temp_password: TEMP }) },
+  { name: 'password reset', rw: resetRewrites, cut: cutResetExpiry, send: (E) => E.sendTempPasswordEmail('pat.lee@example.invalid', TEMP, 'admin') },
 ];
 const FULL_LINES = ['4100 Mowry Ave, Ste 12, Fremont, CA 94538', 'License No. PPO 120456'];
 /** BASE's visible text with the rewrites applied, each counted. */
@@ -517,7 +532,7 @@ async function main(): Promise<void> {
     return [name, cut ? cutAppBlock(b.html, BASE_APP_BLOCK) : b.html, cut ? cutAppBlock(c.html, CUR_APP_BLOCK) : c.html, rw, b.subject, c.subject];
   }));
   const lettered = await frozen(async () => LETTERED.map(([name, fn]) => [name, fn()] as const));
-  pairs.push(['password-reset', prBase.html, pr.html, noReply, prBase.subject, pr.subject]);
+  pairs.push(['password-reset', prBase.html, cutResetExpiry(pr.html), resetRewrites, prBase.subject, pr.subject]);
   let gmailSame = 0;
   for (const [name, b, c] of pairs) {
     const r = compareStyles(b, c, rules);
@@ -658,10 +673,17 @@ async function main(): Promise<void> {
     const r = await run({}, n.send);
     const m = r.delivered[0];
     const base = await run({}, n.send, BASEMOD);
-    const want = base.delivered[0] && rewritten(visibleText(base.delivered[0].html), noReply);
+    const want = base.delivered[0] && rewritten(visibleText(base.delivered[0].html), n.rw);
     check(r.lookups.length === 0 && m !== undefined && m.replyTo === SUPPORT && !m.attachments && m.html.includes(`<div style="${ES.brand}">NetraOps</div>`)
-      && want !== undefined && want.problems.length === 0 && envelope(m) === envelope(base.delivered[0]) && visibleText(m.html) === want.text,
-      `W7 ${n.name}: NetraOps', with no letterhead lookup, even for a company with one; BASE's email but for "${NO_REPLY}"`);
+      && want !== undefined && want.problems.length === 0 && envelope(m) === envelope(base.delivered[0]) && visibleText(n.cut ? n.cut(m.html) : m.html) === want.text,
+      `W7 ${n.name}: NetraOps', with no letterhead lookup, even for a company with one; BASE's email but for ${n.rw.map((x) => `"${x.from}"`).join(' and ')}${n.cut ? ', and N207\'s paragraph under the password' : ''}`);
+    if (n.cut) {
+      const html = m?.html ?? '';
+      const box = html.indexOf(TEMP);
+      const para = html.search(RESET_EXPIRY);
+      check(box > 0 && para > box && html.indexOf('</div>', box) + '</div>'.length === para && para < html.indexOf('You will be required to change this on next login.'),
+        `W7b ${n.name}: N207's one paragraph, "It works for 24 hours.", sits right under the password and above "You will be required to change this on next login."`);
+    }
   }
   {
     const everything: string[] = [];

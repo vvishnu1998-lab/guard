@@ -11,6 +11,9 @@ import { deviceLabel } from '../services/deviceLabel';
 import { Sentry } from '../services/sentry';
 import { PACIFIC_TZ_SQL } from '../services/pacificDate';
 import { bodyTokens, clearSessionCookie, endSignIn, newSid, setSessionCookie, sidKey } from '../services/webSession';
+import {
+  cancelReset, claimReset, pendingResetFor, releaseReset, resetEmailDue, useReset, PASSWORD_HASH_COST, type ResetRole,
+} from '../services/pendingPasswordReset';
 
 const router = Router();
 
@@ -102,6 +105,20 @@ export async function logEvent(
   ).catch(() => {});
 }
 
+/**
+ * N207: a sign-in settles any pending reset (services/pendingPasswordReset.ts). With the emailed temporary
+ * password, it becomes the password, with a forced change, as forgot-password itself used to do at once. With the
+ * current password, the pending reset is void.
+ */
+async function settleReset(role: ResetRole, accountId: string, resetHash: string | null, req: Request): Promise<void> {
+  if (resetHash) {
+    await useReset(role, accountId, resetHash);
+    await logEvent(accountId, role, 'password_reset_used', req);
+  } else {
+    await cancelReset(role, accountId);
+  }
+}
+
 // ── Guard: email + password login ────────────────────────────────────────────
 
 router.post('/guard/login', async (req: Request, res: Response) => {
@@ -154,8 +171,10 @@ router.post('/guard/login', async (req: Request, res: Response) => {
 
   const hashToCheck = guard?.password_hash ?? '$2b$12$invalidhashpadding000000000000000000000000000000000000';
   const valid = await bcrypt.compare(password, hashToCheck);
+  // N207: an emailed temporary password signs in too, until it expires (services/pendingPasswordReset.ts).
+  const resetHash = guard && !valid ? await pendingResetFor('guard', guard.id, password) : null;
 
-  if (!guard || !valid) {
+  if (!guard || (!valid && !resetHash)) {
     if (guard) {
       await pool.query(
         `INSERT INTO login_attempts (guard_id, failed_count, updated_at)
@@ -196,7 +215,9 @@ router.post('/guard/login', async (req: Request, res: Response) => {
     [guard.id]
   );
   const lockRow = lockResult.rows[0];
-  if (lockRow?.locked_at && lockRow.failed_count >= MAX_FAILED_ATTEMPTS) {
+  // N207: the emailed temporary password gets past a lock, as the reset request itself used to clear it. The
+  // request alone no longer does.
+  if (!resetHash && lockRow?.locked_at && lockRow.failed_count >= MAX_FAILED_ATTEMPTS) {
     await logEvent(guard.id, 'guard', 'login_blocked_locked', req);
     return res.status(423).json({
       error: 'Too many failed attempts. Try again in 30 minutes or contact your supervisor.',
@@ -210,6 +231,7 @@ router.post('/guard/login', async (req: Request, res: Response) => {
      ON CONFLICT (guard_id) DO UPDATE SET failed_count = 0, locked_at = NULL, updated_at = NOW()`,
     [guard.id]
   );
+  await settleReset('guard', guard.id, resetHash, req);
   // Session hijack fix (Interpretation B): a successful guard login
   // is a session-invalidating event. Bump tokens_not_before so any
   // JWT issued to a prior device (same guard, different phone) is
@@ -272,7 +294,7 @@ router.post('/guard/login', async (req: Request, res: Response) => {
 
   res.json({
     ...tokens,
-    must_change_password: guard.must_change_password,
+    must_change_password: resetHash ? true : guard.must_change_password,
   });
 });
 
@@ -312,6 +334,7 @@ router.post('/guard/change-password', requireAuth('guard'), async (req: Request,
     [newHash, req.user!.sub]
   );
   await revokeGuardDevices(req.user!.sub, 'password_change');
+  await cancelReset('guard', req.user!.sub);
   Sentry.addBreadcrumb({
     category: 'auth',
     message: 'guard change-password: session invalidated + fcm cleared',
@@ -401,12 +424,14 @@ router.post('/admin/login', async (req: Request, res: Response) => {
 
   const hashToCheck = admin?.password_hash ?? '$2b$12$invalidhashpadding000000000000000000000000000000000000';
   const valid = await bcrypt.compare(password, hashToCheck);
+  // N207: an emailed temporary password signs in too, until it expires (services/pendingPasswordReset.ts).
+  const resetHash = admin && !valid ? await pendingResetFor('company_admin', admin.id, password) : null;
 
-  if (!admin || !valid || !admin.is_active) {
+  if (!admin || (!valid && !resetHash) || !admin.is_active) {
     // Increment only on a wrong password for a real admin — not on a missing
     // account (nothing to count) and not on a correct-password-but-deactivated
     // attempt (password was right). Anti-enumeration 401 unchanged.
-    if (admin && !valid) {
+    if (admin && !valid && !resetHash) {
       await pool.query(
         `UPDATE company_admins
             SET failed_login_count = failed_login_count + 1,
@@ -443,6 +468,7 @@ router.post('/admin/login', async (req: Request, res: Response) => {
     'UPDATE company_admins SET failed_login_count = 0, locked_at = NULL WHERE id = $1',
     [admin.id],
   );
+  await settleReset('company_admin', admin.id, resetHash, req);
 
   const tokens = signTokens({
     sub: admin.id,
@@ -453,7 +479,7 @@ router.post('/admin/login', async (req: Request, res: Response) => {
   });
   await logEvent(admin.id, 'company_admin', 'login_success', req);
   setSessionCookie(req, res, 'company_admin', tokens.access);
-  res.json({ ...bodyTokens(req, tokens), must_change_password: admin.must_change_password });
+  res.json({ ...bodyTokens(req, tokens), must_change_password: resetHash ? true : admin.must_change_password });
 });
 
 // ── Star admin: change password ──────────────────────────────────────────────
@@ -482,6 +508,7 @@ router.post('/admin/change-password', requireAuthAllowingTemporaryPassword('comp
     'UPDATE company_admins SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
     [newHash, req.user!.sub]
   );
+  await cancelReset('company_admin', req.user!.sub);
   await logEvent(req.user!.sub, 'company_admin', 'password_changed', req);
   notifyPasswordChanged(adminResult.rows[0].email, 'admin', req);
   clearSessionCookie(req, res, 'company_admin');
@@ -511,8 +538,10 @@ router.post('/client/login', async (req: Request, res: Response) => {
   const client = result.rows[0];
   const hashToCheck = client?.password_hash ?? '$2b$12$invalidhashpadding000000000000000000000000000000000000';
   const valid = await bcrypt.compare(password, hashToCheck);
+  // N207: an emailed temporary password signs in too, until it expires (services/pendingPasswordReset.ts).
+  const resetHash = client && !valid ? await pendingResetFor('client', client.id, password) : null;
 
-  if (!client || !valid || !client.is_active) {
+  if (!client || (!valid && !resetHash) || !client.is_active) {
     return res.status(401).json({ error: 'Invalid credentials or portal access disabled' });
   }
 
@@ -544,6 +573,7 @@ router.post('/client/login', async (req: Request, res: Response) => {
   // site. If the user has >1 site, the frontend routes to /select-site
   // and calls /switch-site to swap the site_id into a fresh JWT.
   const defaultSiteId = sites[0].id;
+  await settleReset('client', client.id, resetHash, req);
   const tokens = signTokens({ sub: client.id, role: 'client', site_id: defaultSiteId, sid: newSid() });
 
   // Session C — stamp last_login_at so admins can see "last login: 3 days ago"
@@ -555,7 +585,7 @@ router.post('/client/login', async (req: Request, res: Response) => {
   setSessionCookie(req, res, 'client', tokens.access);
   res.json({
     ...bodyTokens(req, tokens),
-    must_change_password: client.must_change_password,
+    must_change_password: resetHash ? true : client.must_change_password,
     sites,
   });
 });
@@ -588,6 +618,7 @@ router.post('/client/change-password', requireAuth('client'), async (req: Reques
     'UPDATE clients SET password_hash = $1, must_change_password = false, tokens_not_before = NOW() WHERE id = $2',
     [newHash, req.user!.sub]
   );
+  await cancelReset('client', req.user!.sub);
   await logEvent(req.user!.sub, 'client', 'password_changed', req);
   notifyPasswordChanged(clientResult.rows[0].email, 'client', req);
   clearSessionCookie(req, res, 'client');
@@ -905,12 +936,13 @@ router.post('/admin/unlock-guard/:guard_id', requireAuth('company_admin'), async
   res.json({ success: true });
 });
 
-// ── Forgot password: email a temporary 8-char password ──────────────────────
-// User enters their email; if it matches an account in the named portal,
-// generate a temp password, hash it, set must_change_password=true, and email
-// the plaintext to the user. On next login, the frontend forces a change
-// before any route is accessible. Same success message regardless of whether
-// the email exists (anti-enumeration).
+// ── Forgot password: email a temporary password (N207) ─────────────────────
+// User enters their email; if it matches an active account in the named
+// portal, a temporary password is emailed and kept beside the password for 24
+// hours (services/pendingPasswordReset.ts). The password itself is untouched:
+// the temporary one replaces it only when the owner signs in with it, and must
+// then be changed. Same answer, as fast, whether or not the email has an
+// account (anti-enumeration).
 
 router.post('/forgot-password', async (req: Request, res: Response) => {
   const { email, portal } = req.body;
@@ -956,40 +988,48 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     if (r.rows[0]) { userId = r.rows[0].id; table = 'guards'; }
   }
 
-  if (!userId || !table) return res.json(safeResponse);
+  // N207: answered before any of the work below, which only an account gets (bcrypt, SendGrid), so an email with
+  // an account and one without take as long.
+  res.json(safeResponse);
+  if (!userId || !table) return;
 
-  const role = portal === 'admin' ? 'company_admin' : portal === 'client' ? 'client' : 'guard';
+  const role: ResetRole = portal === 'admin' ? 'company_admin' : portal === 'client' ? 'client' : 'guard';
+  void emailReset(role, userId, normalizedEmail, portal as 'admin' | 'client' | 'guard', req).catch((err) => {
+    console.error('[forgot-password] reset failed', err);
+    Sentry.captureException(err, { tags: { flow: 'forgot_password', role } });
+  });
+});
+
+/**
+ * N207: the work behind a reset request, after its answer. At most one email per account per 15 minutes (3a): a
+ * request inside that gap sends nothing and leaves the last temporary password working. The hash is stored first,
+ * which claims the slot, and released if SendGrid refuses the email, so a failed send never holds back a retry.
+ */
+async function emailReset(
+  role: ResetRole, accountId: string, email: string, portal: 'admin' | 'client' | 'guard', req: Request,
+): Promise<void> {
+  if (!(await resetEmailDue(role, accountId))) {
+    await logEvent(accountId, role, 'password_reset_throttled', req);
+    return;
+  }
   const tempPassword = generateTempPassword();
-  const hash = await bcrypt.hash(tempPassword, 12);
-
-  // Email-first ordering — rotating the stored hash before a confirmed send would silently lock the user out.
+  const hash = await bcrypt.hash(tempPassword, PASSWORD_HASH_COST);
+  if (!(await claimReset(role, accountId, hash))) {
+    await logEvent(accountId, role, 'password_reset_throttled', req);
+    return;
+  }
   try {
-    await sendTempPasswordEmail(normalizedEmail, tempPassword, portal as 'admin' | 'client' | 'guard');
+    await sendTempPasswordEmail(email, tempPassword, portal);
   } catch (err) {
-    await logEvent(userId, role, 'password_reset_email_failed', req);
+    await releaseReset(role, accountId, hash);
+    await logEvent(accountId, role, 'password_reset_email_failed', req);
     Sentry.captureException(err, {
       tags: { flow: 'forgot_password', role },
-      extra: { target_email: normalizedEmail, target_id: userId },
+      extra: { target_email: email, target_id: accountId },
     });
-    return res.json(safeResponse);
+    return;
   }
-
-  await pool.query(
-    `UPDATE ${table} SET password_hash = $1, must_change_password = true WHERE id = $2`,
-    [hash, userId]
-  );
-
-  // For guards: also clear any failed-attempt lock so the temp can be used.
-  if (table === 'guards') {
-    await pool.query(
-      `UPDATE login_attempts SET failed_count = 0, locked_at = NULL, updated_at = NOW() WHERE guard_id = $1`,
-      [userId]
-    ).catch(() => {});
-  }
-
-  await logEvent(userId, role, 'password_reset_emailed', req);
-
-  res.json(safeResponse);
-});
+  await logEvent(accountId, role, 'password_reset_emailed', req);
+}
 
 export default router;

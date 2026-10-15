@@ -1505,11 +1505,14 @@ export async function sendTempPasswordEmail(
         <div style="background:#0B1526;color:#F59E0B;font-family:'SF Mono','Menlo',monospace;font-size:22px;letter-spacing:4px;padding:14px 20px;border-radius:8px;text-align:center;margin-bottom:20px">
           ${tempPassword}
         </div>
+        <p style="color:#555;font-size:13px;margin-bottom:20px">
+          It works for 24 hours.
+        </p>
         <p style="color:#DC2626;font-size:13px;font-weight:600;margin-bottom:20px">
           You will be required to change this on next login.
         </p>
         <p style="color:#999;font-size:12px;margin-top:16px">
-          If you didn't request this, contact your administrator immediately.
+          If you didn't ask for this, ignore this email: your current password still works.
         </p>
       </div>
       <div style="${ES.footer}">NetraOps</div>
