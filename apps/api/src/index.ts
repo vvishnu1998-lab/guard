@@ -2,6 +2,9 @@
 // auto-instrumentation can patch the Express prototype. The Sentry module
 // also loads dotenv first so SENTRY_DSN resolves.
 import { Sentry } from './services/sentry';
+// N169: what happens to an error that escapes everything. Second, so the handlers are in place before the rest
+// of the API loads.
+import './services/processHandlers';
 import 'express-async-errors';
 import express from 'express';
 import cors from 'cors';

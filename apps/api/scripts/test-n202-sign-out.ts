@@ -223,8 +223,11 @@ async function main(): Promise<void> {
       const indexWant = once(once(once(baseIndex, "import rateLimit from 'express-rate-limit';\n", ''),
         "import { pool } from './db/pool';\n", "import { pool } from './db/pool';\nimport { authLimiter, globalLimiter } from './middleware/rateLimits';\n"),
         `// Rate limiting\n${block(baseIndex, 'globalLimiter')}\n${block(baseIndex, 'authLimiter')}\n`, '// Rate limiting: globalLimiter and authLimiter, in middleware/rateLimits.ts.\n');
-      check(globalSame && authSame && indexWant === read('src/index.ts'),
-        `globalLimiter is BASE's (${globalSame}); authLimiter is BASE's plus the skip (${authSame}); index.ts is BASE's with the definitions swapped for the import, mounts unchanged (${indexWant === read('src/index.ts')})`);
+      // N169 added one import to index.ts after N202; it is taken out, strictly, before the comparison.
+      const indexNow = once(read('src/index.ts'), "// N169: what happens to an error that escapes everything. Second, so the handlers are in place before the rest\n"
+        + "// of the API loads.\nimport './services/processHandlers';\n", '');
+      check(globalSame && authSame && indexWant === indexNow,
+        `globalLimiter is BASE's (${globalSame}); authLimiter is BASE's plus the skip (${authSame}); index.ts is BASE's with the definitions swapped for the import, mounts unchanged, N169's import aside (${indexWant === indexNow})`);
     }
 
     section('M  mutation controls');
