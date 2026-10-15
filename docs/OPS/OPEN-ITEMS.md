@@ -5447,7 +5447,7 @@ verified 2026-10-06, read-only: nothing in `apps/api/src` calls `process.on('unc
     ingest on 127.0.0.1. It covers `index.ts`'s own boot error; the events match the ones Sentry's handlers sent
     at BASE; 6 of 6 mutants are caught. The compiled build, run under plain `node` as Railway runs it, logged,
     reported and exited 1 the same way.
-- **The restart:** `railway.json` restarts the API at most 3 times on failure (N208).
+- **The restart:** `railway.json` restarted the API at most 3 times on failure; N208 makes it ALWAYS, uncapped.
 - **Size S. Tier 1** (a code PR through the deploy gate).
 
 ### N170 — routes/activityLog.ts imports from the PDF theme and pdfkit, and uses none of it
@@ -5780,6 +5780,32 @@ verified 2026-10-11, read-only in production, across all rows to date.
     at end + G, and the missed-ping push moves G later.
   - **A capture time from the phone:** a mobile change, and a value the client controls.
 - **Either one changes the MISSED counts that clients see. Tier 2: Vishnu decides.**
+- **Decided 2026-10-15 (Vishnu):** "add a 30-second grace after the ping window closes; a ping inside it counts as on
+  time. Forward-only, no backfill of past records." On the one question that raised, "(a)": a ping that counts
+  through the grace answers only the window it names, so the next window still needs its own ping.
+- **The counts he asked for** (read-only, 2026-10-15), late answers that arrived within 30 s of the close:
+  - last 7 days: 13 of 46;
+  - last 30 days: 36 of 150, all STARNET, median 16.6 s;
+  - all time: 50 of 257, 45 of them STARNET.
+  In 12 of the 30-day 36, that ping was the only one in the next window, which (a) leaves to be answered on its
+  own. Answers later than 30 s keep today's rule: 8 of the 114 in 30 days were the only ping of the window they
+  arrived in.
+- **Status 2026-10-15: BUILT** on `fix/n179-n180-n185-n193-n208` (on `25bce4b`).
+  - `services/pingGrace.ts` (new): 30 s of grace (PING_GRACE_MS) for every window that closes from PING_GRACE_FROM
+    (2026-10-16 00:00 PDT, after the deploy) on. A ping labelled W that arrives within 30 s of W's close answers W
+    on time, and no longer also answers the window it arrived in. Windows that closed earlier keep the old rule.
+  - missedPingCron judges a window only once its grace has passed, and runs 31 s past each 5-minute mark, so its
+    flag and push come about 30 s later. An answer that arrives after the grace but before the tick becomes the
+    row's resolution at once, marked late, with no push.
+  - pingReminder asks the same question, so W's grace ping no longer silences W+1's prompt.
+  - The job runner accepts a leading seconds field (`_run.ts`).
+  - **Unchanged:** the ping route; the daily client report, which counts by label, late answers included; and
+    violation hours, which are recomputed from arrival times on every read, so changing them would rewrite past
+    exports.
+  - **Proof:** `scripts/test-n179-ping-grace.ts`, 18/18. It runs both jobs' real ticks on a local database around a
+    test cutover, writing pings in time order, and catches 7 of 7 mutants.
+- **Merge with Vishnu present** (it changes what clients see as late). PING_GRACE_FROM must fall after the deploy:
+  if the merge slips past 2026-10-15 23:30 PDT, move it first.
 
 ### N180 — the site security report's timeline day count touches the end of its bar
 
@@ -5788,6 +5814,11 @@ verified 2026-10-11 on the fix/pdf-polish samples. Pre-existing and unchanged.
   ends: no right padding. The date at the bar's left has 10 pt.
 - The activity log had the same defect, fixed with `width: PAGE_W - ML - 8` (its check L3).
 - **Fix:** the same 8 pt in `routes/clientPortal.ts`.
+- **Status 2026-10-15: BUILT** on `fix/n179-n180-n185-n193-n208` (Vishnu: "fix the timeline count touching the bar
+  edge"): the count now ends 10 pt inside the bar, matching the date's 10 pt on its left (width PAGE_W - ML - 10).
+  - **Proof:** `test-pdf-polish.ts` C7 measures every day count of a rendered report: 10.00 pt from the bar's end,
+    with the date 10.00 pt from its start. The control, without the edit, ends at 545.00.
+  - C5 loads BASE with the same edit, exactly once, and still finds nothing else moved.
 - **Size XS. Tier 1** (clients see it).
 
 ## New from N178 (fix/n178-client-range, 2026-10-11)
@@ -6099,6 +6130,13 @@ verified 2026-10-13 by Vishnu, on B5's 8-email test batch (STATE.md, #106).
   company has no letterhead.
 - **Decision (Vishnu, 2026-10-13):** cause unknown, affecting only the no-letterhead incident alert. Parked as
   low priority, with no more test sends for it.
+- **Looked at again, 2026-10-15** (Vishnu: "investigate read-only first. Fix only if the cause is established;
+  otherwise report findings and leave it parked").
+  - #7's raw message, read through the Gmail connector, decodes to 3,298 bytes of HTML.
+  - Every tag in it is closed, and its one non-ASCII character is "·". Nothing in it is malformed.
+  - It is the only email in the batch that is all three: single-part, NetraOps header, and the incident body with
+    its tracked link. Telling those apart needs a test send, which the parking decision rules out.
+  - **Cause not established; stays PARKED.**
 - **Size: unknown. Tier 1** (a fix would be a merge to main; cosmetic, client-visible).
 
 ## New from the store-links rollout (2026-10-13)
@@ -6244,6 +6282,18 @@ and contact lines of about 90 characters and more.
 - **Fix when needed:**
   - shorten the company name in the header and footer with an ellipsis, as the PDF letterhead does;
   - shorten or wrap long block lines.
+- **Status 2026-10-15: BUILT** on `fix/n179-n180-n185-n193-n208` (Vishnu: "keep long company names from colliding
+  with the page number in XLSX print footers").
+  - The footer's company name is cut with an ellipsis, so that "Confidential — <company>" fits 230 pt in Helvetica
+    at 8 pt (`footerCompany`, `letterhead/xlsx.ts`), the way the PDF letterhead cuts it.
+  - The header keeps the whole name: it did not collide, 110 pt clear at 75 characters.
+  - **Measured through Excel's PDF export, on Letter, 2026-10-15.** "Page" starts at x 288.0.
+    - Before: 50 characters end 20.6 pt clear, 55 end 4.3 pt clear, and 75 interleave with it.
+    - After: B1's 75-character fixture and 40 "W" end 27.5 pt clear, and a 41-character name prints whole, 50.8 pt
+      clear.
+  - **Proof:** `scripts/test-n193-footer-name.ts`, 12/12, 3 of 3 mutants caught. `test-letterhead-b6-b7` now expects
+    the cut name in the footer, since its hostile profile is cut.
+  - **Still open, not asked:** B6's block lines longer than about 90 characters.
 - **Size S. Tier 1.**
 
 ## New from Phase C, change password (2026-10-13)
@@ -6893,8 +6943,10 @@ keys: code, message, status".
 - **Decided 2026-10-15 (Vishnu, 6a):** archive WEB-4 in Sentry. "6a: you archive WEB-4 via the Sentry API."
   **Not done yet:** the Sentry token on the Mac is read-only (`event:read`, `org:read`, `project:read`); archiving
   needs `event:write`. At 11:04 PT WEB-4 was unresolved, with 377 events, last seen 10:14 PT.
-- **Vishnu, 2026-10-15:** "1a (I'll archive WEB-4 myself)". The archive is his, in Sentry's UI; N204 closes once it
-  is recorded.
+- **Vishnu, 2026-10-15:** "1a (I'll archive WEB-4 myself)". The archive is his, in Sentry's UI.
+- **Status 2026-10-15: CLOSED.** Vishnu: "WEB-4 archived forever." Read through the API at 12:55 PT: status
+  `ignored`, substatus `archived_forever`, set at 12:47:07 PT. It had 379 events; the last came at 12:42:35 PT, a
+  second after his own sign-in.
 - **Size S (the look). Tier 0.**
 
 ### N205 — a multi-site client's earlier session tokens outlive SIGN OUT
@@ -6962,8 +7014,9 @@ verified 2026-10-15 by reading `routes/auth.ts` (`POST /api/auth/forgot-password
   before COMMIT."
 - **Order (7a):** after N169's PR. **Size M. Tier 2** (it emails guards, admins and clients): merge with Vishnu
   present.
-- **Status 2026-10-15: BUILT** on `fix/n207-forgot-password` (on `729b4ff`). v83's preview ran on production and
-  rolled back. Its COMMIT waits for Vishnu's yes, and the merge for Vishnu (Tier 2).
+- **Status 2026-10-15: SHIPPED and VERIFIED** as `25bce4b` (PR #127, 12:23:06 PT, by OVERRIDE), after v83 was
+  committed on production at 12:18:34 PT; Vishnu's reset check on his own account passed, 12:39–12:42 PT. See
+  STATE.md. Built on `fix/n207-forgot-password` (on `729b4ff`):
   - **The table:** `pending_password_resets` (schema_v83), one row per account, keyed `(role, account_id)`, with no
     foreign key. The temporary password is stored as a cost-12 bcrypt hash, never plain. `expires_at` is 24 hours
     on, and `created_at` paces the emails. The read-only role can read every column but `password_hash`;
@@ -7003,5 +7056,15 @@ Railway restarts a service that exits non-zero, up to that cap (docs.railway.com
   one deployment's life leaves the API down until the next deploy.
 - N169 changes none of this: before it, Sentry's default handler also ended the process on an uncaught exception.
   Sentry saw none in the 90 days to 2026-10-15.
-- **Fix (not done; log only):** ask Railway how the count resets, or raise the cap.
+- **Fix (log only, until 2026-10-15):** ask Railway how the count resets, or raise the cap.
+- **Status 2026-10-15: BUILT** on `fix/n179-n180-n185-n193-n208` (Vishnu: "raise or remove the Railway restart cap
+  in railway.json; tell me the setting you chose and why"). The setting is `restartPolicyType: ALWAYS`, with no
+  `restartPolicyMaxRetries`, so Railway restarts the API whenever it stops, uncapped.
+  - **Why:** the API never exits on its own, so every stop is a fault (N169 exits 1 on an uncaught exception).
+    Every stop should restart, and with no cap a fourth crash in one deployment's life cannot leave it down.
+  - **The plan:** Railway's docs say ALWAYS is not available on Free and trial plans, which also cap ON_FAILURE at
+    10; paid plans may set any policy. This project's plan is UNVERIFIED: Railway's API refused the read with the
+    CLI's token. It has run a production API and Postgres since July, more than a Free plan's credit covers.
+  - **After the deploy:** the deployment's `serviceManifest.deploy.restartPolicyType` should read ALWAYS. It read
+    ON_FAILURE with 3 retries on `5810bcc7`.
 - **Size XS. Tier 1** (`railway.json` rides with a code PR).
