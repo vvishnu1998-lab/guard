@@ -6373,8 +6373,8 @@ changed by another person, with a session or the current password, learns of it 
   temporary password included; 4a, the copy as proposed, with the weekday computed in Pacific time and a test
   that pins a known date's weekday. It emails STARNET's guards, admins and client, so its merge is Tier 2 and
   waits for Vishnu to be present.
-- **Status 2026-10-14: BUILT as Phase D's D2 on `feat/phase-d2-password-changed-email` (on `69f97dd`), not yet
-  merged** (Tier 2: Vishnu present). See the Phase D section for what it sends and the proof.
+- **Status 2026-10-14: SHIPPED as Phase D's D2 in `26d38ae` (PR #122, 16:47:04 PT, by OVERRIDE with Vishnu
+  present) and VERIFIED in Gmail.** See the Phase D section.
 - **Size S. Tier 1** (customer-visible email; its merge is Tier 2).
 
 ### N198 — the web build downloads its fonts from Google, so a Google hiccup fails the build
@@ -6508,8 +6508,11 @@ UTC, the browser in Pacific).
 
 ## New from Phase D, login history (2026-10-14)
 
-**Status: D1 SHIPPED 2026-10-14 as `69f97dd` (PR #121, 15:55:09 PT, by OVERRIDE; see STATE.md). D2 BUILT on
-`feat/phase-d2-password-changed-email` (on `69f97dd`), not yet merged: Tier 2, it waits for Vishnu to be present.**
+**Status: COMPLETE 2026-10-14.**
+- D1 SHIPPED as `69f97dd` (PR #121, 15:55:09 PT, by OVERRIDE).
+- D2 SHIPPED as `26d38ae` (PR #122, 16:47:04 PT, by OVERRIDE with Vishnu present), and VERIFIED in Gmail.
+
+See STATE.md.
 
 Phase D is the last part of Vishnu's program: A company profile, B letterhead, C change password, D login
 history. N197 is folded in.
@@ -6522,7 +6525,8 @@ Vishnu, 2026-10-14:
 Locked since 2026-10-06 (6a): own history only, no IP column.
 
 - **1b:** the history lists sign-ins, failed sign-ins, lockouts, password changes and password reset emails.
-  - It lists no sign-outs: the admin web's SIGN OUT only clears its cookies, so none is recorded (N202).
+  - Sign-outs: none was recorded, because the web's SIGN OUT only cleared its cookies. N202 (4a) records them, and
+    the history lists them as "Signed out".
 - **2a:** its own page, `/admin/settings/sign-ins`.
   - Opened from Settings → YOUR ACCOUNT → SIGN-IN HISTORY.
   - Newest first, 50 at a time with LOAD MORE, back 365 days (auth_events' retention).
@@ -6578,7 +6582,7 @@ Locked since 2026-10-06 (6a): own history only, no IP column.
   clients or guards; N200 changes only the answers to requests no app sends.
 - **Size M. Tier 1.**
 
-**D2, the N197 email: BUILT 2026-10-14, not yet merged; its merge waits for Vishnu (Tier 2).**
+**D2, the N197 email: SHIPPED 2026-10-14 as `26d38ae` (PR #122), VERIFIED in Gmail by Vishnu.**
 - **When it is sent:** after every change of password through the three change-password routes, the first
   change from a temporary password included (3a). It is sent once the change is stored, and not awaited:
   - a failed send is reported to Sentry (`sendgrid_failing`, flow `password_changed`);
@@ -6611,17 +6615,138 @@ Locked since 2026-10-06 (6a): own history only, no IP column.
     - every six hours of 2025–2028 against Intl, in six process zones;
     - 3 of 3 mutants caught.
   - `check-email-escaping`: 19 templates, the three new variants with the address and the device poisoned.
-- **After the merge, Vishnu's real-path check:** change the Star Guard test admin's password and read the email
-  in Gmail.
+- **Verified in Gmail (Vishnu, 2026-10-14 ~17:01 PT):** "Wednesday, October 14, 2026 at 5:01 PM PT, from Chrome
+  on macOS", for the right account, with the approved copy, in the Inbox, not clipped.
 
-### N202 — the admin web's SIGN OUT leaves the session alive on the server
+### N202 — the web's SIGN OUT leaves the session alive on the server, in all three portals
 
-verified 2026-10-14 by reading `components/admin/AdminNav.tsx`, and in production's auth_events: no admin sign-out
-has ever been recorded.
-- SIGN OUT clears the two cookies and opens the sign-in page. It never calls `POST /api/auth/logout`.
-- So the access token stays valid until it expires (8 hours): anyone holding a copy can keep using it after the
-  admin signs out.
-- For the same reason, no sign-out appears in the history (Phase D's option 1c, not chosen).
-- **Fix when wanted:** SIGN OUT calls `/api/auth/logout` with the session before clearing the cookies, and the route
-  revokes the token's id. The history can then list sign-outs.
+verified 2026-10-14 by reading `components/admin/AdminNav.tsx`, `components/client/ClientNav.tsx` and
+`app/vishnu/layout.tsx`, and in production's auth_events: no web sign-out had ever been recorded (guards, whose app
+calls the route: 75).
+- SIGN OUT cleared the two cookies and opened the sign-in page. It never called `POST /api/auth/logout`.
+- So the session token stayed valid until it expired (8 hours): anyone holding a copy could keep using it after the
+  sign-out. The refresh token, stored at sign-in by four pages and read by none, stayed valid for 30 days.
+- For the same reason, no sign-out appeared in the history (Phase D's option 1c, not chosen).
+- **Vishnu, 2026-10-14:** "1a 2a 3a 4a. Build straight through, merge by OVERRIDE."
+  - **1a:** all three portals: admin, client and Vishnu.
+  - **2a:** the browser keeps no refresh token. SIGN OUT still revokes and clears one stored before.
+  - **3a:** `POST /api/auth/logout` is not counted by the /api/auth limit (20 requests per 15 minutes per
+    address); the global limit (500) still applies. A sign-out needs a live session, so it cannot guess a
+    password, and a sign-out refused by the limit would leave its session alive. The mobile app shares that budget
+    (the 2026-08-20 lockout).
+  - **4a:** SIGN-IN HISTORY lists "Signed out".
+- **Status 2026-10-14: BUILT on `feat/n202-server-sign-out` (on `26d38ae`).**
+- **What changed:**
+  - `apps/web/lib/signOut.ts`: `endSession(portal)` sends `POST /api/auth/logout` with the portal's session
+    token, and a refresh token stored before this change, then clears both of the portal's cookies whatever the
+    answer, after at most 3 seconds. Two clicks make one request.
+  - It is not a keepalive request: it is awaited, and a keepalive request that needs a CORS preflight, as this one
+    does, has been refused by browsers (Chrome's, when keepalive shipped; Chrome 152 sends it).
+  - Each portal's SIGN OUT awaits it, then opens its sign-in page.
+  - The four sign-in pages (admin, client, the client's site picker, Vishnu) no longer store a refresh token.
+  - `apps/api/src/middleware/rateLimits.ts`: the two limiters, moved from `index.ts` unchanged except for
+    authLimiter's `skip` of `POST /logout`, so a harness can mount the real ones.
+  - `services/signInHistory.ts` lists `logout`; the web names it "Signed out", and the page's intro names
+    sign-outs.
+- **What it does not cover:**
+  - A multi-site client's earlier tokens, from sign-in and from each site switch, stay valid until they expire
+    (N205).
+  - Session tokens are still in cookies a page script can read (N203).
+  - An admin's "Preview as client" window cannot sign out on the server: its read-only token is refused by the
+    route (403), so its SIGN OUT clears the cookie as before, and the token lives out its 30 minutes. On `26d38ae`
+    the preview does not open at all (N206).
+- **Proof:**
+  - `apps/api` `scripts/test-n202-sign-out.ts`, 9/9 (local database, the real limiters and routers):
+    - 25 sign-outs in a row, all 200; after them sign-ins 1–20 still reach the route (401, a wrong password) and
+      the 21st gets 429; a sign-out after that, 200;
+    - after a sign-out the session token answers 401 "Token has been revoked" and the refresh token is refused; a
+      sign-out without a refresh token works, and the same token signing out again is refused;
+    - the history reads sign-in, sign-out, sign-in, sign-out, sign-in, each "Chrome on macOS";
+    - the limiters are `26d38ae`'s plus the skip, and `index.ts` mounts them as before;
+    - 4 of 4 mutants caught: no skip, a skip of everything, a skip of GET, the history without sign-outs.
+  - `scripts/test-d1-sign-in-history.ts` still 18/18, with a sign-out among the listed rows.
+  - `apps/web` `npm run check:sign-out`, 15/15:
+    - per portal, one request with that portal's session token and the old refresh token when stored, not
+      keepalive; both of its cookies gone; no other portal's cookie touched;
+    - a refusal, a network error and an API that never answers (abandoned at 3 s) sign the browser out all the
+      same; no session cookie, no request; two clicks, one request;
+    - each SIGN OUT goes through `endSession`; no page stores a refresh token; the nine touched files are
+      `26d38ae`'s plus exactly these edits;
+    - 8 of 8 mutants caught.
+  - `check:sign-in-history` still 15/15, with "Signed out".
+  - In a browser (Chrome 152), against the real limiters and routers on a local database and the branch's web dev
+    server, with the API on another origin (so with a CORS preflight, as in production):
+    - admin, client (through the site picker) and Vishnu: each sign-in stores only the session cookie;
+    - each SIGN OUT sends the preflight (204) and `POST /api/auth/logout` (200), clears that portal's cookies and
+      leaves the other portals' alone; the token from before answers 401 "Token has been revoked";
+    - a refresh cookie left by an older sign-in is cleared too;
+    - the API's headers show each sign-in counted by the 20-request limit and each sign-out only by the global 500;
+    - the admin's history reads "Signed in", "Signed out", "Signed in", each "Chrome on macOS".
+- **Visible on deploy:** every portal's SIGN OUT ends its session on the server; an admin's SIGN-IN HISTORY lists
+  "Signed out". Nothing changes for guards, whose app already called the route.
+- **Size S. Tier 1.**
+
+## New from N202, server-side sign-out (2026-10-14)
+
+### N203 — the web keeps its session tokens in cookies any script on its pages can read
+
+verified 2026-10-14 by reading the four sign-in pages, `lib/adminApi.ts`, `lib/clientApi.ts`, `lib/vishnuApi.ts`
+and `middleware.ts`.
+- Each portal's session token is written with `document.cookie` (`path=/; max-age=28800; SameSite=Strict` at
+  sign-in): not `HttpOnly`, which a page script cannot set, and not `Secure`.
+- Every API call reads it back from `document.cookie` and sends it as a bearer token; `middleware.ts` reads the
+  same cookie to guard the portal's pages.
+- So a script injected into any page of the site could read an admin's, a client's or Vishnu's session token and
+  use it for up to 8 hours, or until SIGN OUT revokes it (N202).
+- **Fix when wanted:** the session moves to an `HttpOnly; Secure` cookie that the API sets and the browser sends
+  by itself, and the web stops handling the token. The web calls the API on another origin with bearer tokens
+  today, so this changes how the web authenticates (cookies across origins, CSRF; the mobile app's bearer tokens
+  stay): it needs its own scope.
+- **Vishnu, 2026-10-14, excluding it from N202:** "File the excluded item as a new N-item: move session tokens
+  out of script-readable cookies (httpOnly). Scope it after N202 ships."
+- **Size M. Tier 1.**
+
+### N204 — Sentry WEB-4: a rejected object nothing handles, in production since August, the homepage included
+
+verified 2026-10-14 in Sentry (read-only): WEB-4, "UnhandledRejection: Object captured as promise rejection with
+keys: code, message, status".
+- 374 events since 2026-08-04; 230 of them carry tags.
+- Every tagged event: Chrome on macOS (152: 89, 153: 93, 154: 37, 155: 11), production, across many releases.
+- Pages: `/admin` 67, the homepage `/` 54, `/admin/login` 16, `/data-deletion` 15, `/admin/activity` 14,
+  `/admin/shifts` 12, `/vishnu` 10, and others.
+- No event names a user. `/vishnu` needs Vishnu's own sign-in, so at least those 10 come from his browser, and
+  four Chrome versions in two months fit one Mac updating itself. That is a lead, not a finding.
+- The browser's unhandledrejection handler caught it: the rejected value is a plain object, not an Error, and
+  nothing on the page handled it.
+- It predates Phase D. It fired at 17:01 PT during Vishnu's D2 check, as it has on pages no deploy touched.
+- **Where it comes from: UNVERIFIED.** It may be one browser, or a browser extension.
+- **Next (Vishnu, 2026-10-14: "an N-item for a read-only look"):** read the events' stack frames, breadcrumbs and
+  browser details in Sentry; say whether it is our code, and how many browsers send it.
+- **Size S (the look). Tier 0.**
+
+### N205 — a multi-site client's earlier session tokens outlive SIGN OUT
+
+verified 2026-10-14 by reading `routes/clientPortal.ts` (`POST /api/client/switch-site`), and in N202's browser
+run.
+- Picking a site mints a new token pair, and the route's own comment says "The old token stays valid until natural
+  expiry". A client with more than one site picks one at every sign-in, so each sign-in leaves two live tokens.
+- SIGN OUT (N202) revokes only the token in use. In the browser run, after SIGN OUT, the token from before the site
+  switch still answered 200 with the site.
+- Production, read-only 2026-10-14: 3 of 7 active clients have more than one site; 1 of them is STARNET's.
+- **Fix when wanted:** switch-site revokes the caller's token when it mints the new pair (an INSERT into
+  `revoked_tokens`, as the logout route does), so one token is live at a time.
+- **Size S. Tier 1.**
+
+### N206 — "Preview as client" opens the client sign-in page, with the preview token in its address
+
+verified 2026-10-14 in N202's browser run, on a branch whose `middleware.ts`, `lib/clientApi.ts`,
+`components/client/PreviewBootstrap.tsx` and `app/admin/clients/page.tsx` are `26d38ae`'s; not checked in
+production.
+- PREVIEW AS CLIENT opens `/client?preview=<token>`. The page code would adopt the token (`lib/clientApi.ts`), but
+  `middleware.ts` runs first: with no client cookie it redirects to `/client/login?from=<the address>`.
+- So the admin sees the client sign-in page, not the preview.
+- The token stays in the sign-in page's address, inside `from`: `PreviewBootstrap` removes only a `preview`
+  parameter. N189's Web Analytics bullet covers what the analytics script does with full addresses.
+- **Fix when wanted:** the middleware lets `/client` through when `?preview=` carries a token it can verify, or the
+  preview adopts its token on a page outside `/client/*`.
 - **Size S. Tier 1.**
