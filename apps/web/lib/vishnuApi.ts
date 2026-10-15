@@ -1,31 +1,32 @@
 /**
  * Authenticated API client for Vishnu super admin portal.
- * Reads the guard_vishnu_access JWT cookie and attaches it as Bearer token.
+ * Sends the session the way lib/session.ts says (N203 stage 2): the API's
+ * HttpOnly cookie on the web's own site, the bearer token on a preview.
  */
+import { authInit, signedOut } from './session';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
-function getToken(): string {
-  if (typeof document === 'undefined') return '';
-  return document.cookie.match(/guard_vishnu_access=([^;]+)/)?.[1] ?? '';
-}
-
 export async function vishnuFetch(path: string, options?: RequestInit): Promise<Response> {
-  return fetch(`${API}${path}`, {
+  const auth = authInit('vishnu');
+  const res = await fetch(`${API}${path}`, {
+    credentials: auth.credentials,
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${getToken()}`,
+      ...auth.headers,
       ...(options?.headers ?? {}),
     },
   });
+  // N203 stage 2: the API's 401 is the real check. The session is gone: sign in again.
+  if (res.status === 401) signedOut('vishnu');
+  return res;
 }
 
 export async function vishnuGet<T>(path: string): Promise<T> {
   const res = await vishnuFetch(path);
   if (!res.ok) {
     if (res.status === 401 && typeof window !== 'undefined') {
-      window.location.href = '/vishnu/login';
       return Promise.reject(new Error('Unauthorized'));
     }
     const err = await res.json().catch(() => ({}));

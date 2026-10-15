@@ -32,6 +32,7 @@ import * as path from 'path';
 import ts from 'typescript';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { undoN203Stage2 } from './n203Stage2Edits';
 
 /** main before Phase C (PR #118's merge). */
 const BASE = '814a0dbb0e13318f538396eff332b9d1a21bf60f';
@@ -62,7 +63,8 @@ stub('next/link', {
     React.createElement('a', { href, className }, children),
 });
 
-const now = (rel: string) => fs.readFileSync(path.join(WEB, rel), 'utf8');
+/** The page as it was before N203 stage 2 (scripts/n203Stage2Edits.ts, proven exact by check-session-cookie), so this check still compares only its own change. */
+const now = (rel: string) => undoN203Stage2(rel, fs.readFileSync(path.join(WEB, rel), 'utf8'));
 const base = (rel: string) => execFileSync('git', ['show', `${BASE}:apps/web/${rel}`], { encoding: 'utf8' });
 /** The page component from `src`, compiled under the page's own path so its imports resolve as they do in the app. */
 function page(src: string, rel: string): React.ComponentType {

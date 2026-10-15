@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useState, FormEvent } from 'react';
+import { authInit, forgetSession } from '../../../lib/session';
 
 /**
  * /admin/change-password — one page, two ways in:
@@ -52,12 +53,6 @@ function EyeOffIcon() {
   );
 }
 
-function readCookie(name: string): string | null {
-  if (typeof document === 'undefined') return null;
-  const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
-  return m ? decodeURIComponent(m[1]) : null;
-}
-
 export default function AdminChangePasswordPage() {
   const fromSettings = useSearchParams()?.get('from') === 'settings';
   const copy = fromSettings ? COPY.settings : COPY.temporary;
@@ -78,19 +73,21 @@ export default function AdminChangePasswordPage() {
 
     setLoading(true);
     try {
-      const access = readCookie('guard_admin_access');
+      // N203 stage 2: the session as lib/session.ts sends it (the cookie, or a preview's bearer token).
+      const auth = authInit('admin');
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/admin/change-password`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
+        credentials: auth.credentials,
+        headers: { 'Content-Type': 'application/json', ...auth.headers },
         body: JSON.stringify({ current_password: current, new_password: next }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Could not change password'); return; }
       // The server stamps tokens_not_before on password change, so the
-      // cookies we hold are already revoked — expire them and send the
-      // admin to sign in fresh instead of into a wall of 401s.
-      document.cookie = 'guard_admin_access=; path=/; max-age=0; SameSite=Strict';
-      document.cookie = 'guard_admin_refresh=; path=/; max-age=0; SameSite=Strict';
+      // session we hold is already revoked, and the API cleared its cookie.
+      // Forget the rest and send the admin to sign in fresh instead of
+      // into a wall of 401s.
+      forgetSession('admin');
       window.location.href = '/admin/login?notice=password-changed';
     } catch {
       setError('Network error. Please try again.');

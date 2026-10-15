@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Image from 'next/image';
 import { useSearchParams } from 'next/navigation';
 import { clientFetch, clientGet } from '../../../lib/clientApi';
+import { markSignedIn } from '../../../lib/session';
 
 interface Site {
   id:      string;
@@ -76,7 +77,8 @@ export default function ClientSelectSitePage() {
         setSwitching(null);
         return;
       }
-      document.cookie = `guard_client_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
+      // N203 stage 2: the new site's session is the API's cookie (lib/session.ts); the hint is renewed.
+      markSignedIn('client', data.access);
       // N202 (2a): no refresh token is kept. Nothing in the web reads one, and SIGN OUT revokes the session.
       window.location.href = fromPath;
     } catch {

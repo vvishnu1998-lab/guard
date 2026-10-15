@@ -1,6 +1,7 @@
 'use client';
 import Image from 'next/image';
 import { useState, FormEvent } from 'react';
+import { COOKIE_REFUSED, markSignedIn, sessionKept, signInHeaders } from '../../../lib/session';
 
 function EyeIcon() {
   return (
@@ -43,12 +44,14 @@ export default function VishnuLoginPage() {
         method: 'POST',
         // N203 stage 1: so the browser keeps the HttpOnly session cookie the API sets.
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...signInHeaders('vishnu') },
         body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Login failed'); return; }
-      document.cookie = `guard_vishnu_access=${data.access}; path=/; max-age=28800; SameSite=Strict`;
+      // N203 stage 2: the session is the API's HttpOnly cookie; the page guard reads a hint (lib/session.ts).
+      markSignedIn('vishnu', data.access);
+      if (!(await sessionKept('vishnu'))) { setError(COOKIE_REFUSED); return; }
       // N202 (2a): no refresh token is kept. Nothing in the web reads one, and SIGN OUT revokes the session.
       window.location.href = '/vishnu';
     } catch {

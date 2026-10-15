@@ -1,39 +1,28 @@
 /**
  * Authenticated API client for client portal.
- * Reads the guard_client_access JWT cookie and attaches it as Bearer token.
+ * Sends the client's session the way lib/session.ts says (N203 stage 2): the
+ * API's HttpOnly cookie on the web's own site, the bearer token on a preview.
+ * An admin's "Preview as client" arrives the same way, as the client portal's
+ * cookie, never as a token in a URL (N206).
  */
+import { authInit, signedOut } from './session';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
-function getToken(): string {
-  if (typeof document === 'undefined') return '';
-  // Session B — admin "Preview as client" flow. window.open drops a
-  // ?preview=<token> query param on the target URL. When there is no
-  // real client cookie yet, adopt the preview token AND persist it as
-  // the client cookie so subsequent navigations Just Work. The URL is
-  // scrubbed by <PreviewBootstrap /> after mount.
-  const cookieToken = document.cookie.match(/guard_client_access=([^;]+)/)?.[1];
-  if (cookieToken) return cookieToken;
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const preview = params.get('preview');
-    if (preview) {
-      document.cookie = `guard_client_access=${preview}; path=/; SameSite=Strict`;
-      return preview;
-    }
-  } catch { /* SSR or non-browser env */ }
-  return '';
-}
-
 export async function clientFetch(path: string, options?: RequestInit): Promise<Response> {
-  return fetch(`${API}${path}`, {
+  const auth = authInit('client');
+  const res = await fetch(`${API}${path}`, {
+    credentials: auth.credentials,
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${getToken()}`,
+      ...auth.headers,
       ...(options?.headers ?? {}),
     },
   });
+  // N203 stage 2: the API's 401 is the real check. The session is gone: sign in again.
+  if (res.status === 401) signedOut('client');
+  return res;
 }
 
 export async function clientGet<T>(path: string): Promise<T> {

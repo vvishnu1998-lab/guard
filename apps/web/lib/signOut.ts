@@ -20,13 +20,19 @@
  * does (JSON and a bearer token, to the API's origin), has been refused by
  * browsers: Chrome refused it when keepalive shipped (Chrome 152 sends it). A
  * refused request would sign the browser out and leave the session alive.
+ *
+ * N203 stage 2: on the web's own site the session is the API's HttpOnly cookie,
+ * which no script can see, so SIGN OUT always asks the API, naming the portal,
+ * and the API clears the cookie. On a preview it sends the bearer token, as
+ * before. Then the browser forgets the hint and any token (lib/session.ts).
  */
+import { authInit, cookieSession, forgetSession, SIGN_IN_PATH, type Portal } from './session';
+
+export { SIGN_IN_PATH };
+export type { Portal };
+
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
-export type Portal = 'admin' | 'client' | 'vishnu';
-
-const COOKIE_PREFIX: Record<Portal, string> = { admin: 'guard_admin', client: 'guard_client', vishnu: 'guard_vishnu' };
-export const SIGN_IN_PATH: Record<Portal, string> = { admin: '/admin/login', client: '/client/login', vishnu: '/vishnu/login' };
 export const SIGN_OUT_TIMEOUT_MS = 3000;
 
 function readCookie(name: string): string {
@@ -41,10 +47,9 @@ export function endSession(portal: Portal): Promise<void> {
   const inFlight = pending[portal];
   if (inFlight) return inFlight;
   const run = (async () => {
-    const prefix = COOKIE_PREFIX[portal];
-    const access = readCookie(`${prefix}_access`);
-    const refresh = readCookie(`${prefix}_refresh`);
-    if (access) {
+    const access = readCookie(`guard_${portal}_access`);
+    const refresh = readCookie(`guard_${portal}_refresh`);
+    if (cookieSession() || access) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), SIGN_OUT_TIMEOUT_MS);
       try {
@@ -53,7 +58,7 @@ export function endSession(portal: Portal): Promise<void> {
           // N203 stage 1: so the browser applies the API's clearing of the HttpOnly session cookie.
           credentials: 'include',
           signal: controller.signal,
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
+          headers: { 'Content-Type': 'application/json', ...authInit(portal).headers },
           body: JSON.stringify(refresh ? { refresh_token: refresh } : {}),
         });
       } catch {
@@ -62,8 +67,7 @@ export function endSession(portal: Portal): Promise<void> {
         clearTimeout(timer);
       }
     }
-    document.cookie = `${prefix}_access=; path=/; max-age=0`;
-    document.cookie = `${prefix}_refresh=; path=/; max-age=0`;
+    forgetSession(portal);
   })();
   pending[portal] = run;
   return run.finally(() => { delete pending[portal]; });

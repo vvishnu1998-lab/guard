@@ -19,6 +19,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { adminGet, adminPatch, adminPost, adminDelete } from '../../../lib/adminApi';
+import { markSignedIn } from '../../../lib/session';
 
 interface Site {
   id:                          string;
@@ -346,10 +347,14 @@ function ClientPortalsPageInner() {
 
   async function previewAsClient(siteId: string) {
     try {
-      const r = await adminPost<{ access_token: string; expires_in: number }>(
+      // N206 (N203 stage 2): no token in a URL. The API set the client portal's
+      // cookie for the preview's 30 minutes; a preview of the web (bearer path)
+      // gets the token in the body instead. The hint lets the client pages open.
+      const r = await adminPost<{ access_token?: string; expires_in: number }>(
         `/api/admin/sites/${siteId}/preview-client-token`, {},
       );
-      window.open(`/client?preview=${encodeURIComponent(r.access_token)}`, '_blank', 'noopener');
+      markSignedIn('client', r.access_token, r.expires_in);
+      window.open('/client', '_blank', 'noopener');
     } catch (e: any) { setError(e?.message ?? 'Preview failed'); }
   }
 

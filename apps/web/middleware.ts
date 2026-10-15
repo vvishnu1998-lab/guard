@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { jwtVerify } from 'jose';
+import { apiHost, sameSite } from './lib/session';
 
 /**
  * Next.js Edge Middleware — route protection for all three portals.
@@ -22,6 +23,15 @@ import { jwtVerify } from 'jose';
  * Per-portal key routing mirrors the API (see `secretForRole` in
  * apps/api/src/middleware/auth.ts): vishnu → VISHNU_JWT_SECRET, all
  * others → JWT_SECRET.
+ *
+ * N203 stage 2 (Vishnu's 1a, 2026-10-15): where the web and the API are one
+ * site (www.netraops.com), the session is the API's HttpOnly cookie, which this
+ * host never sees. A non-secret hint, netraops_<portal>_signed_in, lets the
+ * portal's pages through; it decides nothing, because the API's 401 is the real
+ * check (lib/session.ts). A session signed in before stage 2 carries today's
+ * token cookie and no hint: the token is verified as above and swapped for the
+ * hint, once, for the rest of its life, so nobody is signed out. Elsewhere (a
+ * Vercel preview) the token cookie is checked as above, unchanged.
  */
 
 const ROUTES = [
@@ -29,18 +39,24 @@ const ROUTES = [
     prefix:             '/admin',
     loginPath:          '/admin/login',
     cookieName:         'guard_admin_access',
+    refreshName:        'guard_admin_refresh',
+    hintName:           'netraops_admin_signed_in',
     secretEnvVar:       'JWT_SECRET',
   },
   {
     prefix:             '/client',
     loginPath:          '/client/login',
     cookieName:         'guard_client_access',
+    refreshName:        'guard_client_refresh',
+    hintName:           'netraops_client_signed_in',
     secretEnvVar:       'JWT_SECRET',
   },
   {
     prefix:             '/vishnu',
     loginPath:          '/vishnu/login',
     cookieName:         'guard_vishnu_access',
+    refreshName:        'guard_vishnu_refresh',
+    hintName:           'netraops_vishnu_signed_in',
     secretEnvVar:       'VISHNU_JWT_SECRET',
   },
 ] as const;
@@ -64,6 +80,31 @@ export async function middleware(req: NextRequest) {
       pathname.startsWith(route.loginPath + '/')
     ) {
       return NextResponse.next();
+    }
+
+    if (sameSite(req.nextUrl.hostname, apiHost())) {
+      if (req.cookies.get(route.hintName)?.value === '1') return NextResponse.next();
+      // 1a: a session from before stage 2 swaps its token cookie for the hint.
+      const legacy = req.cookies.get(route.cookieName)?.value;
+      const legacySecret = getSecret(route.secretEnvVar);
+      if (legacy && legacySecret) {
+        try {
+          const { payload } = await jwtVerify(legacy, legacySecret, { algorithms: ['HS256'] });
+          const left = typeof payload.exp === 'number' ? payload.exp - Math.floor(Date.now() / 1000) : 0;
+          const res = NextResponse.next();
+          res.cookies.set(route.hintName, '1', { path: '/', maxAge: Math.max(left, 1), sameSite: 'lax', secure: req.nextUrl.protocol === 'https:' });
+          res.cookies.delete(route.cookieName);
+          res.cookies.delete(route.refreshName);
+          return res;
+        } catch {
+          // Expired or not ours: the sign-in page, below.
+        }
+      }
+      const res = NextResponse.redirect(
+        new URL(`${route.loginPath}?from=${encodeURIComponent(pathname + (req.nextUrl.search ?? ''))}`, req.url),
+      );
+      if (legacy) res.cookies.delete(route.cookieName);
+      return res;
     }
 
     const token = req.cookies.get(route.cookieName)?.value;

@@ -1,30 +1,31 @@
 /**
  * Authenticated API client for admin web portal.
- * Reads the guard_admin_access JWT cookie and attaches it as Bearer token.
+ * Sends the admin's session the way lib/session.ts says (N203 stage 2): the
+ * API's HttpOnly cookie on the web's own site, the bearer token on a preview.
  * All pages in /admin use this instead of raw fetch.
  */
+import { authInit, signedOut } from './session';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-
-function getToken(): string {
-  if (typeof document === 'undefined') return '';
-  return document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? '';
-}
 
 /** The API's answer to an admin on a temporary password (N194): every route but changing it is refused. */
 export const PASSWORD_CHANGE_REQUIRED = 'PASSWORD_CHANGE_REQUIRED';
 export const CHANGE_PASSWORD_PATH = '/admin/change-password';
 
 export async function adminFetch(path: string, options?: RequestInit): Promise<Response> {
+  const auth = authInit('admin');
   const res = await fetch(`${API}${path}`, {
     cache: 'no-store',  // never serve a stale list — refetches after mutations must reflect them
+    credentials: auth.credentials,
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${getToken()}`,
+      ...auth.headers,
       ...(options?.headers ?? {}),
     },
   });
+  // N203 stage 2: the API's 401 is the real check. The session is gone: sign in again.
+  if (res.status === 401) signedOut('admin');
   // N194: an admin on a temporary password is sent to change it, from any
   // page whose data the API refused. Not from the change-password page itself,
   // where the nav's own polling would otherwise reload it forever. The

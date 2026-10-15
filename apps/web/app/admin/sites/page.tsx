@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { adminGet, adminPatch, adminPost } from '../../../lib/adminApi';
+import { authInit } from '../../../lib/session';
 import { fmtContractDate } from '../../../lib/contractDates';
 import {
   centroidOf,
@@ -33,10 +34,6 @@ const GeofenceMapEditor = dynamic(() => import('../../../components/GeofenceMapE
 });
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-function getAdminToken() {
-  if (typeof document === 'undefined') return '';
-  return document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? '';
-}
 
 interface Site {
   id:                          string;
@@ -544,11 +541,14 @@ export default function SitesPage() {
   async function deleteProfile(profile: Profile, siteId: string) {
     if (!confirm(`Delete profile "${profile.profile_name}"? This can't be undone.`)) return;
     try {
+      // N203 stage 2: the admin's session as lib/session.ts sends it.
+      const auth = authInit('admin');
       await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001'}/api/scheduling/profile/${profile.id}`, {
         method: 'DELETE',
+        credentials: auth.credentials,
         headers: {
           'Content-Type':  'application/json',
-          Authorization:   `Bearer ${document.cookie.match(/guard_admin_access=([^;]+)/)?.[1] ?? ''}`,
+          ...auth.headers,
         },
       }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error ?? 'Delete failed'); });
       await fetchProfilesForSite(siteId);
@@ -615,9 +615,10 @@ export default function SitesPage() {
   async function uploadPdfToSite(siteId: string, file: File): Promise<void> {
     const fd = new FormData();
     fd.append('file', file);
+    // N203 stage 2: the admin's session as lib/session.ts sends it.
     const res = await fetch(`${API}/api/sites/${siteId}/instructions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${getAdminToken()}` },
+      ...authInit('admin'),
       body: fd,
     });
     if (!res.ok) {
