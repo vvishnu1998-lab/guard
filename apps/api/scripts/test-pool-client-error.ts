@@ -463,7 +463,8 @@ function initSentry(): void {
     environment: 'pf-harness',
     sampleRate: 1.0,
     tracesSampleRate: 1.0,                    // production: 0.05
-    integrations: [Sentry.httpIntegration(), Sentry.expressIntegration()],   // src/services/sentry.ts's set
+    // src/services/sentry.ts's set as it was here; since N169 it also leaves out Sentry's two process handlers.
+    integrations: [Sentry.httpIntegration(), Sentry.expressIntegration()],
     transport: (opts: any) => core.createTransport(opts, async (req: { body: string | Uint8Array }) => {
       recorded.push(core.parseEnvelope(req.body) as Envelope);
       return { statusCode: 200 };

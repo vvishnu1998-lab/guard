@@ -18,6 +18,9 @@
  * Error handler: Sentry.setupExpressErrorHandler(app) is wired in index.ts
  * AFTER all routes. It captures the error AND calls next(err) so existing
  * Express error handling (default 500 response) continues to fire.
+ *
+ * Process handlers: an uncaught exception or an unhandled rejection is the API's own policy, in
+ * services/processHandlers.ts (N169), with or without a DSN. Sentry's two are left out of its defaults below.
  */
 import 'dotenv/config';
 import * as Sentry from '@sentry/node';
@@ -69,7 +72,12 @@ if (process.env.SENTRY_DSN) {
     environment: process.env.SENTRY_ENV || process.env.NODE_ENV || 'production',
     sampleRate: 1.0,
     tracesSampleRate: 0.05,
-    integrations: [
+    // A function, not an array: an array is ADDED to the defaults, and Sentry's two process handlers have to
+    // come out of them. The API has its own (services/processHandlers.ts, N169). With Sentry's running beside
+    // them, every rejection would print Sentry's warning as well, and a reason that is not an object (a string,
+    // say) would be reported twice: Sentry marks an Error as sent, but cannot mark a string.
+    integrations: (defaults) => [
+      ...defaults.filter((i) => i.name !== 'OnUncaughtException' && i.name !== 'OnUnhandledRejection'),
       Sentry.httpIntegration(),
       Sentry.expressIntegration(),
     ],
