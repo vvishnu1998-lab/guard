@@ -5,8 +5,8 @@ import { Sentry } from './services/sentry';
 import 'express-async-errors';
 import express from 'express';
 import cors from 'cors';
-import rateLimit from 'express-rate-limit';
 import { pool } from './db/pool';
+import { authLimiter, globalLimiter } from './middleware/rateLimits';
 
 // Route imports
 import authRoutes from './routes/auth';
@@ -68,20 +68,7 @@ const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 
-// Rate limiting
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20, // tighter limit for auth endpoints
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many login attempts, please try again later.' },
-});
+// Rate limiting: globalLimiter and authLimiter, in middleware/rateLimits.ts.
 
 // Fail-closed CORS (CB4, audit/WEEK1.md C3).
 // - ALLOWED_ORIGINS is required; the server refuses to start without it so
