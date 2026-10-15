@@ -264,6 +264,22 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-15 — PR #126, N169 (the API's own handlers for an uncaught exception and an unhandled rejection, 5a), by OVERRIDE — verified 2026-10-15 11:34 PT
+
+| thing | value |
+|---|---|
+| merge | PR #126 merged as `729b4ff` at **11:23:50 PT by OVERRIDE** (Vishnu: "Start with the N169 + N204 PR, merge by OVERRIDE."). One read at 11:23:46.5 PT: 5/5 SUCCESS, CLEAN, head `b6e227a`, main `2324b59`. Then one call, `gh pr merge 126 --merge --match-head-commit b6e227a…`. The merge tree equals the head's tree (`346e587`). |
+| web | Vercel production on `729b4ff`: success at 11:25:19 PT. |
+| Railway | `6be48377-efd5-4894-94f3-cc1579b4e618` **SUCCESS** from `729b4ff` (GitHub deployment success at 11:26:09 PT). |
+| health | `/health` commit `729b4ff`; `/health/crons` 20 jobs, `stale: []`; route control 401. |
+| the new process | Logged `[jobs] registered 20 jobs with heartbeats` and `API server running on port 8080` at 11:25:49.9 PT; no `[process]` line to 11:33 PT. The handlers cannot be exercised in production without a fault; the proof is the test and the compiled build (OPEN-ITEMS N169). |
+| switchover | The old container (`b82c6718`, from #125's `2324b59`) served its last request at 11:25:29.2 PT and logged last at 11:26:23.3. The new one was listening at 11:25:49.9 and served its first request at 11:26:25.2. Over its whole life (09:43:08.6 to 11:25:29.2) the old one served 1493 requests: 0 were 499s and 0 were 5xx. To 11:32:44 the new one served 16: 0 were 499s and 0 were 5xx. Sentry, 11:20–11:34 PT: nothing in any project. |
+| restart window | 11:23:50–11:26:23 PT: STARNET had 2 sessions open and wrote nothing. After the deploy: notifications at 11:30:00 and 11:30:01, and a ping at 11:33:30. |
+| N204 | WEB-4 NOT archived: the Sentry token on the Mac is read-only (see OPEN-ITEMS N204). |
+| visible change | None for anyone using the apps. Railway's logs get a `[process]` line if the API ever crashes or a promise goes unhandled. |
+
+---
+
 ## Shipped 2026-10-15 — PR #125, N203 stage 2 (the web stops handling session tokens), 3b and N206, merged with Vishnu present; live on the cookie path since the web's API address moved to api.netraops.com — verified 2026-10-15 10:09 PT
 
 | thing | value |

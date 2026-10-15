@@ -295,9 +295,20 @@ async function main(): Promise<void> {
 
     section('G  the guard/mobile sign-in is the same, byte for byte');
     const span = (s: string) => s.slice(s.indexOf("router.post('/guard/login'"), s.indexOf("router.post('/guard/change-password'"));
-    const routeNow = span(read('src/routes/auth.ts'));
+    // N207 (after stage 2) lets an emailed temporary password sign in, guards included, by design. Its four edits to
+    // this route are taken out, each exactly once, before the comparison; the requests below are run as they are.
+    const N207_EDITS: Array<[string, string]> = [
+      ["  const valid = await bcrypt.compare(password, hashToCheck);\n  // N207: an emailed temporary password signs in too, until it expires (services/pendingPasswordReset.ts).\n"
+        + "  const resetHash = guard && !valid ? await pendingResetFor('guard', guard.id, password) : null;\n\n  if (!guard || (!valid && !resetHash)) {\n",
+        '  const valid = await bcrypt.compare(password, hashToCheck);\n\n  if (!guard || !valid) {\n'],
+      ['  // N207: the emailed temporary password gets past a lock, as the reset request itself used to clear it. The\n'
+        + '  // request alone no longer does.\n  if (!resetHash && lockRow?.locked_at', '  if (lockRow?.locked_at'],
+      ["  await settleReset('guard', guard.id, resetHash, req);\n", ''],
+      ['    must_change_password: resetHash ? true : guard.must_change_password,\n', '    must_change_password: guard.must_change_password,\n'],
+    ];
+    const routeNow = N207_EDITS.reduce((src, [after, before]) => once(src, after, before), span(read('src/routes/auth.ts')));
     check(routeNow.length > 4000 && routeNow === span(gitShow(BASE, 'src/routes/auth.ts')) && routeNow === span(gitShow(BEFORE_N203, 'src/routes/auth.ts')),
-      `the guard sign-in route (${routeNow.length} characters) is ${BASE.slice(0, 7)}'s and ${BEFORE_N203.slice(0, 7)}'s to the byte`);
+      `the guard sign-in route (${routeNow.length} characters) is ${BASE.slice(0, 7)}'s and ${BEFORE_N203.slice(0, 7)}'s to the byte, N207's four edits aside`);
     const DROP = new Set(['date', 'etag', 'connection', 'keep-alive']);
     /** A response with its two tokens set aside: status, headers, body, and what the tokens carry. */
     const face = (r: Res) => {
@@ -389,7 +400,7 @@ async function main(): Promise<void> {
         check(wrong(r), `control — ${what}`);
       }
       {
-        const make = mutantOf('src/routes/auth.ts', (s) => once(s, '  res.json({\n    ...tokens,\n    must_change_password: guard.must_change_password,\n', '  res.json({\n    ...bodyTokens(req, tokens),\n    must_change_password: guard.must_change_password,\n'));
+        const make = mutantOf('src/routes/auth.ts', (s) => once(s, '  res.json({\n    ...tokens,\n', '  res.json({\n    ...bodyTokens(req, tokens),\n'));
         const at = await serve({ auth: make().default });
         const r = await request(at, 'POST', '/api/auth/guard/login', named('admin', WWW), { email: G.email, password: G.password }, IPHONE_APP);
         const wrong = r.status === 200 && !('access' in (r.body ?? {}));
