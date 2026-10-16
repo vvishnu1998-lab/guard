@@ -418,6 +418,21 @@ check S3, SendGrid, FCM, Sentry, or cron liveness. A wedged cron still returns
 
 ---
 
+## Shipped 2026-10-14 — PR #116, N192 (the hours-export fixture regenerated offline) and D26 (never write files into the production container), by OVERRIDE — verified 2026-10-13 ~19:00 PT (02:00Z)
+
+| thing | value |
+|---|---|
+| merge | PR #116 merged as `dd27ed7` at **18:53:13 PT (01:53:13Z, 2026-10-14) by OVERRIDE**; the merge was issued at 01:53:11Z. Vishnu: "OVERRIDE — merge #116." Prechecks at 01:53:05Z: head `c625203` containing main `20b0e73`, MERGEABLE/CLEAN, 5 of 5 checks green, 5 files (the fixture, one comment in the harness, `DECISIONS.md`, `OPEN-ITEMS.md`, `STATE.md`). `gh pr merge --merge --match-head-commit c625203…`. Baseline at 01:53:07Z: 3 STARNET sessions open, last STARNET ping 01:30:20Z, 1 STARNET ping in the last 30 minutes; control (all companies) 3 open sessions, 1 ping. |
+| Railway | `fc47bfd2-ac72-48ae-bd55-4be6fb221726` **SUCCESS** at 01:55:25Z (18:55:25 PT) from `dd27ed7` (pending 01:53:18Z). |
+| web | Vercel production on `dd27ed7`: success at 01:54:33Z. |
+| health | `/health` commit `dd27ed7`, first seen at 01:55:26Z by a 120 s poll (the poll before it, 01:53:26Z, still read `20b0e73`); `/health/crons` 20 jobs, `stale: []`; `/app` 200 and the admin QR 200 at both polls. |
+| restart window | 01:53:13Z to 01:55:26Z. STARNET, counts via `postgres-readonly`: **0 location pings, 0 session starts or ends, 0 breaks, 0 notifications, 0 guard auth events**, and 0 more up to the read; the 3 open sessions stayed open. Control: 0 platform-wide pings and auth events. The last STARNET ping before the merge was 01:30:20Z, so probably none was due inside the window (the usual caveat). |
+| visible change | None. A test fixture, a comment in a harness script and docs; no runtime code. |
+| what it did | The fixture (`apps/api/scripts/__snapshots__/hours-export.2026-07-01_2026-08-23.json`) was regenerated **offline**: the real `buildHoursExport` run over the rows verified against live, with the `[INACTIVE] ` prefix the builder applies to an inactive site, then the harness's own redaction. Control: the same regeneration without the prefix reproduced the old fixture byte for byte. The new fixture differs in exactly 23 leaf values, all of them that prefix, and array order is unchanged. Every row of both tenants matched live (Star Guard 42 of 42, STARNET 18 of 18); live had 0 auto-closed sessions in the window, matching the fixture's flags. **D26** was added to `DECISIONS.md`. |
+| NOT done | **The production `script:hours-snapshot -- --check` has not been run against the new fixture.** The only way left from here was to write the script into the production container, which D26 forbids, so I stopped; Vishnu runs it once. Until he reports pass or fail, N192 is "fixed offline, not confirmed in the environment". |
+
+---
+
 ## Shipped 2026-10-14 — PR #115, the end-of-day state record, by OVERRIDE (docs; a Railway restart) — verified 2026-10-13 18:50 PT
 
 | thing | value |
