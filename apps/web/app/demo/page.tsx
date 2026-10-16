@@ -5,6 +5,7 @@ import NavBar from '../../components/marketing/NavBar';
 import ContactForm from '../../components/marketing/ContactForm';
 import LogoImage from '../../components/marketing/LogoImage';
 import Testimonial from '../../components/marketing/Testimonial';
+import { appLink } from '../../lib/storeLinks';
 
 // Landing page for the printed-brochure QR codes (https://netraops.com/demo, apex
 // 308s to www). Walkthrough video above the same contact form the homepage uses.
@@ -96,7 +97,7 @@ export default function DemoPage() {
             <LogoImage size={28} className="object-contain opacity-80" />
             <span className="text-white/30 text-xs tracking-[0.2em]">© 2026 NETRAOPS. ALL RIGHTS RESERVED.</span>
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
             <Link href="/privacy" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               PRIVACY POLICY
             </Link>
@@ -106,6 +107,9 @@ export default function DemoPage() {
             <Link href="/security" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               SECURITY
             </Link>
+            <a href={appLink('site_demo')} className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+              GET THE APP
+            </a>
             <Link href="/portal" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               LOGIN
             </Link>

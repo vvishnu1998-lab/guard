@@ -7,7 +7,9 @@ import NavBar from '../components/marketing/NavBar';
 import HeroSection from '../components/marketing/HeroSection';
 import ContactForm from '../components/marketing/ContactForm';
 import LogoImage from '../components/marketing/LogoImage';
+import Step2AppLinks from '../components/marketing/Step2AppLinks';
 import Testimonial from '../components/marketing/Testimonial';
+import { appLink } from '../lib/storeLinks';
 
 export const metadata: Metadata = {
   alternates: { canonical: '/' },
@@ -171,6 +173,7 @@ export default function LandingPage() {
                 n: '02',
                 title: 'Guards Clock In',
                 body: 'Guards use the NetraOps mobile app to clock in with photo verification and live location.',
+                extra: <Step2AppLinks />,
               },
               {
                 n: '03',
@@ -186,6 +189,7 @@ export default function LandingPage() {
                 </div>
                 <h3 className="font-display uppercase text-white font-bold text-lg mb-3 tracking-normal">{step.title}</h3>
                 <p className="text-white/40 text-sm leading-relaxed" style={{ fontFamily: 'var(--font-dm-sans), sans-serif' }}>{step.body}</p>
+                {step.extra}
               </FadeSection>
             ))}
           </div>
@@ -234,7 +238,7 @@ export default function LandingPage() {
             <LogoImage size={28} className="object-contain opacity-80" />
             <span className="text-white/30 text-xs tracking-[0.2em]">© 2026 NETRAOPS. ALL RIGHTS RESERVED.</span>
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
             <Link href="/privacy" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               PRIVACY POLICY
             </Link>
@@ -244,6 +248,9 @@ export default function LandingPage() {
             <Link href="/security" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               SECURITY
             </Link>
+            <a href={appLink('site_footer')} className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+              GET THE APP
+            </a>
             <Link href="/portal" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               LOGIN
             </Link>

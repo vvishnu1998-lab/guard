@@ -5,7 +5,10 @@
  *
  * THE ONE URL (owner decision, 2026-10-13): https://www.netraops.com/app is
  * the single target for email, QR codes, the in-app notice and the video.
- * Only the official store badges on /app itself link straight to a store.
+ * Only the official store badges link straight to a store: the ones on /app
+ * and Apple's on the homepage's "How it works" step 02 (owner decision,
+ * 2026-10-14). Every text link goes to /app. check-site-links.ts pins this for
+ * the public site.
  *
  * The store URLs are the ones the owner pasted from App Store Connect and
  * Play Console on 2026-10-13. Never derive or guess them. The App Store form

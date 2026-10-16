@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { appLink } from '../../lib/storeLinks';
 
 // Server component — native <details>/<summary> accordion. The `name`
 // attribute gives one-open-at-a-time behavior in modern browsers with zero
@@ -15,7 +16,15 @@ const faqs: { q: string; a: React.ReactNode }[] = [
   },
   {
     q: 'Do guards need special hardware?',
-    a: 'No. Guards use the NetraOps app on their own iOS or Android phone. No fobs, no wands, no extra equipment to buy or lose.',
+    a: (
+      <>
+        No. Guards use the NetraOps app on their own{' '}
+        <a href={appLink('site_faq')} className="text-[#C9A84C] hover:text-[#D4B560] underline underline-offset-2 transition-colors">
+          iPhone or Android phone
+        </a>
+        . No fobs, no wands, no extra equipment to buy or lose.
+      </>
+    ),
   },
   {
     q: 'Can my clients see reports?',

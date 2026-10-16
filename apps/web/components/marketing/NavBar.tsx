@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import LogoImage from './LogoImage';
+import { appLink } from '../../lib/storeLinks';
 
 // ── NavBar component ──────────────────────────────────────────────────────────
 export default function NavBar() {
@@ -29,6 +30,10 @@ export default function NavBar() {
           </a>
           <a href="#contact" className="hidden md:block text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
             CONTACT
+          </a>
+          {/* lg and up only: at md (768) the nav has no spare room (a fifth link wraps to three lines and pushes REQUEST DEMO out of the bar). */}
+          <a href={appLink('site_nav')} className="hidden lg:block whitespace-nowrap text-white/40 hover:text-white/80 text-xs tracking-[0.2em] transition-colors">
+            GET THE APP
           </a>
           <Link
             href="/portal"

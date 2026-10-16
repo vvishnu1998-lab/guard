@@ -3,6 +3,7 @@ import Image from 'next/image';
 import { useState, FormEvent } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { COOKIE_REFUSED, markSignedIn, sessionKept, signInHeaders } from '../../../lib/session';
+import { appLink } from '../../../lib/storeLinks';
 
 function EyeIcon() {
   return (
@@ -249,7 +250,14 @@ export default function AdminLoginPage() {
             </div>
           )}
 
-          <div className="flex justify-center gap-4 mt-10">
+          <p className="text-center text-white/40 text-xs mt-10">
+            Are you a guard?{' '}
+            <a href={appLink('login_admin')} className="-my-3 inline-block py-3 text-amber-500 hover:text-amber-400 transition-colors">
+              Get the app
+            </a>
+          </p>
+
+          <div className="flex justify-center gap-4 mt-4">
             <a href="/privacy" className="text-white/40 hover:text-white/70 text-[11px] tracking-wide transition-colors">Privacy</a>
             <span className="text-white/20 text-[11px]">•</span>
             <a href="/terms" className="text-white/40 hover:text-white/70 text-[11px] tracking-wide transition-colors">Terms</a>
