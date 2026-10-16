@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { appLink } from '../../lib/storeLinks';
 
 export const metadata: Metadata = {
   title: 'Account and Data Deletion',
@@ -42,7 +43,9 @@ export default function DataDeletion() {
           <dl className="grid sm:grid-cols-2 gap-y-4 gap-x-8">
             <div>
               <dt className="text-gray-400 text-sm font-medium tracking-wide uppercase mb-1">App</dt>
-              <dd className="text-white font-medium">NetraOps</dd>
+              <dd className="text-white font-medium">
+                <a href={appLink('site_deletion')} className="underline decoration-white/30 underline-offset-2 hover:decoration-[#00C8FF] transition-colors">NetraOps</a>
+              </dd>
               <dd className="text-gray-400 text-sm break-all">com.netraops.guard</dd>
             </div>
             <div>

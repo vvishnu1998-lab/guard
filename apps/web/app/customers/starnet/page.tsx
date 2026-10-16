@@ -4,6 +4,7 @@ import FadeSection from '../../../components/marketing/FadeSection';
 import NavBar from '../../../components/marketing/NavBar';
 import LogoImage from '../../../components/marketing/LogoImage';
 import { QUOTE } from '../../../components/marketing/Testimonial';
+import { appLink } from '../../../lib/storeLinks';
 
 // Starnet Security customer story, approved for publishing by Starnet
 // Security Inc (2026-10). Every string below is VERBATIM as approved — do not
@@ -206,7 +207,7 @@ export default function StarnetStoryPage() {
             <LogoImage size={28} className="object-contain opacity-80" />
             <span className="text-white/30 text-xs tracking-[0.2em]">© 2026 NETRAOPS. ALL RIGHTS RESERVED.</span>
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
             <Link href="/privacy" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               PRIVACY POLICY
             </Link>
@@ -216,6 +217,9 @@ export default function StarnetStoryPage() {
             <Link href="/security" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               SECURITY
             </Link>
+            <a href={appLink('site_footer')} className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
+              GET THE APP
+            </a>
             <Link href="/portal" className="text-white/25 hover:text-white/60 text-xs tracking-widest transition-colors">
               LOGIN
             </Link>

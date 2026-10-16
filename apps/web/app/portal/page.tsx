@@ -1,6 +1,7 @@
 'use client';
 import Image from 'next/image';
 import Link from 'next/link';
+import { appLink } from '../../lib/storeLinks';
 
 export const dynamic = 'force-static';
 
@@ -55,6 +56,14 @@ export default function PortalSelect() {
           SUPER ADMIN
         </Link>
       </div>
+
+      {/* Guards sign in on the phone app, not on this page: lower emphasis than the three portals, but a real link. */}
+      <a
+        href={appLink('login_portal')}
+        className="-mt-4 inline-flex min-h-[44px] items-center text-white/40 hover:text-white/70 text-xs tracking-[0.2em] font-semibold transition-colors"
+      >
+        GUARD? GET THE APP
+      </a>
 
       <p className="text-[#4A5568] text-[10px] tracking-widest mt-4">© NETRAOPS</p>
     </main>

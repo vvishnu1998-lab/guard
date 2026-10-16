@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { appLink } from '../../lib/storeLinks';
 
 export const metadata: Metadata = {
   title: 'Support',
@@ -43,6 +44,15 @@ export default function Support() {
           </a>
           <p className="text-gray-400 mt-4">Typical response: within 1 business day</p>
         </div>
+
+        {/* The app */}
+        <section className="mb-12">
+          <h2 className="text-2xl font-bold text-white mb-4">Get the guard app</h2>
+          <p>
+            Guards use the NetraOps app on an iPhone or Android phone.{' '}
+            <a href={appLink('site_support')} className="text-[#00C8FF] hover:underline">Get the app</a>.
+          </p>
+        </section>
 
         {/* Common topics */}
         <section className="mb-12">

@@ -13,6 +13,7 @@
     "check:store-links": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-store-links.ts",
     "check:checkpoint-csv": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-checkpoint-csv.ts",
     "check:app-page": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-app-page.ts",
+    "check:site-links": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-site-links.ts",
     "check:guard-handoff": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-guard-handoff.ts",
     "check:change-password": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-change-password.ts",
     "check:fonts": "TS_NODE_PROJECT=./scripts/tsconfig.check.json ts-node scripts/check-fonts.ts",
